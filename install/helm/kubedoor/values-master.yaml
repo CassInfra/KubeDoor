@@ -5,12 +5,12 @@ kubedoor:
   master:
     enable: true
 
-storageClass: local-path # 查看您K8S的StorageClass，指定有效的存储类，会自动创建PV/PVC。
+storageClass: nfs-csi # 查看您K8S的StorageClass，指定有效的存储类，会自动创建PV/PVC。
 
 # 用于存储每日的K8S微服务高峰期资源数据/微服务管控数据，KubeDoor的配置。
 clickhouse:
   enable: true # enable为true时，表示自动新安装clickhouse单机版到kubedoor命名空间内。
-  storage: 100Gi # 存储空间大小
+  storage: 10Gi # 存储空间大小
 
   #【enable为true时，已下信息，仅可修改密码】
   #【enable为false时，请填写您已有的ClickHouse信息】
@@ -33,19 +33,15 @@ tsdb:
    
   # 如果是使用您已有的Victoria-Metrics，请在您的Prometheus/vmagent配置中找到external_labels的key填入，如果您没有配置过请在您的Prometheus配置中新增一个。
 
-  external_labels_key: "origin_prometheus" # 注意key只能字母数字下划线。
-
-  # external_labels_value: "" # master端不需要填写该字段。
-
   
 # 以下信息3选1填写:
 
   #【当type为: KubeDoor, 请填写以下vm_single的内容】
   vm_single:
-    retention: 30d # 监控数据的存储时长
+    retention: 5d # 监控数据的存储时长
     user: monit # vm_single的账号
     passwd: dduF1E3sj # vm_single的密码
-    storage: 100Gi # 存储空间大小
+    storage: 10Gi # 存储空间大小
 
   #【当type为: Victoria-Metrics-Single, 请填写您的时序数据库地址】
   url: "http://monit:dduF1E3sj@10.7.0.100:8428" #时序数据库的地址，http开头，端口号结尾，有认证的按例子格式填写。
@@ -58,20 +54,20 @@ tsdb:
 
 # 这是对接alertmanager(kubedoor已集成)的告警通知服务：支持企微，钉钉，飞书，Slack；并且提供了告警入库以及在kuibedoor-web聚合后展示分析告警数据。
 kubedoor_alarm:
-  DEFAULT_AT: "a01100" # 如果在告警规则中找不到annotations.at的值，则会使用该值(IM工具的用户ID)作为@的通知人。
-  ALERTMANAGER_EXTURL: "http://10.1.118.123:30319" # alertmanager外部可访问的链接，用于收到告警通知后，可直接点击访问alertmanager进行屏蔽告警的按钮。(部署后可在kubedoor-config中修改)
+  DEFAULT_AT: "邓斌" # 如果在告警规则中找不到annotations.at的值，则会使用该值(IM工具的用户ID)作为@的通知人。
+  ALERTMANAGER_EXTURL: "https://alertmanager.mirayai.com" # alertmanager外部可访问的链接，用于收到告警通知后，可直接点击访问alertmanager进行屏蔽告警的按钮。(部署后可在kubedoor-config中修改)
 
 # nginx basic认证配置，用于KuboDoor-Web登录的账号密码
 kubedoor_web_secret:
   nginx_auth: # htpasswd格式："用户名:加密密码"，可以在https://tool.lu/htpasswd/在线生成，加密方式选Crypt。
-    - kubedoor:a3rsHbfPnb4Ps # 这是默认的账号密码，都是"kubedoor"，可以配置多个账号。
+    - kubedoor:N0OmO54BSylsU # 这是默认的账号密码，都是"kubedoor"，可以配置多个账号。
     - Up4biLko1dNh:cUo3fhryKizac # 这是预置的用于agent连接master进行basic认证用的。账号：Up4biLko1dNh 密码：qCa22jDkfc9y
 
 config:
   # 这里填写通知的信息(包括告警的默认通知，部署后可以自行在alertmanager配置中，更改通知路由规则。)
   # 钉钉机器人安全设置的自定义关键词请设置为：告警
   MSG_TYPE: "wecom" # 各类操作通知的消息类型：wecom, dingding, feishu, slack
-  MSG_TOKEN: "0baefewf8-xxxx-xxxx-xxxx-1c274" # 通知服务对应的token
+  MSG_TOKEN: "69343f6e-0b49-4da3-8ed0-d1567b131dda" # 通知服务对应的token
 
 
 # 测试阶段, 暂无需填写

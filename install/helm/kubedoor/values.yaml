@@ -12,7 +12,18 @@ image:
   grafana_oss: 11.4.0
 
 tsdb:
-  type: "KubeDoor" 
+  type: "KubeDoor" # 时序数据库类型，可选：Victoria-Metrics-Single, Victoria-Metrics-Cluster, ClickHouse
+  external_labels_key: "origin_prometheus" # 注意key只能字母数字下划线。注意所有external_labels_key的值都相同。
+  # 请填写您的K8S名称。如果是使用您已有的Prometheus，请在您的Prometheus配置中找到external_labels的value填入。
+  external_labels_value: "dev-k8s"
+
+logs:
+  victorialogs:
+    host: "victorialogs.kubedoor"
+    port: "9428"
+    retention: 5d # 日志数据的存储时长
+    storage: 10Gi # 存储空间大小
+
 
 clickhouse:
   enable: false
@@ -29,4 +40,6 @@ monit:
   kube_state_metrics:
     enable: false
   node_exporter:
+    enable: false
+  vector:
     enable: false

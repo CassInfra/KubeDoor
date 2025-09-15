@@ -6,7 +6,7 @@ sources:
   - https://github.com/starsliao/KubeDoor
 maintainers:
   - name: StarsL.cn
-  - url: https://github.com/starsliao
+    url: https://github.com/starsliao
 
-version: 1.5
+version: "1.5"
 appVersion: "1.5"
