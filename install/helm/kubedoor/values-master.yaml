@@ -33,10 +33,6 @@ tsdb:
    
   # 如果是使用您已有的Victoria-Metrics，请在您的Prometheus/vmagent配置中找到external_labels的key填入，如果您没有配置过请在您的Prometheus配置中新增一个。
 
-  external_labels_key: "origin_prometheus" # 注意key只能字母数字下划线。
-
-  # external_labels_value: "" # master端不需要填写该字段。
-
   
 # 以下信息3选1填写:
 

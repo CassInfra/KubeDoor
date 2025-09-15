@@ -19,12 +19,6 @@ config:
 tsdb:
   # 以下两个字段用于多K8S监控数据，通过远程写方式，写入到同一个时序数据库的场景，即为Prometheus/vmagent设置中的external_labels的key/value。
   # 使用远程存储时，这个key/value会作为标签增加到每一个指标中，这样通过这个标签就可以区分出指标属于哪个K8S了。
-
-  external_labels_key: "origin_prometheus" # 注意key只能字母数字下划线。注意所有external_labels_key的值都相同。
-  # 请填写您的K8S名称。如果是使用您已有的Prometheus，请在您的Prometheus配置中找到external_labels的value填入。
-  external_labels_value: "my-test-k8s"
-
-
   #【注意】如果您当前K8S已经有完整的Prometheus/vmagent监控，并且是远程写入时序数据库，则以下remoteWriteUrl不用管，并且请把以下所有的enable都设置为false，将不会安装false的组件。
 
   # 当您需要kubedoor-agent为您安装vmagent时才需要配置这个地址。
@@ -45,3 +39,12 @@ monit:
   # 用于Prometheus采集K8S节点数据指标，如果K8S节点已部署node-exporter可设置为false
   node_exporter:
     enable: true
+  # vector采集java和ingress的日志。
+  vector:
+    enable: true
+    backend_labels_key: "app/component"
+    backend_labels_value: "java"
+    # 日志匹配格式，默认匹配java日志格式，日志格式：2023-08-24 15:20:30.123。
+    backend_log_match: "^\\d{4}-\\d{2}-\\d{2}[ T]\\d{2}:\\d{2}:\\d{2}[.,]\\d{3}"
+    ingress_labels_key: "app.kubernetes.io/instance"
+    ingress_labels_value: "ingress-nginx"

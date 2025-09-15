@@ -1,0 +1,353 @@
+{{- if .Values.monit.vector.enable }}
+############################################
+# Vector K8S DaemonSet - Containerd CRI 官方最佳实践版本  
+# 基于官方文档：https://github.com/vectordotdev/vector
+############################################
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: vector-config
+  namespace: kubedoor
+data:
+  vector.yaml: |
+    # 数据目录
+    data_dir: "/var/lib/vector"
+    
+    # API
+    api:
+      enabled: true
+      address: "0.0.0.0:8686"
+    
+    # 使用官方推荐的kubernetes_logs源
+    sources:
+      java_k8s_logs:
+        type: "kubernetes_logs"
+        # 官方推荐：自动处理多行日志合并
+        auto_partial_merge: true
+        # 只收集Java应用，通过标签过滤
+        extra_label_selector: "{{ .Values.monit.vector.backend_labels_key }}={{ .Values.monit.vector.backend_labels_value }}"
+      ng_k8s_access:
+        type: "kubernetes_logs"
+        # 只收集Java应用，通过标签过滤
+        extra_label_selector: "{{ .Values.monit.vector.ingress_labels_key }}={{ .Values.monit.vector.ingress_labels_value }}"
+    
+    # 1、只过滤健康检查
+    transforms:
+      java_filter_logs:
+        type: filter
+        inputs:
+          - java_k8s_logs
+        condition: |
+          # 只排除明显的健康检查
+          !contains(string!(.message), "/actuator/health") && 
+          !contains(string!(.message), "/health")
+      # 2、Java多行日志增强处理
+      java_merge_multiline_logs:
+        type: reduce
+        inputs: [java_filter_logs]
+        group_by:
+          - pod_name
+          - container_name
+        merge_strategies:
+          message: concat_newline
+        starts_when:
+          type: vrl
+          source: |
+            match(string!(.message), r'{{ .Values.monit.vector.backend_log_match }}')
+        expire_after_ms: 5000
+        flush_period_ms: 1000
+      
+      # 3、添加VictoriaLogs所需的_msg字段
+      java_add_msg_field:
+        type: remap
+        inputs: [java_merge_multiline_logs]
+        source: |
+          # 保留message字段并重命名为_msg
+          ._msg = .message
+
+          # 用正则匹配日志级别
+          match, err = parse_regex(._msg, r'^(?P<ts>\S+\s+\S+)\s+(?P<level>[A-Z]+)\s+.*')
+          if err == null {
+            .level = match.level
+          } else {
+            .level = "unknown"
+          }
+
+          # 创建新对象只包含需要的字段
+          .log_type  = "java"
+          . = {
+            "_msg": ._msg,
+            "level": .level,
+            "log_type": .log_type,
+            "kubernetes": {
+              "pod_namespace": .kubernetes.pod_namespace,
+              "pod_name": .kubernetes.pod_name,
+              "container_name": .kubernetes.container_name,
+              "pod_node_name": .kubernetes.pod_node_name
+            }
+          }
+          .namespace = .kubernetes.pod_namespace
+          del(.kubernetes.pod_namespace)
+          .pod = .kubernetes.pod_name
+          del(.kubernetes.pod_name)
+          .service = .kubernetes.container_name
+          del(.kubernetes.container_name)
+          .node = .kubernetes.pod_node_name
+          del(.kubernetes.pod_node_name)
+
+      nginx_format_access:
+        drop_on_error: true
+        reroute_dropped: true
+        type: remap
+        inputs:
+          - ng_k8s_access
+        source: |
+          ._msg = .message
+          # 解析JSON到临时变量，避免覆盖整个事件
+          parsed_json = parse_json!(replace(.message, r'([^\x00-\x7F])', "\\\\$$1") ?? .message)
+          if exists(parsed_json.message) {
+            parsed_json = parse_json!(replace(parsed_json.message, "\\x", "\\\\x") ?? parsed_json.message)
+          }
+          # 将解析的字段合并到当前事件，保留_msg
+          . = merge!(., parsed_json)
+          .createdtime = to_unix_timestamp(now(), unit: "milliseconds")
+          .timestamp = to_unix_timestamp(parse_timestamp!(.timestamp , format: "%+"), unit: "milliseconds")
+          .url_list = split!(.url, "?", 2)
+          .path = .url_list[0]
+          .query = .url_list[1]
+          .path_list = split!(.path, "/", 3)
+          if length(.path_list) > 2 {.top_path = join!(["/", .path_list[1]])} else {.top_path = "/"}
+          .upstreamtime = to_float(.upstreamtime) ?? 0
+          .duration = round((to_float(.responsetime) ?? 0) - to_float(.upstreamtime),3)
+          if .xff == "-" { .xff = .remote_ip }
+          .client_ip = split!(.xff, ",", 2)[0]
+          .ua = parse_user_agent!(.http_user_agent , mode: "enriched")
+          .client_browser_family = .ua.browser.family
+          .client_browser_major = .ua.browser.major
+          .client_os_family = .ua.os.family
+          .client_os_major = .ua.os.major
+          .client_device_brand = .ua.device.brand
+          .client_device_model = .ua.device.model
+          
+          # GeoIP 查询必须传字符串表名
+          .geoip = get_enrichment_table_record("geoip_table", {"ip": .client_ip}) ?? {"city_name":"unknown","region_name":"unknown","country_name":"unknown"}
+          .client_city = .geoip.city_name
+          .client_region = .geoip.region_name
+          .client_country = .geoip.country_name
+          .client_latitude = .geoip.latitude
+          .client_longitude = .geoip.longitude
+          # 只保留nginx字段
+          .log_type  = "nginx"
+          . = {
+            "_msg": ._msg,
+            "log_type": .log_type,
+            "timestamp": .timestamp,
+            "createdtime": .createdtime,
+            "server_ip": .server_ip,
+            "remote_ip": .remote_ip,
+            "xff": .xff,
+            "remote_user": .remote_user,
+            "domain": .domain,
+            "url": .url,
+            "path": .path,
+            "query": .query,
+            "top_path": .top_path,
+            "referer": .referer,
+            "upstreamtime": .upstreamtime,
+            "responsetime": .responsetime,
+            "duration": .duration,
+            "request_method": .request_method,
+            "status": .status,
+            "response_length": .response_length,
+            "request_length": .request_length,
+            "protocol": .protocol,
+            "upstreamhost": .upstreamhost,
+            "http_user_agent": .http_user_agent,
+            "client_ip": .client_ip,
+            "client_browser_family": .client_browser_family,
+            "client_browser_major": .client_browser_major,
+            "client_os_family": .client_os_family,
+            "client_os_major": .client_os_major,
+            "client_device_brand": .client_device_brand,
+            "client_device_model": .client_device_model,
+            "client_city": .client_city,
+            "client_region": .client_region,
+            "client_country": .client_country,
+            "client_latitude": .client_latitude,
+            "client_longitude": .client_longitude
+          }
+    
+    # 输出
+    sinks:
+      # VictoriaLogs
+      victorialogs:
+        type: loki
+        inputs: 
+          - java_add_msg_field
+          - nginx_format_access
+        endpoint: "http://{{ .Values.logs.victorialogs.host }}:{{ .Values.logs.victorialogs.port }}"
+        path: /insert/loki/api/v1/push
+        labels:
+          {{ .Values.tsdb.external_labels_key }}: {{ .Values.tsdb.external_labels_value }}
+          env: {{ .Values.tsdb.external_labels_value }}
+        encoding:
+          codec: json
+        # 添加批处理和缓冲配置
+        batch:
+          max_bytes: 102400
+          timeout_secs: 5
+        buffer:
+          type: memory
+          max_events: 1000
+          when_full: drop_newest
+        # 禁用健康检查避免400错误
+        healthcheck: false
+        request:
+          timeout_secs: 30
+      dropped_console:
+        type: console
+        inputs: ["nginx_format_access.dropped"]
+        encoding:
+          codec: json
+    enrichment_tables:
+      geoip_table:
+        path: "/usr/share/GeoIP/GeoLite2-City.mmdb"
+        type: geoip
+        locale: "zh-CN" #获取到的地域信息使用中文显示，删掉这行默认是英文显示，能解析数据量会比中文多一点点
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: vector
+  namespace: kubedoor
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: vector
+rules:
+  - apiGroups: [""]
+    resources:
+      - namespaces
+      - nodes  
+      - pods
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: vector
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: vector
+subjects:
+  - kind: ServiceAccount
+    name: vector
+    namespace: kubedoor
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: vector
+  namespace: kubedoor
+  labels:
+    app: vector
+spec:
+  selector:
+    matchLabels:
+      app: vector
+  template:
+    metadata:
+      labels:
+        app: vector
+    spec:
+      serviceAccountName: vector
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
+      containers:
+      - name: vector
+        image: registry.cn-hangzhou.aliyuncs.com/rhub/timberio.vector:0.49.X
+        imagePullPolicy: Always
+        env:
+        - name: VECTOR_SELF_NODE_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: spec.nodeName
+        - name: VECTOR_LOG
+          value: "warn"
+        - name: TZ
+          value: "Asia/Shanghai"
+        - name: PROCFS_ROOT
+          value: "/host/proc"
+        - name: SYSFS_ROOT
+          value: "/host/sys"
+        ports:
+        - name: api
+          containerPort: 8686
+        resources:
+          requests:
+            memory: "128Mi"
+            cpu: "200m"
+          limits:
+            memory: "512Mi"
+            cpu: "1000m"
+        volumeMounts:
+        - name: config
+          mountPath: /etc/vector
+        - name: data
+          mountPath: /var/lib/vector
+        - name: var-log
+          mountPath: /var/log
+          readOnly: true
+        - name: run-containerd
+          mountPath: /run/containerd/containerd.sock
+          readOnly: true
+        - name: var-lib-containerd
+          mountPath: /var/lib/containerd
+          readOnly: true
+        - name: proc
+          mountPath: /host/proc
+          readOnly: true
+        - name: sys
+          mountPath: /host/sys
+          readOnly: true
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: api
+          initialDelaySeconds: 30
+          periodSeconds: 30
+      initContainers:
+      - command:
+        - sh
+        - -c
+        - "until nc -z {{ .Values.logs.victorialogs.host }} {{ .Values.logs.victorialogs.port }}; do echo waiting for basic service `date`; sleep 3; done;"
+        image: registry.cn-hangzhou.aliyuncs.com/rhub/busybox:1.36
+        imagePullPolicy: IfNotPresent
+        name: wait-basic
+      volumes:
+      - name: config
+        configMap:
+          name: vector-config
+      - name: data
+        hostPath:
+          path: /var/lib/vector
+          type: DirectoryOrCreate
+      - name: var-log
+        hostPath:
+          path: /var/log
+      - name: run-containerd
+        hostPath:
+          path: /run/containerd/containerd.sock
+          type: Socket
+      - name: var-lib-containerd
+        hostPath:
+          path: /var/lib/containerd
+      - name: proc
+        hostPath:
+          path: /proc
+      - name: sys
+        hostPath:
+          path: /sys
+{{- end }}

@@ -1,0 +1,151 @@
+{{- if .Values.kubedoor.master.enable }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: vmalert-logs-config
+  namespace: kubedoor
+data:
+  logs.yaml: |-
+    groups:
+    - name: VictoriaLogs_Java_Alerts
+      type: vlogs
+      labels:
+        {{ .Values.tsdb.external_labels_key }}: {{ .Values.tsdb.external_labels_value }}
+      rules:
+      - alert: Java应用ERROR日志过多
+        expr: |
+          _time:5m AND log_type: "java" AND level: "ERROR" | stats by (service) count() as error_count | filter error_count :> 100
+        for: 3m
+        labels:
+          severity: Warning
+        annotations:
+          description: "K8S：{{`{{ $labels.`}}{{ .Values.tsdb.external_labels_key }}{{` }}`}}\n- 服务：{{`{{ $labels.service }}`}}\n- ERROR日志频率：{{`{{ $value | printf \"%.2f\" }}`}}/秒"
+
+      - alert: Java应用异常堆栈日志
+        expr: |
+          _time:5m AND log_type: "java" AND (level: "ERROR" OR level: "WARN") |~ "Exception|ERROR|Throwable" | stats by (service) count() as exception_count | filter exception_count :> 150
+        for: 2m
+        labels:
+          severity: Critical
+        annotations:
+          description: "K8S：{{`{{ $labels.`}}{{ .Values.tsdb.external_labels_key }}{{` }}`}}\n- 服务：{{`{{ $labels.service }}`}}\n- 异常堆栈频率：{{`{{ $value | printf \"%.2f\" }}`}}/秒"
+
+      - alert: Java应用OutOfMemoryError
+        expr: |
+          _time:5m AND log_type: "java" |~ "OutOfMemoryError" | stats by (service) count() as oom_count | filter oom_count :> 0
+        for: 1m
+        labels:
+          severity: Critical
+        annotations:
+          description: "K8S：{{`{{ $labels.`}}{{ .Values.tsdb.external_labels_key }}{{` }}`}}\n- 服务：{{`{{ $labels.service }}`}}\n- 检测到OutOfMemoryError"
+
+      - alert: Java应用数据库连接异常
+        expr: |
+          _time:5m AND log_type: "java" |~ "Connection.*timeout|Connection.*refused|Connection.*reset" | stats by (service) count() as conn_error_count | filter conn_error_count :> 2
+        for: 3m
+        labels:
+          severity: Warning
+        annotations:
+          description: "K8S：{{`{{ $labels.`}}{{ .Values.tsdb.external_labels_key }}{{` }}`}}\n- 服务：{{`{{ $labels.service }}`}}\n- 数据库连接异常频率：{{`{{ $value | printf \"%.2f\" }}`}}/秒"
+
+    - name: VictoriaLogs_Nginx_Alerts
+      type: vlogs
+      labels:
+        {{ .Values.tsdb.external_labels_key }}: {{ .Values.tsdb.external_labels_value }}
+      rules:
+      - alert: Nginx_5xx错误率过高
+        expr: |
+          _time:5m AND log_type: "nginx" | extract "domain=<domain> " | extract "status=<status>;" | stats by (domain) count() if (status:~5.*) as failed, count() as total| math failed / total as failed_percentage| filter failed_percentage :> 0.01 | fields domain,failed_percentage
+        for: 3m
+        labels:
+          severity: Critical
+        annotations:
+          description: "K8S：{{`{{ $labels.`}}{{ .Values.tsdb.external_labels_key }}{{` }}`}}\n- 域名：{{`{{ $labels.domain }}`}}\n- 5xx错误率：{{`{{ $value | printf \"%.2f\" }}`}}%"
+
+      - alert: Nginx_4xx错误率过高
+        expr: |
+          _time:5m AND log_type: "nginx" | extract "domain=<domain> " | extract "status=<status>;" | stats by (domain) count() if (status:~4.*) as failed, count() as total| math failed / total as failed_percentage| filter failed_percentage :> 0.01 | fields domain,failed_percentage
+        for: 3m
+        labels:
+          severity: Warning
+        annotations:
+          description: "K8S：{{`{{ $labels.`}}{{ .Values.tsdb.external_labels_key }}{{` }}`}}\n- 域名：{{`{{ $labels.domain }}`}}\n- 4xx错误率：{{`{{ $value | printf \"%.2f\" }}`}}%"
+
+      - alert: Nginx响应时间过长
+        expr: |
+          _time:5m AND log_type: "nginx" | extract "domain=<domain> " | extract "responsetime=<responsetime>" | stats by (domain) quantile(0.95, responsetime) as p95_response_time | filter p95_response_time :> 2
+        for: 5m
+        labels:
+          severity: Warning
+        annotations:
+          description: "K8S：{{`{{ $labels.`}}{{ .Values.tsdb.external_labels_key }}{{` }}`}}\n- 域名：{{`{{ $labels.domain }}`}}\n- 95%响应时间：{{`{{ $value | printf \"%.2f\" }}`}}秒"
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: vmalert-logs
+  namespace: kubedoor
+  labels:
+    app: vmalert-logs
+spec:
+  ports:
+    - name: vmalert
+      port: 8080
+      targetPort: 8080
+  type: NodePort
+  selector:
+    app: vmalert-logs
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vmalert-logs
+  namespace: kubedoor
+  labels:
+    app: vmalert-logs
+spec:
+  selector:
+    matchLabels:
+      app: vmalert-logs
+  template:
+    metadata:
+      labels:
+        app: vmalert-logs
+    spec:
+      containers:
+        - name: vmalert
+          image: registry.cn-shenzhen.aliyuncs.com/starsl/vmalert:stable
+          imagePullPolicy: IfNotPresent
+          args:
+            # VictoriaLogs数据源配置
+            - -datasource.url=http://{{ .Values.logs.victorialogs.host }}:{{ .Values.logs.victorialogs.port }}
+            - -notifier.url=http://alertmanager.kubedoor:9093
+            - -remoteWrite.url=http://{{ .Values.tsdb.vm_single.user }}:{{ .Values.tsdb.vm_single.passwd }}@victoria-metrics.kubedoor:8428
+            - -remoteRead.url=http://{{ .Values.tsdb.vm_single.user }}:{{ .Values.tsdb.vm_single.passwd }}@victoria-metrics.kubedoor:8428
+            - -rule=/etc/ruler/*.yaml
+            - -evaluationInterval=15s
+            - -rule.defaultRuleType=vlogs
+            - -httpListenAddr=0.0.0.0:8080
+          env:
+            - name: TZ
+              value: Asia/Shanghai
+          resources:
+            limits:
+              cpu: '1'
+              memory: 1Gi
+            requests:
+              cpu: 50m
+              memory: 128Mi
+          ports:
+            - containerPort: 8080
+              name: http
+          volumeMounts:
+            - mountPath: /etc/ruler/
+              name: ruler
+              readOnly: true
+      volumes:
+        - configMap:
+            name: vmalert-logs-config
+          name: ruler
+{{- end }}

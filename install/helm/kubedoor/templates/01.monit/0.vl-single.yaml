@@ -1,0 +1,104 @@
+{{- if .Values.kubedoor.master.enable }}
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: victorialogs-pvc
+  namespace: kubedoor
+  labels:
+    app: victorialogs
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: {{ .Values.storageClass }}
+  resources:
+    requests:
+      storage: {{ .Values.logs.victorialogs.storage }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: victorialogs
+  namespace: kubedoor
+  labels:
+    app: victorialogs
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate  # 设置升级策略为Recreate,会终止所有旧pod后再创建新pod
+  selector:
+    matchLabels:
+      app: victorialogs
+  template:
+    metadata:
+      labels:
+        app: victorialogs
+    spec:
+      containers:
+      - name: victorialogs
+        image: registry.cn-hangzhou.aliyuncs.com/rhub/victorialogs:v1.23.3-victorialogs-scratch
+        imagePullPolicy: IfNotPresent
+        readinessProbe:
+          failureThreshold: 3
+          httpGet:
+            path: /metrics
+            port: 9428
+            scheme: HTTP
+          initialDelaySeconds: 10
+          periodSeconds: 3
+          successThreshold: 2
+          timeoutSeconds: 5
+        livenessProbe:
+          failureThreshold: 3
+          httpGet:
+            path: /metrics
+            port: 9428
+            scheme: HTTP
+          initialDelaySeconds: 10
+          periodSeconds: 3
+          successThreshold: 1
+          timeoutSeconds: 5
+        ports:
+        - containerPort: 9428
+          name: http
+        env:
+        - name: TZ
+          value: "Asia/Shanghai"
+        args:
+        - --storageDataPath=/victoria-logs-data
+        - --httpListenAddr=:9428
+        - --retentionPeriod={{ .Values.logs.victorialogs.retention }}
+        - --loggerFormat=json
+        - --loggerOutput=stderr
+        volumeMounts:
+        - name: victoria-logs-data
+          mountPath: /victoria-logs-data
+        resources:
+          requests:
+            memory: "256Mi"
+            cpu: "100m"
+          limits:
+            memory: "1Gi"
+            cpu: "500m"
+      volumes:
+      - name: victoria-logs-data
+        persistentVolumeClaim:
+          claimName: victorialogs-pvc
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: victorialogs
+  namespace: kubedoor
+  labels:
+    app: victorialogs
+spec:
+  selector:
+    app: victorialogs
+  ports:
+  - port: 9428
+    targetPort: 9428
+    protocol: TCP
+    name: http
+  type: NodePort
+{{- end }}
