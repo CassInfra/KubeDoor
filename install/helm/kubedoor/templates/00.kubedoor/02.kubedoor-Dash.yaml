@@ -331,7 +331,7 @@ data:
               },
               "editorMode": "code",
               "expr": "log_type: \"java\" AND env: \"$env\" AND service: in($service) AND level: in($level) AND ($query != \"\" or 1==1) | stats by (level) count() c | sort by (c desc) | limit 10",
-              "legendFormat": "{{level}}",
+              "legendFormat": "{{ "{{level}}" }}",
               "queryType": "stats",
               "refId": "A"
             }
