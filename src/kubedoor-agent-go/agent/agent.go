@@ -12,10 +12,11 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/gorilla/websocket"
-	"go.uber.org/zap"
 	"kubedoor-agent-go/config"
 	"kubedoor-agent-go/utils"
+
+	"github.com/gorilla/websocket"
+	"go.uber.org/zap"
 )
 
 func StartAgent() {
@@ -147,6 +148,10 @@ func processMessages(conn *websocket.Conn) error {
 			go handleMessage(conn, data)
 		case "admis":
 			handleAdmisRequest(message)
+		case "start_pod_logs":
+			handleStartPodLogs(message)
+		case "stop_pod_logs":
+			handleStopPodLogs(message)
 		default:
 			utils.Logger.Warn("Unknown message type", zap.String("type", string(data.MessageType)), zap.String("message", string(message)))
 		}

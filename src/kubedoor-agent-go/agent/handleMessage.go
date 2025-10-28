@@ -45,6 +45,23 @@ func handleMessage(conn *websocket.Conn, data config.MessageDataStruct) {
 		response = handleCron(data)
 	case data.Path == "/api/admis_switch":
 		response = api.AdmisSwitch(data.Query)
+	case data.Path == "/api/events":
+		// GET /api/events?namespace=xxx
+		response = api.GetNamespaceEvents(data.Query)
+	case data.Path == "/api/get_dpm_pods":
+		// GET /api/get_dpm_pods?namespace=xxx&deployment=xxx
+		response = api.GetDeploymentPods(data.Query)
+	case data.Path == "/api/nodes":
+		// GET /api/nodes
+		response = api.GetNodesInfo()
+	case data.Path == "/api/balance_node":
+		// POST /api/balance_node { env, source, target, top_deployments }
+		var bodyMap map[string]interface{}
+		if err := parseBody(data.Body, &bodyMap); err != nil {
+			response = map[string]interface{}{"message": "invalid body", "success": false}
+			break
+		}
+		response = api.BalanceNode(bodyMap)
 	case data.Path == "/api/pod/modify_pod":
 		response = podmgr.ModifyPod(data.Query)
 	case data.Path == "/api/pod/delete_pod":
