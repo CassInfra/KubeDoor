@@ -75,7 +75,7 @@ data:
     PARTITION BY toYYYYMM(date)
     PRIMARY KEY (date,env,namespace,deployment)
     ORDER BY (date,env,namespace,deployment)
-    TTL toDateTime(date) + toIntervalDay(365)
+    TTL toDateTime(date) + toIntervalDay(31)
     SETTINGS index_granularity = 8192;
 
     CREATE TABLE IF NOT EXISTS kubedoor.k8s_pod_alert_days
@@ -105,9 +105,77 @@ data:
       env,
       alert_group,
       alert_name)
-    TTL toDateTime(start_time) + toIntervalDay(365)
+    TTL toDateTime(start_time) + toIntervalDay(31)
     SETTINGS index_granularity = 8192;
 
+    CREATE DATABASE IF NOT EXISTS nginxlogs ENGINE=Atomic;
+    CREATE TABLE nginxlogs.nginx_access
+    (
+        `timestamp` DateTime64(3, 'Asia/Shanghai'),
+        `server_ip` String,
+        `domain` String,
+        `request_method` String,
+        `status` Int32,
+        `top_path` String,
+        `path` String,
+        `query` String,
+        `protocol` String,
+        `referer` String,
+        `upstreamhost` String,
+        `responsetime` Float32,
+        `upstreamtime` Float32,
+        `duration` Float32,
+        `request_length` Int32,
+        `response_length` Int32,
+        `client_ip` String,
+        `client_latitude` Float32,
+        `client_longitude` Float32,
+        `remote_user` String,
+        `remote_ip` String,
+        `xff` String,
+        `client_city` String,
+        `client_region` String,
+        `client_country` String,
+        `http_user_agent` String,
+        `client_browser_family` String,
+        `client_browser_major` String,
+        `client_os_family` String,
+        `client_os_major` String,
+        `client_device_brand` String,
+        `client_device_model` String,
+        `createdtime` DateTime64(3, 'Asia/Shanghai')
+    )
+    ENGINE = MergeTree
+    PARTITION BY toYYYYMMDD(timestamp)
+    PRIMARY KEY (timestamp,
+    server_ip,
+    status,
+    top_path,
+    domain,
+    upstreamhost,
+    client_ip,
+    remote_user,
+    request_method,
+    protocol,
+    responsetime,
+    upstreamtime,
+    duration,
+    request_length,
+    response_length,
+    path,
+    referer,
+    client_city,
+    client_region,
+    client_country,
+    client_browser_family,
+    client_browser_major,
+    client_os_family,
+    client_os_major,
+    client_device_brand,
+    client_device_model
+    )
+    TTL toDateTime(timestamp) + toIntervalDay(30)
+    SETTINGS index_granularity = 8192;
   config.xml: |
     <clickhouse replace="true">
         <logger>
@@ -254,10 +322,7 @@ spec:
           configMap:
             name: clickhouse-config
   strategy:
-    type: RollingUpdate
-    rollingUpdate:
-      maxUnavailable: 1
-      maxSurge: 0
+    type: Recreate
 ---
 
 apiVersion: v1
