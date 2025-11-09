@@ -46,11 +46,21 @@
 <div align="center">
 
 #### 🎉新增K8S事件监控，Pod实时日志，K8S MCP支持！K8S统一管控，多K8S监控、告警、展示的最佳实践🎉
-![KubeDoor1.5.2](screenshot/KubeDoor1.3.3.png)
+![KubeDoor1.6.0](screenshot/KubeDoor1.3.3.png)
 </div>
 
 ## 💎功能描述
 ### 0. 💥新版功能亮点
+##### **💎花折1.6.0：新增各类K8S资源管理能力及资源的批量操作！**
+<details close>
+<summary>🔍点击展开 ...</summary>
+ 
+**新增管理Deployment、Pod、Service、ConfigMap、Ingress、StatefulSet、DaemonSet、节点管理、Istio，支持各资源类增删改查与批量操作！**
+
+|<img src="https://github.com/user-attachments/assets/c3e913f0-7a75-401d-bf16-ad0cc3c6b015" />|<img src="https://github.com/user-attachments/assets/207d70c1-6c67-435d-9d70-e72b9eb9ec23" />|
+| ------------------------------------| ----------------------------------- |
+</details>
+
 ##### **🎥KubeDoor K8S事件采集分析与监控告警！多K8S事件采集与查询分析，灵活的K8S事件告警规则配置。**
 <details close>
 <summary>🔍点击展开 ...</summary>
