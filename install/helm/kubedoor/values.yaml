@@ -2,14 +2,17 @@ image:
   repository: swr.cn-south-1.myhuaweicloud.com/starsl.cn
   agent_build: python # 默认kubedoor-agent是Python的版本，改为"go"可切换为@comqx(https://github.com/comqx)开发维护的go版本（也可以安装后修改镜像标签或在WEBUI-agent管理中切换版本）
   kubedoor_agent_go_tag: 1.1.3-go #暂停维护, 请勿使用.
-  kubedoor_agent_tag: 1.5.2
-  kubedoor_master_tag: 1.5.2
-  kubedoor_web_tag: 1.5.2
+  kubedoor_agent_tag: 1.6.0
+  kubedoor_master_tag: 1.6.0
+  kubedoor_web_tag: 1.6.0
   kubedoor_alarm_tag: 1.5.2
   kubedoor_mcp_tag: 0.3.0
 
   grafana_plugins_init: 0.1.0
   grafana_oss: 11.4.0
+
+
+# 无论何种安装方式, 请勿修改以下变量, 这些是默认值, 安装master或者agent的时候会被相应yaml覆盖.
 
 tsdb:
   type: "KubeDoor" 

@@ -110,54 +110,117 @@ def slack(webhook, content, at=""):
     return response.json()
 
 
-def parse_cpu(value: str) -> float:
+def parse_cpu(value) -> float:
     """Convert Kubernetes CPU units to mCPU (millicores)."""
     if not isinstance(value, str):
         try:
-            return float(value) * 1000
+            return round(float(value) * 1000, 2)
+        except (ValueError, TypeError):
+            return 0.0
+
+    if value.endswith("k"):
+        try:
+            return round(float(value[:-1]) * 1000 * 1000, 2)
+        except ValueError:
+            return 0.0
+    if value.endswith("m"):
+        try:
+            return round(float(value[:-1]), 2)
+        except ValueError:
+            return 0.0
+    if value.endswith("n"):
+        try:
+            return round(int(value[:-1]) / 1_000_000, 2)
+        except ValueError:
+            return 0.0
+    try:
+        return round(float(value) * 1000, 2)
+    except ValueError:
+        return 0.0
+
+
+def parse_pods(value) -> int:
+    """Convert Kubernetes pod units to integer."""
+    if not isinstance(value, str):
+        try:
+            return int(value)
         except (ValueError, TypeError):
             return 0
 
-    if value.endswith("m"):
+    if value.endswith("k"):
         try:
-            return int(value[:-1])
-        except ValueError:
-            return 0
-    if value.endswith("n"):
-        try:
-            return int(value[:-1]) / 1_000_000
+            return int(float(value[:-1]) * 1000)
         except ValueError:
             return 0
     try:
-        return float(value) * 1000
+        return int(value)
     except ValueError:
         return 0
 
 
-def parse_memory(value: str) -> float:
+def parse_memory(value) -> float:
     """Convert Kubernetes memory units to MB."""
     if not isinstance(value, str):
         try:
-            return int(value) / (1024 * 1024)
+            return round(int(value) / (1024 * 1024), 2)
         except (ValueError, TypeError):
-            return 0
+            return 0.0
 
     if value.endswith("Ki"):
         try:
-            return int(value[:-2]) / 1024
+            return round(int(value[:-2]) / 1024, 2)
         except ValueError:
-            return 0
+            return 0.0
     if value.endswith("Mi"):
         try:
-            return int(value[:-2])
+            return round(float(value[:-2]), 2)
         except ValueError:
-            return 0
+            return 0.0
     if value.endswith("Gi"):
         try:
-            return int(value[:-2]) * 1024
+            return round(float(value[:-2]) * 1024, 2)
         except ValueError:
-            return 0
+            return 0.0
     try:
-        return int(value) / (1024 * 1024)
-    except ValueError:
-        return 0
+        return round(int(value) / (1024 * 1024), 2)
+    except (ValueError, TypeError):
+        return 0.0
+
+
+def bytes_to_gib(value) -> float:
+    """Convert bytes to GiB."""
+    return round(value / (1024 * 1024 * 1024), 2)
+
+
+def parse_storage_to_gib(value) -> float:
+    """Convert Kubernetes storage units to GiB."""
+    if not isinstance(value, str):
+        try:
+            return round(int(value) / (1024 * 1024 * 1024), 2)
+        except (ValueError, TypeError):
+            return 0.0
+
+    if value.endswith("Ki"):
+        try:
+            return round(int(value[:-2]) / (1024 * 1024), 2)
+        except ValueError:
+            return 0.0
+    if value.endswith("Mi"):
+        try:
+            return round(int(value[:-2]) / 1024, 2)
+        except ValueError:
+            return 0.0
+    if value.endswith("Gi"):
+        try:
+            return round(float(value[:-2]), 2)
+        except ValueError:
+            return 0.0
+    if value.endswith("Ti"):
+        try:
+            return round(float(value[:-2]) * 1024, 2)
+        except ValueError:
+            return 0.0
+    try:
+        return round(int(value) / (1024 * 1024 * 1024), 2)
+    except (ValueError, TypeError):
+        return 0.0

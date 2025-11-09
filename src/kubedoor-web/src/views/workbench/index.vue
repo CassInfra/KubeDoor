@@ -176,9 +176,10 @@
               sortable
             >
               <template #default="scope">
+                <!-- :disabled="!scope.row.admission" -->
                 <el-switch
                   v-model="scope.row.scheduler"
-                  :disabled="!scope.row.admission"
+                  :disabled="true"
                   :active-value="true"
                   :inactive-value="false"
                   @change="val => handleSchedulerChange(!!val, scope.row)"

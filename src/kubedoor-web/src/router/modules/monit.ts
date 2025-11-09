@@ -23,22 +23,74 @@ export default {
       }
     },
     {
-      path: "/monitk8s/index",
-      name: "Monitk8s",
-      component: () => import("@/views/monitk8s/index.vue"),
+      path: "/monit/pod",
+      name: "PodManager",
+      component: () => import("@/views/monit/pod/index.vue"),
       meta: {
-        title: $t("menus.resourceMonitk8s"),
-        icon: "ep:odometer",
+        title: "Pod",
+        icon: "ep:box",
         showLink: VITE_HIDE_HOME === "true" ? false : true
       }
     },
     {
-      path: "/monitnode/index",
-      name: "Monitnode",
-      component: () => import("@/views/monitnode/index.vue"),
+      path: "/monit/service",
+      name: "ServiceManager",
+      component: () => import("@/views/monit/service/index.vue"),
       meta: {
-        title: $t("menus.resourceMonitnode"),
-        icon: "ep:data-analysis",
+        title: "Service",
+        icon: "ep:connection",
+        showLink: VITE_HIDE_HOME === "true" ? false : true
+      }
+    },
+    {
+      path: "/monit/ingress",
+      name: "IngressManager",
+      component: () => import("@/views/monit/ingress/index.vue"),
+      meta: {
+        title: "Ingress",
+        icon: "ep:guide",
+        showLink: VITE_HIDE_HOME === "true" ? false : true
+      }
+    },
+    {
+      path: "/monit/configmap",
+      name: "ConfigMapManager",
+      component: () => import("@/views/monit/configmap/index.vue"),
+      meta: {
+        title: "ConfigMap",
+        icon: "ep:document",
+        showLink: VITE_HIDE_HOME === "true" ? false : true
+      }
+    },
+
+    {
+      path: "/monit/statefulset",
+      name: "StatefulSetManager",
+      component: () => import("@/views/monit/stateful/index.vue"),
+      meta: {
+        title: "StatefulSet",
+        icon: "ep:grid",
+        showLink: VITE_HIDE_HOME === "true" ? false : true
+      }
+    },
+
+    {
+      path: "/monit/daemonset",
+      name: "DaemonSetManager",
+      component: () => import("@/views/monit/daemon/index.vue"),
+      meta: {
+        title: "DaemonSet",
+        icon: "ep:collection",
+        showLink: VITE_HIDE_HOME === "true" ? false : true
+      }
+    },
+    {
+      path: "/monit/nodemanager",
+      name: "NodeManager",
+      component: () => import("@/views/monit/nodemanager/index.vue"),
+      meta: {
+        title: "节点管理",
+        icon: "ep:cpu",
         showLink: VITE_HIDE_HOME === "true" ? false : true
       }
     }

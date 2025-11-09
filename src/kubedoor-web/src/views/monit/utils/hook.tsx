@@ -45,21 +45,28 @@ export function useResource() {
 
       const showAddLabelRes = await showAddLabel(row.env, row.namespace);
 
+      const scaleProps = {
+        isScale: true,
+        content,
+        showInterval: params.length > 1, // 是否显示间隔
+        showAddLabel: showAddLabelRes.data.length > 0,
+        params: {
+          podCount: row.podCount,
+          env: row.env,
+          namespace: row.namespace,
+          deployment: row.deployment
+        }
+      };
+
       addDialog({
         title: transformI18n("resource.scale"),
-        props: {
-          isScale: true,
-          content,
-          showInterval: params.length > 1, // 是否显示间隔
-          showAddLabel: showAddLabelRes.data.length > 0,
-          params: { podCount: row.podCount }
-        },
+        props: scaleProps,
         width: "40%",
         draggable: true,
         fullscreen: deviceDetection(),
         closeOnClickModal: false,
         sureBtnLoading: true,
-        contentRenderer: () => h(scale, { ref: ScaleRef }),
+        contentRenderer: () => h(scale, { ref: ScaleRef, ...scaleProps }),
         beforeSure: async done => {
           const scaleData = await ScaleRef.value.getData();
           // 更新扩缩容量pod数 - 如果勾选了temp则跳过SQL更新
@@ -76,20 +83,28 @@ export function useResource() {
             item.num = scaleData.podCount;
             return item;
           });
+
+          // 构建新的数据格式
+          const requestData = {
+            deployment_list: params,
+            node_scheduler: scaleData.selectedNodes || []
+          };
+
           if (scaleData.tempData) {
             if (params.length > 1 || scaleData.tempData.type == 1) {
               res = await execCapacity(
                 currentEnv,
                 scaleData.tempData.add_label,
-                params,
+                requestData,
                 params.length > 1 ? scaleData.tempData.interval : undefined,
                 scaleData.temp,
-                scaleData.strategy
+                scaleData.strategy,
+                scaleData.scheduler
               );
             } else {
               let tempData = {
                 type: "scale",
-                service: params,
+                service: requestData,
                 time: "",
                 cron: ""
               };
@@ -105,7 +120,8 @@ export function useResource() {
                 scaleData.tempData.add_label,
                 tempData,
                 scaleData.temp,
-                scaleData.strategy
+                scaleData.strategy,
+                scaleData.scheduler
               );
             }
 
@@ -151,18 +167,26 @@ export function useResource() {
         })
         .join("<br>");
 
+      const rebootScaleProps = {
+        isScale: false,
+        content,
+        showInterval: params.length > 1,
+        showAddLabel: false,
+        params: {
+          env: row.env,
+          namespace: row.namespace,
+          deployment: row.deployment
+        }
+      };
+
       addDialog({
         title: transformI18n("resource.reboot"),
         width: "40%",
-        props: {
-          isScale: false,
-          content,
-          showInterval: params.length > 1
-        },
+        props: rebootScaleProps,
         draggable: true,
         fullscreen: deviceDetection(),
         closeOnClickModal: false,
-        contentRenderer: () => h(scale, { ref: ScaleRef }),
+        contentRenderer: () => h(scale, { ref: ScaleRef, ...rebootScaleProps }),
         beforeSure: async done => {
           const scaleData = await ScaleRef.value.getData();
           let res;
@@ -171,7 +195,9 @@ export function useResource() {
               res = await rebootResource(
                 currentEnv,
                 params,
-                params.length > 1 ? scaleData.tempData.interval : undefined
+                params.length > 1 ? scaleData.tempData.interval : undefined,
+                scaleData.scheduler,
+                scaleData.selectedNodes
               );
             } else {
               let tempData = {
@@ -187,7 +213,14 @@ export function useResource() {
                 tempData.time = "";
                 tempData.cron = scaleData.tempData.cron;
               }
-              res = await execTimeCron(currentEnv, false, tempData);
+              res = await execTimeCron(
+                currentEnv,
+                false,
+                tempData,
+                false,
+                undefined,
+                false
+              );
             }
 
             console.log(res);

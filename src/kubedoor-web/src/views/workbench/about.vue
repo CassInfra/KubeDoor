@@ -138,7 +138,7 @@ import { ref, onMounted } from "vue";
 
 // 响应式数据
 const loading = ref(true);
-const version = ref("1.5.2");
+const version = ref("1.6.0");
 const repositoryUrl = ref("https://github.com/starsliao/KubeDoor");
 const blogUrl = ref("https://StarsL.cn");
 

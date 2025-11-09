@@ -6,7 +6,8 @@ ClickHouse客户端模块
 """
 
 import os
-from typing import Dict, List, Optional, Any
+import re
+from typing import Dict, List, Optional, Any, Tuple
 from datetime import datetime
 from loguru import logger
 from .connection_pool import get_connection_pool
@@ -24,6 +25,12 @@ class ClickHouseClient:
         self.pool = get_connection_pool()
         logger.info("ClickHouseClient初始化完成，使用连接池模式")
 
+    def _load_sql_statements(self, sql_file_path: str) -> List[str]:
+        """加载并拆分SQL文件中的语句"""
+        with open(sql_file_path, 'r', encoding='utf-8') as f:
+            sql_content = f.read()
+        return [stmt.strip() for stmt in sql_content.split(';') if stmt.strip()]
+
     def execute_sql_file(self, sql_file_path: str) -> None:
         """执行SQL文件
 
@@ -31,26 +38,101 @@ class ClickHouseClient:
             sql_file_path: SQL文件路径
         """
         try:
-            with open(sql_file_path, 'r', encoding='utf-8') as f:
-                sql_content = f.read()
-
-            # 分割SQL语句（以分号分隔）
-            sql_statements = [stmt.strip() for stmt in sql_content.split(';') if stmt.strip()]
-
-            for sql in sql_statements:
-                if sql.strip():
-                    logger.debug(f"执行SQL: {sql[:100]}...")
-                    self.pool.execute_command(sql)
+            for sql in self._load_sql_statements(sql_file_path):
+                logger.debug(f"执行SQL: {sql[:100]}...")
+                self.pool.execute_command(sql)
 
             logger.info(f"成功执行SQL文件: {sql_file_path}")
         except Exception as e:
             logger.error(f"执行SQL文件失败 {sql_file_path}: {e}")
             raise
 
+    @staticmethod
+    def _extract_database_name(statement: str) -> str:
+        match = re.search(r"create\s+database\s+(?:if\s+not\s+exists\s+)?([`\"]?[\w]+[`\"]?)", statement, re.IGNORECASE)
+        if not match:
+            raise ValueError("无法解析数据库名称")
+        return match.group(1).replace('`', '').replace('"', '').strip()
+
+    @staticmethod
+    def _extract_table_identifier(statement: str) -> str:
+        match = re.search(
+            r"create\s+table\s+(?:if\s+not\s+exists\s+)?([`\"\w\.]+)",
+            statement,
+            re.IGNORECASE,
+        )
+        if not match:
+            raise ValueError("无法解析表名称")
+        return match.group(1).replace('`', '').replace('"', '').strip()
+
+    def _split_table_identifier(self, identifier: str) -> Tuple[str, str]:
+        if '.' in identifier:
+            db_name, table_name = identifier.split('.', 1)
+        else:
+            db_name = getattr(self.pool, 'database', None) or 'default'
+            table_name = identifier
+        return db_name.strip(), table_name.strip()
+
+    def database_exists(self, database: str) -> bool:
+        result = self.pool.execute_query(
+            "SELECT count() FROM system.databases WHERE name = %s",
+            [database],
+        )
+        return bool(result and result[0][0] > 0)
+
+    def table_exists(self, database: str, table: str) -> bool:
+        result = self.pool.execute_query(
+            "SELECT count() FROM system.tables WHERE database = %s AND name = %s",
+            [database, table],
+        )
+        return bool(result and result[0][0] > 0)
+
     def init_table(self) -> None:
         """初始化K8S事件表"""
-        sql_file = os.path.join(os.path.dirname(__file__), 'create_table.sql')
-        self.execute_sql_file(sql_file)
+        sql_file = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'create_table.sql')
+        statements = self._load_sql_statements(sql_file)
+
+        database_statements: List[Tuple[str, str]] = []
+        table_statements: List[Tuple[str, str]] = []
+        other_statements: List[str] = []
+
+        for stmt in statements:
+            normalized = stmt.lstrip().lower()
+            if normalized.startswith('create database'):
+                database_statements.append((self._extract_database_name(stmt), stmt))
+            elif normalized.startswith('create table'):
+                table_statements.append((self._extract_table_identifier(stmt), stmt))
+            else:
+                other_statements.append(stmt)
+
+        for db_name, stmt in database_statements:
+            existed = self.database_exists(db_name)
+            logger.debug(f"执行数据库初始化SQL: {stmt[:100]}...")
+            self.pool.execute_command(stmt)
+            if not self.database_exists(db_name):
+                raise RuntimeError(f"数据库 {db_name} 初始化失败")
+            if existed:
+                logger.info(f"数据库 {db_name} 已存在")
+            else:
+                logger.info(f"数据库 {db_name} 创建成功")
+
+        for identifier, stmt in table_statements:
+            db_name, table_name = self._split_table_identifier(identifier)
+            existed = self.table_exists(db_name, table_name)
+            logger.debug(f"执行表初始化SQL: {stmt[:100]}...")
+            self.pool.execute_command(stmt)
+            if not self.table_exists(db_name, table_name):
+                raise RuntimeError(f"表 {db_name}.{table_name} 初始化失败")
+            if existed:
+                logger.info(f"表 {db_name}.{table_name} 已存在")
+            else:
+                logger.info(f"表 {db_name}.{table_name} 创建成功")
+
+        for stmt in other_statements:
+            logger.debug(f"执行附加SQL: {stmt[:100]}...")
+            self.pool.execute_command(stmt)
+
+        logger.info("ClickHouse表结构初始化完成")
 
     def upsert_event(self, event_data: Dict[str, Any]) -> None:
         """

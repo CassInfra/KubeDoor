@@ -148,7 +148,11 @@
               </div>
               <div class="detail-item">
                 <span class="detail-label">名称: </span>
-                <span class="detail-value">{{ detailData.name }}</span>
+                <span
+                  class="detail-value"
+                  style="color: #e74c3c; font-weight: bold; font-size: 1.1em"
+                  >{{ detailData.name }}</span
+                >
               </div>
             </div>
 
@@ -686,7 +690,7 @@
                             v-model="detail.service"
                             filterable
                             allow-create
-                            placeholder="服务名"
+                            placeholder="请先选择命名空间，再选服务名"
                             style="flex: 1; min-width: 300px"
                             @focus="
                               () =>
@@ -739,13 +743,26 @@
                   <el-row :gutter="20" style="margin-top: 16px">
                     <el-col :span="8">
                       <el-form-item label="端口" label-width="60px">
-                        <el-input-number
-                          v-model="detail.port"
-                          :min="1"
-                          :max="65535"
-                          placeholder="端口号"
-                          style="width: 100%"
-                        />
+                        <div
+                          style="display: flex; align-items: center; gap: 8px"
+                        >
+                          <el-input-number
+                            v-model="detail.port"
+                            :min="0"
+                            :max="65535"
+                            controls-position="right"
+                            placeholder="端口号"
+                            style="width: 120px"
+                          />
+                          <el-button
+                            :icon="Refresh"
+                            type="primary"
+                            plain
+                            size="small"
+                            title="获取服务第一个端口号"
+                            @click="refreshPort(detail)"
+                          />
+                        </div>
                       </el-form-item>
                     </el-col>
                     <el-col :span="8">
@@ -1454,36 +1471,105 @@
         <template v-if="editVSForm.df_forward_type === 'route'">
           <el-form-item label="Service" prop="route_service">
             <div style="display: flex; align-items: center; gap: 8px">
-              <el-input
+              <el-select
                 v-model="editVSForm.route_service"
-                placeholder="服务名"
-                style="flex: 1"
-              />
+                filterable
+                allow-create
+                placeholder="请先选择命名空间"
+                style="flex: 1; min-width: 200px"
+                @focus="
+                  () =>
+                    fetchServiceOptions(
+                      route.query.env as string,
+                      editVSForm.route_namespace
+                    )
+                "
+              >
+                <el-option
+                  v-for="service in serviceOptions"
+                  :key="service"
+                  :label="service"
+                  :value="service"
+                />
+              </el-select>
               <span>.</span>
-              <el-input
+              <el-select
                 v-model="editVSForm.route_namespace"
+                filterable
+                allow-create
                 placeholder="命名空间"
-                style="flex: 1"
-              />
+                style="flex: 1; min-width: 100px"
+                @focus="() => fetchNamespaceOptions(route.query.env as string)"
+                @change="
+                  () =>
+                    fetchServiceOptions(
+                      route.query.env as string,
+                      editVSForm.route_namespace
+                    )
+                "
+              >
+                <el-option
+                  v-for="namespace in namespaceOptions"
+                  :key="namespace"
+                  :label="namespace"
+                  :value="namespace"
+                />
+              </el-select>
               <span>.svc.cluster.local</span>
             </div>
           </el-form-item>
 
-          <el-form-item label="端口" prop="route_port">
-            <el-input-number
-              v-model="editVSForm.route_port"
-              :min="0"
-              :max="65535"
-              placeholder="请输入端口号"
-              style="width: 100%"
-            />
-          </el-form-item>
+          <!-- 端口、刷新按钮和默认超时在同一行 -->
+          <el-row :gutter="20">
+            <el-col :span="12">
+              <el-form-item label="端口" prop="route_port">
+                <div style="display: flex; align-items: center; gap: 8px">
+                  <el-input-number
+                    v-model="editVSForm.route_port"
+                    :min="0"
+                    :max="65535"
+                    placeholder="请输入端口号"
+                    style="flex: 1"
+                    controls-position="right"
+                  />
+                  <el-button
+                    :icon="Refresh"
+                    type="primary"
+                    plain
+                    size="small"
+                    title="获取服务第一个端口号"
+                    @click="refreshPortForEdit"
+                  />
+                </div>
+              </el-form-item>
+            </el-col>
+            <el-col :span="12">
+              <el-form-item label="默认超时" prop="df_forward_timeout">
+                <el-input
+                  v-model="editVSForm.df_forward_timeout"
+                  placeholder="例如: 30s"
+                />
+              </el-form-item>
+            </el-col>
+          </el-row>
 
-          <el-form-item label="默认超时" prop="df_forward_timeout">
-            <el-input
-              v-model="editVSForm.df_forward_timeout"
-              placeholder="例如: 30s"
-            />
+          <!-- Headers -->
+          <el-form-item label="Headers">
+            <div style="display: flex; align-items: flex-start; gap: 8px">
+              <el-checkbox
+                v-model="editVSForm.route_headers.enabled"
+                label="启用"
+                style="margin-top: 1px"
+              />
+              <el-input
+                v-model="editVSForm.route_headers.value"
+                :disabled="!editVSForm.route_headers.enabled"
+                type="textarea"
+                :rows="1"
+                placeholder='默认：{"request": {"set": {"X-Forwarded-Proto": "https"}}}'
+                style="flex: 1; min-width: 370px"
+              />
+            </div>
           </el-form-item>
         </template>
 
@@ -1633,7 +1719,11 @@ const editVSForm = ref({
   route_port: 0,
   df_forward_timeout: "",
   delegate_name: "",
-  delegate_namespace: ""
+  delegate_namespace: "",
+  route_headers: {
+    enabled: false,
+    value: '{"request": {"set": {"X-Forwarded-Proto": "https"}}}'
+  }
 });
 
 // 编辑VirtualService表单验证规则
@@ -2379,6 +2469,10 @@ const showEditVSDialogFunc = () => {
   let routePort = 0;
   let delegateName = "";
   let delegateNamespace = "";
+  let routeHeaders = {
+    enabled: false,
+    value: '{"request": {"set": {"X-Forwarded-Proto": "https"}}}'
+  };
 
   if (detailData.value.df_forward_detail) {
     try {
@@ -2417,6 +2511,12 @@ const showEditVSDialogFunc = () => {
 
           routePort = firstDestination.destination.port?.number || 0;
         }
+
+        // 处理headers字段
+        if (firstDestination.headers) {
+          routeHeaders.enabled = true;
+          routeHeaders.value = JSON.stringify(firstDestination.headers);
+        }
       } else if (detailData.value.df_forward_type === "delegate") {
         delegateName = forwardDetail.name || "";
         delegateNamespace = forwardDetail.namespace || "";
@@ -2439,7 +2539,8 @@ const showEditVSDialogFunc = () => {
     route_port: routePort,
     df_forward_timeout: detailData.value.df_forward_timeout || "",
     delegate_name: delegateName,
-    delegate_namespace: delegateNamespace
+    delegate_namespace: delegateNamespace,
+    route_headers: routeHeaders
   };
 
   showEditVSDialog.value = true;
@@ -2459,7 +2560,11 @@ const cancelEditVS = () => {
     route_port: 0,
     df_forward_timeout: "",
     delegate_name: "",
-    delegate_namespace: ""
+    delegate_namespace: "",
+    route_headers: {
+      enabled: false,
+      value: '{"request": {"set": {"X-Forwarded-Proto": "https"}}}'
+    }
   };
 };
 
@@ -2489,14 +2594,26 @@ const confirmEditVS = async () => {
     if (editVSForm.value.df_forward_type === "route") {
       // Route 类型格式
       const host = `${editVSForm.value.route_service}.${editVSForm.value.route_namespace}.svc.cluster.local`;
-      requestData.df_forward_detail = [
-        {
-          destination: {
-            host: host,
-            port: { number: editVSForm.value.route_port }
-          }
+      const routeItem: any = {
+        destination: {
+          host: host,
+          port: { number: editVSForm.value.route_port }
         }
-      ];
+      };
+
+      // 处理headers字段
+      if (
+        editVSForm.value.route_headers.enabled &&
+        editVSForm.value.route_headers.value
+      ) {
+        try {
+          routeItem.headers = JSON.parse(editVSForm.value.route_headers.value);
+        } catch (e) {
+          console.warn("Headers JSON格式错误:", e);
+        }
+      }
+
+      requestData.df_forward_detail = [routeItem];
       requestData.df_forward_timeout = editVSForm.value.df_forward_timeout;
     } else if (editVSForm.value.df_forward_type === "delegate") {
       // Delegate 类型格式
@@ -2596,6 +2713,10 @@ const handleEditForwardTypeChange = () => {
     editVSForm.value.route_namespace = "";
     editVSForm.value.route_port = 0;
     editVSForm.value.df_forward_timeout = "";
+    editVSForm.value.route_headers = {
+      enabled: false,
+      value: '{"request": {"set": {"X-Forwarded-Proto": "https"}}}'
+    };
   }
 };
 
@@ -3090,6 +3211,39 @@ const refreshPort = async (detail: any) => {
 
     if (result && result.data && result.data.first_port) {
       detail.port = result.data.first_port;
+      ElMessage.success(`已获取到端口号: ${result.data.first_port}`);
+    } else {
+      ElMessage.error("未能获取到端口号");
+    }
+  } catch (error) {
+    console.error("获取端口号失败:", error);
+    ElMessage.error("获取端口号失败");
+  }
+};
+
+// 编辑VirtualService时刷新端口号
+const refreshPortForEdit = async () => {
+  if (!editVSForm.value.route_service || !editVSForm.value.route_namespace) {
+    ElMessage.warning("请先填写服务名和命名空间");
+    return;
+  }
+
+  try {
+    // 获取当前VS的集群信息
+    const env = detailData.value?.k8s_clusters?.[0];
+    if (!env) {
+      ElMessage.error("无法获取集群信息");
+      return;
+    }
+
+    const result = await getServiceFirstPort(
+      env.k8s_name,
+      editVSForm.value.route_namespace,
+      editVSForm.value.route_service
+    );
+
+    if (result && result.data && result.data.first_port) {
+      editVSForm.value.route_port = result.data.first_port;
       ElMessage.success(`已获取到端口号: ${result.data.first_port}`);
     } else {
       ElMessage.error("未能获取到端口号");

@@ -1,10 +1,11 @@
-// const { VITE_HIDE_HOME } = import.meta.env;
-// const Layout = () => import("@/layout/index.vue");
+const { VITE_HIDE_HOME } = import.meta.env;
+const Layout = () => import("@/layout/index.vue");
 import { $t } from "@/plugins/i18n";
 
 export default {
   path: "/alarm",
   redirect: "/alarm/statistics",
+  component: Layout,
   meta: {
     icon: "ep:bell",
     title: $t("menus.alarm"),
@@ -36,6 +37,26 @@ export default {
       meta: {
         title: "K8S事件详情",
         icon: "ep:video-camera-filled"
+      }
+    },
+    {
+      path: "/monitk8s/index",
+      name: "Monitk8s",
+      component: () => import("@/views/monitk8s/index.vue"),
+      meta: {
+        title: $t("menus.resourceMonitk8s"),
+        icon: "ep:odometer",
+        showLink: VITE_HIDE_HOME === "true" ? false : true
+      }
+    },
+    {
+      path: "/monitnode/index",
+      name: "Monitnode",
+      component: () => import("@/views/monitnode/index.vue"),
+      meta: {
+        title: $t("menus.resourceMonitnode"),
+        icon: "ep:data-analysis",
+        showLink: VITE_HIDE_HOME === "true" ? false : true
       }
     }
   ]

@@ -222,3 +222,22 @@ group by ({env_key} namespace, owner_name, image_spec, image) (
 )
 '''
 }
+
+
+# 获取deployment的pod所在的节点分布
+
+deployment_node = {
+    "promql": '''
+count by (node) (
+    kube_pod_info{{env} created_by_kind="ReplicaSet",namespace="{namespace}",created_by_name=~"{deployment}.*"}
+  and on ({env_key} namespace, created_by_name)
+    label_replace(
+      kube_replicaset_owner{{env} owner_kind="Deployment",namespace="{namespace}",owner_name="{deployment}"},
+      "created_by_name",
+      "$1",
+      "replicaset",
+      "(.*)"
+    )
+)
+'''
+}

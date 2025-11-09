@@ -1,10 +1,7 @@
-import logging
 import json
 from aiohttp import web
 from kubernetes_asyncio.client.exceptions import ApiException
-
-# 配置日志
-logger = logging.getLogger(__name__)
+from loguru import logger
 
 
 async def get_virtualservice(custom_objects_api, request):

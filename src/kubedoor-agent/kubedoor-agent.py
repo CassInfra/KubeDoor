@@ -11,10 +11,18 @@ from loguru import logger
 import utils
 import configmap_manager
 import service_manager
+import ingress_manager
+import pod_manager
 import istio_manager
 import re
 from deployment_monitor import DeploymentMonitor
 from k8s_event_monitor import K8sEventMonitor
+from event_monitor_config import *
+from k8s_node_scheduler import K8sNodeScheduler
+from k8s_client_manager import K8sClientManager
+from node_manager import get_nodes_list, cordon_nodes, uncordon_nodes
+import k8s_resource_handler
+import stateful_daemon_manager
 
 # 配置日志
 logger.remove()
@@ -30,6 +38,7 @@ ws_conn = None
 v1 = None  # AppsV1Api
 batch_v1 = None  # BatchV1Api
 core_v1 = None  # CoreV1Api
+networking_v1 = None  # NetworkingV1Api
 admission_api = None  # AdmissionregistrationV1Api
 custom_api = None  # CustomObjectsApi（用于访问Metrics API）
 deployment_monitor = None  # DeploymentMonitor实例
@@ -42,12 +51,13 @@ pod_logs_tasks = {}
 
 def init_kubernetes():
     """在程序启动时加载 Kubernetes 配置并初始化客户端"""
-    global v1, batch_v1, core_v1, admission_api, custom_api, deployment_monitor, event_monitor
+    global v1, batch_v1, core_v1, networking_v1, admission_api, custom_api, deployment_monitor, event_monitor
     try:
         config.load_incluster_config()
         v1 = client.AppsV1Api()
         batch_v1 = client.BatchV1Api()
         core_v1 = client.CoreV1Api()
+        networking_v1 = client.NetworkingV1Api()
         admission_api = client.AdmissionregistrationV1Api()
         custom_api = client.CustomObjectsApi()
         deployment_monitor = DeploymentMonitor(v1, core_v1)
@@ -71,10 +81,15 @@ async def handle_http_request(
             elif method == "POST":
                 async with session.post(path, params=query, json=body, ssl=False) as resp:
                     response_data = await resp.json()
+            elif method == "DELETE":
+                async with session.delete(path, params=query, json=body, ssl=False) as resp:
+                    response_data = await resp.json()
             else:
-                response_data = {"error": f"Unsupported method: {method}"}
+                response_data = {"success": False, "error": f"agent收到master发来的不支持的请求方法: {method}"}
+                logger.error(response_data["error"])
     except Exception as e:
-        response_data = {"error": str(e)}
+        response_data = {"success": False, "error": str(e)}
+        logger.error(response_data["error"])
 
     await ws.send_json({"type": "response", "request_id": request_id, "response": response_data})
 
@@ -186,9 +201,47 @@ async def heartbeat(ws: ClientWebSocketResponse):
         try:
             await ws.send_json({"type": "heartbeat"})
             logger.debug("成功发送心跳")
-            await asyncio.sleep(4)
+            await asyncio.sleep(HEARTBEAT_INTERVAL)
         except Exception as e:
             logger.error(f"心跳发送失败：{e}")
+            break
+
+
+async def monitor_health_check():
+    """定期健康检查，监控事件传输状态"""
+    last_check_time = datetime.now()
+    while True:
+        try:
+            await asyncio.sleep(HEALTH_CHECK_INTERVAL)  # 健康检查间隔
+
+            current_time = datetime.now()
+
+            # 检查WebSocket连接健康状态
+            if not event_monitor.is_websocket_healthy():
+                logger.warning("⚠️ 健康检查: WebSocket连接不健康")
+                raise Exception("WebSocket连接不健康")
+
+            # 检查事件监控状态
+            if not event_monitor.is_running:
+                logger.warning("⚠️ 健康检查: 事件监控未运行")
+                raise Exception("事件监控未运行")
+
+            # 检查是否长时间没有事件（可能表示K8s事件流断开）
+            if event_monitor.last_event_time:
+                time_since_last_event = current_time - event_monitor.last_event_time
+                if time_since_last_event.total_seconds() > EVENT_TIMEOUT_THRESHOLD:
+                    logger.warning(f"⚠️ 健康检查: 已有 {time_since_last_event.total_seconds():.0f} 秒没有收到K8s事件")
+
+            # 定期输出统计信息
+            time_since_last_check = current_time - last_check_time
+            if time_since_last_check.total_seconds() > STATS_REPORT_INTERVAL:
+                logger.debug(
+                    f"📊 事件监控状态: 已处理 {event_monitor.event_count} 个事件, WebSocket健康: {event_monitor.is_websocket_healthy()}"
+                )
+                last_check_time = current_time
+
+        except Exception as e:
+            logger.error(f"健康检查失败：{e}")
             break
 
 
@@ -202,20 +255,55 @@ async def connect_to_server():
                     logger.info("成功连接到服务端")
                     global ws_conn
                     ws_conn = ws
-                    
+
                     # 设置事件监听器的WebSocket连接
                     event_monitor.set_websocket_connection(ws)
-                    
-                    # 并发运行请求处理、心跳发送和事件监听
-                    await asyncio.gather(
-                        process_request(ws), 
-                        heartbeat(ws),
-                        event_monitor.start_monitoring()
-                    )
+
+                    # 并发运行请求处理、心跳发送、事件监听和健康检查，使用return_when=FIRST_EXCEPTION
+                    # 这样任何一个任务异常都会导致重新连接，而不是整个程序崩溃
+                    try:
+                        done, pending = await asyncio.wait(
+                            [
+                                asyncio.create_task(process_request(ws)),
+                                asyncio.create_task(heartbeat(ws)),
+                                asyncio.create_task(event_monitor.start_monitoring()),
+                                asyncio.create_task(monitor_health_check()),
+                            ],
+                            return_when=asyncio.FIRST_EXCEPTION,
+                        )
+
+                        # 取消所有待处理的任务
+                        for task in pending:
+                            task.cancel()
+                            try:
+                                await task
+                            except asyncio.CancelledError:
+                                pass
+
+                        # 检查已完成的任务是否有异常
+                        for task in done:
+                            if task.exception():
+                                logger.error(f"任务异常: {task.exception()}")
+                                raise task.exception()
+
+                    except Exception as task_e:
+                        logger.error(f"WebSocket任务异常: {task_e}")
+                        # 停止事件监控
+                        await event_monitor.stop_monitoring()
+                        # 清空WebSocket连接引用
+                        event_monitor.set_websocket_connection(None)
+                        ws_conn = None
+                        raise task_e
+
         except Exception as e:
             logger.error(f"连接到服务端失败：{e}")
-            logger.info("等待 5 秒后重新连接...")
-            await asyncio.sleep(5)
+            # 确保清理资源
+            if event_monitor:
+                await event_monitor.stop_monitoring()
+                event_monitor.set_websocket_connection(None)
+            ws_conn = None
+            logger.info(f"等待 {WEBSOCKET_RECONNECT_DELAY} 秒后重新连接...")
+            await asyncio.sleep(WEBSOCKET_RECONNECT_DELAY)
 
 
 async def delete_cronjob_or_not(cronjob_name, job_type):
@@ -272,9 +360,10 @@ async def scale(request):
     res_type = request.query.get("type")
     temp = request.query.get("temp")
     isolate = request.query.get("isolate")
+    scheduler = request.query.get("scheduler", "false")
     error_list = []
 
-    for index, deployment in enumerate(request_info):
+    for index, deployment in enumerate(request_info.get('deployment_list', [])):
         namespace = deployment.get("namespace")
         deployment_name = deployment.get("deployment_name")
         num = deployment.get("num")
@@ -380,6 +469,102 @@ async def scale(request):
             # 重试机制处理409冲突
             max_retries = 3
             retry_count = 0
+            if scheduler == 'true' and add_label == 'true':
+                return web.json_response({"message": "add_label和scheduler参数不能同时为True"}, status=400)
+
+            # 如果启用scheduler，解析body获取node_scheduler列表
+            if scheduler == 'true' and not job_name:
+                try:
+                    logger.info(
+                        f"开始处理scheduler参数，env={utils.PROM_K8S_TAG_VALUE}, ns={namespace}, deployment={deployment_name}"
+                    )
+
+                    node_scheduler_list = request_info.get('node_scheduler', [])
+                    logger.info(f"获取到node_scheduler列表: {node_scheduler_list}")
+
+                    # 使用客户端管理器确保客户端正确关闭
+                    async with K8sClientManager() as k8s_manager:
+                        logger.info(f"成功获取K8s客户端: {type(k8s_manager.core_v1_api)}")
+
+                        # 初始化K8s节点调度器
+                        logger.info("正在初始化K8s节点调度器...")
+                        k8s_scheduler = K8sNodeScheduler(k8s_manager.core_v1_api)
+                        logger.info(f"成功初始化K8s节点调度器: {type(k8s_scheduler)}")
+
+                        # 执行禁止调度操作
+                        logger.info(f"开始执行禁止调度操作，排除节点: {node_scheduler_list}")
+                        cordon_result = await k8s_scheduler.cordon_nodes_exclude(exclude_nodes=node_scheduler_list)
+                        logger.info(f"禁止调度操作完成: {cordon_result}")
+
+                        # 检查 cordon 操作是否有错误
+                        if cordon_result.get("error_count", 0) > 0:
+                            error_details = []
+                            for result in cordon_result.get("results", []):
+                                if result.get("status") == "error":
+                                    error_details.append(f"节点 {result.get('node_name')}: {result.get('message')}")
+
+                            error_message = f"禁止节点调度操作失败，错误详情: {'; '.join(error_details)}"
+                            logger.error(error_message)
+
+                            # 执行恢复操作：取消所有节点的禁止调度状态
+                            try:
+                                logger.warning("⚠️ cordon操作失败，开始执行uncordon恢复操作以确保节点状态一致性...")
+                                uncordon_result = await k8s_scheduler.uncordon_nodes_exclude(
+                                    exclude_nodes=node_scheduler_list
+                                )
+                                logger.info(f"uncordon恢复操作完成: {uncordon_result}")
+
+                                if uncordon_result.get("error_count", 0) > 0:
+                                    logger.error(f"⚠️ uncordon恢复操作也出现错误: {uncordon_result}")
+                                    error_message += (
+                                        f"；恢复操作也失败: {uncordon_result.get('error_count', 0)}个节点恢复失败"
+                                    )
+                                else:
+                                    logger.info("✅ uncordon恢复操作成功，所有节点调度状态已恢复")
+                                    error_message += "；已执行恢复操作确保节点状态一致性"
+
+                            except Exception as uncordon_e:
+                                logger.error(
+                                    f"❌ 执行uncordon恢复操作时发生异常: {type(uncordon_e).__name__}: {str(uncordon_e)}"
+                                )
+                                error_message += f"；恢复操作异常: {str(uncordon_e)}"
+
+                            return web.json_response({"message": error_message}, status=500)
+
+                except Exception as e:
+                    logger.error(f"处理scheduler参数时发生异常: {type(e).__name__}: {str(e)}")
+                    import traceback
+
+                    logger.error(f"异常堆栈: {traceback.format_exc()}")
+
+                    # 在异常情况下也执行恢复操作
+                    if (
+                        'node_scheduler_list' in locals()
+                        and node_scheduler_list
+                        and 'k8s_scheduler' in locals()
+                        and k8s_scheduler
+                    ):
+                        try:
+                            logger.warning(
+                                "⚠️ 处理scheduler参数时发生异常，开始执行uncordon恢复操作以确保节点状态一致性..."
+                            )
+                            uncordon_result = await k8s_scheduler.uncordon_nodes_exclude(
+                                exclude_nodes=node_scheduler_list
+                            )
+                            logger.info(f"异常情况下的uncordon恢复操作完成: {uncordon_result}")
+
+                            if uncordon_result.get("error_count", 0) > 0:
+                                logger.error(f"⚠️ 异常情况下的uncordon恢复操作也出现错误: {uncordon_result}")
+                            else:
+                                logger.info("✅ 异常情况下的uncordon恢复操作成功，所有节点调度状态已恢复")
+
+                        except Exception as uncordon_e:
+                            logger.error(
+                                f"❌ 异常情况下执行uncordon恢复操作时发生异常: {type(uncordon_e).__name__}: {str(uncordon_e)}"
+                            )
+
+                    return web.json_response({"message": f"处理scheduler参数失败: {str(e)}"}, status=500)
+
             while retry_count < max_retries:
                 try:
                     # 重新获取deployment对象，避免resourceVersion冲突
@@ -414,6 +599,34 @@ async def scale(request):
 
             if job_name:
                 await delete_cronjob_or_not(job_name, job_type)
+
+            # 如果启用了scheduler，在标签修改完成后执行取消禁止调度操作（延迟10秒）
+            if scheduler == 'true' and not job_name:
+                try:
+                    logger.info(f"标签修改完成，准备执行取消禁止调度操作，排除节点: {node_scheduler_list}")
+                    logger.info("正在调用uncordon_nodes_exclude方法...")
+
+                    # 定义错误回调函数
+                    def uncordon_error_callback(error_message):
+                        logger.error(f"取消禁止调度操作失败通知: {error_message}")
+                        utils.send_msg(
+                            f"⚠️ 取消禁止调度操作失败: {error_message}\n\n{utils.PROM_K8S_TAG_VALUE}, {namespace}, {deployment_name}"
+                        )
+
+                    # 为 uncordon 操作创建新的客户端管理器
+                    async with K8sClientManager() as uncordon_k8s_manager:
+                        uncordon_scheduler = K8sNodeScheduler(uncordon_k8s_manager.core_v1_api)
+                        uncordon_result = await uncordon_scheduler.uncordon_nodes_exclude(
+                            exclude_nodes=node_scheduler_list, delay_seconds=10, error_callback=uncordon_error_callback
+                        )
+                        logger.info(f"取消禁止调度操作已安排: {uncordon_result}")
+                except Exception as e:
+                    logger.error(f"执行取消禁止调度操作失败: {type(e).__name__}: {str(e)}")
+                    import traceback
+
+                    logger.error(f"uncordon异常堆栈: {traceback.format_exc()}")
+                    # 不影响主流程，只记录错误
+
         except ApiException as e:
             logger.exception(f"调用 AppsV1Api 时出错: {e}")
             try:
@@ -432,6 +645,7 @@ async def reboot(request):
     """批量重启微服务"""
     request_info = await request.json()
     interval = request.query.get("interval")
+    scheduler = request.query.get("scheduler", "false")
     patch = {
         "spec": {
             "template": {"metadata": {"annotations": {"kubectl.kubernetes.io/restartedAt": datetime.now().isoformat()}}}
@@ -439,7 +653,7 @@ async def reboot(request):
     }
     error_list = []
 
-    for index, deployment in enumerate(request_info):
+    for index, deployment in enumerate(request_info.get('deployment_list', [])):
         namespace = deployment.get("namespace")
         deployment_name = deployment.get("deployment_name")
         job_name = deployment.get("job_name")
@@ -454,6 +668,99 @@ async def reboot(request):
                 error_list.append({'namespace': namespace, 'deployment_name': deployment_name, 'reason': reason})
                 continue
 
+            # 如果启用scheduler，解析body获取node_scheduler列表
+            if scheduler == 'true' and not job_name:
+                try:
+                    logger.info(
+                        f"开始处理scheduler参数，env={utils.PROM_K8S_TAG_VALUE}, ns={namespace}, deployment={deployment_name}"
+                    )
+
+                    node_scheduler_list = request_info.get('node_scheduler', [])
+                    logger.info(f"获取到node_scheduler列表: {node_scheduler_list}")
+
+                    # 使用客户端管理器确保客户端正确关闭
+                    async with K8sClientManager() as k8s_manager:
+                        logger.info(f"成功获取K8s客户端: {type(k8s_manager.core_v1_api)}")
+
+                        # 初始化K8s节点调度器
+                        logger.info("正在初始化K8s节点调度器...")
+                        k8s_scheduler = K8sNodeScheduler(k8s_manager.core_v1_api)
+                        logger.info(f"成功初始化K8s节点调度器: {type(k8s_scheduler)}")
+
+                        # 执行禁止调度操作
+                        logger.info(f"开始执行禁止调度操作，排除节点: {node_scheduler_list}")
+                        cordon_result = await k8s_scheduler.cordon_nodes_exclude(exclude_nodes=node_scheduler_list)
+                        logger.info(f"禁止调度操作完成: {cordon_result}")
+
+                        # 检查 cordon 操作是否有错误
+                        if cordon_result.get("error_count", 0) > 0:
+                            error_details = []
+                            for result in cordon_result.get("results", []):
+                                if result.get("status") == "error":
+                                    error_details.append(f"节点 {result.get('node_name')}: {result.get('message')}")
+
+                            error_message = f"禁止节点调度操作失败，错误详情: {'; '.join(error_details)}"
+                            logger.error(error_message)
+
+                            # 执行恢复操作：取消所有节点的禁止调度状态
+                            try:
+                                logger.warning("⚠️ cordon操作失败，开始执行uncordon恢复操作以确保节点状态一致性...")
+                                uncordon_result = await k8s_scheduler.uncordon_nodes_exclude(
+                                    exclude_nodes=node_scheduler_list
+                                )
+                                logger.info(f"uncordon恢复操作完成: {uncordon_result}")
+
+                                if uncordon_result.get("error_count", 0) > 0:
+                                    logger.error(f"⚠️ uncordon恢复操作也出现错误: {uncordon_result}")
+                                    error_message += (
+                                        f"；恢复操作也失败: {uncordon_result.get('error_count', 0)}个节点恢复失败"
+                                    )
+                                else:
+                                    logger.info("✅ uncordon恢复操作成功，所有节点调度状态已恢复")
+                                    error_message += "；已执行恢复操作确保节点状态一致性"
+
+                            except Exception as uncordon_e:
+                                logger.error(
+                                    f"❌ 执行uncordon恢复操作时发生异常: {type(uncordon_e).__name__}: {str(uncordon_e)}"
+                                )
+                                error_message += f"；恢复操作异常: {str(uncordon_e)}"
+
+                            return web.json_response({"message": error_message}, status=500)
+
+                except Exception as e:
+                    logger.error(f"处理scheduler参数时发生异常: {type(e).__name__}: {str(e)}")
+                    import traceback
+
+                    logger.error(f"异常堆栈: {traceback.format_exc()}")
+
+                    # 在异常情况下也执行恢复操作
+                    if (
+                        'node_scheduler_list' in locals()
+                        and node_scheduler_list
+                        and 'k8s_scheduler' in locals()
+                        and k8s_scheduler
+                    ):
+                        try:
+                            logger.warning(
+                                "⚠️ 处理scheduler参数时发生异常，开始执行uncordon恢复操作以确保节点状态一致性..."
+                            )
+                            uncordon_result = await k8s_scheduler.uncordon_nodes_exclude(
+                                exclude_nodes=node_scheduler_list
+                            )
+                            logger.info(f"异常情况下的uncordon恢复操作完成: {uncordon_result}")
+
+                            if uncordon_result.get("error_count", 0) > 0:
+                                logger.error(f"⚠️ 异常情况下的uncordon恢复操作也出现错误: {uncordon_result}")
+                            else:
+                                logger.info("✅ 异常情况下的uncordon恢复操作成功，所有节点调度状态已恢复")
+
+                        except Exception as uncordon_e:
+                            logger.error(
+                                f"❌ 异常情况下执行uncordon恢复操作时发生异常: {type(uncordon_e).__name__}: {str(uncordon_e)}"
+                            )
+
+                    return web.json_response({"message": f"处理scheduler参数失败: {str(e)}"}, status=500)
+
             logger.info(f"重启 Deployment【{deployment_name}】，如已接入准入控制, 实际变更已数据库中数据为准。")
             await v1.patch_namespaced_deployment(deployment_name, namespace, patch)
 
@@ -465,6 +772,34 @@ async def reboot(request):
 
             if job_name:
                 await delete_cronjob_or_not(job_name, job_type)
+
+            # 如果启用了scheduler，在标签修改完成后执行取消禁止调度操作（延迟10秒）
+            if scheduler == 'true' and not job_name:
+                try:
+                    logger.info(f"标签修改完成，准备执行取消禁止调度操作，排除节点: {node_scheduler_list}")
+                    logger.info("正在调用uncordon_nodes_exclude方法...")
+
+                    # 定义错误回调函数
+                    def uncordon_error_callback(error_message):
+                        logger.error(f"取消禁止调度操作失败通知: {error_message}")
+                        utils.send_msg(
+                            f"⚠️ 取消禁止调度操作失败: {error_message}\n\n{utils.PROM_K8S_TAG_VALUE}, {namespace}, {deployment_name}"
+                        )
+
+                    # 为 uncordon 操作创建新的客户端管理器
+                    async with K8sClientManager() as uncordon_k8s_manager:
+                        uncordon_scheduler = K8sNodeScheduler(uncordon_k8s_manager.core_v1_api)
+                        uncordon_result = await uncordon_scheduler.uncordon_nodes_exclude(
+                            exclude_nodes=node_scheduler_list, delay_seconds=120, error_callback=uncordon_error_callback
+                        )
+                        logger.info(f"取消禁止调度操作已安排: {uncordon_result}")
+                except Exception as e:
+                    logger.error(f"执行取消禁止调度操作失败: {type(e).__name__}: {str(e)}")
+                    import traceback
+
+                    logger.error(f"uncordon异常堆栈: {traceback.format_exc()}")
+                    # 不影响主流程，只记录错误
+
         except ApiException as e:
             logger.exception(f"调用 AppsV1Api 时出错: {e}")
             try:
@@ -611,7 +946,7 @@ async def create_mutating_webhook():
                     ]
                 ),
                 side_effects="None",
-                timeout_seconds=10,
+                timeout_seconds=30,
                 admission_review_versions=["v1"],
                 reinvocation_policy="Never",
             )
@@ -1298,15 +1633,20 @@ async def get_pod_label_and_maxUnavailable(namespace, deployment_name):
 
 
 async def get_deployment_affinity_old(namespace, deployment_name):
-    """获取deployment现在的affinity配置，并判断是否包含kubedoor-scheduler标签匹配"""
+    """检查deployment是否包含kubedoor-scheduler标签匹配
+    返回: has_kubedoor_scheduler
+    """
     try:
         # 获取 Deployment
         deployment = await v1.read_namespaced_deployment(deployment_name, namespace)
         # 获取 affinity配置
         affinity = deployment.spec.template.spec.affinity
+
+        has_kubedoor_scheduler = False
+
         if affinity and affinity.node_affinity:
+            # 检查是否包含kubedoor-scheduler
             node_affinity = affinity.node_affinity
-            # 检查 requiredDuringSchedulingIgnoredDuringExecution 和 nodeSelectorTerms
             if node_affinity.required_during_scheduling_ignored_during_execution:
                 node_selector_terms = (
                     node_affinity.required_during_scheduling_ignored_during_execution.node_selector_terms
@@ -1314,9 +1654,14 @@ async def get_deployment_affinity_old(namespace, deployment_name):
                 for term in node_selector_terms:
                     for expression in term.match_expressions:
                         if 'kubedoor-scheduler' in expression.values:
-                            return True
-        return False
-    except AttributeError:
+                            has_kubedoor_scheduler = True
+                            break
+                    if has_kubedoor_scheduler:
+                        break
+
+        return has_kubedoor_scheduler
+    except Exception as e:
+        logger.error(f"检查deployment affinity配置失败: {e}")
         return False
 
 
@@ -1373,11 +1718,15 @@ async def update_all(
         }
         change_list.append(restart_strategy)
     else:
-        # 如果deployment配置过affinity选择节点，则删除
-        if await get_deployment_affinity_old(namespace, deployment_name):
-            affinity = {"op": "replace", "path": "/spec/template/spec/affinity", "value": {}}
-            change_list.append(affinity)
-            logger.info("检查到【{namespace}】【{deployment_name}】已配置节点选择，并且调度开关已关闭，affinity置空")
+        # 如果deployment配置过affinity选择节点，则删除nodeAffinity部分
+        has_kubedoor_scheduler = await get_deployment_affinity_old(namespace, deployment_name)
+        if has_kubedoor_scheduler:
+            # 直接删除nodeAffinity字段，保留podAffinity和podAntiAffinity
+            remove_node_affinity = {"op": "remove", "path": "/spec/template/spec/affinity/nodeAffinity"}
+            change_list.append(remove_node_affinity)
+            logger.info(
+                f"检查到【{namespace}】【{deployment_name}】已配置节点选择，并且调度开关已关闭，删除nodeAffinity字段"
+            )
     # 按照数据库修改所有参数
     patch_replicas = {"op": "replace", "path": "/spec/replicas", "value": replicas}
     change_list.append(patch_replicas)
@@ -1462,7 +1811,7 @@ async def admis_mutate(request):
     request_futures[uid] = response_future
     await ws_conn.send_json({"type": "admis", "request_id": uid, "namespace": namespace, "deployment": deployment_name})
     try:
-        result = await asyncio.wait_for(response_future, timeout=10)
+        result = await asyncio.wait_for(response_future, timeout=30)
         logger.info(f"response_future 收到 admis 响应：{uid} {result}")
     except asyncio.TimeoutError:
         del request_futures[uid]
@@ -1708,32 +2057,64 @@ async def setup_routes(app):
     app.router.add_get('/api/get_dpm_pods', get_deployment_pods)
     app.router.add_get('/api/nodes', get_nodes_info)
     app.router.add_post('/api/balance_node', balance_node)
+    # node管理接口
+    app.router.add_get('/api/nodes/list', lambda request: get_nodes_list(core_v1, custom_api, request))
+    app.router.add_post('/api/nodes/cordon', lambda request: cordon_nodes(core_v1, request))
+    app.router.add_post('/api/nodes/uncordon', lambda request: uncordon_nodes(core_v1, request))
     # ConfigMap管理接口
     app.router.add_get('/api/agent/configmaps', lambda request: configmap_manager.get_configmap_list(core_v1, request))
-    app.router.add_get(
-        '/api/agent/configmap/get', lambda request: configmap_manager.get_configmap_content(core_v1, request)
-    )
-    app.router.add_post(
-        '/api/agent/configmap/update', lambda request: configmap_manager.update_configmap_content(core_v1, request)
-    )
     # Service管理接口
     app.router.add_get('/api/agent/services', lambda request: service_manager.get_service_list(core_v1, request))
-    app.router.add_get('/api/agent/service/get', lambda request: service_manager.get_service_content(core_v1, request))
-    app.router.add_post(
-        '/api/agent/service/update', lambda request: service_manager.update_service_content(core_v1, request)
-    )
     app.router.add_get(
         '/api/agent/service/endpoints', lambda request: service_manager.get_service_endpoints(core_v1, request)
     )
     app.router.add_get(
         '/api/agent/service/first-port', lambda request: service_manager.get_service_first_port(core_v1, request)
     )
+    # Ingress管理接口
+    app.router.add_get('/api/agent/ingresses', lambda request: ingress_manager.get_ingress_list(networking_v1, request))
+    app.router.add_get(
+        '/api/agent/ingress/rules',
+        lambda request: ingress_manager.get_ingress_rules(custom_api, request),
+    )
+    # Pod管理接口
+    app.router.add_get('/api/agent/pods', lambda request: pod_manager.get_pod_list(core_v1, custom_api, request))
     # VirtualService管理接口
     app.router.add_get('/api/agent/istio/vs', lambda request: istio_manager.get_virtualservice(custom_api, request))
     app.router.add_post(
         '/api/agent/istio/vs/apply', lambda request: istio_manager.apply_virtualservice(custom_api, request)
     )
     # app.router.add_delete('/api/agent/istio/vs/delete', lambda request: istio_manager.delete_virtualservice(custom_api, request))
+
+    # K8S资源管理接口
+    app.router.add_post('/api/agent/res/ops', k8s_resource_handler.handle_k8s_operation)
+    app.router.add_get('/api/agent/res/content', k8s_resource_handler.handle_get_resource_content)
+    app.router.add_delete('/api/agent/res/delete', k8s_resource_handler.handle_delete_resource)
+
+    # StatefulSet管理接口
+    app.router.add_get(
+        '/api/agent/statefulsets', lambda request: stateful_daemon_manager.get_statefulset_list(v1, request)
+    )
+    app.router.add_get(
+        '/api/agent/statefulset/pods',
+        lambda request: stateful_daemon_manager.get_statefulset_pods(request, core_v1, custom_api, v1),
+    )
+    app.router.add_post(
+        '/api/agent/statefulset/restart', lambda request: stateful_daemon_manager.restart_statefulset(request, v1)
+    )
+    app.router.add_post(
+        '/api/agent/statefulset/scale', lambda request: stateful_daemon_manager.scale_statefulset(request, v1)
+    )
+
+    # DaemonSet管理接口
+    app.router.add_get('/api/agent/daemonsets', lambda request: stateful_daemon_manager.get_daemonset_list(v1, request))
+    app.router.add_get(
+        '/api/agent/daemonset/pods',
+        lambda request: stateful_daemon_manager.get_daemonset_pods(request, core_v1, custom_api, v1),
+    )
+    app.router.add_post(
+        '/api/agent/daemonset/restart', lambda request: stateful_daemon_manager.restart_daemonset(request, v1)
+    )
 
 
 async def start_https_server():

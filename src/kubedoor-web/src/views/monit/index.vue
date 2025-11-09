@@ -2,12 +2,17 @@
   <div class="realtime-monitor-container">
     <!-- 搜索表单 -->
     <div class="search-section">
-      <el-form :model="searchForm" inline style="margin-bottom: -18px">
+      <el-form
+        :model="searchForm"
+        inline
+        class="query-form"
+        style="margin-bottom: -18px"
+      >
         <el-form-item label="K8S">
           <el-select
             v-model="searchForm.env"
             placeholder="请选择K8S环境"
-            class="!w-[180px]"
+            class="!w-[200px]"
             filterable
             @change="handleEnvChange"
           >
@@ -27,7 +32,7 @@
             class="!w-[180px]"
             filterable
             clearable
-            @change="handleSearch"
+            @change="handleNamespaceChange"
           >
             <el-option
               v-for="item in nsOptions"
@@ -51,11 +56,25 @@
           <el-button
             type="primary"
             :disabled="!searchForm.env"
+            :loading="loading"
             @click="handleSearch"
           >
-            搜索
+            查询
           </el-button>
-          <el-button @click="handleReset">重置</el-button>
+          <el-button
+            type="primary"
+            plain
+            :icon="Refresh"
+            :disabled="!searchForm.env"
+            :loading="loading"
+            @click="handleRefresh"
+          >
+            刷新
+          </el-button>
+        </el-form-item>
+        <!-- 新建按钮放置在表单最右侧 -->
+        <el-form-item class="right-auto">
+          <el-button type="success" @click="openCreateDialog">新建</el-button>
         </el-form-item>
       </el-form>
     </div>
@@ -237,45 +256,173 @@
       </div>
     </el-dialog>
 
+    <!-- 新建资源全屏YAML编辑弹窗（效果同 Service 编辑弹窗） -->
+    <!-- 编辑Deployment -->
+    <el-dialog
+      v-model="editDialogVisible"
+      title="编辑Deployment"
+      width="95%"
+      top="2.5vh"
+      :close-on-click-modal="false"
+      destroy-on-close
+    >
+      <div class="edit-container">
+        <div class="yaml-editor-container">
+          <div class="editor-header">
+            <span class="editor-title">Deployment YAML配置</span>
+            <el-button
+              type="primary"
+              :loading="saveLoading"
+              @click="handleSave"
+            >
+              提交
+            </el-button>
+          </div>
+          <div ref="yamlEditorRef" class="yaml-editor" />
+        </div>
+      </div>
+    </el-dialog>
+
+    <!-- 更新方式选择弹框 -->
+    <el-dialog
+      v-model="updateMethodDialogVisible"
+      title="选择更新方式"
+      width="500px"
+      :close-on-click-modal="false"
+    >
+      <div class="update-method-container">
+        <el-radio-group v-model="selectedUpdateMethod">
+          <el-radio value="apply">Apply - 应用配置（推荐）</el-radio>
+          <el-radio value="replace">Replace - 替换配置</el-radio>
+        </el-radio-group>
+        <div class="method-description">
+          <p v-if="selectedUpdateMethod === 'apply'">
+            Apply方式会智能合并配置，保留现有的其他字段，适用于大部分场景。
+          </p>
+          <p v-if="selectedUpdateMethod === 'replace'">
+            Replace方式会完全替换现有配置，请确保YAML包含所有必要字段。
+          </p>
+        </div>
+      </div>
+      <template #footer>
+        <span class="dialog-footer">
+          <el-button @click="updateMethodDialogVisible = false">取消</el-button>
+          <el-button
+            type="primary"
+            :loading="saveLoading"
+            @click="confirmUpdate"
+          >
+            确认更新
+          </el-button>
+        </span>
+      </template>
+    </el-dialog>
+
+    <el-dialog
+      v-model="createDialogVisible"
+      title="新建资源"
+      fullscreen
+      :close-on-click-modal="false"
+      destroy-on-close
+    >
+      <div class="edit-container">
+        <div class="yaml-editor-container">
+          <div class="editor-header">
+            <span class="editor-title">Deployment YAML配置</span>
+            <el-button
+              type="primary"
+              :loading="createSaveLoading"
+              @click="handleCreateSave"
+            >
+              提交
+            </el-button>
+          </div>
+          <div
+            ref="createYamlEditorRef"
+            class="yaml-editor create-yaml-editor"
+          />
+        </div>
+      </div>
+    </el-dialog>
+
+    <!-- 新建更新方式选择弹框（含 create/apply/replace） -->
+    <el-dialog
+      v-model="createUpdateMethodDialogVisible"
+      title="选择更新方式"
+      width="600px"
+      :close-on-click-modal="false"
+    >
+      <div class="update-method-container">
+        <div class="method-radio-row">
+          <el-radio-group v-model="selectedCreateUpdateMethod">
+            <el-radio value="create">Create - 新建</el-radio>
+            <el-radio value="apply">Apply - 应用配置（推荐）</el-radio>
+            <el-radio value="replace">Replace - 替换配置</el-radio>
+          </el-radio-group>
+        </div>
+        <div class="method-description">
+          <p v-if="selectedCreateUpdateMethod === 'create'">
+            Create方式用于新建资源，提交的YAML将被直接创建。
+          </p>
+          <p v-if="selectedCreateUpdateMethod === 'apply'">
+            Apply方式会智能合并配置，保留现有的其他字段，适用于大部分场景。
+          </p>
+          <p v-if="selectedCreateUpdateMethod === 'replace'">
+            Replace方式会完全替换现有配置，请确保YAML包含所有必要字段。
+          </p>
+        </div>
+      </div>
+      <template #footer>
+        <span class="dialog-footer">
+          <el-button @click="createUpdateMethodDialogVisible = false"
+            >取消</el-button
+          >
+          <el-button
+            type="primary"
+            :loading="createSaveLoading"
+            @click="confirmCreateUpdate"
+          >
+            确认更新
+          </el-button>
+        </span>
+      </template>
+    </el-dialog>
+
     <div class="mt-2">
       <el-card v-loading="loading">
         <el-table
+          ref="tableRef"
           class="hide-expand"
-          :data="filteredTableData"
+          :data="paginatedTableData"
           style="width: 100%"
           stripe
           border
-          :default-sort="{ prop: 'podCount', order: 'descending' }"
+          :default-sort="defaultSortState"
           row-key="id"
           :expand-row-keys="expandedRowKeys"
+          @sort-change="handleSortChange"
         >
-          <el-table-column
-            prop="env"
-            label="K8S"
-            min-width="100"
-            show-overflow-tooltip
-          />
           <el-table-column
             prop="namespace"
             label="命名空间"
-            min-width="80"
+            min-width="100"
             show-overflow-tooltip
           />
           <el-table-column
             prop="deployment"
             label="微服务"
-            min-width="140"
+            min-width="160"
             show-overflow-tooltip
           />
           <el-table-column
             prop="podCount"
-            label="POD"
-            min-width="80"
+            label="Pod"
+            min-width="70"
             align="center"
-            sortable
+            sortable="custom"
           >
             <template #header>
-              <span style="color: #409eff">POD</span>
+              <span style="color: #409eff">Pod</span>
             </template>
             <template #default="scope">
               <span style="font-weight: bold; color: #409eff">{{
@@ -284,7 +431,7 @@
             </template>
           </el-table-column>
 
-          <el-table-column label="明细" min-width="80" align="center">
+          <el-table-column label="明细" min-width="60" align="center">
             <template #default="scope">
               <el-button
                 type="primary"
@@ -485,7 +632,8 @@
                                 handleViewLogs(
                                   scope.row.env,
                                   scope.row.namespace,
-                                  podScope.row.name
+                                  podScope.row.name,
+                                  scope.row.deployment
                                 )
                               "
                               >日志</el-dropdown-item
@@ -495,18 +643,15 @@
                                 handleModifyPod(
                                   scope.row.env,
                                   scope.row.namespace,
-                                  podScope.row.name
+                                  podScope.row.name,
+                                  scope.row.deployment
                                 )
                               "
                               >隔离</el-dropdown-item
                             >
                             <el-dropdown-item
                               @click="
-                                handleDeletePod(
-                                  scope.row.env,
-                                  scope.row.namespace,
-                                  podScope.row.name
-                                )
+                                handleDeletePod(scope.row, podScope.row.name)
                               "
                               >删除</el-dropdown-item
                             >
@@ -568,7 +713,7 @@
             label="平均CPU"
             min-width="110"
             align="center"
-            sortable
+            sortable="custom"
           >
             <template #default="scope"> {{ scope.row.avgCpu }}m </template>
           </el-table-column>
@@ -577,7 +722,7 @@
             label="最大CPU"
             min-width="110"
             align="center"
-            sortable
+            sortable="custom"
           >
             <template #header>
               <span style="color: #f56c6c">最大CPU</span>
@@ -593,7 +738,7 @@
             label="需求CPU"
             min-width="110"
             align="center"
-            sortable
+            sortable="custom"
           >
             <template #default="scope"> {{ scope.row.requestCpu }}m </template>
           </el-table-column>
@@ -602,7 +747,7 @@
             label="限制CPU"
             min-width="110"
             align="center"
-            sortable
+            sortable="custom"
           >
             <template #header>
               <span style="color: #409eff">限制CPU</span>
@@ -618,7 +763,7 @@
             label="平均MEM"
             min-width="110"
             align="center"
-            sortable
+            sortable="custom"
           >
             <template #default="scope"> {{ scope.row.avgMem }}MB </template>
           </el-table-column>
@@ -628,7 +773,7 @@
             label="最大MEM"
             min-width="110"
             align="center"
-            sortable
+            sortable="custom"
           >
             <template #header>
               <span style="color: #f56c6c">最大MEM</span>
@@ -645,7 +790,7 @@
             label="需求MEM"
             min-width="110"
             align="center"
-            sortable
+            sortable="custom"
           >
             <template #default="scope"> {{ scope.row.requestMem }}MB </template>
           </el-table-column>
@@ -655,7 +800,7 @@
             label="限制MEM"
             min-width="110"
             align="center"
-            sortable
+            sortable="custom"
           >
             <template #header>
               <span style="color: #409eff">限制MEM</span>
@@ -681,6 +826,12 @@
                     <el-dropdown-item @click="onReboot(scope.row)"
                       >重启</el-dropdown-item
                     >
+                    <el-dropdown-item @click="handleEdit(scope.row)"
+                      >编辑</el-dropdown-item
+                    >
+                    <el-dropdown-item @click="handleDeleteDeployment(scope.row)"
+                      >删除</el-dropdown-item
+                    >
                     <el-dropdown-item @click="openUpdateDialog(scope.row)"
                       >更新</el-dropdown-item
                     >
@@ -690,6 +841,18 @@
             </template>
           </el-table-column>
         </el-table>
+        <div class="table-pagination">
+          <el-pagination
+            background
+            layout="total, sizes, prev, pager, next, jumper"
+            :total="filteredTableData.length"
+            :page-sizes="pageSizeOptions"
+            :page-size="pageSize"
+            :current-page="currentPage"
+            @size-change="handlePageSizeChange"
+            @current-change="handlePageChange"
+          />
+        </div>
       </el-card>
     </div>
     <el-dialog
@@ -736,6 +899,7 @@ import {
   onBeforeUnmount
 } from "vue";
 import { ElMessage, ElMessageBox } from "element-plus";
+import type { TableInstance } from "element-plus";
 
 import {
   modifyPod,
@@ -746,7 +910,7 @@ import {
   autoJvmMem,
   updateOperate
 } from "@/api/alarm";
-import { ArrowDown } from "@element-plus/icons-vue";
+import { ArrowDown, Refresh } from "@element-plus/icons-vue";
 import {
   getPromEnv,
   getPromNamespace,
@@ -755,11 +919,19 @@ import {
   showAddLabel,
   getPodPreviousLogs,
   createPodLogStreamUrl,
-  getImageTags
+  getImageTags,
+  getNodeResourceRank
 } from "@/api/monit";
 import { useResource } from "./utils/hook";
 import { useSearchStoreHook } from "@/store/modules/search";
 import { AnsiUp } from "ansi_up";
+import * as monaco from "monaco-editor";
+import * as yaml from "js-yaml";
+import {
+  getServiceContent,
+  updateServiceContent,
+  deleteK8sResource
+} from "@/api/service";
 
 const { onChangeCapacity, onReboot, onUpdateImage } = useResource();
 const searchStore = useSearchStoreHook();
@@ -777,35 +949,170 @@ const nsOptions = ref<string[]>([]);
 
 // 表格数据
 const tableData = ref<any[]>([]);
-const filteredTableData = ref<any[]>([]);
-// const filteredTableData = computed(() => {
-//   if (!searchForm.keyword) {
-//     return tableData.value;
-//   }
+const tableRef = ref<TableInstance>();
+const pageSizeOptions = [100, 200, 500, 1000];
+const pageSize = ref<number>(pageSizeOptions[0]);
+const currentPage = ref(1);
+const appliedKeyword = ref("");
+const lastFetchedEnv = ref<string | null>(null);
+const lastFetchedNamespace = ref<string | null>(null);
+const filteredTableData = computed(() => {
+  const keyword = appliedKeyword.value.trim().toLowerCase();
+  if (!keyword) {
+    return tableData.value;
+  }
+  return tableData.value.filter(item => {
+    const includesKeyword = (value?: string | null) =>
+      value ? value.toLowerCase().includes(keyword) : false;
+    return (
+      includesKeyword(item.env) ||
+      includesKeyword(item.namespace) ||
+      includesKeyword(item.deployment)
+    );
+  });
+});
 
-//   const keyword = searchForm.keyword.toLowerCase();
-//   return tableData.value.filter(
-//     item =>
-//       item.env.toLowerCase().includes(keyword) ||
-//       (item.namespace && item.namespace.toLowerCase().includes(keyword)) ||
-//       (item.deployment && item.deployment.toLowerCase().includes(keyword))
-//   );
-// });
+type SortOrder = "ascending" | "descending" | null;
+
+const defaultSortState: { prop: string; order: SortOrder } = {
+  prop: "podCount",
+  order: "descending"
+};
+
+const sortField = ref<string>(defaultSortState.prop);
+const sortOrder = ref<SortOrder>(defaultSortState.order);
+
+const resetPagination = () => {
+  currentPage.value = 1;
+};
+
+const applySortStateToTable = () => {
+  nextTick(() => {
+    if (!tableRef.value) return;
+    if (sortOrder.value && sortField.value) {
+      tableRef.value.sort?.(sortField.value, sortOrder.value);
+    } else {
+      tableRef.value.clearSort?.();
+    }
+  });
+};
+
+const restoreDefaultSortState = () => {
+  sortField.value = defaultSortState.prop;
+  sortOrder.value = defaultSortState.order;
+  applySortStateToTable();
+};
+
+const toNumber = (value: unknown) => {
+  if (value === null || value === undefined) return 0;
+  const num = Number(value);
+  return Number.isFinite(num) ? num : 0;
+};
+
+const columnComparators: Record<string, (a: any, b: any) => number> = {
+  podCount: (a, b) => toNumber(a.podCount) - toNumber(b.podCount),
+  avgCpu: (a, b) => toNumber(a.avgCpu) - toNumber(b.avgCpu),
+  maxCpu: (a, b) => toNumber(a.maxCpu) - toNumber(b.maxCpu),
+  requestCpu: (a, b) => toNumber(a.requestCpu) - toNumber(b.requestCpu),
+  limitCpu: (a, b) => toNumber(a.limitCpu) - toNumber(b.limitCpu),
+  avgMem: (a, b) => toNumber(a.avgMem) - toNumber(b.avgMem),
+  maxMem: (a, b) => toNumber(a.maxMem) - toNumber(b.maxMem),
+  requestMem: (a, b) => toNumber(a.requestMem) - toNumber(b.requestMem),
+  limitMem: (a, b) => toNumber(a.limitMem) - toNumber(b.limitMem)
+};
+
+const defaultComparator = (aValue: unknown, bValue: unknown) => {
+  if (aValue === bValue) return 0;
+  if (aValue === undefined || aValue === null) return -1;
+  if (bValue === undefined || bValue === null) return 1;
+  if (typeof aValue === "number" && typeof bValue === "number") {
+    return aValue - bValue;
+  }
+  const numA = Number(aValue);
+  const numB = Number(bValue);
+  if (!Number.isNaN(numA) && !Number.isNaN(numB)) {
+    return numA - numB;
+  }
+  return String(aValue).localeCompare(String(bValue));
+};
+
+const sortedTableData = computed(() => {
+  const data = [...filteredTableData.value];
+  if (!sortField.value || !sortOrder.value) {
+    return data;
+  }
+  const comparator = columnComparators[sortField.value]
+    ? columnComparators[sortField.value]
+    : (a: any, b: any) =>
+        defaultComparator(a?.[sortField.value], b?.[sortField.value]);
+  const direction = sortOrder.value === "ascending" ? 1 : -1;
+  return data.sort((a, b) => comparator(a, b) * direction);
+});
+
+const paginatedTableData = computed(() => {
+  const start = (currentPage.value - 1) * pageSize.value;
+  const end = start + pageSize.value;
+  return sortedTableData.value.slice(start, end);
+});
+
+watch(pageSize, () => {
+  resetPagination();
+});
+
+watch(
+  () => filteredTableData.value.length,
+  total => {
+    const maxPage = total > 0 ? Math.ceil(total / pageSize.value) : 1;
+    if (currentPage.value > maxPage) {
+      currentPage.value = maxPage;
+    }
+  }
+);
+
+const handlePageSizeChange = (value: number) => {
+  pageSize.value = value;
+};
+
+const handlePageChange = (value: number) => {
+  currentPage.value = value;
+};
+
+const handleSortChange = ({
+  prop,
+  order
+}: {
+  prop?: string;
+  order: SortOrder;
+}) => {
+  if (!order) {
+    sortField.value = "";
+    sortOrder.value = null;
+  } else {
+    sortField.value = prop || "";
+    sortOrder.value = order;
+  }
+  resetPagination();
+};
 
 // 展开行相关
 const expandedRowKeys = ref<string[]>([]);
 
 // 处理Pod详情
-const handlePodDetail = async (row: any) => {
-  // 如果已经加载过Pod数据，直接展开/收起行
-  if (expandedRowKeys.value.includes(row.id)) {
-    expandedRowKeys.value = expandedRowKeys.value.filter(id => id !== row.id);
-    return;
-  }
-
-  // 设置唯一ID用于展开行
+const handlePodDetail = async (
+  row: any,
+  options?: { forceReload?: boolean }
+) => {
   if (!row.id) {
     row.id = `${row.env}-${row.namespace}-${row.deployment}`;
+  }
+  const rowId = row.id;
+  const forceReload = options?.forceReload ?? false;
+  const isExpanded = expandedRowKeys.value.includes(rowId);
+
+  // 如果已经加载过Pod数据且是用户点击，则执行折叠
+  if (isExpanded && !forceReload) {
+    expandedRowKeys.value = expandedRowKeys.value.filter(id => id !== rowId);
+    return;
   }
 
   // 设置加载状态
@@ -813,13 +1120,12 @@ const handlePodDetail = async (row: any) => {
 
   try {
     const res = await getPodData(row.env, row.namespace, row.deployment);
-    if (res.pods) {
-      row.pods = res.pods;
-    } else {
-      row.pods = [];
+    const pods = Array.isArray(res.pods) ? res.pods : [];
+    row.pods = pods;
+    row.podCount = pods.length;
+    if (!isExpanded) {
+      expandedRowKeys.value.push(rowId);
     }
-    // 展开行
-    expandedRowKeys.value.push(row.id);
   } catch (error) {
     console.error("获取Pod数据失败:", error);
     ElMessage.error("获取Pod数据失败");
@@ -841,6 +1147,15 @@ const updateForm = reactive({
   currentImageInfo: [] as string[],
   availableTags: [] as Array<[string, string]>
 });
+
+const editDialogVisible = ref(false);
+const saveLoading = ref(false);
+const currentEditDeployment = ref<any>(null);
+const yamlEditorRef = ref<HTMLElement | null>(null);
+let yamlEditor: monaco.editor.IStandaloneCodeEditor | null = null;
+
+const updateMethodDialogVisible = ref(false);
+const selectedUpdateMethod = ref<"apply" | "replace">("apply");
 
 const openUpdateDialog = async (row: any) => {
   selectedDeployment.value = row;
@@ -876,9 +1191,155 @@ const handleUpdate = async () => {
       image_tag: updateForm.imageTag
     });
     updateDialogVisible.value = false;
-    handleSearch();
+    await handleSearch(true);
   } finally {
     updateLoading.value = false;
+  }
+};
+
+const handleEdit = async (row: any) => {
+  currentEditDeployment.value = row;
+  editDialogVisible.value = true;
+
+  await nextTick();
+  await initYamlEditor();
+
+  try {
+    const res = await getServiceContent(
+      row.env,
+      row.namespace,
+      row.deployment,
+      "deployment"
+    );
+    if (res.success && res.data && yamlEditor) {
+      yamlEditor.setValue(res.data);
+    }
+  } catch (error) {
+    console.error("��ȡDeployment����ʧ��:", error);
+    ElMessage.error("��ȡDeployment����ʧ��");
+  }
+};
+
+const handleDeleteDeployment = async (row: any) => {
+  if (!row?.env || !row?.namespace || !row?.deployment) {
+    ElMessage.error("缺少删除所需的部署信息");
+    return;
+  }
+
+  try {
+    await ElMessageBox.confirm(
+      `确定要删除部署 \"${row.deployment}\" 吗？`,
+      "确认删除",
+      {
+        confirmButtonText: "删除",
+        cancelButtonText: "取消",
+        type: "warning"
+      }
+    );
+
+    const res = await deleteK8sResource(
+      row.env,
+      row.namespace,
+      "deployment",
+      row.deployment
+    );
+
+    if (res.success) {
+      ElMessage.success("部署删除成功");
+      await handleSearch(true);
+    } else {
+      ElMessage.error(res.message || "部署删除失败");
+    }
+  } catch (error) {
+    if (error !== "cancel" && error !== "close") {
+      console.error("删除部署失败:", error);
+      ElMessage.error("删除部署失败");
+    }
+  }
+};
+
+const initYamlEditor = async () => {
+  if (!yamlEditorRef.value) return;
+
+  if (yamlEditor) {
+    yamlEditor.dispose();
+  }
+
+  yamlEditor = monaco.editor.create(yamlEditorRef.value, {
+    value: "",
+    language: "yaml",
+    theme: "vs-dark",
+    automaticLayout: true,
+    minimap: { enabled: false },
+    scrollBeyondLastLine: false,
+    wordWrap: "on",
+    fontSize: 14,
+    lineNumbers: "on",
+    folding: true,
+    selectOnLineNumbers: true,
+    roundedSelection: false,
+    readOnly: false,
+    cursorStyle: "line"
+  });
+};
+
+const handleSave = async () => {
+  if (!yamlEditor || !currentEditDeployment.value) {
+    ElMessage.error("编辑器未初始化或未选择Deployment");
+    return;
+  }
+
+  const yamlContent = yamlEditor.getValue();
+  if (!yamlContent.trim()) {
+    ElMessage.error("YAML内容不能为空");
+    return;
+  }
+
+  try {
+    yaml.load(yamlContent);
+    selectedUpdateMethod.value = "apply";
+    updateMethodDialogVisible.value = true;
+  } catch (error) {
+    console.error("YAML格式验证失败:", error);
+    if (error instanceof yaml.YAMLException) {
+      ElMessage.error(`YAML格式错误: ${error.message}`);
+    } else {
+      ElMessage.error("YAML格式验证失败");
+    }
+  }
+};
+
+const confirmUpdate = async () => {
+  if (!yamlEditor || !currentEditDeployment.value) {
+    ElMessage.error("编辑器未初始化或未选择Deployment");
+    return;
+  }
+
+  const yamlContent = yamlEditor.getValue();
+
+  try {
+    saveLoading.value = true;
+    const res = await updateServiceContent(
+      currentEditDeployment.value.env,
+      selectedUpdateMethod.value,
+      yamlContent
+    );
+
+    if (res.success) {
+      ElMessage.success(`Deployment ${selectedUpdateMethod.value} 更新成功`);
+      updateMethodDialogVisible.value = false;
+      editDialogVisible.value = false;
+      await handleSearch(true);
+    } else {
+      ElMessage.error(
+        res.message || `Deployment ${selectedUpdateMethod.value} 更新失败`
+      );
+    }
+  } catch (error) {
+    console.error("更新Deployment失败:", error);
+    ElMessage.error("更新Deployment失败");
+  } finally {
+    saveLoading.value = false;
   }
 };
 
@@ -907,14 +1368,33 @@ const getEnvOptions = async (): Promise<void> => {
 
 // 处理环境变化
 const handleEnvChange = async (val: string) => {
+  searchForm.env = val;
   searchForm.ns = "";
+  searchForm.keyword = "";
   searchStore.setEnv(val);
+  searchStore.setNamespace("");
+  appliedKeyword.value = "";
+  tableData.value = [];
+  expandedRowKeys.value = [];
+  lastFetchedEnv.value = null;
+  lastFetchedNamespace.value = null;
+  resetPagination();
+  restoreDefaultSortState();
   if (val) {
     await getNsOptions(val);
-    handleSearch();
   } else {
-    tableData.value = [];
+    nsOptions.value = [];
   }
+};
+
+const handleNamespaceChange = (val: string) => {
+  searchForm.ns = val || "";
+  searchStore.setNamespace(searchForm.ns);
+  tableData.value = [];
+  expandedRowKeys.value = [];
+  lastFetchedNamespace.value = null;
+  resetPagination();
+  restoreDefaultSortState();
 };
 
 // 获取命名空间列表
@@ -946,14 +1426,7 @@ const getNsOptions = async (env: string): Promise<void> => {
   }
 };
 
-// 处理搜索
-const handleSearch = async () => {
-  if (!searchForm.env) {
-    ElMessage.warning("请选择K8S环境");
-    return;
-  }
-  searchStore.setNamespace(searchForm.ns);
-
+const fetchDeploymentData = async () => {
   loading.value = true;
   try {
     const res = await getPromQueryData(searchForm.env, searchForm.ns);
@@ -984,19 +1457,8 @@ const handleSearch = async () => {
     } else {
       tableData.value = [];
     }
-
-    const keyword = searchForm.keyword.toLowerCase();
-
-    if (!searchForm.keyword) {
-      filteredTableData.value = tableData.value;
-    } else {
-      filteredTableData.value = tableData.value.filter(
-        item =>
-          item.env.toLowerCase().includes(keyword) ||
-          (item.namespace && item.namespace.toLowerCase().includes(keyword)) ||
-          (item.deployment && item.deployment.toLowerCase().includes(keyword))
-      );
-    }
+    lastFetchedEnv.value = searchForm.env || null;
+    lastFetchedNamespace.value = searchForm.ns || "";
   } catch (error) {
     console.error("获取监控数据失败:", error);
     ElMessage.error("获取监控数据失败");
@@ -1006,12 +1468,36 @@ const handleSearch = async () => {
   }
 };
 
-// 处理重置
-const handleReset = async () => {
-  searchForm.env = envOptions.value[0] || "";
-  searchForm.keyword = "";
-  searchStore.clearStorage();
-  await handleEnvChange(envOptions.value[0]);
+// 处理搜索
+const handleSearch = async (forceFetchOrEvent: boolean | Event = false) => {
+  if (forceFetchOrEvent instanceof Event) {
+    forceFetchOrEvent.preventDefault();
+  }
+  const forceFetch =
+    typeof forceFetchOrEvent === "boolean" ? forceFetchOrEvent : false;
+  if (!searchForm.env) {
+    ElMessage.warning("请选择K8S环境");
+    return;
+  }
+
+  searchStore.setNamespace(searchForm.ns);
+  appliedKeyword.value = searchForm.keyword.trim();
+  resetPagination();
+
+  const normalizedNamespace = searchForm.ns || "";
+  const shouldFetch =
+    forceFetch ||
+    lastFetchedEnv.value !== searchForm.env ||
+    lastFetchedNamespace.value !== normalizedNamespace ||
+    tableData.value.length === 0;
+
+  if (shouldFetch) {
+    await fetchDeploymentData();
+  }
+};
+
+const handleRefresh = async () => {
+  await handleSearch(true);
 };
 
 const handleCapacity = async (row: any) => {
@@ -1034,7 +1520,8 @@ const isUserScrolling = ref(false); // 用户是否在手动滚动
 const currentPodInfo = ref({
   name: "",
   env: "",
-  namespace: ""
+  namespace: "",
+  deployment: ""
 });
 
 // 日志搜索相关
@@ -1096,6 +1583,159 @@ const toggleFilterMode = () => {
   }
 };
 
+// 新建对话框相关
+const createDialogVisible = ref(false);
+const createSaveLoading = ref(false);
+const createYamlEditorRef = ref<HTMLElement | null>(null);
+let createYamlEditor: monaco.editor.IStandaloneCodeEditor | null = null;
+
+// 新建更新方式选择弹框相关
+const createUpdateMethodDialogVisible = ref(false);
+const selectedCreateUpdateMethod = ref<"create" | "apply" | "replace">(
+  "create"
+);
+
+// 初始化新建的YAML编辑器
+const initCreateYamlEditor = async () => {
+  if (!createYamlEditorRef.value) return;
+  if (createYamlEditor) {
+    createYamlEditor.dispose();
+  }
+  createYamlEditor = monaco.editor.create(createYamlEditorRef.value, {
+    value: "",
+    language: "yaml",
+    theme: "vs-dark",
+    automaticLayout: true,
+    minimap: { enabled: false },
+    scrollBeyondLastLine: false,
+    wordWrap: "on",
+    fontSize: 14,
+    lineNumbers: "on",
+    folding: true,
+    selectOnLineNumbers: true,
+    roundedSelection: false,
+    readOnly: false,
+    cursorStyle: "line"
+  });
+};
+
+// 打开新建对话框
+const openCreateDialog = async () => {
+  if (!searchForm.env) {
+    ElMessage.warning("请选择K8S环境");
+    return;
+  }
+  createDialogVisible.value = true;
+  await nextTick();
+  await initCreateYamlEditor();
+  if (createYamlEditor) {
+    createYamlEditor.setValue("");
+  }
+};
+
+// 新建保存 - 显示更新方式选择弹框
+const handleCreateSave = async () => {
+  console.log("=== handleCreateSave 开始执行 ===");
+
+  if (!createYamlEditor) {
+    console.error("编辑器未初始化");
+    ElMessage.error("编辑器未初始化");
+    return;
+  }
+
+  // 获取编辑器内容，添加多种获取方式作为备用
+  let yamlContent = "";
+  try {
+    yamlContent = createYamlEditor.getValue();
+    console.log("通过getValue()获取到编辑器内容:", yamlContent);
+  } catch (error) {
+    console.error("无法通过getValue()获取编辑器内容:", error);
+    // 备用方案：通过DOM获取内容
+    const editorContainer = createYamlEditorRef.value;
+    if (editorContainer) {
+      const textArea = editorContainer.querySelector("textarea");
+      if (textArea) {
+        yamlContent = textArea.value;
+        console.log("通过DOM获取到编辑器内容:", yamlContent);
+      } else {
+        console.log("未找到textarea元素");
+      }
+    } else {
+      console.log("未找到编辑器容器");
+    }
+  }
+
+  console.log("最终获取到的YAML内容:", yamlContent);
+  console.log("内容长度:", yamlContent.length);
+  console.log("内容是否为空:", !yamlContent.trim());
+
+  if (!yamlContent.trim()) {
+    console.log("YAML内容为空，显示错误消息");
+    ElMessage.error("YAML内容不能为空");
+    return;
+  }
+
+  console.log("开始YAML格式验证...");
+  console.log("yaml对象:", yaml);
+
+  try {
+    const parsedYaml = yaml.load(yamlContent);
+    console.log("YAML格式验证通过，解析结果:", parsedYaml);
+    selectedCreateUpdateMethod.value = "create";
+    createUpdateMethodDialogVisible.value = true;
+  } catch (error) {
+    console.error("YAML格式验证失败:", error);
+    console.log("错误类型:", error.constructor.name);
+    console.log("错误消息:", error.message);
+
+    if (error instanceof yaml.YAMLException) {
+      console.log("这是一个YAMLException");
+      ElMessage.error(`YAML格式错误: ${error.message}`);
+    } else {
+      console.log("这不是YAMLException，而是:", error.constructor.name);
+      ElMessage.error(`YAML格式验证失败: ${error.message}`);
+    }
+  }
+
+  console.log("=== handleCreateSave 执行结束 ===");
+};
+
+// 确认新建/更新
+const confirmCreateUpdate = async () => {
+  if (!createYamlEditor) {
+    ElMessage.error("编辑器未初始化");
+    return;
+  }
+  if (!searchForm.env) {
+    ElMessage.warning("请选择K8S环境");
+    return;
+  }
+  const yamlContent = createYamlEditor.getValue();
+  try {
+    createSaveLoading.value = true;
+    const res = await updateServiceContent(
+      searchForm.env,
+      selectedCreateUpdateMethod.value,
+      yamlContent
+    );
+    if (res.success) {
+      ElMessage.success(`资源 ${selectedCreateUpdateMethod.value} 更新成功`);
+      createUpdateMethodDialogVisible.value = false;
+      createDialogVisible.value = false;
+      // 保持与 Service 页面一致，这里不强制刷新表格
+    } else {
+      ElMessage.error(
+        res.message || `资源 ${selectedCreateUpdateMethod.value} 更新失败`
+      );
+    }
+  } catch (error) {
+    console.error("更新资源失败:", error);
+    ElMessage.error("更新资源失败");
+  } finally {
+    createSaveLoading.value = false;
+  }
+};
+
 const showResultDialog = (message: string, operation: string = "") => {
   resultMessage.value = `<div style="white-space: pre-wrap; word-break: break-all;">${message}</div>`;
   currentOperation.value = operation;
@@ -1103,12 +1743,29 @@ const showResultDialog = (message: string, operation: string = "") => {
 };
 
 // Pod操作相关函数
-const handleModifyPod = async (env: string, namespace: string, pod: string) => {
+const handleModifyPod = async (
+  env: string,
+  namespace: string,
+  pod: string,
+  deployment: string
+) => {
   try {
+    // 设置当前Pod信息
+    currentPodInfo.value = {
+      name: pod,
+      env: env,
+      namespace: namespace,
+      deployment: deployment
+    };
+
     const scalePodRef = ref(false);
     const addLabelRef = ref(false);
     const shouldShowAddLabel = ref(false);
     const scaleStrategyRef = ref("cpu"); // 默认选择CPU策略
+    const schedulerRef = ref(false); // 调度到指定节点
+    const resourceTypeRef = ref("cpu"); // 资源类型选择
+    const nodeListRef = ref([]); // 节点列表
+    const selectedNodesRef = ref([]); // 选中的节点
 
     // 检查是否需要显示已开启固定节点均衡模式选项
     try {
@@ -1122,6 +1779,233 @@ const handleModifyPod = async (env: string, namespace: string, pod: string) => {
       console.error("检查固定节点均衡模式失败:", error);
       shouldShowAddLabel.value = false;
     }
+
+    // 获取节点资源信息的函数
+    const fetchNodeResources = async (
+      resourceType: string,
+      namespace: string,
+      deployment: string
+    ) => {
+      try {
+        const result = await getNodeResourceRank(
+          env,
+          resourceType,
+          namespace,
+          deployment
+        );
+        if (result.success && result.data) {
+          nodeListRef.value = result.data;
+          selectedNodesRef.value = []; // 重置选中的节点
+          // 更新节点列表显示
+          const nodeListContainer =
+            document.getElementById("nodeListContainer");
+          if (nodeListContainer) {
+            nodeListContainer.style.display = "block";
+            // 重新渲染节点列表
+            renderNodeList();
+          }
+        }
+      } catch (error) {
+        console.error("获取节点资源信息失败:", error);
+        ElMessage.error("获取节点资源信息失败");
+      }
+    };
+
+    // 渲染节点列表
+    const renderNodeList = () => {
+      const nodeListContainer = document.getElementById("nodeListContainer");
+      if (!nodeListContainer) return;
+
+      // 清空现有内容
+      nodeListContainer.innerHTML = "";
+
+      // 创建节点列表
+      nodeListRef.value.forEach((node: any) => {
+        const nodeItem = document.createElement("div");
+        nodeItem.style.cssText =
+          "display: flex; align-items: center; margin-bottom: 8px; padding: 8px; border: 1px solid #e4e7ed; border-radius: 4px;";
+
+        const checkbox = document.createElement("input");
+        checkbox.type = "checkbox";
+        checkbox.style.marginRight = "8px";
+        checkbox.addEventListener("change", e => {
+          const target = e.target as HTMLInputElement;
+          if (target.checked) {
+            if (!selectedNodesRef.value.includes(node.name)) {
+              selectedNodesRef.value.push(node.name);
+            }
+          } else {
+            const index = selectedNodesRef.value.indexOf(node.name);
+            if (index > -1) {
+              selectedNodesRef.value.splice(index, 1);
+            }
+          }
+        });
+
+        const label = document.createElement("span");
+        // 当资源类型是Pod数时不显示百分号
+        const percentText =
+          resourceTypeRef.value === "pod" ? node.percent : `${node.percent}%`;
+        // 设置颜色样式：percentText为蓝色，node.cpod_num不等于0时为红色
+        const cpodNumColor = node.cpod_num !== 0 ? "color: red;" : "";
+        label.innerHTML = `${node.name} (<span style="color: blue;">${percentText}</span>，<span style="${cpodNumColor}">${node.cpod_num}Pod</span>)`;
+
+        nodeItem.appendChild(checkbox);
+        nodeItem.appendChild(label);
+        nodeListContainer.appendChild(nodeItem);
+      });
+    };
+
+    // 创建调度到指定节点的容器
+    const schedulerContainer = h(
+      "div",
+      {
+        id: "schedulerContainer",
+        style:
+          "display: none; margin-left: 24px; flex-direction: column; margin-bottom: 12px;"
+      },
+      [
+        h(
+          "div",
+          { style: "margin-bottom: 8px; font-size: 14px; color: #606266;" },
+          "资源类型:"
+        ),
+        h(
+          "div",
+          {
+            style:
+              "display: flex; gap: 12px; margin-bottom: 12px; flex-wrap: wrap;"
+          },
+          [
+            h(
+              "label",
+              {
+                style:
+                  "display: flex; align-items: center; cursor: pointer; font-size: 12px;"
+              },
+              [
+                h("input", {
+                  type: "radio",
+                  name: "resourceType",
+                  value: "cpu",
+                  style: "margin-right: 4px;",
+                  onChange: () => {
+                    resourceTypeRef.value = "cpu";
+                    fetchNodeResources(
+                      "cpu",
+                      currentPodInfo.value.namespace,
+                      currentPodInfo.value.deployment
+                    );
+                  }
+                }),
+                h("span", "当前CPU")
+              ]
+            ),
+            h(
+              "label",
+              {
+                style:
+                  "display: flex; align-items: center; cursor: pointer; font-size: 12px;"
+              },
+              [
+                h("input", {
+                  type: "radio",
+                  name: "resourceType",
+                  value: "mem",
+                  style: "margin-right: 4px;",
+                  onChange: () => {
+                    resourceTypeRef.value = "mem";
+                    fetchNodeResources(
+                      "mem",
+                      currentPodInfo.value.namespace,
+                      currentPodInfo.value.deployment
+                    );
+                  }
+                }),
+                h("span", "当前内存")
+              ]
+            ),
+            h(
+              "label",
+              {
+                style:
+                  "display: flex; align-items: center; cursor: pointer; font-size: 12px;"
+              },
+              [
+                h("input", {
+                  type: "radio",
+                  name: "resourceType",
+                  value: "peak_cpu",
+                  style: "margin-right: 4px;",
+                  onChange: () => {
+                    resourceTypeRef.value = "peak_cpu";
+                    fetchNodeResources(
+                      "peak_cpu",
+                      currentPodInfo.value.namespace,
+                      currentPodInfo.value.deployment
+                    );
+                  }
+                }),
+                h("span", "峰值CPU")
+              ]
+            ),
+            h(
+              "label",
+              {
+                style:
+                  "display: flex; align-items: center; cursor: pointer; font-size: 12px;"
+              },
+              [
+                h("input", {
+                  type: "radio",
+                  name: "resourceType",
+                  value: "peak_mem",
+                  style: "margin-right: 4px;",
+                  onChange: () => {
+                    resourceTypeRef.value = "peak_mem";
+                    fetchNodeResources(
+                      "peak_mem",
+                      currentPodInfo.value.namespace,
+                      currentPodInfo.value.deployment
+                    );
+                  }
+                }),
+                h("span", "峰值内存")
+              ]
+            ),
+            h(
+              "label",
+              {
+                style:
+                  "display: flex; align-items: center; cursor: pointer; font-size: 12px;"
+              },
+              [
+                h("input", {
+                  type: "radio",
+                  name: "resourceType",
+                  value: "pod",
+                  style: "margin-right: 4px;",
+                  onChange: () => {
+                    resourceTypeRef.value = "pod";
+                    fetchNodeResources(
+                      "pod",
+                      currentPodInfo.value.namespace,
+                      currentPodInfo.value.deployment
+                    );
+                  }
+                }),
+                h("span", "Pod数")
+              ]
+            )
+          ]
+        ),
+        h("div", {
+          id: "nodeListContainer",
+          style:
+            "display: none; max-height: 200px; overflow-y: auto; border: 1px solid #e4e7ed; border-radius: 4px; padding: 8px;"
+        })
+      ]
+    );
 
     // 创建固定节点均衡模式选项的容器
     const addLabelContainer = h(
@@ -1216,30 +2100,75 @@ const handleModifyPod = async (env: string, namespace: string, pod: string) => {
     );
 
     const messageElements = [
-      h("p", { style: "margin-bottom: 16px;" }, "确认要隔离该Pod吗？"),
+      h(
+        "p",
+        { style: "margin-bottom: 16px; margin-left: 24px;" },
+        "确认要隔离该Pod吗？"
+      ),
       h(
         "div",
-        { style: "display: flex; align-items: center; margin-bottom: 12px;" },
+        {
+          style:
+            "display: flex; align-items: center; margin-bottom: 12px; gap: 20px; margin-left: 24px;"
+        },
         [
-          h("input", {
-            type: "checkbox",
-            id: "scalePodCheckbox",
-            style: "margin-right: 8px;",
-            onChange: (e: Event) => {
-              scalePodRef.value = (e.target as HTMLInputElement).checked;
-              // 动态显示/隐藏固定节点均衡模式选项
-              const container = document.getElementById("addLabelContainer");
-              if (container) {
-                container.style.display =
-                  scalePodRef.value && shouldShowAddLabel.value
+          h("div", { style: "display: flex; align-items: center;" }, [
+            h("input", {
+              type: "checkbox",
+              id: "schedulerCheckbox",
+              style: "margin-right: 8px;",
+              onChange: (e: Event) => {
+                schedulerRef.value = (e.target as HTMLInputElement).checked;
+                // 重置资源类型选择
+                resourceTypeRef.value = "";
+                nodeListRef.value = [];
+                selectedNodesRef.value = [];
+                // 清除所有radio按钮的选中状态
+                const radioButtons = document.querySelectorAll(
+                  'input[name="resourceType"]'
+                );
+                radioButtons.forEach((radio: any) => {
+                  radio.checked = false;
+                });
+                // 隐藏节点列表
+                const nodeListContainer =
+                  document.getElementById("nodeListContainer");
+                if (nodeListContainer) {
+                  nodeListContainer.style.display = "none";
+                }
+                // 动态显示/隐藏调度选项
+                const container = document.getElementById("schedulerContainer");
+                if (container) {
+                  container.style.display = schedulerRef.value
                     ? "flex"
                     : "none";
+                }
               }
-            }
-          }),
-          h("label", { for: "scalePodCheckbox" }, "临时扩容1个Pod")
+            }),
+            h("label", { for: "schedulerCheckbox" }, "调度到指定节点")
+          ]),
+          h("div", { style: "display: flex; align-items: center;" }, [
+            h("input", {
+              type: "checkbox",
+              id: "scalePodCheckbox",
+              style: "margin-right: 8px;",
+              onChange: (e: Event) => {
+                scalePodRef.value = (e.target as HTMLInputElement).checked;
+                // 动态显示/隐藏固定节点均衡模式选项
+                const container = document.getElementById("addLabelContainer");
+                if (container) {
+                  container.style.display =
+                    scalePodRef.value && shouldShowAddLabel.value
+                      ? "flex"
+                      : "none";
+                }
+              }
+            }),
+            h("label", { for: "scalePodCheckbox" }, "临时扩容1个Pod")
+          ])
         ]
       ),
+      schedulerContainer,
       addLabelContainer
     ];
 
@@ -1248,8 +2177,10 @@ const handleModifyPod = async (env: string, namespace: string, pod: string) => {
       message: h("div", messageElements),
       confirmButtonText: "确定",
       cancelButtonText: "取消",
-      type: "warning",
-      showCancelButton: true
+      showCancelButton: true,
+      customStyle: {
+        width: "600px"
+      }
     });
 
     const params: any = {
@@ -1257,6 +2188,11 @@ const handleModifyPod = async (env: string, namespace: string, pod: string) => {
       ns: namespace,
       pod_name: pod
     };
+
+    // 添加调度相关参数
+    if (schedulerRef.value) {
+      params.scheduler = true;
+    }
 
     if (scalePodRef.value) {
       params.scale_pod = true;
@@ -1267,11 +2203,17 @@ const handleModifyPod = async (env: string, namespace: string, pod: string) => {
       }
     }
 
-    const res = await modifyPod(params);
+    // 准备请求体数据
+    const bodyData: any = {};
+    if (schedulerRef.value && selectedNodesRef.value.length > 0) {
+      bodyData.node_scheduler = selectedNodesRef.value;
+    }
+
+    const res = await modifyPod(params, bodyData);
     if (res.success) {
       ElMessage.success("操作成功");
       showResultDialog(res.message, "modify");
-      handleSearch(); // 刷新数据
+      await handleSearch(true); // 刷新数据
     } else {
       ElMessage.error("操作失败");
     }
@@ -1280,7 +2222,10 @@ const handleModifyPod = async (env: string, namespace: string, pod: string) => {
   }
 };
 
-const handleDeletePod = async (env: string, namespace: string, pod: string) => {
+const handleDeletePod = async (row: any, pod: string) => {
+  const env = row.env;
+  const namespace = row.namespace;
+  const deployment = row.deployment;
   try {
     await ElMessageBox.confirm("确认要删除该Pod吗？", "提示", {
       confirmButtonText: "确定",
@@ -1288,13 +2233,13 @@ const handleDeletePod = async (env: string, namespace: string, pod: string) => {
       type: "warning"
     });
     const res = await deletePod({
-      env: env,
+      env,
       ns: namespace,
       pod_name: pod
     });
     if (res.success) {
       ElMessage.success("操作成功");
-      handleSearch(); // 刷新数据
+      await handlePodDetail(row, { forceReload: true });
     } else {
       ElMessage.error("操作失败");
     }
@@ -1419,11 +2364,17 @@ const handleAutoJvmMem = async (
 };
 
 // 日志查看相关函数
-const handleViewLogs = (env: string, namespace: string, pod: string) => {
+const handleViewLogs = (
+  env: string,
+  namespace: string,
+  pod: string,
+  deployment: string
+) => {
   currentPodInfo.value = {
     name: pod,
     env: env,
-    namespace: namespace
+    namespace: namespace,
+    deployment: deployment
   };
   logMessages.value = [];
   logDialogVisible.value = true;
@@ -1804,17 +2755,107 @@ onBeforeUnmount(() => {
 // 页面加载时获取环境列表
 onMounted(async () => {
   await getEnvOptions();
-  // 如果已经有环境值，则执行搜索
-  if (searchForm.env) {
-    handleSearch();
-  }
+  applySortStateToTable();
 });
 </script>
 
 <style scoped>
+.create-yaml-editor {
+  height: calc(100vh - 120px);
+}
+
+.method-radio-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: nowrap;
+}
+
+.edit-container {
+  height: 82vh;
+  display: flex;
+  flex-direction: column;
+}
+
+.yaml-editor-container {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  border: 1px solid #dcdfe6;
+  border-radius: 4px;
+  overflow: hidden;
+}
+
+.editor-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 12px 16px;
+  background-color: #f5f7fa;
+  border-bottom: 1px solid #dcdfe6;
+}
+
+.editor-title {
+  font-size: 16px;
+  font-weight: bold;
+  color: #303133;
+}
+
+.yaml-editor {
+  flex: 1;
+  min-height: 0;
+}
+
+.update-method-container {
+  padding: 20px 0;
+}
+
+.update-method-container .el-radio-group {
+  display: flex;
+  flex-direction: row;
+  gap: 24px;
+}
+
+.update-method-container .el-radio {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 500;
+}
+
+.method-description {
+  margin-top: 20px;
+  padding: 12px;
+  background-color: #f5f7fa;
+  border-radius: 4px;
+  border-left: 4px solid #409eff;
+}
+
+.method-description p {
+  margin: 0;
+  color: #606266;
+  font-size: 14px;
+  line-height: 1.5;
+}
+</style>
+
+<style scoped>
+.realtime-monitor-container {
+  padding: 1px;
+}
+
 .search-section {
-  padding: 16px;
-  border-radius: 8px;
+  margin-bottom: 2px;
+}
+
+.query-form {
+  display: flex;
+  align-items: center;
+  flex-wrap: nowrap;
+  width: 100%;
+}
+
+.query-form .el-form-item.right-auto {
+  margin-left: auto;
 }
 
 .el-form-item {
@@ -1963,13 +3004,17 @@ onMounted(async () => {
   color: #606266;
   white-space: nowrap;
 }
+
+.table-pagination {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 12px;
+}
 </style>
 
 <style>
-.hide-expand {
-  .el-table__expand-icon {
-    display: none;
-  }
+.hide-expand .el-table__expand-icon {
+  display: none;
 }
 
 /* 搜索高亮样式 - 针对黑色背景优化，必须在非scoped样式中定义 */

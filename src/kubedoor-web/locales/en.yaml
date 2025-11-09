@@ -75,14 +75,14 @@ menus:
   pureHome: Home
   pureLogin: Login
   pureAbnormal: Abnormal Page
-  alarm: Alarm
+  alarm: Monitor Alarm
   alarmStatistics: Alarm Statistics
   alarmDetail: Alarm Detail
   peakResources: Peak Resources
   resourceManagement: Resource Management
   resourceCollection: Resource Collection
   resourceStatistics: Resource Statistics
-  resourceMonit: Resource Monit
+  resourceMonit: Resource Management
   RealtimeResource: Realtime Resource
   resourceMonitk8s: Resource K8S
   resourceMonitnode: Resource Node
@@ -120,7 +120,7 @@ login:
   purePassWordRuleReg: The password format should be any combination of 8-18 digits
 resource:
   add: Add Resource
-  edit: Operator
+  edit: Settings
   keyword: Keyword
   keywordPlaceholder: Namespace or Deployment
   placeholder: Please select

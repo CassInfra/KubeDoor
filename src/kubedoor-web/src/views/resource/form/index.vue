@@ -49,7 +49,7 @@ defineExpose({ getRef });
     :rules="formRules"
     label-width="145px"
   >
-    <el-row :gutter="30">
+    <el-row :gutter="20">
       <re-col :value="20" :xs="24" :sm="24">
         <el-form-item :label="transformI18n('resource.column.k8s')" prop="env">
           <el-select

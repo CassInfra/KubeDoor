@@ -21,21 +21,21 @@ export default {
       }
     },
     {
-      path: "/statistics/index",
-      name: "Statistics",
-      component: () => import("@/views/statistics/index.vue"),
-      meta: {
-        title: $t("menus.resourceStatistics"),
-        icon: "ep:pie-chart"
-      }
-    },
-    {
       path: "/collection/index",
       name: "collection",
       component: () => import("@/views/collection/index.vue"),
       meta: {
         title: $t("menus.resourceCollection"),
         icon: "ep:calendar"
+      }
+    },
+    {
+      path: "/statistics/index",
+      name: "Statistics",
+      component: () => import("@/views/statistics/index.vue"),
+      meta: {
+        title: $t("menus.resourceStatistics"),
+        icon: "ep:pie-chart"
       }
     }
   ]

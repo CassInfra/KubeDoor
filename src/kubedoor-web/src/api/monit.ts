@@ -143,3 +143,25 @@ export const getImageTags = (
     data: { k8s, namespace, deployment }
   });
 };
+
+/**
+ * 获取节点资源排名
+ * @param env K8S环境
+ * @param type 资源类型
+ * @param namespace 命名空间
+ * @param deployment 微服务名称
+ */
+export const getNodeResourceRank = (
+  env: string,
+  type: string,
+  namespace?: string,
+  deployment?: string
+) => {
+  const params: any = { env, type };
+  if (namespace) params.namespace = namespace;
+  if (deployment) params.deployment = deployment;
+
+  return http.request<ResultTable>("get", "/api/prom_node_rank", {
+    params
+  });
+};

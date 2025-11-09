@@ -55,6 +55,7 @@ export function useResource(tableRef: Ref, searchStore: any) {
       label: "勾选列", // 如果需要表格多选，此处label必须设置
       type: "selection",
       fixed: "left",
+      width: 55,
       reserveSelection: true // 数据刷新后保留选项
     },
     {
@@ -94,6 +95,11 @@ export function useResource(tableRef: Ref, searchStore: any) {
         return h("span", { style: { color: "red" } }, [
           h("span", {}, transformI18n("resource.column.podCount"))
         ]);
+      },
+      cellRenderer: ({ row }) => {
+        return h("span", { style: { color: "red" } }, [
+          h("span", {}, row.pod_count)
+        ]);
       }
     },
     {
@@ -119,7 +125,11 @@ export function useResource(tableRef: Ref, searchStore: any) {
           h("span", {}, transformI18n("resource.column.p95PodCpuPct"))
         ]);
       },
-      formatter: ({ p95_pod_cpu_pct }) => p95_pod_cpu_pct.toFixed(2) + "%"
+      cellRenderer: ({ row }) => {
+        return h("span", { style: { color: "red" } }, [
+          h("span", {}, row.p95_pod_cpu_pct.toFixed(2) + "%")
+        ]);
+      }
     },
     {
       label: transformI18n("resource.column.podQps"),
@@ -162,6 +172,11 @@ export function useResource(tableRef: Ref, searchStore: any) {
         return h("span", { style: { color: "red" } }, [
           h("span", {}, transformI18n("resource.column.requestCpuM"))
         ]);
+      },
+      cellRenderer: ({ row }) => {
+        return h("span", { style: { color: "red" } }, [
+          h("span", {}, row.request_cpu_m)
+        ]);
       }
     },
     {
@@ -180,7 +195,11 @@ export function useResource(tableRef: Ref, searchStore: any) {
           h("span", {}, transformI18n("resource.column.p95PodMemPct"))
         ]);
       },
-      formatter: ({ p95_pod_mem_pct }) => p95_pod_mem_pct.toFixed(2) + "%"
+      cellRenderer: ({ row }) => {
+        return h("span", { style: { color: "red" } }, [
+          h("span", {}, row.p95_pod_mem_pct.toFixed(2) + "%")
+        ]);
+      }
     },
     {
       label: transformI18n("resource.column.requestMemMb"),
@@ -190,6 +209,11 @@ export function useResource(tableRef: Ref, searchStore: any) {
       headerRenderer: () => {
         return h("span", { style: { color: "red" } }, [
           h("span", {}, transformI18n("resource.column.requestMemMb"))
+        ]);
+      },
+      cellRenderer: ({ row }) => {
+        return h("span", { style: { color: "red" } }, [
+          h("span", {}, row.request_mem_mb)
         ]);
       }
     },
@@ -236,6 +260,7 @@ export function useResource(tableRef: Ref, searchStore: any) {
       //   }),
       fixed: "right",
       minWidth: 245,
+      align: "center",
       slot: "operation"
     }
   ];
@@ -280,13 +305,14 @@ export function useResource(tableRef: Ref, searchStore: any) {
   async function onSearch() {
     loading.value = true;
     const { data, meta } = await getResourceList(queryForm);
-    dataList.value = data.map(item => {
+    dataList.value = data.map((item, rowIndex) => {
       let obj: any = {};
       for (let index = 0; index < meta.length; index++) {
         const key = meta[index].name;
         obj[key] = item[index];
-        obj.index = index;
       }
+      // 为每行创建唯一标识符
+      obj.row_id = `${obj.env || ""}_${obj.namespace || ""}_${obj.deployment || ""}_${rowIndex}`;
       return obj;
     });
     loading.value = false;
@@ -558,16 +584,23 @@ export function useResource(tableRef: Ref, searchStore: any) {
           let res;
           if (data) {
             if (params.length > 1 || data.type == 1) {
+              const requestBody = {
+                deployment_list: params,
+                node_scheduler: []
+              };
               res = await execCapacity(
                 currentEnv,
                 data.add_label,
-                params,
+                requestBody,
                 params.length > 1 ? data.interval : undefined
               );
             } else {
               let tempData = {
                 type: "scale",
-                service: params,
+                service: {
+                  deployment_list: params,
+                  node_scheduler: []
+                },
                 time: "",
                 cron: ""
               };

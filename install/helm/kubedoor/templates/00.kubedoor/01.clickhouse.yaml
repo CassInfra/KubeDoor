@@ -5,111 +5,18 @@ metadata:
   name: clickhouse-config
   namespace: kubedoor
 data:
-  kubedoor-init.sql: |
-    CREATE DATABASE IF NOT EXISTS kubedoor ENGINE=Atomic;
-
-    CREATE TABLE IF NOT EXISTS kubedoor.k8s_agent_status
-    (
-        `env` String,
-        `collect` Bool DEFAULT false,
-        `peak_hours` String,
-        `admission` Bool DEFAULT false,
-        `admission_namespace` String,
-        `nms_not_confirm` Bool DEFAULT false,
-        `scheduler` Bool DEFAULT false
-    )
-    ENGINE = MergeTree
-    PRIMARY KEY tuple(env)
-    SETTINGS index_granularity = 8192;
-    
-    CREATE TABLE IF NOT EXISTS kubedoor.k8s_res_control
-    (
-        env String,
-        namespace String,
-        deployment String,
-        pod_count_init UInt8 DEFAULT 0 COMMENT '初始化pod数,仅首次记录该值,从当前pod数复制',
-        pod_count UInt8 DEFAULT 0 COMMENT '当前pod数,第三优先级',
-        pod_count_manual Int16 DEFAULT -1 COMMENT '手动填写需要的pod数,第一优先级,webhook拦截时读取到-1,则取pod_count_ai',
-        p95_pod_cpu_pct Float32 DEFAULT -1,
-        p95_pod_mem_pct Float32 DEFAULT -1,
-        request_cpu_m Int32 DEFAULT -1 COMMENT '取自高峰期的p95 CPU负载,最小1,新建服务时,该值默认为-1,webhook拦截时读取到-1,则不改变改字段,并通知。',
-        request_mem_mb Int32 DEFAULT -1 COMMENT '取自高峰期的p95 内存使用量,最小1,新建服务时,该值默认为-1,webhook拦截时读取到-1,则不改变改字段,并通知。',
-        limit_cpu_m Int32 DEFAULT -1 COMMENT '初始化的时候取当前pod的limit cpu,没有则为-1,webhook拦截时读取到-1,则不改变改字段,并通知。',
-        limit_mem_mb Int32 DEFAULT -1 COMMENT '初始化的时候取当前pod的limit mem,没有则为-1,webhook拦截时读取到-1,则不改变改字段,并通知。',
-        update DateTime('Asia/Shanghai'),
-        pod_mem_saved_mb Float32 DEFAULT -1,
-        pod_qps Float32 DEFAULT -1,
-        pod_g1gc_qps Float32 DEFAULT -1,
-        pod_count_ai Int16 DEFAULT -1 COMMENT 'AI计算后需要的pod数,第二优先级,webhook拦截时读取到-1,则取pod_count',
-        pod_qps_ai Float32 DEFAULT -1,
-        pod_load_ai Float32 DEFAULT -1,
-        pod_g1gc_qps_ai Float32 DEFAULT -1,
-        update_ai DateTime('Asia/Shanghai')
-    )
-    ENGINE = MergeTree
-    PRIMARY KEY (env,namespace,deployment)
-    ORDER BY (env,namespace,deployment)
-    SETTINGS index_granularity = 8192;
-    
-    
-    CREATE TABLE IF NOT EXISTS kubedoor.k8s_resources
-    (
-        date DateTime('Asia/Shanghai'),
-        env String,
-        namespace String,
-        deployment String,
-        pod_count UInt8,
-        p95_pod_load Float32,
-        p95_pod_cpu_pct Float32,
-        p95_pod_wss_mb Float32,
-        p95_pod_wss_pct Float32,
-        limit_pod_cpu_m Float32,
-        limit_pod_mem_mb Float32,
-        request_pod_cpu_m Float32,
-        request_pod_mem_mb Float32,
-        p95_pod_qps Float32,
-        p95_pod_g1gc_qps Float32,
-        pod_jvm_max_mb Float32
-    )
-    ENGINE = MergeTree
-    PARTITION BY toYYYYMM(date)
-    PRIMARY KEY (date,env,namespace,deployment)
-    ORDER BY (date,env,namespace,deployment)
-    TTL toDateTime(date) + toIntervalDay(365)
-    SETTINGS index_granularity = 8192;
-
-    CREATE TABLE IF NOT EXISTS kubedoor.k8s_pod_alert_days
-    (
-        `fingerprint` String,
-        `alert_status` String,
-        `send_resolved` Bool DEFAULT true,
-        `count_firing` UInt32,
-        `count_resolved` Int32,
-        `start_time` DateTime('Asia/Shanghai'),
-        `end_time` Nullable(DateTime('Asia/Shanghai')) DEFAULT NULL,
-        `severity` String,
-        `alert_group` String,
-        `alert_name` String,
-        `env` String,
-        `namespace` String,
-        `container` String,
-        `pod` String,
-        `description` String,
-        `operate` String
-    )
-    ENGINE = MergeTree
-    PARTITION BY toYYYYMMDD(start_time)
-    PRIMARY KEY (start_time,
-      fingerprint,
-      severity,
-      env,
-      alert_group,
-      alert_name)
-    TTL toDateTime(start_time) + toIntervalDay(365)
-    SETTINGS index_granularity = 8192;
-
   config.xml: |
     <clickhouse replace="true">
+        <latency_log remove="1"/>
+        <trace_log remove="1"/>
+        <processors_profile_log remove="1"/>
+        <metric_log remove="1"/>
+        <asynchronous_metric_log remove="1"/>
+        <query_log remove="1"/>
+        <text_log remove="1"/>
+        <part_log remove="1"/>
+        <asynchronous_metrics_update_period_s>3600</asynchronous_metrics_update_period_s>
+        <asynchronous_heavy_metrics_update_period_s>3600</asynchronous_heavy_metrics_update_period_s> 
         <logger>
             <level>warning</level>
             <console>true</console>
@@ -118,6 +25,12 @@ data:
         <listen_host>0.0.0.0</listen_host>
         <http_port>8123</http_port>
         <tcp_port>9000</tcp_port>
+        <interserver_http_port>9009</interserver_http_port>
+        <interserver_listen_host>0.0.0.0</interserver_listen_host>
+        <!-- 系统缓存配置 -->
+        <mark_cache_size>268435456</mark_cache_size> <!-- 256MB -->
+        <uncompressed_cache_size>134217728</uncompressed_cache_size> <!-- 128MB -->
+        
         <user_directories>
             <users_xml>
                 <path>users.xml</path>
@@ -127,25 +40,42 @@ data:
             </local_directory>
         </user_directories>
     </clickhouse>
+
   users.xml: |
     <?xml version="1.0"?>
     <clickhouse replace="true">
-        <max_server_memory_usage>3500000000</max_server_memory_usage>
-        <mark_cache_size>536870912</mark_cache_size>
-        <background_pool_size>8</background_pool_size>
-        <max_concurrent_queries>20</max_concurrent_queries>
         <profiles>
             <default>
+                <!-- 外部排序/聚合阈值 -->
+                <max_bytes_before_external_group_by>400000000</max_bytes_before_external_group_by> <!-- 400MB -->
+                <max_bytes_before_external_sort>400000000</max_bytes_before_external_sort> <!-- 400MB -->
+                
+                <!-- 内存高效处理 -->
+                <distributed_aggregation_memory_efficient>1</distributed_aggregation_memory_efficient>
+                <aggregation_memory_efficient_merge_threads>2</aggregation_memory_efficient_merge_threads>
+                <enable_memory_bound_merging_of_aggregation_results>1</enable_memory_bound_merging_of_aggregation_results>
+                
+                <!-- 性能优化 -->
                 <local_filesystem_read_method>pread</local_filesystem_read_method>
-                <max_memory_usage>2000000000</max_memory_usage>
-                <max_bytes_before_external_group_by>1500000000</max_bytes_before_external_group_by>
-                <max_bytes_before_external_sort>1500000000</max_bytes_before_external_sort>
                 <use_uncompressed_cache>0</use_uncompressed_cache>
                 <load_balancing>in_order</load_balancing>
-                <max_threads>4</max_threads>
+                
+                <!-- 查询超时控制 -->
+                <max_execution_time>300</max_execution_time> <!-- 5分钟查询超时 -->
+                <timeout_before_checking_execution_speed>10</timeout_before_checking_execution_speed>
+                
+                <!-- 日志和调试 -->
                 <log_queries>0</log_queries>
+                <log_query_threads>0</log_query_threads>
+                
+                <!-- 网络和连接 -->
+                <max_concurrent_queries_for_user>30</max_concurrent_queries_for_user>
+                
+                <!-- 内存过载保护 -->
+                <memory_usage_overcommit_max_wait_microseconds>5000000</memory_usage_overcommit_max_wait_microseconds>
             </default>
         </profiles>
+        
         <users>
             <default>
                 <password remove='1' />
@@ -153,15 +83,15 @@ data:
                 <access_management>1</access_management>
                 <profile>default</profile>
                 <networks>
-                    <ip>::/0</ip>
+                    <ip>0.0.0.0/0</ip>
                 </networks>
                 <quota>default</quota>
-                <access_management>1</access_management>
                 <named_collection_control>1</named_collection_control>
                 <show_named_collections>1</show_named_collections>
                 <show_named_collections_secrets>1</show_named_collections_secrets>
             </default>
         </users>
+        
         <quotas>
             <default>
                 <interval>
@@ -195,9 +125,26 @@ spec:
       labels:
         app: clickhouse
     spec:
+      initContainers:
+        - name: disable-thp
+          image: registry.cn-shenzhen.aliyuncs.com/starsl/busybox
+          command:
+            - /bin/sh
+            - '-c'
+            - >
+              echo 'madvise' > /sys/kernel/mm/transparent_hugepage/enabled ||
+              true
+
+              echo 'madvise' > /sys/kernel/mm/transparent_hugepage/defrag ||
+              true
+          volumeMounts:
+            - name: sys
+              mountPath: /sys
+          securityContext:
+            privileged: true
       containers:
         - name: clickhouse
-          image: registry.cn-shenzhen.aliyuncs.com/starsl/clickhouse-server:25.3-alpine
+          image: registry.cn-shenzhen.aliyuncs.com/starsl/clickhouse-server:25.10-alpine
           ports:
             - containerPort: 8123
             - containerPort: 9000
@@ -216,9 +163,6 @@ spec:
             - name: storage
               mountPath: /var/lib/clickhouse
             - name: clickhouse-config
-              mountPath: /docker-entrypoint-initdb.d/kubedoor-init.sql
-              subPath: kubedoor-init.sql
-            - name: clickhouse-config
               mountPath: /etc/clickhouse-server/config.d/config.xml
               subPath: config.xml
             - name: clickhouse-config
@@ -231,13 +175,12 @@ spec:
             requests:
               cpu: 200m
               memory: 1Gi
-          livenessProbe:
+          startupProbe:
             tcpSocket:
               port: 9000
             timeoutSeconds: 3
             periodSeconds: 10
-            successThreshold: 1
-            failureThreshold: 3
+            failureThreshold: 20
           readinessProbe:
             tcpSocket:
               port: 9000
@@ -253,6 +196,10 @@ spec:
         - name: clickhouse-config
           configMap:
             name: clickhouse-config
+        - name: sys
+          hostPath:
+            path: /sys
+            type: Directory
   strategy:
     type: RollingUpdate
     rollingUpdate:

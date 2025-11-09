@@ -150,10 +150,11 @@ export const getCollection = (date: string, env: string) => {
 export const execCapacity = (
   env: string,
   addLabel: boolean,
-  data: any[],
+  data: any,
   interval?: number,
   temp?: boolean,
-  strategy?: string
+  strategy?: string,
+  scheduler?: boolean
 ) => {
   let url = `/api/scale?env=${env}${addLabel ? "&add_label=true" : ""}`;
   if (temp) {
@@ -161,6 +162,9 @@ export const execCapacity = (
   }
   if (strategy && addLabel) {
     url += `&type=${strategy}`;
+  }
+  if (scheduler) {
+    url += "&scheduler=true";
   }
   return http.request<ResultTable>("post", url, {
     params: interval ? { interval } : undefined,
@@ -173,7 +177,8 @@ export const execTimeCron = (
   addLabel: boolean,
   data: any,
   temp?: boolean,
-  strategy?: string
+  strategy?: string,
+  scheduler?: boolean
 ) => {
   let url = `/api/cron?env=${env}${addLabel ? "&add_label=true" : ""}`;
   if (temp) {
@@ -182,15 +187,40 @@ export const execTimeCron = (
   if (strategy && addLabel) {
     url += `&type=${strategy}`;
   }
+  if (scheduler) {
+    url += "&scheduler=true";
+  }
   return http.request<ResultTable>("post", url, {
     data
   });
 };
 
-export const rebootResource = (env: string, data: any[], interval?: number) => {
-  return http.request<ResultTable>("post", `/api/restart?env=${env}`, {
+export const rebootResource = (
+  env: string,
+  data: any[],
+  interval?: number,
+  scheduler?: boolean,
+  selectedNodes?: string[]
+) => {
+  let url = `/api/restart?env=${env}`;
+  if (scheduler) {
+    url += "&scheduler=true";
+  }
+
+  // 当启用调度器时，修改数据格式
+  let requestData;
+  if (scheduler && selectedNodes && selectedNodes.length > 0) {
+    requestData = {
+      deployment_list: data,
+      node_scheduler: selectedNodes
+    };
+  } else {
+    requestData = data;
+  }
+
+  return http.request<ResultTable>("post", url, {
     params: interval ? { interval } : undefined,
-    data
+    data: requestData
   });
 };
 

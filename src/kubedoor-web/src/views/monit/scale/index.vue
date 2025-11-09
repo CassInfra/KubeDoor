@@ -2,6 +2,8 @@
 import { ref } from "vue";
 import { transformI18n } from "@/plugins/i18n";
 import ReCol from "@/components/ReCol";
+import { getNodeResourceRank } from "@/api/monit";
+import { ElMessage } from "element-plus";
 // import { message } from "@/utils/message";
 
 import Warning from "@iconify-icons/ep/warning-filled";
@@ -34,6 +36,12 @@ const form = ref({
 
 const podCount = ref(props.params?.podCount || 0);
 
+// 调度到指定节点相关变量
+const schedulerRef = ref(false); // 调度到指定节点
+const resourceTypeRef = ref("cpu"); // 资源类型选择
+const nodeListRef = ref([]); // 节点列表
+const selectedNodesRef = ref([]); // 选中的节点
+
 const validateData = (rule, value, callback) => {
   const inputTime = new Date(value);
   const cstOffset = 8 * 60 * 60 * 1000; // CST是UTC+8，转换为毫秒
@@ -57,6 +65,96 @@ const formRules = {
     { validator: validateData, trigger: "blur" }
   ],
   cron: [{ required: true, message: transformI18n("resource.rules.cron") }]
+};
+
+// 获取节点资源信息的函数
+const fetchNodeResources = async (
+  resourceType: string,
+  namespace: string,
+  deployment: string
+) => {
+  try {
+    const result = await getNodeResourceRank(
+      props.params?.env || "",
+      resourceType,
+      namespace,
+      deployment
+    );
+    if (result.success && result.data) {
+      nodeListRef.value = result.data;
+      selectedNodesRef.value = []; // 重置选中的节点
+      // 更新节点列表显示
+      const nodeListContainer = document.getElementById("nodeListContainer");
+      if (nodeListContainer) {
+        nodeListContainer.style.display = "block";
+        // 重新渲染节点列表
+        renderNodeList();
+      }
+    }
+  } catch (error) {
+    console.error("获取节点资源信息失败:", error);
+    ElMessage.error("获取节点资源信息失败");
+  }
+};
+
+// 渲染节点列表
+const renderNodeList = () => {
+  const nodeListContainer = document.getElementById("nodeListContainer");
+  if (!nodeListContainer) return;
+
+  // 清空现有内容
+  nodeListContainer.innerHTML = "";
+
+  // 创建节点列表
+  nodeListRef.value.forEach((node: any) => {
+    const nodeItem = document.createElement("div");
+    nodeItem.style.cssText =
+      "display: flex; align-items: center; margin-bottom: 8px; padding: 8px; border: 1px solid #e4e7ed; border-radius: 4px;";
+
+    const checkbox = document.createElement("input");
+    checkbox.type = "checkbox";
+    checkbox.style.marginRight = "8px";
+    checkbox.addEventListener("change", e => {
+      const target = e.target as HTMLInputElement;
+      if (target.checked) {
+        if (!selectedNodesRef.value.includes(node.name)) {
+          selectedNodesRef.value.push(node.name);
+        }
+      } else {
+        const index = selectedNodesRef.value.indexOf(node.name);
+        if (index > -1) {
+          selectedNodesRef.value.splice(index, 1);
+        }
+      }
+    });
+
+    const label = document.createElement("span");
+    // 当资源类型是Pod数时不显示百分号
+    const percentText =
+      resourceTypeRef.value === "pod" ? node.percent : `${node.percent}%`;
+    // 设置颜色样式：percentText为蓝色，node.cpod_num不等于0时为红色
+    const cpodNumColor =
+      node.cpod_num !== 0 ? "color: red;" : "color: inherit;";
+    label.innerHTML = `${node.name} (<span style="color: blue;">${percentText}</span>，<span style="${cpodNumColor}">${node.cpod_num}Pod</span>)`;
+
+    nodeItem.appendChild(checkbox);
+    nodeItem.appendChild(label);
+    nodeListContainer.appendChild(nodeItem);
+  });
+};
+
+// 处理调度器勾选变化
+const handleSchedulerChange = () => {
+  if (!schedulerRef.value) {
+    // 取消勾选时重置相关状态
+    resourceTypeRef.value = "cpu";
+    nodeListRef.value = [];
+    selectedNodesRef.value = [];
+    const nodeListContainer = document.getElementById("nodeListContainer");
+    if (nodeListContainer) {
+      nodeListContainer.style.display = "none";
+    }
+  }
 };
 
 function getData() {
@@ -83,7 +181,9 @@ function getData() {
           podCount: podCount.value,
           tempData: tempData,
           temp: form.value.temp,
-          strategy: form.value.strategy
+          strategy: form.value.strategy,
+          scheduler: schedulerRef.value,
+          selectedNodes: selectedNodesRef.value
         });
       }
     });
@@ -147,9 +247,165 @@ defineExpose({ getData });
             </el-form-item>
           </re-col>
           <re-col :offset="2" :value="20" :xs="24" :sm="24">
-            <el-form-item :label="'临时扩容'" label-width="70px" prop="temp">
-              <el-checkbox v-model="form.temp" />
+            <div style="display: flex; gap: 20px; align-items: center">
+              <label
+                style="display: flex; align-items: center; cursor: pointer"
+              >
+                <el-checkbox v-model="form.temp" style="margin-right: 8px" />
+                <span>临时扩容</span>
+              </label>
+              <label
+                style="display: flex; align-items: center; cursor: pointer"
+              >
+                <el-checkbox
+                  v-model="schedulerRef"
+                  style="margin-right: 8px"
+                  @change="handleSchedulerChange"
+                />
+                <span>调度到指定节点</span>
+              </label>
+            </div>
+          </re-col>
+          <!-- 调度到指定节点的资源类型选择 -->
+          <re-col v-if="schedulerRef" :offset="2" :value="20" :xs="24" :sm="24">
+            <el-form-item :label="'资源类型'" label-width="80px">
+              <div style="display: flex; gap: 12px; flex-wrap: wrap">
+                <label
+                  style="
+                    display: flex;
+                    align-items: center;
+                    cursor: pointer;
+                    font-size: 12px;
+                  "
+                >
+                  <input
+                    type="radio"
+                    name="resourceType"
+                    value="cpu"
+                    style="margin-right: 4px"
+                    @change="
+                      resourceTypeRef = 'cpu';
+                      fetchNodeResources(
+                        'cpu',
+                        props.params?.namespace || '',
+                        props.params?.deployment || ''
+                      );
+                    "
+                  />
+                  <span>当前CPU</span>
+                </label>
+                <label
+                  style="
+                    display: flex;
+                    align-items: center;
+                    cursor: pointer;
+                    font-size: 12px;
+                  "
+                >
+                  <input
+                    type="radio"
+                    name="resourceType"
+                    value="mem"
+                    style="margin-right: 4px"
+                    @change="
+                      resourceTypeRef = 'mem';
+                      fetchNodeResources(
+                        'mem',
+                        props.params?.namespace || '',
+                        props.params?.deployment || ''
+                      );
+                    "
+                  />
+                  <span>当前内存</span>
+                </label>
+                <label
+                  style="
+                    display: flex;
+                    align-items: center;
+                    cursor: pointer;
+                    font-size: 12px;
+                  "
+                >
+                  <input
+                    type="radio"
+                    name="resourceType"
+                    value="peak_cpu"
+                    style="margin-right: 4px"
+                    @change="
+                      resourceTypeRef = 'peak_cpu';
+                      fetchNodeResources(
+                        'peak_cpu',
+                        props.params?.namespace || '',
+                        props.params?.deployment || ''
+                      );
+                    "
+                  />
+                  <span>峰值CPU</span>
+                </label>
+                <label
+                  style="
+                    display: flex;
+                    align-items: center;
+                    cursor: pointer;
+                    font-size: 12px;
+                  "
+                >
+                  <input
+                    type="radio"
+                    name="resourceType"
+                    value="peak_mem"
+                    style="margin-right: 4px"
+                    @change="
+                      resourceTypeRef = 'peak_mem';
+                      fetchNodeResources(
+                        'peak_mem',
+                        props.params?.namespace || '',
+                        props.params?.deployment || ''
+                      );
+                    "
+                  />
+                  <span>峰值内存</span>
+                </label>
+                <label
+                  style="
+                    display: flex;
+                    align-items: center;
+                    cursor: pointer;
+                    font-size: 12px;
+                  "
+                >
+                  <input
+                    type="radio"
+                    name="resourceType"
+                    value="pod"
+                    style="margin-right: 4px"
+                    @change="
+                      resourceTypeRef = 'pod';
+                      fetchNodeResources(
+                        'pod',
+                        props.params?.namespace || '',
+                        props.params?.deployment || ''
+                      );
+                    "
+                  />
+                  <span>Pod数</span>
+                </label>
+              </div>
             </el-form-item>
+          </re-col>
+          <!-- 节点列表容器 -->
+          <re-col v-if="schedulerRef" :offset="2" :value="20" :xs="24" :sm="24">
+            <div
+              id="nodeListContainer"
+              style="
+                display: none;
+                max-height: 200px;
+                overflow-y: auto;
+                border: 1px solid #e4e7ed;
+                border-radius: 4px;
+                padding: 8px;
+              "
+            />
           </re-col>
           <re-col
             v-if="props.showAddLabel && form.add_label"
@@ -171,6 +427,164 @@ defineExpose({ getData });
                 <el-radio label="pod">Pod数</el-radio>
               </el-radio-group>
             </el-form-item>
+          </re-col>
+        </template>
+        <template v-if="!props.isScale && props.params">
+          <!-- 重启对话框的调度到指定节点功能 -->
+          <re-col :offset="2" :value="20" :xs="24" :sm="24">
+            <div style="display: flex; gap: 20px; align-items: center">
+              <label
+                style="display: flex; align-items: center; cursor: pointer"
+              >
+                <el-checkbox
+                  v-model="schedulerRef"
+                  style="margin-right: 8px"
+                  @change="handleSchedulerChange"
+                />
+                <span>调度到指定节点</span>
+              </label>
+            </div>
+          </re-col>
+          <!-- 调度到指定节点的资源类型选择 -->
+          <re-col v-if="schedulerRef" :offset="2" :value="20" :xs="24" :sm="24">
+            <el-form-item :label="'资源类型'" label-width="80px">
+              <div style="display: flex; gap: 12px; flex-wrap: wrap">
+                <label
+                  style="
+                    display: flex;
+                    align-items: center;
+                    cursor: pointer;
+                    font-size: 12px;
+                  "
+                >
+                  <input
+                    type="radio"
+                    name="resourceType"
+                    value="cpu"
+                    style="margin-right: 4px"
+                    @change="
+                      resourceTypeRef = 'cpu';
+                      fetchNodeResources(
+                        'cpu',
+                        props.params?.namespace || '',
+                        props.params?.deployment || ''
+                      );
+                    "
+                  />
+                  <span>当前CPU</span>
+                </label>
+                <label
+                  style="
+                    display: flex;
+                    align-items: center;
+                    cursor: pointer;
+                    font-size: 12px;
+                  "
+                >
+                  <input
+                    type="radio"
+                    name="resourceType"
+                    value="mem"
+                    style="margin-right: 4px"
+                    @change="
+                      resourceTypeRef = 'mem';
+                      fetchNodeResources(
+                        'mem',
+                        props.params?.namespace || '',
+                        props.params?.deployment || ''
+                      );
+                    "
+                  />
+                  <span>当前内存</span>
+                </label>
+                <label
+                  style="
+                    display: flex;
+                    align-items: center;
+                    cursor: pointer;
+                    font-size: 12px;
+                  "
+                >
+                  <input
+                    type="radio"
+                    name="resourceType"
+                    value="peak_cpu"
+                    style="margin-right: 4px"
+                    @change="
+                      resourceTypeRef = 'peak_cpu';
+                      fetchNodeResources(
+                        'peak_cpu',
+                        props.params?.namespace || '',
+                        props.params?.deployment || ''
+                      );
+                    "
+                  />
+                  <span>峰值CPU</span>
+                </label>
+                <label
+                  style="
+                    display: flex;
+                    align-items: center;
+                    cursor: pointer;
+                    font-size: 12px;
+                  "
+                >
+                  <input
+                    type="radio"
+                    name="resourceType"
+                    value="peak_mem"
+                    style="margin-right: 4px"
+                    @change="
+                      resourceTypeRef = 'peak_mem';
+                      fetchNodeResources(
+                        'peak_mem',
+                        props.params?.namespace || '',
+                        props.params?.deployment || ''
+                      );
+                    "
+                  />
+                  <span>峰值内存</span>
+                </label>
+                <label
+                  style="
+                    display: flex;
+                    align-items: center;
+                    cursor: pointer;
+                    font-size: 12px;
+                  "
+                >
+                  <input
+                    type="radio"
+                    name="resourceType"
+                    value="pod"
+                    style="margin-right: 4px"
+                    @change="
+                      resourceTypeRef = 'pod';
+                      fetchNodeResources(
+                        'pod',
+                        props.params?.namespace || '',
+                        props.params?.deployment || ''
+                      );
+                    "
+                  />
+                  <span>Pod数</span>
+                </label>
+              </div>
+            </el-form-item>
+          </re-col>
+          <!-- 节点列表容器 -->
+          <re-col v-if="schedulerRef" :offset="2" :value="20" :xs="24" :sm="24">
+            <div
+              id="nodeListContainer"
+              style="
+                display: none;
+                max-height: 200px;
+                overflow-y: auto;
+                border: 1px solid #e4e7ed;
+                border-radius: 4px;
+                padding: 8px;
+              "
+            />
           </re-col>
         </template>
         <template v-if="!props.showInterval">

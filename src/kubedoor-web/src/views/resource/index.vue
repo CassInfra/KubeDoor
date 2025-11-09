@@ -209,7 +209,7 @@ const {
           </div>
           <pure-table
             ref="tableRef"
-            row-key="index"
+            row-key="row_id"
             adaptive
             stripe
             :adaptiveConfig="{ offsetBottom: 28 }"
@@ -229,7 +229,6 @@ const {
                 @click="openDialog('修改', row)"
               >
                 {{ transformI18n("resource.edit") }}
-                <el-icon class="el-icon--right"><arrow-down /></el-icon>
               </el-button>
               <!-- <el-divider direction="vertical" />
               <el-button

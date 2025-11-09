@@ -75,17 +75,17 @@ menus:
   pureHome: 首页
   pureLogin: 登录
   pureAbnormal: 异常页面
-  alarm: 资源告警
+  alarm: 监控告警
   alarmStatistics: 告警面板
   alarmDetail: K8S告警详情
   peakResources: 高峰资源
   resourceManagement: 高峰资源管控
   resourceCollection: 每日高峰资源
-  resourceStatistics: 高峰资源看板
-  resourceMonit: 资源监控
-  RealtimeResource: 实时资源列表
-  resourceMonitk8s: K8S监控看板
-  resourceMonitnode: 节点监控看板
+  resourceStatistics: 高峰资源看板📊
+  resourceMonit: 资源管理
+  RealtimeResource: Deployment
+  resourceMonitk8s: K8S监控看板📊
+  resourceMonitnode: 节点监控看板📊
   resourceWorkbench: Agent管理
   istioManagement: ISTIO管理
   level1VirtualService: 全局VS管理
@@ -120,7 +120,7 @@ login:
   purePassWordRuleReg: 密码格式应为8-18位数字、字母、符号的任意两种组合
 resource:
   add: 新增资源
-  edit: 操作
+  edit: 设置
   keyword: 关键字
   keywordPlaceholder: 命名空间或微服务匹配
   placeholder: 请选择

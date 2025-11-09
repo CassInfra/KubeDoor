@@ -3,6 +3,7 @@ import json
 import sys
 import time
 import base64
+import re
 import aiohttp
 from datetime import datetime, timedelta
 from aiohttp import web, WSMsgType
@@ -13,6 +14,7 @@ from istio_route import istio_route
 import image_tags_fetcher
 from k8s_event import process_k8s_event_async, init_clickhouse_tables
 from k8s_event.event_query_api import query_k8s_events_handler, get_k8s_events_menu_options
+from promql import deployment_node
 
 logger.remove()
 
@@ -42,6 +44,19 @@ logger.add(
 )
 
 
+def ensure_clickhouse_schema_initialized():
+    """在程序启动时初始化ClickHouse表结构"""
+    try:
+        init_clickhouse_tables()
+        logger.info("ClickHouse表结构初始化成功")
+    except Exception as exc:
+        logger.error(f"ClickHouse表结构初始化失败: {exc}")
+        sys.exit(1)
+
+
+ensure_clickhouse_schema_initialized()
+
+
 async def get_authorization_header(username, password):
     credentials = f'{username}:{password}'
     encoded_credentials = base64.b64encode(credentials.encode('utf-8')).decode('utf-8')
@@ -57,13 +72,17 @@ async def forward_request(request):
             return web.json_response({"error": "权限不足，只能执行SELECT查询"}, status=403)
         if not data.strip().lower().startswith(('select', 'alter', 'insert')):
             return web.json_response({"error": "不支持的SQL操作"}, status=403)
+
+        # 替换数据库名称
         data = data.replace('__KUBEDOORDB__', utils.CK_DATABASE)
         logger.info(f'📐{data}')
 
         if data.strip().lower().startswith(('alter')):
+            table_name_match = re.search(rf'{re.escape(utils.CK_DATABASE)}\.(\w+)', data)
+            table_name = table_name_match.group(1) if table_name_match else None
             utils.ck_alter(data)
-            utils.ck_optimize()
-            logger.info("SQL: 数据更新")
+            utils.ck_optimize(table_name)
+            logger.info("📐SQL: 数据更新完成")
             return web.json_response({"success": True, "msg": "SQL: 数据更新完成"})
         else:
             TARGET_URL = (
@@ -82,6 +101,7 @@ async def forward_request(request):
                     else:
                         text = await response.text()
                         response_data = {"msg": text}
+                    logger.info("📐SQL: 数据查询完成")
                     return web.json_response({"success": True, **response_data})
     except Exception as e:
         logger.error(f"Error in forward_request: {e}")
@@ -158,7 +178,7 @@ async def websocket_handler(request):
                                     del pod_logs_connections[connection_id]
                     elif data.get("type") == "k8s_event":
                         # 处理来自agent的K8S事件消息
-                        logger.info(f"💯[K8S事件]客户端 env={env}: {data}")
+                        logger.debug(f"💯[K8S事件]客户端 env={env}: {data}")
 
                         # 异步存储K8S事件到ClickHouse，避免阻塞WebSocket消息循环
                         try:
@@ -496,6 +516,37 @@ async def prom_env_handler(request):
         return web.json_response({'message': str(e), 'username': username, 'permission': permission}, status=500)
 
 
+async def prom_node_rank_handler(request):
+    env_value = request.query.get('env')
+    res_type = request.query.get('type', 'cpu')
+    namespace = request.query.get('namespace')
+    deployment = request.query.get('deployment')
+
+    if not env_value:
+        return web.json_response({'message': 'env query parameter is required'}, status=400)
+
+    try:
+
+        deployment_node_dict = await utils.get_deployment_node(deployment_node, env_value, namespace, deployment)
+        node_rank_data = await utils.get_node_res_rank(env_value, res_type)
+
+        # 为node_rank_data的每个元素添加cpod_num字段
+        for node_data in node_rank_data:
+            node_name = node_data.get("name")
+            # 从deployment_node_dict中获取对应节点的cpod_num值，如果不存在则设为0
+            cpod_num_str = deployment_node_dict.get(node_name, "0")
+            # 将字符串转换为数字
+            try:
+                cpod_num = int(cpod_num_str)
+            except (ValueError, TypeError):
+                cpod_num = 0
+            node_data["cpod_num"] = cpod_num
+
+        return web.json_response({'success': True, 'data': node_rank_data})
+    except Exception as e:
+        return web.json_response({'message': str(e)}, status=500)
+
+
 async def agent_names(request):
     try:
         k8s_names = utils.ck_get_k8s_names()
@@ -589,12 +640,6 @@ async def init_peak_data(request):
 
 async def start_background_tasks(app):
     """启动后台任务"""
-    # 初始化ClickHouse表结构
-    try:
-        init_clickhouse_tables()
-        logger.info("ClickHouse表结构初始化成功")
-    except Exception as e:
-        logger.error(f"ClickHouse表结构初始化失败: {e}")
     app["heartbeat_task"] = asyncio.create_task(heartbeat_check())
 
 
@@ -612,6 +657,7 @@ app.router.add_get("/api/prom_ns", prom_ns_handler)
 app.router.add_get("/api/prom_env", prom_env_handler)
 app.router.add_get("/api/prom_services", prom_services_handler)
 app.router.add_get("/api/prom_query", prom_query_handler)
+app.router.add_get("/api/prom_node_rank", prom_node_rank_handler)
 app.router.add_post("/api/image/tags", image_tags_fetcher.get_image_tags_handler)  # 8
 
 # 查询K8S事件相关接口
@@ -654,4 +700,5 @@ app.on_startup.append(start_background_tasks)
 app.on_cleanup.append(cleanup_background_tasks)
 
 if __name__ == '__main__':
+    logger.info("🌻kubedoor-master is starting on port 80🚀...")
     web.run_app(app, host='0.0.0.0', port=80)

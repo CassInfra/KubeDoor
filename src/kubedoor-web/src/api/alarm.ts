@@ -202,8 +202,11 @@ interface PodParams {
 }
 
 // Pod隔离接口
-export const modifyPod = (params: PodParams) => {
-  return http.request<ResultData>("post", "/api/pod/modify_pod", { params });
+export const modifyPod = (params: PodParams, data?: any) => {
+  return http.request<ResultData>("post", "/api/pod/modify_pod", {
+    params,
+    data
+  });
 };
 
 // Pod删除接口

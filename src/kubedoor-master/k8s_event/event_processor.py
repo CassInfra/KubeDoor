@@ -62,7 +62,7 @@ class K8SEventProcessor:
             except Exception as e:
                 logger.error(f"处理告警规则失败: {e}")
 
-            logger.info(
+            logger.debug(
                 f"成功处理K8S事件: {processed_data.get('eventUid')} " f"命名空间: {processed_data.get('namespace')}"
             )
             return True

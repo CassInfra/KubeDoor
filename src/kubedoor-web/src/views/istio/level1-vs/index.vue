@@ -263,36 +263,112 @@
         <template v-if="createForm.df_forward_type === 'route'">
           <el-form-item label="Service" prop="route_service">
             <div style="display: flex; align-items: center; gap: 8px">
-              <el-input
+              <el-select
                 v-model="createForm.route_service"
-                placeholder="服务名"
-                style="flex: 1"
-              />
+                placeholder="请先选择命名空间"
+                style="flex: 1; min-width: 200px"
+                filterable
+                allow-create
+                @focus="
+                  () =>
+                    fetchServiceOptions(
+                      createForm.k8s_clusters[0],
+                      createForm.route_namespace
+                    )
+                "
+                @change="
+                  () =>
+                    fetchServiceOptions(
+                      createForm.k8s_clusters[0],
+                      createForm.route_namespace
+                    )
+                "
+              >
+                <el-option
+                  v-for="service in serviceOptions"
+                  :key="service"
+                  :label="service"
+                  :value="service"
+                />
+              </el-select>
               <span>.</span>
-              <el-input
+              <el-select
                 v-model="createForm.route_namespace"
                 placeholder="命名空间"
-                style="flex: 1"
-              />
+                style="flex: 1; min-width: 100px"
+                filterable
+                allow-create
+                @focus="() => fetchNamespaceOptions(createForm.k8s_clusters[0])"
+                @change="
+                  () =>
+                    fetchServiceOptions(
+                      createForm.k8s_clusters[0],
+                      createForm.route_namespace
+                    )
+                "
+              >
+                <el-option
+                  v-for="namespace in namespaceOptions"
+                  :key="namespace"
+                  :label="namespace"
+                  :value="namespace"
+                />
+              </el-select>
               <span>.svc.cluster.local</span>
             </div>
           </el-form-item>
 
-          <el-form-item label="端口" prop="route_port">
-            <el-input-number
-              v-model="createForm.route_port"
-              :min="1"
-              :max="65535"
-              placeholder="请输入端口号"
-              style="width: 100%"
-            />
-          </el-form-item>
+          <!-- 端口、刷新按钮和默认超时在同一行 -->
+          <el-row :gutter="20">
+            <el-col :span="12">
+              <el-form-item label="端口" prop="route_port">
+                <div style="display: flex; align-items: center; gap: 8px">
+                  <el-input-number
+                    v-model="createForm.route_port"
+                    :min="0"
+                    :max="65535"
+                    placeholder="请输入端口号"
+                    style="flex: 1"
+                    controls-position="right"
+                  />
+                  <el-button
+                    :icon="Refresh"
+                    type="primary"
+                    plain
+                    size="small"
+                    title="获取服务第一个端口号"
+                    @click="refreshPortForCreate"
+                  />
+                </div>
+              </el-form-item>
+            </el-col>
+            <el-col :span="12">
+              <el-form-item label="默认超时" prop="df_forward_timeout">
+                <el-input
+                  v-model="createForm.df_forward_timeout"
+                  placeholder="例如: 30s"
+                />
+              </el-form-item>
+            </el-col>
+          </el-row>
 
-          <el-form-item label="默认超时" prop="df_forward_timeout">
-            <el-input
-              v-model="createForm.df_forward_timeout"
-              placeholder="例如: 30s"
-            />
+          <!-- Headers -->
+          <el-form-item label="Headers">
+            <div style="display: flex; align-items: flex-start; gap: 8px">
+              <el-checkbox
+                v-model="createForm.route_headers.enabled"
+                label="启用"
+                style="margin-top: 1px"
+              />
+              <el-input
+                v-model="createForm.route_headers.value"
+                :disabled="!createForm.route_headers.enabled"
+                type="textarea"
+                :rows="1"
+                placeholder='默认：{"request": {"set": {"X-Forwarded-Proto": "https"}}}'
+                style="flex: 1; min-width: 370px"
+              />
+            </div>
           </el-form-item>
         </template>
 
@@ -392,11 +468,12 @@ import { ElMessage } from "element-plus";
 
 import { useRouter, useRoute } from "vue-router";
 import { Refresh, View, Plus } from "@element-plus/icons-vue";
-import { getPromNamespace } from "@/api/monit";
+import { getPromNamespace, getPromServices } from "@/api/monit";
 import {
   getVirtualServices,
   getAgentNames,
-  collectVirtualServiceRoutes
+  collectVirtualServiceRoutes,
+  getServiceFirstPort
 } from "@/api/istio";
 
 defineOptions({
@@ -429,18 +506,26 @@ const hostInputVisible = ref(false);
 const hostInputValue = ref("");
 const hostInputRef = ref();
 
+// Service和Namespace选项数据
+const serviceOptions = ref<string[]>([]);
+const namespaceOptions = ref<string[]>([]);
+
 // 创建表单数据
 const createForm = reactive({
   k8s_clusters: [] as string[],
   name: "",
   namespace: "istio-system",
-  gateways: "",
+  gateways: "istio-system/internal",
   hosts: [] as string[],
   df_forward_type: "",
   route_service: "",
   route_namespace: "",
   route_port: 0,
   df_forward_timeout: "",
+  route_headers: {
+    enabled: false,
+    value: '{"request": {"set": {"X-Forwarded-Proto": "https"}}}'
+  },
   delegate_name: "",
   delegate_namespace: ""
 });
@@ -570,6 +655,67 @@ const getNsOptions = async (env: string): Promise<void> => {
     console.error("获取命名空间列表失败:", error);
     ElMessage.error("获取命名空间列表失败");
     return Promise.reject(error);
+  }
+};
+
+// 获取命名空间选项（用于创建表单）
+const fetchNamespaceOptions = async (env: string) => {
+  if (!env) {
+    namespaceOptions.value = [];
+    return;
+  }
+  try {
+    const response = await getPromNamespace(env);
+    namespaceOptions.value = response.data;
+  } catch (error) {
+    console.error("获取命名空间选项失败:", error);
+    namespaceOptions.value = [];
+  }
+};
+
+// 获取服务选项（用于创建表单）
+const fetchServiceOptions = async (env: string, namespace: string) => {
+  if (!env || !namespace) {
+    serviceOptions.value = [];
+    return;
+  }
+  try {
+    const response = await getPromServices(env, namespace);
+    serviceOptions.value = response.data;
+  } catch (error) {
+    console.error("获取服务选项失败:", error);
+    serviceOptions.value = [];
+  }
+};
+
+// 创建VirtualService时刷新端口号
+const refreshPortForCreate = async () => {
+  if (!createForm.route_service || !createForm.route_namespace) {
+    ElMessage.warning("请先填写服务名和命名空间");
+    return;
+  }
+
+  if (!createForm.k8s_clusters || createForm.k8s_clusters.length === 0) {
+    ElMessage.warning("请先选择关联集群");
+    return;
+  }
+
+  try {
+    const result = await getServiceFirstPort(
+      createForm.k8s_clusters[0],
+      createForm.route_namespace,
+      createForm.route_service
+    );
+
+    if (result && result.data && result.data.first_port) {
+      createForm.route_port = result.data.first_port;
+      ElMessage.success(`已获取到端口号: ${result.data.first_port}`);
+    } else {
+      ElMessage.error("未能获取到端口号");
+    }
+  } catch (error) {
+    console.error("获取端口号失败:", error);
+    ElMessage.error("获取端口号失败");
   }
 };
 
@@ -713,6 +859,9 @@ const handleForwardTypeChange = (value: string) => {
     createForm.route_namespace = "";
     createForm.route_port = 0;
     createForm.df_forward_timeout = "";
+    createForm.route_headers.enabled = false;
+    createForm.route_headers.value =
+      '{"request": {"set": {"X-Forwarded-Proto": "https"}}}';
   }
 };
 
@@ -722,13 +871,17 @@ const resetCreateForm = () => {
     k8s_clusters: [],
     name: "",
     namespace: "istio-system",
-    gateways: "",
+    gateways: "istio-system/internal",
     hosts: [],
     df_forward_type: "",
     route_service: "",
     route_namespace: "",
     route_port: 0,
     df_forward_timeout: "",
+    route_headers: {
+      enabled: false,
+      value: '{"request": {"set": {"X-Forwarded-Proto": "https"}}}'
+    },
     delegate_name: "",
     delegate_namespace: ""
   });
@@ -763,14 +916,26 @@ const handleCreate = async () => {
       requestData.df_forward_type = createForm.df_forward_type;
 
       if (createForm.df_forward_type === "route") {
-        requestData.df_forward_detail = [
-          {
-            destination: {
-              host: `${createForm.route_service}.${createForm.route_namespace}.svc.cluster.local`,
-              port: { number: createForm.route_port }
-            }
+        const routeItem: any = {
+          destination: {
+            host: `${createForm.route_service}.${createForm.route_namespace}.svc.cluster.local`,
+            port: { number: createForm.route_port }
           }
-        ];
+        };
+
+        // 处理headers字段
+        if (
+          createForm.route_headers.enabled &&
+          createForm.route_headers.value
+        ) {
+          try {
+            routeItem.headers = JSON.parse(createForm.route_headers.value);
+          } catch (e) {
+            console.warn("Headers JSON格式错误:", e);
+          }
+        }
+
+        requestData.df_forward_detail = [routeItem];
         requestData.df_forward_timeout = createForm.df_forward_timeout;
       } else if (createForm.df_forward_type === "delegate") {
         requestData.df_forward_detail = {

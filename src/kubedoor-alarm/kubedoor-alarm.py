@@ -74,16 +74,51 @@ def slack(webhook, content, at=""):
     webhook_url = f'https://hooks.slack.com/services/{webhook}'
     headers = {'Content-Type': 'application/json'}
 
-    # 构建消息内容，如果有@用户则添加
-    message_text = content
-    if at:
-        message_text += f" <@{at}>"
+    # 遍历消息列表，每个消息都发送一条通知
+    for message in content:
+        # 构建blocks
+        blocks = []
 
-    params = {"text": message_text}
+        # 第一个block：标题（加粗）
+        title_block = {
+            "type": "rich_text",
+            "elements": [
+                {
+                    "type": "rich_text_section",
+                    "elements": [{"type": "text", "text": message[0], "style": {"bold": True}}],
+                }
+            ],
+        }
+        blocks.append(title_block)
 
-    data = json.dumps(params)
-    response = requests.post(webhook_url, headers=headers, data=data)
-    logging.info(f'【slack】{response.json()}')
+        # 第二个block：消息内容（包含@用户）
+        content_text = message[1]
+        if at:
+            content_text += f" <@{at}>"
+
+        content_block = {"type": "section", "text": {"type": "mrkdwn", "text": content_text}}
+        blocks.append(content_block)
+
+        # 如果有第三个字段（告警情况），添加屏蔽链接block
+        if len(message) >= 3:
+            link_block = {
+                "type": "rich_text",
+                "elements": [
+                    {"type": "rich_text_section", "elements": [{"type": "link", "text": "【屏蔽】", "url": message[2]}]}
+                ],
+            }
+            blocks.append(link_block)
+
+        # 添加分隔线
+        divider_block = {"type": "divider"}
+        blocks.append(divider_block)
+
+        params = {"blocks": blocks}
+
+        data = json.dumps(params)
+        response = requests.post(webhook_url, headers=headers, data=data)
+
+        logging.info(f'【slack】status_code: {response.status_code}, text: {response.text}')
 
 
 def parse_alert_time(time_str):
@@ -387,7 +422,7 @@ def handle_custom_alert():
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
 
-@app.route("/msg/<token>", methods=['POST'])
+@app.route("/msg/<path:token>", methods=['POST'])
 def alertnode(token):
     req = request.get_json()
     logging.info('↓↓↓↓↓↓↓↓↓↓↓↓↓↓node↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓')
@@ -401,7 +436,12 @@ def alertnode(token):
 
     # if (now_cn > time1830 or now_cn < time0830):
     #    return Response(status=204)
-    allmd = ''
+    im, key = token.split('=', 1)
+    logging.info(f"im: {im}, key: {key}")
+    if im == 'slack':
+        allmd = []
+    else:
+        allmd = ''
     for i in req["alerts"]:
         status = "故障" if i['status'] == "firing" else "恢复"
         try:
@@ -429,19 +469,27 @@ def alertnode(token):
 
         url = f"{ALERTMANAGER_EXTURL}/#/alerts?silenced=false&inhibited=false&active=true&filter=%7Balertname%3D%22{i['labels']['alertname']}%22%7D"
 
-        if status == '恢复':
-            info = f"### {status}<font color=\"#6aa84f\">{summary}</font>\n- {message}\n\n"
+        if im == 'slack':
+            if status == '恢复':
+                info = [f'🎉{status}: {summary}', message]
+            else:
+                info = [f'💥{status}: {summary}', message, url]
+            allmd.append(info)
         else:
-            info = f"### {status}<font color=\"#ff0000\">{summary}</font>\n- {message}[【屏蔽】]({url})\n\n"
-        allmd = allmd + info
+            if status == '恢复':
+                info = f"### {status}<font color=\"#6aa84f\">{summary}</font>\n- {message}\n\n"
+            else:
+                info = f"### {status}<font color=\"#ff0000\">{summary}</font>\n- {message}[【屏蔽】]({url})\n\n"
+            allmd = allmd + info
 
-    im, key = token.split('=', 1)
     if im == 'wecom':
         wecom(key, allmd, at)
     elif im == 'dingding':
         dingding(key, allmd, at)
     elif im == 'feishu':
         feishu(key, allmd, at)
+    elif im == 'slack':
+        slack(key, allmd, at)
     return Response(status=200)
 
 

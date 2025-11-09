@@ -19,6 +19,7 @@ logger.add(
 )
 
 # 环境变量
+DEFAULT_AT = os.environ.get('DEFAULT_AT')
 CK_DATABASE = os.environ.get('CK_DATABASE')
 CK_HOST = os.environ.get('CK_HOST')
 CK_HTTP_PORT = os.environ.get('CK_HTTP_PORT')
@@ -311,8 +312,8 @@ def get_node_deployments(node, env_value):
         logger.error(f'查询节点 {node} 上的deployment列表失败')
 
 
-def ck_optimize():
-    result = ckclient.execute('OPTIMIZE TABLE k8s_res_control FINAL')
+def ck_optimize(table_name):
+    result = ckclient.execute(f'OPTIMIZE TABLE {table_name}')
     return True
 
 
@@ -414,13 +415,13 @@ def send_msg(content, msgToken=None):
     response = ""
     token = msgToken if msgToken is not None else MSG_TOKEN
     if MSG_TYPE == "wecom":
-        response = wecom(token, content)
+        response = wecom(token, content, DEFAULT_AT)
     elif MSG_TYPE == "dingding":
-        response = dingding(token, content)
+        response = dingding(token, content, DEFAULT_AT)
     elif MSG_TYPE == "feishu":
-        response = feishu(token, content)
+        response = feishu(token, content, DEFAULT_AT)
     elif MSG_TYPE == "slack":
-        response = slack(token, content)
+        response = slack(token, content, DEFAULT_AT)
     return f'【{MSG_TYPE}】{response}'
 
 
@@ -714,6 +715,31 @@ def get_deployment_from_control_data(deployment_list, num, type, env):
     return top_deployments
 
 
+async def get_deployment_node(promql, k8s, namespace, deployment):
+    query = (
+        promql.get("promql")
+        .replace("{env_key}", f"{PROM_K8S_TAG_KEY},")
+        .replace("{env}", f'{PROM_K8S_TAG_KEY}="{k8s}",')
+        .replace("{namespace}", namespace)
+        .replace("{deployment}", deployment)
+    )
+    logger.info(f"查询节点信息，query: {query}")
+    response = requests.get(get_prom_url(), params={'query': query})
+    response.raise_for_status()
+    data = response.json().get("data").get("result")
+
+    # 处理Prometheus响应数据，返回节点IP和对应值的字典
+    node_dict = {}
+    if data:
+        for item in data:
+            node_ip = item.get("metric", {}).get("node")
+            value = item.get("value", [])
+            if node_ip and len(value) >= 2:
+                node_dict[node_ip] = value[1]
+
+    return node_dict
+
+
 async def get_deployment_image(promql, k8s, namespace, deployment):
     query = (
         promql.get("promql")
@@ -743,12 +769,13 @@ async def get_deployment_image(promql, k8s, namespace, deployment):
 async def get_node_res_rank(env_value, res_type):
     query = node_rank_query.get(res_type).replace("{env}", f'{PROM_K8S_TAG_KEY}="{env_value}",')
     try:
+        logger.info(f'查询节点{res_type}排名，环境: {env_value}')
         logger.info(query)
         response = requests.get(get_prom_url(), params={'query': query})
         logger.info(get_prom_url())
         response.raise_for_status()
         data = response.json().get("data").get("result")
-        cpu_list = [
+        res_list = [
             {
                 'name': i.get('metric').get('instance', i.get('metric').get('node')),
                 'percent': round(float(i['value'][1]), 2),
@@ -756,9 +783,9 @@ async def get_node_res_rank(env_value, res_type):
             for i in data
             if 'value' in i and len(i['value']) > 1
         ]
-        logger.info(f'从prometheus查询节点cpu使用率{cpu_list}')
-        cpu_list.sort(key=lambda x: x['percent'])
-        logger.info(f'节点cpu使用率从小到大排序{cpu_list}')
-        return cpu_list
+        logger.debug(f'从prometheus查询节点{res_type}: {res_list}')
+        res_list.sort(key=lambda x: x['percent'])
+        logger.info(f'节点{res_type}从小到大排序{res_list}')
+        return res_list
     except requests.exceptions.RequestException as e:
         raise Exception(f"Error getting node cpu usage percent from Prometheus: {e}")
