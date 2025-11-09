@@ -1,6 +1,6 @@
 <div align="center">
-
-English | [简体中文](README.CN.md)
+ 
+简体中文 | [English](README.EN.md)
 
 [![StarsL.cn](https://img.shields.io/badge/website-StarsL.cn-orange)](https://starsl.cn)
 [![Commits](https://img.shields.io/github/commit-activity/m/CassInfra/KubeDoor?color=ffff00)](https://github.com/CassInfra/KubeDoor/commits/main)
@@ -14,109 +14,108 @@ English | [简体中文](README.CN.md)
 
 # 花折 - KubeDoor
 
-Seize the moment when flowers bloom🌻Don't wait until there are no flowers to pick
+花开堪折直须折🌻莫待无花空折枝
 
 </div>
 
 ---
-**For users in China experiencing image loading issues, please visit the Gitee mirror site: <a target="_blank" href="https://gitee.com/starsl/KubeDoor">https://gitee.com/starsl/KubeDoor</a>**
+**国内用户如果访问图片异常，可以访问Gitee同步站：  <a target="_blank" href="https://gitee.com/starsl/KubeDoor">https://gitee.com/starsl/KubeDoor</a>**
 
 
-## 🏷Table of Contents
-* [💠New Architecture](#new-architecture)
-* [💎Feature Description](#feature-description)
-  * [💥New Version Highlights](#0-new-version-highlights)
-  * [📡Microservice Monitoring & Analysis: Multi-K8S Cluster Unified Monitoring Best Practices](#1-microservice-monitoring--analysis-multi-k8s-cluster-unified-monitoring-best-practices)
-  * [🎛K8S Resource Maintenance Management: Enhanced Management Features](#2-k8s-resource-maintenance-management-enhanced-management-features)
-  * [🧬Exception Alert Notification & Intelligent Aggregation](#3-exception-alert-notification--intelligent-aggregation)
-  * [💠Peak Period P95 Resource Collection & Analysis](#4-peak-period-p95-resource-collection--analysis)
-  * [🚧K8S Admission Control Based: Ensuring Strong Consistency Between Microservice Requirements and Peak Resources](#5-k8s-admission-control-based-ensuring-strong-consistency-between-microservice-requirements-and-peak-resources)
-  * [✨Others](#6-others)
-* [🚀Deployment Instructions](#kubedoor-new-architecture-new-deployment)
-* [🔔KubeDoor Community](#kubedoor-community--sponsorship)
-* [🙇Contributors](#contributors)
-* [🥰Acknowledgments](#acknowledgments)
+## 🏷目录
+* [💠全新架构](#全新架构)
+* [💎功能描述](#功能描述)
+  * [💥新版功能亮点](#0-新版功能亮点)
+  * [📡微服务监控分析：多K8S集群统一监控最佳实践](#1-微服务监控分析多k8s集群统一监控最佳实践)
+  * [🎛K8S资源维护管理：特色管理功能增强](#2-k8s资源维护管理特色管理功能增强)
+  * [🧬异常告警通知与智能聚合](#3-异常告警通知与智能聚合)
+  * [💠高峰期P95资源采集分析](#4-高峰期p95资源采集分析)
+  * [🚧基于K8S准入控制：确保微服务需求值与高峰资源强一致的管控能力](#5-基于K8S准入控制确保微服务需求值与高峰资源强一致的管控能力)
+  * [✨其它](#6-其它)
+* [🚀部署说明](#kubedoor-全新架构全新部署)
+* [🔔KubeDoor交流群](#kubedoor交流群与赞赏)
+* [🙇贡献者](#贡献者)
+* [🥰鸣谢](#鸣谢)
 
 ---
 
-## 🌈Overview
+## 🌈概述
 
-🌼**花折 - KubeDoor** is a microservice resource management platform developed with Python + Vue, based on K8S admission control mechanisms. It supports unified remote storage, monitoring, alerting, and display for multiple K8S clusters. Focusing on the resource perspective of microservices during daily peak periods, it implements resource analysis, statistics, and strong governance for microservices, ensuring consistency between microservice resource request rates and actual usage rates.
-
-## 💠New Architecture
+🌼**花折 - KubeDoor** 是一个使用Python + Vue开发，基于K8S准入控制机制的微服务资源管控平台，支持多K8S集群统一远程存储、监控、告警、展示。专注微服务每日高峰时段的资源视角，实现了微服务的资源分析统计与强管控，确保微服务资源的资源申请率和真实使用率一致。
+## 💠全新架构
 <div align="center">
 
-#### 🎉New K8S Event Monitoring, Pod Real-time Logs, K8S MCP Support! Unified K8S Management, Multi-K8S Monitoring, Alerting, and Display Best Practices🎉
+#### 🎉新增K8S事件监控，Pod实时日志，K8S MCP支持！K8S统一管控，多K8S监控、告警、展示的最佳实践🎉
 ![KubeDoor1.5.2](screenshot/KubeDoor1.3.3.png)
 </div>
 
-## 💎Feature Description
-### 0. 💥New Version Highlights
-##### **🎥KubeDoor K8S Event Collection, Analysis & Monitoring Alerts! Multi-K8S event collection and query analysis with flexible K8S event alert rule configuration.**
+## 💎功能描述
+### 0. 💥新版功能亮点
+##### **🎥KubeDoor K8S事件采集分析与监控告警！多K8S事件采集与查询分析，灵活的K8S事件告警规则配置。**
 <details close>
-<summary>🔍Click to expand ...</summary>
-<a target="_blank" href="docs/K8S事件告警规则配置说明.md">【K8S Event Alert Rule Configuration Guide】</a>
+<summary>🔍点击展开 ...</summary>
+<a target="_blank" href="docs/K8S事件告警规则配置说明.md">【K8S事件告警规则配置说明】</a>
  
 |<img src="https://github.com/user-attachments/assets/916b77dd-5747-47f3-94cc-f8ef3027193a" />|<img src="https://github.com/user-attachments/assets/44b83c51-dee2-4d99-89d6-0230cd8e06e2" />|
 | ------------------------------------| ----------------------------------- |
 </details>
 
-##### **📜KubeDoor WEB adds Pod real-time log tracking with automatic multi-color marking for various exception levels, supporting keyword search, positioning, and filtering. Supports native log color display.**
+##### **📜KubeDoor WEB 新增Pod实时日志跟踪，自动多色标记各级别异常，支持关键字查询定位与过滤。支持日志自带颜色显示。**
 <details close>
-<summary>🔍Click to expand ...</summary>
+<summary>🔍点击展开 ...</summary>
 
-|<img width="2418" height="1278" alt="Image" src="https://github.com/user-attachments/assets/e563c36a-2c1c-4cee-9b35-21a20976856b" />|
+|<img width="2418" height="1278" alt="图片" src="https://github.com/user-attachments/assets/e563c36a-2c1c-4cee-9b35-21a20976856b" />|
 | ------------------------------------|
 </details>
 
 
-##### **💽K8S Microservice Version Update Feature: Supports designated account and time period authorization operations, plus automatic tag retrieval from image repositories.**
+##### **💽K8S微服务版本更新功能：支持指定账号，指定时段授权操作，以及自动从镜像仓库获取标签。**
 <details close>
-<summary>🔍Click to expand ...</summary>
-<a target="_blank" href="docs/K8S微服务镜像更新配置说明.md">【K8S Microservice Image Update Configuration Guide】</a>
+<summary>🔍点击展开 ...</summary>
+<a target="_blank" href="docs/K8S微服务镜像更新配置说明.md">【K8S微服务镜像更新配置说明】</a>
 
  
 |<img width="600" src="https://github.com/user-attachments/assets/0c7d1891-3df1-4413-a7c2-1b2288c35a25" /> |
 |-|
 </details>
 
-##### **💠KubeDoor supports management and synchronization of multi-K8S ISTIO VirtualService rules.**
+##### **💠KubeDoor 支持多K8S ISTIO VirtualService规则的管理与同步。**
 <details close>
-<summary>🔍Click to expand ...</summary>
+<summary>🔍点击展开 ...</summary>
 
-**🚸Internal trial phase, using MySQL data source. Please contact the author for debugging assistance if needed.**
+**🚸内部试用阶段，使用MySQL数据源，如需使用，请联系作者协助调试。**
 |<img width="2463" height="1310" alt="1" src="https://github.com/user-attachments/assets/695bc0d1-929f-4326-8ab6-7e8590319cf5" /> | <img width="893" height="897" alt="3" src="https://github.com/user-attachments/assets/0a74c56c-6a76-4c85-9d2e-e498aaa0b2aa" /> |
 | ------------------------------------| ----------------------------------- |
 | <img width="2460" height="1311" alt="2" src="https://github.com/user-attachments/assets/4e512717-c3d9-4131-824e-c02de89c59fe" />|<img width="1332" height="1182" alt="4" src="https://github.com/user-attachments/assets/2095e0bd-3077-48c6-bcef-25ee258495cc" /> |
 
 </details>
 
-##### **🧱KubeDoor MCP Preview Version is here! Connect to any MCP client for LLM conversational operations on all your K8S clusters and resource exception troubleshooting.**
+##### **🧱KubeDoor MCP 体验版来啦！接入任意MCP客户端，即可与LLM对话方式：对您的所有K8S集群操作、资源异常故障分析。**
 <details close>
-<summary>🔍Click to expand ...</summary>
+<summary>🔍点击展开 ...</summary>
 
-- Use any MCP client, add MCP server, select SSE type, and enter the address: `http://{nodeIP}:{kubedoor-mcp-NodePort}/sse` to connect to KubeDoor MCP.
-- Based on KubeDoor's multi-K8S management monitoring architecture and existing API interfaces, we can quickly generate numerous MCP tools for K8S operations and Grafana data analysis. Stay tuned!
-- **Connected Tool List & Operation Demo**
+- 使用任意MCP客户端, 新增MCP服务器, 选择sse类型,地址输入：`http://{nodeIP}:{kubedoor-mcp-NodePort}/sse`即可接入KubeDoor MCP.
+- 基于KubeDoor的多K8S管理监控架构与已有的API接口，可以快速生成大量MCP工具来操作K8S与Grafana数据分析，敬请期待！
+- **已接入的工具列表与操作演示**
 
   | <img src="https://github.com/user-attachments/assets/19f50de7-248d-429d-9c19-c3a6a2282716"/> | <img src="https://github.com/user-attachments/assets/26e03c8e-4038-4094-affe-1d4de85d4675"/> |
   | ------------------------------------| ----------------------------------- |
   
-  >Due to the uncertainty of large language models, please try to use MCP clients with tool confirmation (Cline, Cursor).
+  >由于大语言模型的不确定性，请尽量使用带工具确认的MCP客户端（Cline、Cursor）。
   >
-  >This is currently a preview version. MCP web client and tool call authentication are not yet implemented. Please do not expose the MCP server address to the public internet.
+  >目前为体验版，暂未做MCP WEB客户端以及工具调用鉴权，请勿将MCP服务端地址暴露到公网。
 </details>
 
 ---
 
-### 1. 📡Microservice Monitoring & Analysis: Multi-K8S Cluster Unified Monitoring Best Practices
+### 1. 📡微服务监控分析：多K8S集群统一监控最佳实践
 <div align="center">
 <img src="./screenshot/1.0/vm-arch.png" width="650;" />
 </div>
 
-  - 🌊Based on the VictoriaMetrics suite, implementing a one-stop K8S monitoring solution for **multi-K8S cluster** unified remote storage, monitoring, alerting, and display.
-  - 🎨Integrated K8S node monitoring dashboard and K8S resource monitoring dashboard, both supporting viewing of various K8S cluster resources in a single dashboard.
-  - 📐Built-in alert rules for K8S resources, JVM resources, and K8S nodes, supporting unified alert rule management, integration with various IM alerts, and flexible @ mechanisms.
+  - 🌊基于VictoriaMetrics全家桶实现**多K8S集群**统一远程存储、监控、告警、展示的一站式K8S监控方案。
+  - 🎨集成了K8S节点监控看板与K8S资源监控看板，均支持在单一看板中查看各个K8S集群的资源情况。
+  - 📐内置K8S资源，JVM资源与K8S节点的告警规则，支持统一告警规则管理，对接各IM告警及灵活的@机制。
 <div align="center">
    
 | <img width="550" src="https://github.com/user-attachments/assets/5a1ba8db-ac3d-4852-b913-000b78c5d0f5" />| <img width="700" src="./screenshot/1.0/2.jpg"/> |<img width="700" src="./screenshot/1.0/3.png"/> | 
@@ -126,12 +125,12 @@ Seize the moment when flowers bloom🌻Don't wait until there are no flowers to 
 
 ---
 
-### 2. 🎛K8S Resource Maintenance Management: Enhanced Management Features
-- 🎭K8S workload real-time monitoring management page: Real-time viewing of microservice status and **Pod log tracking** with automatic **multi-color marking** for various exception levels, supporting keyword filtering.
-- 📀Microservice version updates support **designated accounts**, **specified time periods** for authorized operations, and **automatic tag retrieval from image repositories**. <a target="_blank" href="docs/K8S微服务镜像更新配置说明.md">【K8S Microservice Image Update Configuration Guide】</a>
-- ⏱️Supports **immediate, scheduled, and periodic** execution of microservice **isolation, scaling, and restart** operations.
-- ♨Provides extensive one-click JVM performance analysis operation support for **JAVA microservices**.
-- 🌐Supports management and synchronization of multi-K8S **ISTIO VirtualService** rules.
+### 2. 🎛K8S资源维护管理：特色管理功能增强
+- 🎭K8S负载实时监控管理页面：实时查看微服务状态与**Pod日志跟踪**，自动**多色标记**各级别异常，支持关键字筛选。
+- 📀微服务版本更新支持**指定账号**，**指定时段**授权操作，以及**自动从镜像仓库获取标签**。<a target="_blank" href="docs/K8S微服务镜像更新配置说明.md">【K8S微服务镜像更新配置说明】</a>
+- ⏱️支持**即时、定时、周期性**执行微服务的**隔离、扩缩容和重启**操作。
+- ♨针对**JAVA微服务**提供大量一键JVM性能分析操作支持。
+- 🌐支持多K8S **ISTIO VirtualService**规则的管理与同步。
 <div align="center">
 
 | <img  width="850" src="./screenshot/1.0/1.png"/> |<img width="550" src="https://github.com/user-attachments/assets/0c7d1891-3df1-4413-a7c2-1b2288c35a25" /> |<img width="550" src="https://github.com/user-attachments/assets/d25f67b0-25df-4a43-af8d-49b9fc385c85" />| 
@@ -141,11 +140,11 @@ Seize the moment when flowers bloom🌻Don't wait until there are no flowers to 
 
 ---
 
-### 3. 🧬Exception Alert Notification & Intelligent Aggregation
+### 3. 🧬异常告警通知与智能聚合
 
-- 🦄K8S microservice unified alert analysis and processing page with **daily intelligent aggregation** display, processing markers, daily cumulative counting for identical alerts, providing clear daily alert overview.
-- 🕹️Supports operations on PODs including **isolation, deletion, Java dump, jstack, jfr, JVM** data collection and analysis, with IM notifications.
-- 📺New K8S event collection, analysis & monitoring alerts! Multi-K8S event collection and query analysis with flexible K8S event alert rule configuration. <a target="_blank" href="docs/K8S事件告警规则配置说明.md">【K8S Event Alert Rule Configuration Guide】</a>
+- 🦄K8S微服务统一告警分析与处理页面，告警**按日智能聚合**展示，处理标记，相同告警按日累计计数，每日告警清晰明了。
+- 🕹️支持对POD进行**隔离，删除，Java dump，jstack，jfr，JVM**数据采集分析等操作，并通知到IM。
+- 📺新增K8S事件采集分析与监控告警！多K8S事件采集与查询分析，灵活的K8S事件告警规则配置。<a target="_blank" href="docs/K8S事件告警规则配置说明.md">【K8S事件告警规则配置说明】</a>
 <div align="center">
 
 | <img src="./screenshot/1.0/4.jpg"/> | <img src="./screenshot/1.0/5.png"/> | <img src="./screenshot/1.0/15.jpg"/> |
@@ -155,12 +154,12 @@ Seize the moment when flowers bloom🌻Don't wait until there are no flowers to 
 
 ---
 
-### 4. 💠Peak Period P95 Resource Collection & Analysis
+### 4. 💠高峰期P95资源采集分析
 
-#### 📊Collects P95 CPU and memory consumption during daily business peak periods for K8S microservices, along with request values, limit values, and Pod counts. Implements visualization analysis based on collected data.
-  - 🎨**Daily dimension-based collection of P95 resource data during peak periods**, enabling excellent observation of long-term resource changes for various microservices, with smooth performance even when viewing 1 year of data.
-  - 🏅Peak period global resource statistics and various **resource TOP10**, namespace-level peak period P95 resource usage and **resource consumption ratio relative to overall resources**
-  - 🧿**Microservice-level** peak period overall resource and utilization analysis, microservice and **Pod-level** resource curve charts (request values, limit values, usage values)
+#### 📊采集K8S微服务每日业务高峰时段P95的CPU内存消耗，以及需求、限制值与Pod数。基于采集的数据实现了可视化分析。
+  - 🎨**基于日维度采集每日高峰时段P95的资源数据**，可以很好的观察各微服务长期的资源变化情况，即使查看1年的数据也很流畅。
+  - 🏅高峰时段全局资源统计与各**资源TOP10**，命名空间级别高峰时段P95资源使用量与**资源消耗占整体资源的比例**
+  - 🧿**微服务级别**高峰期整体资源与使用率分析，微服务与**Pod级别**的资源曲线图(需求值,限制值,使用值)
 <div align="center">
   
 |<img src="./screenshot/kd1.jpg"/>|<img src="./screenshot/kd2.jpg"/>|<img src="https://github.com/user-attachments/assets/0b74f5cf-b3f5-4dae-a44e-5382e4977cf4"/>|
@@ -168,25 +167,25 @@ Seize the moment when flowers bloom🌻Don't wait until there are no flowers to 
 |<img src="./screenshot/kd3.jpg"/>|<img src="./screenshot/kd4.jpg"/>|<img src="./screenshot/1.0/9.png"/>|
 </div>
 
-#### 🎡Daily retrieval of resource information for various microservices from the last 10 days of collected data, obtaining P95 resources from the day with maximum resource consumption as microservice request values written to the database.
-  - ♻**After enabling admission control**: Implements microservice **automatic request value management** mechanism, supporting unified strong governance page for manual adjustment of microservice **limit values and Pod counts**.
-  - ✨**Based on admission control mechanism**, achieving **consistency between actual usage rates and resource request values** for K8S microservice resources has very important significance:
-    - 🌊**K8S scheduler** can more precisely schedule Pods to appropriate nodes through real resource request values, **avoiding resource fragmentation and achieving node resource balance**.
-    - ♻**K8S auto-scaling** also relies on resource request values for judgment, **real request values can more accurately trigger scaling operations**.
-    - 🛡**K8S Quality of Service** (QoS mechanism) combined with request values, Pods with real request values will be prioritized for retention, **ensuring normal operation of critical services**.
+#### 🎡每日从采集的数据中，获取最近10天各微服务的资源信息，获取资源消耗最大日的P95资源，作为微服务的需求值写入数据库。
+  - ♻**开启准入控制后**：实现微服务的**需求值自动管理**机制，支持微服务**限制值与Pod数**手动调整的统一强管控页面。
+  - ✨**基于准入控制机制**实现K8S微服务资源的**真实使用率和资源申请需求值保持一致**，具有非常重要的意义：
+    - 🌊**K8S调度器**通过真实的资源需求值就能够更精确地将Pod调度到合适的节点上，**避免资源碎片，实现节点的资源均衡**。
+    - ♻**K8S自动扩缩容**也依赖资源需求值来判断，**真实的需求值可以更精准的触发扩缩容操作**。
+    - 🛡**K8S的保障服务质量**（QoS机制）与需求值结合，真实需求值的Pod会被优先保留，**保证关键服务的正常运行**。
 
 ---
 
-### 5. 🚧K8S Admission Control Based: Ensuring Strong Consistency Between Microservice Requirements and Peak Resources
+### 5. 🚧基于K8S准入控制：确保微服务需求值与高峰资源强一致的管控能力
 
-- #### <a target="_blank" href="docs/K8S资源管控功能说明.md">👑Detailed Explanation of Admission Control-Based Governance Capabilities</a>
+- #### <a target="_blank" href="docs/K8S资源管控功能说明.md">👑基于准入控制的管控能力详解</a>
 
 ---
 
-### 6. ✨Others
-  - ❤️Agent management page: Update and maintain Agent status, configure collection and governance.
-  - 🔒Based on **NGINX basic authentication**, supports LDAP, interface-level permission control, and all **operation audit** logs with notifications.
-  - 📊All dashboards are created based on Grafana and integrated into the frontend UI, enabling data analysis to quickly achieve more elegant displays.
+### 6. ✨其它
+  - ❤️Agent管理页面：更新，维护Agent状态，配置采集与管控。
+  - 🔒基于**NGINX basic认证**，支持LDAP，支持接口级权限控制，支持所有**操作审计**日志与通知。
+  - 📊所有看板基于Grafana创建，并整合到前端UI内，使得数据分析可以快速实现更优雅的展示。
 <div align="center">
    
 | <img src="./screenshot/1.0/11.jpg" width="800;" />| 
@@ -195,84 +194,84 @@ Seize the moment when flowers bloom🌻Don't wait until there are no flowers to 
 
 ---
 
-## 📀KubeDoor New Architecture, New Deployment
-#### 🛠Quick Installation <a target="_blank" href="docs/灵活部署方案.md">【View Flexible Deployment Options】</a>
+## 📀KubeDoor 全新架构，全新部署
+#### 🛠快速安装<a target="_blank" href="docs/灵活部署方案.md">【查看灵活部署方案】</a>
 <details close>
-<summary>🔍Click to expand ...</summary>
+<summary>🔍点击展开 ...</summary>
 
 ```
-### 【Download helm package】
+### 【下载helm包】
 wget https://StarsL.cn/kubedoor/kubedoor-1.5.2.tgz
 tar -zxvf kubedoor-1.5.2.tgz
 cd kubedoor
-### 【Master installation】
-# Edit values-master.yaml file, please read comments carefully and modify configuration content according to descriptions.
+### 【master端安装】
+# 编辑values-master.yaml文件，请仔细阅读注释，根据描述修改配置内容。
 # try
 helm upgrade -i kubedoor . --namespace kubedoor --create-namespace --values values-master.yaml --dry-run --debug
 # install
 helm upgrade -i kubedoor . --namespace kubedoor --create-namespace --values values-master.yaml
-### 【Agent installation】
-# Edit values-agent.yaml file, please read comments carefully and modify configuration content according to descriptions.
+### 【agent端安装】
+# 编辑values-agent.yaml文件，请仔细阅读注释，根据描述修改配置内容。
 helm upgrade -i kubedoor-agent . --namespace kubedoor --create-namespace --values values-agent.yaml --set tsdb.external_labels_value=xxxxxxxx
 ```
 </details>
 
-#### ♻Update Guide <a target="_blank" href="https://github.com/CassInfra/KubeDoor/releases/tag/1.5.2">【Version Change Log】</a>
+#### ♻更新指引<a target="_blank" href="https://github.com/CassInfra/KubeDoor/releases/tag/1.5.2">【版本变更记录】</a>
 
 <details close>
-<summary>🔍Click to expand ...</summary>
+<summary>🔍点击展开 ...</summary>
 
 ```
-# Download installation package
+# 下载安装包
 wget https://StarsL.cn/kubedoor/kubedoor-1.5.2.tgz
 tar -zxvf kubedoor-1.5.2.tgz
 ```
 ```
-# Updating from older versions to 1.3.0 and above requires adding 2 new database fields
+# 旧版本更新到1.3.0及以上版本需要新增2个数据库字段
 ALTER TABLE kubedoor.k8s_agent_status ADD COLUMN nms_not_confirm Bool DEFAULT false AFTER admission_namespace;
 ALTER TABLE kubedoor.k8s_agent_status ADD COLUMN scheduler Bool DEFAULT false AFTER nms_not_confirm;
 ```
-**Note:**
-- Please refer to the already deployed configmap: `kubedoor-info` for `VictoriaMetrics`, `ClickHouse` and other configuration items to modify the corresponding configurations in `values-master.yaml` and `values-agent.yaml`, ensuring the configurations used are consistent with the old version. (Direct file replacement is not possible due to yaml configuration adjustments.)
-- Or use the following commands to view the values configuration information used during deployment, and modify the corresponding configurations in `values-master.yaml` and `values-agent.yaml`.
+**注意：**
+- 请参考已经已经部署好的configmap: `kubedoor-info`中的`VictoriaMetrics`, `ClickHouse`等配置项修改`values-master.yaml`, `values-agent.yaml`的对应配置，确保使用的配置与旧版本一致。(因yaml配置有调整，不可直接替换文件。)
+- 或者使用以下命令查看部署时候的values配置信息，并修改到`values-master.yaml`, `values-agent.yaml`的对应配置。
 ```
 helm get values kubedoor -n kubedoor
 helm get values kubedoor-agent -n kubedoor
 ```
-# 【Master update】
+#【master端更新】
 helm upgrade -i kubedoor . --namespace kubedoor --create-namespace --values values-master.yaml
-# 【Agent update】
+#【agent端更新】
 helm upgrade -i kubedoor-agent . --namespace kubedoor --create-namespace --values values-agent.yaml --set tsdb.external_labels_value=xxxxxxxx
 
 </details>
 
-#### 🌐Usage Instructions
+#### 🌐使用说明
 <details close>
-<summary>🔍Click to expand ...</summary>
+<summary>🔍点击展开 ...</summary>
 
-- **Access WebUI and Initialize Data:**
-  1. Access using K8S node IP + kubedoor-web NodePort, default username and password are both **`kubedoor`**
-  2. Click `Agent Management`, first enable `Auto Collection`, set the `Peak Period`, then execute collection: input the `Historical Data Duration` to collect, click `Collect` to collect historical data and update peak period data to the governance table.
-- **Note:**
-  - After enabling auto collection, data from the previous day's peak period will be collected daily at 1 AM, and data from the day with maximum resource consumption within 10 days will be written to the governance table.
-  - Repeatedly executing `Collection` will not cause duplicate data writes, please use with confidence; after each collection, data from the day with maximum resource consumption within 10 days will automatically be written to the governance table. If it takes a long time, please wait for collection completion or shorten the collection duration.
-  - If you have a newly installed monitoring system and the current day's peak period has passed, no data will be collected; you need to wait until after the next day's peak period to collect data.
+- **访问WebUI 并初始化数据：**
+  1. 使用K8S节点IP + kubedoor-web的NodePort访问，默认账号密码都是 **`kubedoor`**
+  2. 点击`agent管理`，先开启`自动采集`，设置好`高峰期时段`，再执行采集：输入需要采集的`历史数据时长`，点击`采集`，即可采集历史数据并更新高峰时段数据到管控表。
+- **注意：**
+  - 开启自动采集后，每天凌晨1点会采集前一天的高峰期数据，并将10天内最大资源消耗日的数据写入到更新管控表。
+  - 重复执行`采集`不会导致重复写入数据，请放心使用；每次采集后都会自动将10天内最大资源消耗日的数据写入到管控表。如果耗时较长，请等待采集完成或缩短采集时长。
+  - 如果您是新安装的监控系统，并且已过了当天的高峰期时段，将会无法采集到数据；需要等第二天高峰期时段之后才能采集到数据。
 </details>
 
 ---
 
-## 🔔KubeDoor Community & 🧧Sponsorship
+## 🔔KubeDoor交流群与🧧赞赏
 
 <div align="center">
 
-#### If you think the project is good, please give it a ⭐️Star⭐️ If you have other ideas or requirements, welcome to discuss in issues
+#### 如果觉得项目不错，麻烦动动小手点个⭐️Star⭐️ 如果你还有其他想法或者需求，欢迎在 issue 中交流
 <img width="600" alt="kubedoor-wechat" src="https://github.com/user-attachments/assets/91babc64-2473-4dd2-bc39-eaa8c3232156" />
 
-**Add author's WeChat or follow the official account to join the discussion group**
+**加作者微信或关注公众号加入交流群**
 
 </div>
 
-## 🙇Contributors
+## 🙇贡献者
 <div align="center">
 <table>
 <tr>
@@ -308,10 +307,10 @@ helm upgrade -i kubedoor-agent . --namespace kubedoor --create-namespace --value
 </table>
 </div>
 
-## 🥰Acknowledgments
+## 🥰鸣谢
 
-Thanks to the following excellent projects, without which **KubeDoor** would not be possible:
+感谢如下优秀的项目，没有这些项目，不可能会有**KubeDoor**：
 - [TRAE](www.trae.ai) [Python](https://www.python.org/) [AIOHTTP](https://github.com/aio-libs/aiohttp) [VUE](https://cn.vuejs.org/) [Pure Admin](https://pure-admin.cn/) [Element Plus](https://element-plus.org) [Kubernetes](https://kubernetes.io/) [VictoriaMetrics](https://victoriametrics.com/) [ClickHouse](https://clickhouse.com/) [Grafana](https://grafana.com/) [Nginx](https://nginx.org/) ...
 
-**Special Thanks**
-- [**CassTime**](https://www.casstime.com): The birth of **KubeDoor** is inseparable from the support of 🦄**CassTime**.
+**特别鸣谢**
+- [**CassTime**](https://www.casstime.com)：**KubeDoor**的诞生离不开🦄**开思**的支持。
