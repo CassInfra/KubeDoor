@@ -211,8 +211,8 @@
 
 ```
 ### 【下载helm包】
-wget https://StarsL.cn/kubedoor/kubedoor-1.5.2.tgz
-tar -zxvf kubedoor-1.5.2.tgz
+wget https://StarsL.cn/kubedoor/kubedoor-1.6.0.tgz
+tar -zxvf kubedoor-1.6.0.tgz
 cd kubedoor
 ### 【master端安装】
 # 编辑values-master.yaml文件，请仔细阅读注释，根据描述修改配置内容。
@@ -226,15 +226,15 @@ helm upgrade -i kubedoor-agent . --namespace kubedoor --create-namespace --value
 ```
 </details>
 
-#### ♻更新指引<a target="_blank" href="https://github.com/CassInfra/KubeDoor/releases/tag/1.5.2">【版本变更记录】</a>
+#### ♻更新指引<a target="_blank" href="https://github.com/CassInfra/KubeDoor/releases/tag/1.6.0">【版本变更记录】</a>
 
 <details close>
 <summary>🔍点击展开 ...</summary>
 
 ```
 # 下载安装包
-wget https://StarsL.cn/kubedoor/kubedoor-1.5.2.tgz
-tar -zxvf kubedoor-1.5.2.tgz
+wget https://StarsL.cn/kubedoor/kubedoor-1.6.0.tgz
+tar -zxvf kubedoor-1.6.0.tgz
 ```
 ```
 # 旧版本更新到1.3.0及以上版本需要新增2个数据库字段
