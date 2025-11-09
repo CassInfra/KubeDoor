@@ -329,7 +329,7 @@
                       @click="
                         handleViewLogs(
                           searchForm.env,
-                          searchForm.namespace,
+                          podScope.row.namespace,
                           podScope.row.name,
                           extractDeploymentName(podScope.row.controlled_by)
                         )
@@ -340,7 +340,7 @@
                       @click="
                         handleModifyPod(
                           searchForm.env,
-                          searchForm.namespace,
+                          podScope.row.namespace,
                           podScope.row.name,
                           extractDeploymentName(podScope.row.controlled_by),
                           podScope.row.controlled_by
@@ -352,7 +352,7 @@
                       @click="
                         handleDeletePod(
                           searchForm.env,
-                          searchForm.namespace,
+                          podScope.row.namespace,
                           podScope.row.name
                         )
                       "
@@ -362,7 +362,7 @@
                       @click="
                         handleAutoDump(
                           searchForm.env,
-                          searchForm.namespace,
+                          podScope.row.namespace,
                           podScope.row.name
                         )
                       "
@@ -372,7 +372,7 @@
                       @click="
                         handleAutoJstack(
                           searchForm.env,
-                          searchForm.namespace,
+                          podScope.row.namespace,
                           podScope.row.name
                         )
                       "
@@ -382,7 +382,7 @@
                       @click="
                         handleAutoJfr(
                           searchForm.env,
-                          searchForm.namespace,
+                          podScope.row.namespace,
                           podScope.row.name
                         )
                       "
@@ -392,7 +392,7 @@
                       @click="
                         handleAutoJvmMem(
                           searchForm.env,
-                          searchForm.namespace,
+                          podScope.row.namespace,
                           podScope.row.name
                         )
                       "

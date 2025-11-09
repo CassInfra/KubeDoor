@@ -490,7 +490,7 @@ async def delete_pod(env: str, ns: str, pod_name: str):
     # Delete the pod label
     success = await delete_pod_fun(ns, pod_name)
     if not success:
-        return JSONResponse(status_code=500, content={"message": "删除pod失败"})
+        return {"message": "删除pod失败", "success": False}
     send_md("pod删除成功", env, ns, pod_name)
     return {"message": f"【{ns}】【{pod_name}】pod删除成功", "success": True}
 
