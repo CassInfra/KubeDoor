@@ -320,7 +320,7 @@ helm upgrade -i kubedoor-agent . --namespace kubedoor --create-namespace --value
 ## 🥰鸣谢
 
 感谢如下优秀的项目，没有这些项目，不可能会有**KubeDoor**：
-- [TRAE](www.trae.ai) [Python](https://www.python.org/) [AIOHTTP](https://github.com/aio-libs/aiohttp) [VUE](https://cn.vuejs.org/) [Pure Admin](https://pure-admin.cn/) [Element Plus](https://element-plus.org) [Kubernetes](https://kubernetes.io/) [VictoriaMetrics](https://victoriametrics.com/) [ClickHouse](https://clickhouse.com/) [Grafana](https://grafana.com/) [Nginx](https://nginx.org/) ...
+- [Python](https://www.python.org/) [AIOHTTP](https://github.com/aio-libs/aiohttp) [VUE](https://cn.vuejs.org/) [Pure Admin](https://pure-admin.cn/) [Element Plus](https://element-plus.org) [Kubernetes](https://kubernetes.io/) [VictoriaMetrics](https://victoriametrics.com/) [ClickHouse](https://clickhouse.com/) [Grafana](https://grafana.com/) [Nginx](https://nginx.org/) ...
 
 **特别鸣谢**
 - [**CassTime**](https://www.casstime.com)：**KubeDoor**的诞生离不开🦄**开思**的支持。
