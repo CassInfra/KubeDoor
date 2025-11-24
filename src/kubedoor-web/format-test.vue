@@ -31,32 +31,32 @@ const handleClick = () => {
 }
 
 .container h1 {
-  color: #333;
   margin-bottom: 10px;
+  color: #333;
 }
 
 .container p {
-  color: #666;
   margin-bottom: 15px;
+  color: #666;
 }
 
 .container button {
   padding: 10px 20px;
-  background-color: #007bff;
   color: white;
+  cursor: pointer;
+  background-color: #007bff;
   border: none;
   border-radius: 4px;
-  cursor: pointer;
 }
 
 .container button:disabled {
-  background-color: #ccc;
   cursor: not-allowed;
+  background-color: #ccc;
 }
 
 .container ul {
-  list-style-type: none;
   padding: 0;
+  list-style-type: none;
 }
 
 .container li {

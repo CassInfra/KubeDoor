@@ -37,7 +37,7 @@ from kubernetes_asyncio.stream.ws_client import (
 from loguru import logger
 import utils
 import uuid
-from k8s_node_scheduler import K8sNodeScheduler
+from func_manager.k8s_node_scheduler import K8sNodeScheduler
 from k8s_client_manager import K8sClientManager, load_incluster_config
 
 logger.remove()
@@ -166,9 +166,7 @@ async def get_deployment_info(ns: str, pod_name: str):
                 return False, None, 0, "ReplicaSet没有找到对应的Deployment"
 
             # 获取Deployment当前副本数
-            deployment_data = await apps_v1.read_namespaced_deployment(
-                name=deployment_name, namespace=ns, _request_timeout=30
-            )
+            deployment_data = await apps_v1.read_namespaced_deployment(name=deployment_name, namespace=ns, _request_timeout=30)
             current_replicas = deployment_data.spec.replicas or 0
 
             return True, deployment_name, current_replicas, ""
@@ -207,9 +205,7 @@ async def scale_deployment_via_api(
         # 调用kubedoor-agent的scale接口
         # kubedoor-agent运行在443端口（HTTPS）
         # 添加query参数
-        scale_url = (
-            f"https://localhost:443/api/scale?add_label={'true' if add_label else 'false'}&temp=true&isolate=true"
-        )
+        scale_url = f"https://localhost:443/api/scale?add_label={'true' if add_label else 'false'}&temp=true&isolate=true"
 
         headers = {"Content-Type": "application/json"}
 
@@ -321,9 +317,7 @@ async def modify_pod(
 
             if not isinstance(body_data, dict) or "node_scheduler" not in body_data:
                 logger.error(f"body数据格式错误: {body_data}")
-                return JSONResponse(
-                    status_code=400, content={"message": "当scheduler为True时，body必须包含node_scheduler字段"}
-                )
+                return JSONResponse(status_code=400, content={"message": "当scheduler为True时，body必须包含node_scheduler字段"})
 
             node_scheduler_list = body_data.get("node_scheduler", [])
             logger.info(f"获取到node_scheduler列表: {node_scheduler_list}")
@@ -370,9 +364,7 @@ async def modify_pod(
                             error_message += "；已执行恢复操作确保节点状态一致性"
 
                     except Exception as uncordon_e:
-                        logger.error(
-                            f"❌ 执行uncordon恢复操作时发生异常: {type(uncordon_e).__name__}: {str(uncordon_e)}"
-                        )
+                        logger.error(f"❌ 执行uncordon恢复操作时发生异常: {type(uncordon_e).__name__}: {str(uncordon_e)}")
                         error_message += f"；恢复操作异常: {str(uncordon_e)}"
 
                     return JSONResponse(status_code=500, content={"message": error_message})
@@ -384,12 +376,7 @@ async def modify_pod(
             logger.error(f"异常堆栈: {traceback.format_exc()}")
 
             # 在异常情况下也执行恢复操作
-            if (
-                'node_scheduler_list' in locals()
-                and node_scheduler_list
-                and 'k8s_scheduler' in locals()
-                and k8s_scheduler
-            ):
+            if 'node_scheduler_list' in locals() and node_scheduler_list and 'k8s_scheduler' in locals() and k8s_scheduler:
                 try:
                     logger.warning("⚠️ 处理scheduler参数时发生异常，开始执行uncordon恢复操作以确保节点状态一致性...")
                     uncordon_result = await k8s_scheduler.uncordon_nodes_exclude(exclude_nodes=node_scheduler_list)
@@ -401,9 +388,7 @@ async def modify_pod(
                         logger.info("✅ 异常情况下的uncordon恢复操作成功，所有节点调度状态已恢复")
 
                 except Exception as uncordon_e:
-                    logger.error(
-                        f"❌ 异常情况下执行uncordon恢复操作时发生异常: {type(uncordon_e).__name__}: {str(uncordon_e)}"
-                    )
+                    logger.error(f"❌ 异常情况下执行uncordon恢复操作时发生异常: {type(uncordon_e).__name__}: {str(uncordon_e)}")
 
             return JSONResponse(status_code=500, content={"message": f"处理scheduler参数失败: {str(e)}"})
 
@@ -430,9 +415,7 @@ async def modify_pod(
 
         # 2. 扩容deployment（增加一个pod）
         new_replicas = current_replicas + 1
-        scale_success, scale_error = await scale_deployment_via_api(
-            ns, deployment_name, new_replicas, add_label, body_data
-        )
+        scale_success, scale_error = await scale_deployment_via_api(ns, deployment_name, new_replicas, add_label, body_data)
         if not scale_success:
             return JSONResponse(status_code=500, content={"message": scale_error})
 
@@ -707,7 +690,7 @@ async def execute_in_pod(env, ns, v1, pod_name, type, file_name="not_found", con
             message = f"jstack失败"
     if type == "jvm_mem":
         # 查询jvm内存
-        command = "env -u JAVA_TOOL_OPTIONS jmap -heap `pidof -s java`"
+        command = "env -u JAVA_TOOL_OPTIONS jhsdb jmap --heap --pid `pidof -s java` || env -u JAVA_TOOL_OPTIONS jmap -heap `pidof -s java`"
         # command = "ls arthas-boot.jar || curl -s -O https://arthas.aliyun.com/arthas-boot.jar && env -u JAVA_TOOL_OPTIONS java -jar arthas-boot.jar 1 -c 'memory;stop'|sed -n '/memory | plaintext/,/stop | plaintext/{/memory | plaintext/b;/stop | plaintext/b;p}'"
         status, message = await execute_command(command, v1, pod_name, ns, container_name)
     return status, message

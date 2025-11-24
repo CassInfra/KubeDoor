@@ -19,9 +19,9 @@ export const getPromEnv = () => {
  * 获取命名空间列表
  * @param env K8S环境
  */
-export const getPromNamespace = (env: string) => {
-  return http.request<ResultTable>("get", "/api/prom_ns", {
-    params: { env }
+export const getPromNamespace = (env: string, flush?: boolean) => {
+  return http.request<ResultTable>("get", "/api/agent/namespaces", {
+    params: { env, flush }
   });
 };
 

@@ -1,0 +1,1503 @@
+<template>
+  <div class="k8s-overview">
+    <section class="hero-panel">
+      <div class="hero-main">
+        <div class="hero-left">
+          <p class="hero-eyebrow">
+            资源管理 · 集群大屏 · 数据来源: VictoriaMetrics
+          </p>
+          <div class="hero-title-row">
+            <h1>K8S资源总览</h1>
+            <el-select
+              v-model="selectedEnv"
+              placeholder="全部集群"
+              clearable
+              size="small"
+              class="env-select"
+              popper-class="env-select-dropdown"
+              @change="handleEnvChange"
+            >
+              <el-option
+                v-for="env in envList"
+                :key="env"
+                :label="env"
+                :value="env"
+              />
+            </el-select>
+          </div>
+          <div class="hero-stat-list">
+            <div
+              v-for="stat in heroHighlights"
+              :key="stat.label"
+              class="hero-stat"
+            >
+              <span class="label">{{ stat.label }}</span>
+              <strong>{{ formatNumber(stat.value) }}</strong>
+              <p>{{ stat.desc }}</p>
+            </div>
+          </div>
+          <div class="hero-focus">
+            <div
+              v-for="badge in heroRiskBadges"
+              :key="badge.label"
+              class="focus-chip"
+              :class="badge.status"
+            >
+              <span>{{ badge.label }}</span>
+              <strong>{{ formatNumber(badge.value) }}</strong>
+            </div>
+          </div>
+        </div>
+        <div class="hero-right">
+          <div class="hero-toolbar">
+            <div class="hero-updated">上次更新：{{ lastUpdatedText }}</div>
+            <div class="refresh-compact">
+              <span class="refresh-label">自动刷新</span>
+              <el-switch
+                v-model="autoRefresh"
+                size="small"
+                inline-prompt
+                active-text="开"
+                inactive-text="关"
+              />
+              <span class="refresh-hint">{{ refreshSeconds }}秒</span>
+            </div>
+          </div>
+          <div class="health-list">
+            <div
+              v-for="item in maxUsageList"
+              :key="item.key"
+              class="health-item"
+            >
+              <div class="health-header">
+                <div class="health-title">
+                  <span class="label">{{ item.label }}</span>
+                  <span class="name">{{ item.name }}</span>
+                </div>
+                <span class="value">{{ formatNumber(item.value) }}%</span>
+              </div>
+              <el-progress
+                :percentage="Math.min(item.value, 100)"
+                :stroke-width="8"
+                :color="progressColor(item.value)"
+                :show-text="false"
+              />
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="summary-grid">
+      <div
+        v-for="card in summaryCards"
+        :key="card.key"
+        class="summary-card"
+        :style="cardGradientStyle(card.gradient)"
+      >
+        <div class="summary-icon">
+          <iconify-icon-online :icon="card.icon" width="26" height="26" />
+        </div>
+        <div class="summary-meta">
+          <p>{{ card.title }}</p>
+          <h3>
+            {{ formatNumber(card.value) }}
+            <span v-if="card.unit" class="unit">{{ card.unit }}</span>
+            <span v-if="card.subValue" class="sub">{{ card.subValue }}</span>
+          </h3>
+          <div
+            v-if="card.trend !== undefined && card.trendLabel"
+            :class="['card-trend', getTrendClass(card.trend)]"
+          >
+            <span>{{ formatTrend(card.trend) }}</span>
+            <small>{{ card.trendLabel }}</small>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="saturation-chips">
+      <div
+        v-for="item in saturationList"
+        :key="item.label"
+        class="saturation-chip"
+        :class="item.status"
+      >
+        <div class="chip-label">{{ item.label }}</div>
+        <div class="chip-value">
+          <strong>{{ item.value }}</strong>
+          <span>{{ item.unit }}</span>
+        </div>
+        <p>{{ item.desc }}</p>
+      </div>
+    </section>
+
+    <section class="trends-layout">
+      <el-card v-loading="loading.trends" class="chart-card" shadow="hover">
+        <template #header>
+          <div class="card-header">
+            <div>
+              <p class="label">实时曲线</p>
+              <h3>集群运行态势</h3>
+            </div>
+            <el-tag size="small" effect="dark">最近 30 分钟</el-tag>
+          </div>
+        </template>
+        <div ref="trendChartRef" class="trend-chart" />
+      </el-card>
+      <el-card v-loading="loading.snapshot" class="focus-card" shadow="hover">
+        <template #header>
+          <div class="card-header">
+            <div>
+              <p class="label">运行焦点</p>
+              <h3>策略位速览</h3>
+            </div>
+            <el-tag size="small" type="success" effect="dark">智能调度</el-tag>
+          </div>
+        </template>
+        <div class="focus-list">
+          <div
+            v-for="focus in heroPulse.focus"
+            :key="focus.label"
+            class="focus-item"
+          >
+            <div>
+              <span class="focus-label">{{ focus.label }}</span>
+              <strong>{{ focus.value }}</strong>
+            </div>
+            <el-tag :type="tagTypeMap[focus.status]" size="small" effect="dark">
+              {{
+                focus.status === "success"
+                  ? "正常"
+                  : focus.status === "warning"
+                    ? "关注"
+                    : "告警"
+              }}
+            </el-tag>
+          </div>
+        </div>
+        <div class="focus-extra">
+          <p>资源利用率快照</p>
+          <div class="focus-progress">
+            <div
+              v-for="item in focusProgress"
+              :key="item.label"
+              class="focus-progress-item"
+            >
+              <span>{{ item.label }}</span>
+              <el-progress
+                :percentage="item.value"
+                :color="item.color"
+                :show-text="false"
+              />
+              <small>{{ item.value }}%</small>
+            </div>
+          </div>
+        </div>
+      </el-card>
+    </section>
+
+    <section class="bottom-grid">
+      <el-card v-loading="loading.top" class="namespace-card" shadow="never">
+        <template #header>
+          <div class="card-header">
+            <div>
+              <p class="label">Top命名空间</p>
+              <h3>资源占用榜</h3>
+            </div>
+            <el-tag size="small" effect="dark">CPU / 内存</el-tag>
+          </div>
+        </template>
+        <el-table :data="topNamespaces" size="small" border table-layout="auto">
+          <el-table-column label="命名空间 / 所有者" min-width="160">
+            <template #default="{ row }">
+              <div class="ns-name">{{ row.name }}</div>
+              <div class="ns-owner">{{ row.owner }}</div>
+            </template>
+          </el-table-column>
+          <el-table-column label="CPU" min-width="110">
+            <template #default="{ row }">
+              <div class="metric-progress">
+                <el-progress :percentage="row.cpu" :show-text="false" />
+                <span>{{ row.cpu }}%</span>
+              </div>
+            </template>
+          </el-table-column>
+          <el-table-column label="内存" min-width="110">
+            <template #default="{ row }">
+              <div class="metric-progress memory">
+                <el-progress
+                  :percentage="row.memory"
+                  :show-text="false"
+                  status="success"
+                />
+                <span>{{ row.memory }}%</span>
+              </div>
+            </template>
+          </el-table-column>
+          <el-table-column prop="pods" label="运行Pod" min-width="90" />
+          <el-table-column label="趋势" width="90">
+            <template #default="{ row }">
+              <span :class="['trend-text', getTrendClass(row.trend)]">
+                {{ formatTrend(row.trend) }}
+              </span>
+            </template>
+          </el-table-column>
+        </el-table>
+      </el-card>
+
+      <el-card v-loading="loading.top" class="pod-card" shadow="never">
+        <template #header>
+          <div class="card-header">
+            <div>
+              <p class="label">热点Pod</p>
+              <h3>告警/高延迟</h3>
+            </div>
+            <el-tag size="small" type="warning" effect="dark">持续追踪</el-tag>
+          </div>
+        </template>
+        <div class="pod-list">
+          <div v-for="pod in podHotspots" :key="pod.name" class="pod-item">
+            <div class="pod-header">
+              <strong>{{ pod.name }}</strong>
+              <el-tag size="small" :type="podStatusMap[pod.status].type">
+                {{ podStatusMap[pod.status].label }}
+              </el-tag>
+            </div>
+            <p class="pod-extra">{{ pod.namespace }} · {{ pod.qos }}</p>
+            <div class="pod-metrics">
+              <div>
+                <span>重启</span>
+                <strong>{{ pod.restarts }}</strong>
+              </div>
+              <div>
+                <span>延迟</span>
+                <strong>{{ pod.latency }} ms</strong>
+              </div>
+            </div>
+          </div>
+        </div>
+      </el-card>
+
+      <el-card v-loading="loading.top" class="node-card" shadow="never">
+        <template #header>
+          <div class="card-header">
+            <div>
+              <p class="label">节点压力</p>
+              <h3>TOP 5</h3>
+            </div>
+            <el-tag size="small" type="danger" effect="dark">Saturation</el-tag>
+          </div>
+        </template>
+        <div class="node-list">
+          <div v-for="node in topNodes" :key="node.name" class="node-item">
+            <div class="node-info">
+              <strong>{{ node.name }}</strong>
+              <span>{{ node.location }}</span>
+            </div>
+            <div class="node-progress">
+              <div class="progress-line">
+                <span>饱和</span>
+                <div class="bar">
+                  <div
+                    :class="['fill', intensityClass(node.saturation)]"
+                    :style="{ width: node.saturation + '%' }"
+                  />
+                </div>
+                <span class="value">{{ node.saturation }}%</span>
+              </div>
+              <div class="progress-line">
+                <span>GPU</span>
+                <div class="bar">
+                  <div
+                    class="fill gpu"
+                    :style="{ width: node.gpuUsage + '%' }"
+                  />
+                </div>
+                <span class="value">{{ node.gpuUsage }}%</span>
+              </div>
+              <div class="node-workloads">Workloads · {{ node.workloads }}</div>
+            </div>
+          </div>
+        </div>
+      </el-card>
+
+      <el-card
+        v-loading="loading.timeline"
+        class="timeline-card"
+        shadow="never"
+      >
+        <template #header>
+          <div class="card-header">
+            <div>
+              <p class="label">实时事件</p>
+              <h3>告警/操作流</h3>
+            </div>
+            <el-tag size="small" effect="dark">动态</el-tag>
+          </div>
+        </template>
+        <el-timeline>
+          <el-timeline-item
+            v-for="event in timelineEvents"
+            :key="event.id"
+            :timestamp="event.time"
+            :type="event.level"
+            size="large"
+          >
+            <div class="timeline-event">
+              <strong>{{ event.title }}</strong>
+              <p>{{ event.detail }}</p>
+            </div>
+          </el-timeline-item>
+        </el-timeline>
+      </el-card>
+    </section>
+  </div>
+</template>
+
+<script setup lang="ts">
+import {
+  computed,
+  nextTick,
+  onBeforeUnmount,
+  onMounted,
+  reactive,
+  ref,
+  watch
+} from "vue";
+import { useIntervalFn, useResizeObserver } from "@vueuse/core";
+import dayjs from "dayjs";
+import { ElMessage } from "element-plus";
+import echarts from "@/plugins/echarts";
+import {
+  getK8sEventTimeline,
+  getK8sOverviewSnapshot,
+  getK8sOverviewTrends,
+  getK8sTopResources,
+  getPromOverview,
+  type HeroPulse,
+  type OverviewCard,
+  type PromOverviewMetrics,
+  type SaturationBadge,
+  type TimelineEvent,
+  type TopNamespaceUsage,
+  type TopNodePressure,
+  type TopPodHotspot,
+  type TrendSeries
+} from "@/api/overview";
+import { getPromEnv } from "@/api/monit";
+
+const createPromOverviewMetrics = (): PromOverviewMetrics => ({
+  clusters: 0,
+  nodes: 0,
+  workloads: 0,
+  pods: 0,
+  pvcs: 0,
+  total_cpu_cores: 0,
+  total_mem_bytes: 0,
+  used_cpu_cores: 0,
+  used_mem_bytes: 0,
+  net_in_bytes_per_sec: 0,
+  net_out_bytes_per_sec: 0,
+  nodes_cpu_gt_70: 0,
+  nodes_mem_gt_80: 0,
+  nodes_pod_gt_90: 0,
+  pvcs_usage_gt_80: 0,
+  cpu_usage_percent: 0,
+  mem_usage_percent: 0,
+  max_cpu_usage_percent: ["", 0],
+  max_mem_usage_percent: ["", 0],
+  max_cpu_request_percent: ["", 0],
+  max_mem_request_percent: ["", 0],
+  max_pvc_usage_percent: ["", 0]
+});
+
+const promOverview = ref<PromOverviewMetrics>(createPromOverviewMetrics());
+const envList = ref<string[]>([]);
+const selectedEnv = ref<string>("");
+
+const heroPulse = ref<HeroPulse>({
+  clustersOnline: 0,
+  clustersTotal: 0,
+  nodesOnline: 0,
+  nodesTotal: 0,
+  workloads: 0,
+  pods: 0,
+  pvcs: 0,
+  controlPlaneLatency: 0,
+  energySaving: 0,
+  requestsPerMinute: 0,
+  focus: []
+});
+
+const getStressBadgeStatus = (value: number) => {
+  if (value >= 20) return "danger";
+  if (value > 0) return "warning";
+  return "success";
+};
+
+const summaryCards = ref<OverviewCard[]>([]);
+const saturationList = ref<SaturationBadge[]>([]);
+const trendSeries = ref<TrendSeries>({
+  timestamps: [],
+  cpu: [],
+  memory: [],
+  pods: [],
+  network: []
+});
+const topNamespaces = ref<TopNamespaceUsage[]>([]);
+const podHotspots = ref<TopPodHotspot[]>([]);
+const topNodes = ref<TopNodePressure[]>([]);
+const timelineEvents = ref<TimelineEvent[]>([]);
+const lastUpdated = ref<string>("");
+
+const loading = reactive({
+  snapshot: false,
+  trends: false,
+  top: false,
+  timeline: false
+});
+
+const isFetching = ref(false);
+const autoRefresh = ref(true);
+const refreshSeconds = ref(30);
+
+const tagTypeMap = {
+  success: "success",
+  warning: "warning",
+  danger: "danger"
+} as const;
+
+const podStatusMap = {
+  healthy: { label: "稳定", type: "success" },
+  warning: { label: "关注", type: "warning" },
+  danger: { label: "告警", type: "danger" }
+} as const;
+
+const lastUpdatedText = computed(() =>
+  lastUpdated.value ? dayjs(lastUpdated.value).format("HH:mm:ss") : "--"
+);
+
+const heroHighlights = computed(() => [
+  {
+    label: "集群数量",
+    value: promOverview.value.clusters,
+    desc: "Kubernetes Clusters"
+  },
+  {
+    label: "节点总数",
+    value: promOverview.value.nodes,
+    desc: "Nodes"
+  },
+  {
+    label: "工作负载",
+    value: promOverview.value.workloads,
+    desc: "Workloads"
+  },
+  {
+    label: "容器组",
+    value: promOverview.value.pods,
+    desc: "Pods"
+  },
+  {
+    label: "持久卷",
+    value: promOverview.value.pvcs,
+    desc: "PVCs"
+  }
+]);
+
+const heroRiskBadges = computed(() => [
+  {
+    label: "CPU% > 70% 节点",
+    value: promOverview.value.nodes_cpu_gt_70,
+    status: getStressBadgeStatus(promOverview.value.nodes_cpu_gt_70)
+  },
+  {
+    label: "内存% > 80% 节点",
+    value: promOverview.value.nodes_mem_gt_80,
+    status: getStressBadgeStatus(promOverview.value.nodes_mem_gt_80)
+  },
+  {
+    label: "Pod数 > 90% 节点",
+    value: promOverview.value.nodes_pod_gt_90,
+    status: getStressBadgeStatus(promOverview.value.nodes_pod_gt_90)
+  },
+  {
+    label: "持久卷容量 > 80% 节点",
+    value: promOverview.value.pvcs_usage_gt_80,
+    status: getStressBadgeStatus(promOverview.value.pvcs_usage_gt_80)
+  }
+]);
+
+const normalizeMaxMetric = (
+  metric: PromOverviewMetrics["max_cpu_usage_percent"]
+) => {
+  const [name, rawValue] = metric ?? ["", 0];
+  const numericValue = Number(rawValue);
+  const value = Number.isFinite(numericValue)
+    ? Number(numericValue.toFixed(2))
+    : 0;
+  return { name: name || "--", value };
+};
+
+const maxUsageList = computed(() => {
+  const metrics = promOverview.value;
+  return [
+    {
+      key: "max_cpu_usage_percent",
+      label: "最高CPU使用率",
+      ...normalizeMaxMetric(metrics.max_cpu_usage_percent)
+    },
+    {
+      key: "max_mem_usage_percent",
+      label: "最高内存使用率",
+      ...normalizeMaxMetric(metrics.max_mem_usage_percent)
+    },
+    {
+      key: "max_cpu_request_percent",
+      label: "最高CPU已分配率",
+      ...normalizeMaxMetric(metrics.max_cpu_request_percent)
+    },
+    {
+      key: "max_mem_request_percent",
+      label: "最高内存已分配率",
+      ...normalizeMaxMetric(metrics.max_mem_request_percent)
+    },
+    {
+      key: "max_pvc_usage_percent",
+      label: "最高PVC使用率",
+      ...normalizeMaxMetric(metrics.max_pvc_usage_percent)
+    }
+  ];
+});
+
+const latestUsage = computed(() => ({
+  cpu: trendSeries.value.cpu.at(-1) ?? 0,
+  memory: trendSeries.value.memory.at(-1) ?? 0,
+  pods: trendSeries.value.pods.at(-1) ?? 0
+}));
+
+const focusProgress = computed(() => [
+  { label: "CPU", value: latestUsage.value.cpu, color: "#38bdf8" },
+  { label: "内存", value: latestUsage.value.memory, color: "#a855f7" },
+  { label: "Pod", value: latestUsage.value.pods, color: "#f97316" }
+]);
+
+const globalLoading = computed(
+  () => loading.snapshot || loading.trends || loading.top || loading.timeline
+);
+
+const formatNumber = (value: number) =>
+  Number.isInteger(value) ? value.toLocaleString("zh-CN") : value.toFixed(2);
+
+const formatTrend = (value: number) =>
+  `${value > 0 ? "+" : ""}${value.toFixed(1)}%`;
+
+const getTrendClass = (value: number) =>
+  value > 0 ? "trend-up" : value < 0 ? "trend-down" : "trend-flat";
+
+const progressColor = (value: number) => {
+  if (value >= 80) return "#f97316";
+  if (value >= 60) return "#38bdf8";
+  return "#34d399";
+};
+
+const cardGradientStyle = (gradient: [string, string]) => ({
+  backgroundImage: `linear-gradient(135deg, ${gradient[0]}, ${gradient[1]})`
+});
+
+const intensityClass = (value: number) => {
+  if (value >= 80) return "danger";
+  if (value >= 70) return "warning";
+  return "normal";
+};
+
+const bytesToGiB = (bytes: number) =>
+  Number((bytes / 1024 / 1024 / 1024).toFixed(2));
+
+const formatThroughput = (bytesPerSecond: number) => {
+  if (!bytesPerSecond) {
+    return { value: 0, unit: "B/s" };
+  }
+  const units = ["B/s", "KiB/s", "MiB/s", "GiB/s", "TiB/s"];
+  let value = bytesPerSecond;
+  let unitIndex = 0;
+  while (value >= 1024 && unitIndex < units.length - 1) {
+    value /= 1024;
+    unitIndex += 1;
+  }
+  const precision = unitIndex === 0 ? 0 : 2;
+  return {
+    value: Number(value.toFixed(precision)),
+    unit: units[unitIndex]
+  };
+};
+
+const buildPromSummaryCards = (
+  metrics: PromOverviewMetrics
+): OverviewCard[] => {
+  const inbound = formatThroughput(metrics.net_in_bytes_per_sec);
+  const outbound = formatThroughput(metrics.net_out_bytes_per_sec);
+  const totalMemGiB = bytesToGiB(metrics.total_mem_bytes);
+  const usedMemGiB = bytesToGiB(metrics.used_mem_bytes);
+  return [
+    {
+      key: "total_cpu",
+      title: "CPU总核数",
+      value: metrics.total_cpu_cores,
+      unit: "核",
+      icon: "mdi:cpu-64-bit",
+      gradient: ["#48c6ef", "#6f86d6"]
+    },
+    {
+      key: "used_cpu",
+      title: "CPU使用量",
+      value: metrics.used_cpu_cores,
+      unit: "核",
+      icon: "mdi:chip",
+      gradient: ["#fa709a", "#fee140"]
+    },
+    {
+      key: "total_mem",
+      title: "内存总量",
+      value: totalMemGiB,
+      unit: "GiB",
+      icon: "mdi:memory",
+      gradient: ["#1EAE98", "#38ef7d"]
+    },
+    {
+      key: "used_mem",
+      title: "内存使用量",
+      value: usedMemGiB,
+      unit: "GiB",
+      icon: "mdi:server",
+      gradient: ["#209cff", "#68e0cf"]
+    },
+    {
+      key: "net_in",
+      title: "入站流量",
+      value: inbound.value,
+      unit: inbound.unit,
+      icon: "mdi:download-network-outline",
+      gradient: ["#8e2de2", "#4a00e0"]
+    },
+    {
+      key: "net_out",
+      title: "出站流量",
+      value: outbound.value,
+      unit: outbound.unit,
+      icon: "mdi:upload-network-outline",
+      gradient: ["#3C8CE7", "#00EAFF"]
+    }
+  ];
+};
+
+const trendChartRef = ref<HTMLElement | null>(null);
+let trendChart: echarts.ECharts | null = null;
+
+const renderTrendChart = () => {
+  if (!trendChartRef.value || !trendSeries.value.timestamps.length) return;
+  if (!trendChart) {
+    trendChart = echarts.init(trendChartRef.value);
+  }
+  const option = {
+    tooltip: {
+      trigger: "axis",
+      axisPointer: { type: "cross" },
+      backgroundColor: "rgba(15,23,42,0.9)",
+      borderColor: "#334155",
+      textStyle: { color: "#e2e8f0" }
+    },
+    legend: {
+      data: ["CPU占用", "内存占用", "Pod活跃度", "网络吞吐"],
+      textStyle: { color: "#94a3b8" }
+    },
+    grid: { top: 50, left: 30, right: 20, bottom: 20 },
+    xAxis: {
+      type: "category",
+      boundaryGap: false,
+      axisLine: { lineStyle: { color: "#475569" } },
+      axisLabel: { color: "#94a3b8" },
+      data: trendSeries.value.timestamps
+    },
+    yAxis: [
+      {
+        type: "value",
+        min: 0,
+        max: 100,
+        axisLabel: { formatter: "{value}%", color: "#94a3b8" },
+        splitLine: { lineStyle: { color: "rgba(148,163,184,0.2)" } }
+      },
+      {
+        type: "value",
+        min: 0,
+        max: 80,
+        axisLabel: {
+          formatter: (value: number) => `${value}Gbps`,
+          color: "#94a3b8"
+        },
+        splitLine: { show: false }
+      }
+    ],
+    series: [
+      {
+        name: "CPU占用",
+        type: "line",
+        smooth: true,
+        symbol: "circle",
+        symbolSize: 6,
+        lineStyle: { width: 2, color: "#38bdf8" },
+        areaStyle: {
+          opacity: 0.35,
+          color: new echarts.graphic.LinearGradient(0, 0, 0, 1, [
+            { offset: 0, color: "rgba(56, 189, 248, 0.6)" },
+            { offset: 1, color: "rgba(15, 23, 42, 0)" }
+          ])
+        },
+        data: trendSeries.value.cpu
+      },
+      {
+        name: "内存占用",
+        type: "line",
+        smooth: true,
+        symbol: "circle",
+        symbolSize: 6,
+        lineStyle: { width: 2, color: "#a855f7" },
+        areaStyle: {
+          opacity: 0.25,
+          color: new echarts.graphic.LinearGradient(0, 0, 0, 1, [
+            { offset: 0, color: "rgba(168, 85, 247, 0.45)" },
+            { offset: 1, color: "rgba(15, 23, 42, 0)" }
+          ])
+        },
+        data: trendSeries.value.memory
+      },
+      {
+        name: "Pod活跃度",
+        type: "line",
+        smooth: true,
+        symbol: "rect",
+        symbolSize: 8,
+        lineStyle: { width: 2, type: "dashed", color: "#f97316" },
+        data: trendSeries.value.pods
+      },
+      {
+        name: "网络吞吐",
+        type: "bar",
+        yAxisIndex: 1,
+        barWidth: 12,
+        itemStyle: {
+          color: "#22d3ee",
+          borderRadius: [6, 6, 0, 0]
+        },
+        data: trendSeries.value.network
+      }
+    ]
+  };
+  trendChart.setOption(option);
+};
+
+useResizeObserver(trendChartRef, () => {
+  trendChart?.resize();
+});
+
+const handleEnvChange = () => {
+  fetchAllData();
+};
+
+const fetchAllData = async () => {
+  if (isFetching.value) return;
+  isFetching.value = true;
+  loading.snapshot = true;
+  loading.trends = true;
+  loading.top = true;
+  loading.timeline = true;
+  try {
+    const [promRes, snapshotRes, trendsRes, topRes, timelineRes] =
+      await Promise.all([
+        getPromOverview(selectedEnv.value || undefined),
+        getK8sOverviewSnapshot(),
+        getK8sOverviewTrends(),
+        getK8sTopResources(),
+        getK8sEventTimeline()
+      ]);
+    const metrics = promRes.data ?? createPromOverviewMetrics();
+    promOverview.value = metrics;
+    summaryCards.value = buildPromSummaryCards(metrics);
+    heroPulse.value = snapshotRes.data.hero;
+    saturationList.value = snapshotRes.data.saturation;
+    trendSeries.value = trendsRes.data.usage;
+    topNamespaces.value = topRes.data.namespaces;
+    podHotspots.value = topRes.data.pods;
+    topNodes.value = topRes.data.nodes;
+    timelineEvents.value = timelineRes.data.items;
+    lastUpdated.value = snapshotRes.timestamp;
+    await nextTick();
+    renderTrendChart();
+  } catch (error) {
+    console.error(error);
+    ElMessage.error("获取资源总览数据失败");
+  } finally {
+    loading.snapshot = false;
+    loading.trends = false;
+    loading.top = false;
+    loading.timeline = false;
+    isFetching.value = false;
+  }
+};
+
+const intervalMs = computed(() => refreshSeconds.value * 1000);
+
+const { pause, resume } = useIntervalFn(
+  () => {
+    if (autoRefresh.value) {
+      fetchAllData();
+    }
+  },
+  intervalMs,
+  { immediate: false }
+);
+
+watch([autoRefresh, intervalMs], () => {
+  pause();
+  if (autoRefresh.value) {
+    resume();
+  }
+});
+
+onMounted(async () => {
+  try {
+    const envRes = await getPromEnv();
+    if (envRes.data) {
+      envList.value = envRes.data;
+    }
+  } catch (error) {
+    console.error("Failed to fetch env list:", error);
+  }
+  await fetchAllData();
+  if (autoRefresh.value) {
+    resume();
+  }
+});
+
+onBeforeUnmount(() => {
+  pause();
+  trendChart?.dispose();
+  trendChart = null;
+});
+</script>
+
+<style scoped lang="scss">
+.k8s-overview {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+  padding: 12px 20px 32px;
+  background: transparent;
+}
+
+.hero-panel {
+  position: relative;
+  padding: 28px;
+  overflow: hidden;
+  color: #e2e8f0;
+  user-select: none;
+  background:
+    radial-gradient(circle at 20% 30%, rgb(139 92 246 / 35%), transparent 50%),
+    radial-gradient(circle at 80% 10%, rgb(236 72 153 / 30%), transparent 55%),
+    radial-gradient(circle at 50% 80%, rgb(59 130 246 / 25%), transparent 60%),
+    linear-gradient(135deg, #0a0e1a, #1a1f35 40%, #0f172a 70%, #050a15), #0f172a;
+
+  border-radius: 28px;
+  box-shadow: 0 20px 60px rgb(2 6 23 / 40%);
+}
+
+.hero-main {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  gap: 32px;
+}
+
+.hero-left {
+  display: flex;
+  flex: 1.4;
+  flex-direction: column;
+  gap: 20px;
+}
+
+.hero-eyebrow {
+  font-size: 12px;
+  color: rgb(248 250 252 / 65%);
+  letter-spacing: 0.4em;
+}
+
+.hero-title-row {
+  display: flex;
+  gap: 16px;
+  align-items: center;
+}
+
+.hero-title-row h1 {
+  margin: 0;
+}
+
+.env-select {
+  width: 180px;
+
+  :deep(.el-input__wrapper) {
+    background: rgb(15 23 42 / 60%);
+    border: 1px solid rgb(148 163 184 / 40%);
+    box-shadow: none;
+  }
+
+  :deep(.el-select__placeholder) {
+    color: var(--el-input-text-color, #ffffffba);
+  }
+
+  :deep(.el-select__wrapper) {
+    background: #3a2f6d;
+    box-shadow: 0 0 0 1px rgba(220, 223, 230, 0.18) inset;
+  }
+
+  :deep(.el-input__inner) {
+    color: #e2e8f0;
+  }
+
+  :deep(.el-input__inner::placeholder) {
+    color: rgb(226 232 240 / 60%);
+  }
+
+  :deep(.el-input__wrapper:hover) {
+    border-color: rgb(139 92 246 / 60%);
+  }
+
+  :deep(.el-input__wrapper.is-focus) {
+    border-color: rgb(139 92 246 / 80%);
+    box-shadow: 0 0 0 1px rgb(139 92 246 / 30%);
+  }
+}
+
+.hero-desc {
+  max-width: 520px;
+  color: rgb(226 232 240 / 85%);
+}
+
+.hero-stat-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: 14px;
+}
+
+.hero-stat {
+  padding: 16px;
+  background: rgb(15 23 42 / 45%);
+  border: 1px solid rgb(148 163 184 / 25%);
+  border-radius: 18px;
+}
+
+.hero-stat strong {
+  display: block;
+  margin: 6px 0;
+  font-size: 28px;
+  text-align: center;
+}
+
+.hero-stat p {
+  font-size: 12px;
+  color: rgb(226 232 240 / 70%);
+}
+
+.hero-focus {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 20px;
+}
+
+.focus-chip {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  padding: 12px 18px;
+  background: rgb(15 23 42 / 55%);
+  border: 2px solid rgb(148 163 184 / 30%);
+  border-radius: 999px;
+}
+
+.focus-chip.success {
+  color: #4ade80;
+  border-color: rgb(16 185 129 / 50%);
+}
+
+.focus-chip.warning {
+  color: #facc15;
+  border-color: rgb(251 191 36 / 50%);
+}
+
+.focus-chip.danger {
+  color: #f87171;
+  border-color: rgb(248 113 113 / 60%);
+}
+
+.hero-right {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: 14px;
+  padding: 20px;
+  background: rgb(15 23 42 / 45%);
+  border: 1px solid rgb(148 163 184 / 30%);
+  border-radius: 20px;
+}
+
+.hero-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.refresh-compact {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.refresh-label {
+  font-weight: 500;
+  color: rgb(226 232 240 / 90%);
+  font-size: 13px;
+}
+
+.refresh-hint {
+  color: rgb(226 232 240 / 70%);
+  font-size: 12px;
+}
+
+.hero-updated {
+  font-size: 13px;
+  color: rgb(248 250 252 / 75%);
+}
+
+.health-list {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.health-item {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.health-header {
+  display: flex;
+  justify-content: space-between;
+  font-size: 13px;
+  color: rgb(226 232 240 / 90%);
+}
+
+.health-title {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
+  max-width: 100%;
+}
+
+.health-title .name {
+  color: rgb(226 232 240 / 80%);
+  font-size: 13px;
+  line-height: 1.3;
+  word-break: break-all;
+}
+
+.health-title .label {
+  font-weight: 700;
+}
+
+.health-header .value {
+  font-weight: 600;
+}
+
+.health-header small {
+  margin-left: 8px;
+  color: rgb(226 232 240 / 60%);
+}
+
+.summary-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 18px;
+}
+
+.summary-card {
+  display: flex;
+  gap: 16px;
+  padding: 18px;
+  color: #fff;
+  border-radius: 22px;
+  box-shadow: 0 18px 35px rgb(15 23 42 / 25%);
+}
+
+.summary-card p {
+  font-size: 15px;
+  font-weight: 700;
+}
+
+.summary-card h3 {
+  margin: 4px 0;
+  font-size: 30px;
+}
+
+.summary-card .unit {
+  margin-left: 6px;
+  font-size: 14px;
+}
+
+.summary-card .sub {
+  margin-left: 6px;
+  font-size: 16px;
+  opacity: 0.8;
+}
+
+.summary-icon {
+  display: grid;
+  place-items: center;
+  width: 48px;
+  height: 48px;
+  background: rgb(255 255 255 / 20%);
+  border-radius: 16px;
+}
+
+.card-trend {
+  display: flex;
+  gap: 6px;
+  align-items: baseline;
+}
+
+.card-trend small {
+  font-size: 12px;
+  opacity: 0.7;
+}
+
+.trend-up {
+  color: #4ade80;
+}
+
+.trend-down {
+  color: #f87171;
+}
+
+.trend-flat {
+  color: #e2e8f0;
+}
+
+.saturation-chips {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+  gap: 14px;
+}
+
+.saturation-chip {
+  padding: 18px;
+  background: var(--el-bg-color);
+  border: 1px solid rgb(203 213 225 / 50%);
+  border-radius: 20px;
+  box-shadow: 0 14px 30px rgb(15 23 42 / 8%);
+}
+
+.saturation-chip.success {
+  border-color: rgb(34 197 94 / 30%);
+}
+
+.saturation-chip.warning {
+  border-color: rgb(234 179 8 / 35%);
+}
+
+.saturation-chip.danger {
+  border-color: rgb(248 113 113 / 35%);
+}
+
+.chip-label {
+  font-size: 14px;
+  color: #475569;
+}
+
+.chip-value {
+  display: flex;
+  gap: 6px;
+  align-items: baseline;
+  margin: 8px 0;
+}
+
+.chip-value strong {
+  font-size: 28px;
+  color: #0f172a;
+}
+
+.chip-value span {
+  color: #475569;
+}
+
+.trends-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 2fr) minmax(280px, 1fr);
+  gap: 20px;
+}
+
+.trend-chart {
+  width: 100%;
+  height: 320px;
+}
+
+.focus-card .focus-list {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin-bottom: 18px;
+}
+
+.focus-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 14px;
+  background: var(--el-color-primary-light-9);
+  border-radius: 14px;
+}
+
+.focus-label {
+  display: block;
+  font-size: 13px;
+  color: #475569;
+}
+
+.focus-item strong {
+  font-size: 20px;
+  color: #0f172a;
+}
+
+.focus-extra {
+  padding-top: 14px;
+  border-top: 1px dashed rgb(148 163 184 / 50%);
+}
+
+.focus-progress {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin-top: 12px;
+}
+
+.focus-progress-item {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+}
+
+.focus-progress-item small {
+  min-width: 46px;
+  color: #475569;
+  text-align: right;
+}
+
+.bottom-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 2fr) minmax(0, 1.1fr);
+  gap: 20px;
+}
+
+.bottom-grid .namespace-card,
+.bottom-grid .node-card {
+  grid-column: 1 / 2;
+}
+
+.bottom-grid .pod-card,
+.bottom-grid .timeline-card {
+  grid-column: 2 / 3;
+}
+
+.namespace-card :deep(.el-table) {
+  --el-table-row-hover-bg-color: rgb(59 130 246 / 8%);
+}
+
+.ns-name {
+  font-weight: 600;
+  color: #0f172a;
+}
+
+.ns-owner {
+  font-size: 12px;
+  color: #64748b;
+}
+
+.metric-progress {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+}
+
+.metric-progress.memory :deep(.el-progress-bar__inner) {
+  background-color: #a855f7;
+}
+
+.trend-text {
+  font-weight: 600;
+}
+
+.pod-list {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.pod-item {
+  padding: 14px;
+  background: white;
+  border: 1px solid rgb(226 232 240 / 80%);
+  border-radius: 16px;
+  box-shadow: 0 12px 20px rgb(15 23 42 / 8%);
+}
+
+.pod-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 6px;
+}
+
+.pod-extra {
+  margin-bottom: 10px;
+  font-size: 12px;
+  color: #64748b;
+}
+
+.pod-metrics {
+  display: flex;
+  gap: 12px;
+  justify-content: space-between;
+}
+
+.pod-metrics span {
+  display: block;
+  font-size: 12px;
+  color: #94a3b8;
+}
+
+.pod-metrics strong {
+  font-size: 18px;
+}
+
+.node-list {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.node-item {
+  padding: 16px;
+  border: 1px solid rgb(203 213 225 / 80%);
+  border-radius: 18px;
+}
+
+.node-info {
+  display: flex;
+  justify-content: space-between;
+  margin-bottom: 12px;
+  font-size: 13px;
+  color: #475569;
+}
+
+.node-progress .progress-line {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  margin-bottom: 8px;
+}
+
+.node-progress .bar {
+  flex: 1;
+  height: 8px;
+  overflow: hidden;
+  background: rgb(203 213 225 / 50%);
+  border-radius: 999px;
+}
+
+.node-progress .fill {
+  height: 100%;
+  background: linear-gradient(90deg, #f97316, #f43f5e);
+  border-radius: inherit;
+}
+
+.node-progress .fill.warning {
+  background: linear-gradient(90deg, #fbbf24, #f97316);
+}
+
+.node-progress .fill.normal {
+  background: linear-gradient(90deg, #34d399, #10b981);
+}
+
+.node-progress .fill.gpu {
+  background: linear-gradient(90deg, #38bdf8, #6366f1);
+}
+
+.node-workloads {
+  font-size: 12px;
+  color: #475569;
+}
+
+.timeline-card :deep(.el-timeline-item__content) {
+  color: #0f172a;
+}
+
+.timeline-event strong {
+  display: block;
+  margin-bottom: 4px;
+  color: #0f172a;
+}
+
+.timeline-event p {
+  margin: 0;
+  color: #475569;
+}
+
+@media (width <= 1280px) {
+  .hero-main {
+    flex-direction: column;
+  }
+
+  .trends-layout,
+  .bottom-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .bottom-grid .namespace-card,
+  .bottom-grid .node-card,
+  .bottom-grid .pod-card,
+  .bottom-grid .timeline-card {
+    grid-column: auto;
+  }
+}
+</style>
+
+<style lang="scss">
+.env-select-dropdown {
+  background: rgb(15 23 42 / 95%) !important;
+  border: 1px solid rgb(148 163 184 / 40%) !important;
+
+  .el-select-dropdown__item {
+    color: #e2e8f0;
+
+    &:hover {
+      background: rgb(139 92 246 / 25%);
+    }
+
+    &.is-selected {
+      color: #a78bfa;
+      background: rgb(139 92 246 / 20%);
+    }
+  }
+}
+</style>

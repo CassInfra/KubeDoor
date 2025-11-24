@@ -1,8 +1,13 @@
 import asyncio
 import json
 from datetime import datetime, timedelta
+from typing import Optional
+
+from aiohttp import web
+from kubernetes_asyncio.client import AppsV1Api
 from kubernetes_asyncio.client.rest import ApiException
 from loguru import logger
+
 import utils
 
 
@@ -105,7 +110,7 @@ class DeploymentMonitor:
                 except Exception as e:
                     logger.error(f"监控过程中出现未知错误: {e}")
                     await asyncio.sleep(5)
-            
+
             # 超时处理
             utils.send_msg(
                 f"【{utils.PROM_K8S_TAG_VALUE}】【{namespace}】【{deployment_name}】镜像更新超时（20分钟），停止监控"
@@ -119,6 +124,7 @@ class DeploymentMonitor:
                 f"【{utils.PROM_K8S_TAG_VALUE}】【{namespace}】【{deployment_name}】监控过程出现错误: {str(e)}"
             )
     
+
     async def _get_deployment_pods(self, namespace, deployment_name):
         """获取deployment的所有pods"""
         try:
@@ -254,3 +260,36 @@ class DeploymentMonitor:
             reasons.append("未知原因，建议检查Pod events")
         
         return '; '.join(reasons) if reasons else "未知原因"
+
+
+async def update_image(request, apps_v1: AppsV1Api, deployment_monitor: Optional["DeploymentMonitor"]):
+    """更新 Deployment 镜像并触发监控"""
+    try:
+        data = await request.json()
+        new_image_tag = data.get('image_tag')
+        deployment_name = data.get('deployment')
+        namespace = data.get('namespace')
+
+        if not all([new_image_tag, deployment_name, namespace]):
+            return web.json_response({"message": "缺少必要参数", "success": False}, status=400)
+
+        deployment = await apps_v1.read_namespaced_deployment(deployment_name, namespace)
+        current_image = deployment.spec.template.spec.containers[0].image
+        image_name = current_image.split(':')[0]
+        new_image = f"{image_name}:{new_image_tag}"
+        deployment.spec.template.spec.containers[0].image = new_image
+
+        await apps_v1.patch_namespaced_deployment(name=deployment_name, namespace=namespace, body=deployment)
+
+        if deployment_monitor:
+            asyncio.create_task(deployment_monitor.monitor_deployment_update(namespace, deployment_name, new_image))
+
+        return web.json_response(
+            {
+                "success": True,
+                "message": f"{namespace} {deployment_name} updated with image {new_image}",
+            }
+        )
+    except Exception as exc:
+        logger.exception(f"更新镜像失败: {exc}")
+        return web.json_response({"message": str(exc)}, status=500)

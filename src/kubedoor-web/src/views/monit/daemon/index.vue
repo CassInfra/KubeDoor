@@ -11,7 +11,7 @@
           <el-select
             v-model="searchForm.env"
             placeholder="请选择K8S环境"
-            class="!w-[180px]"
+            class="!w-[220px]"
             filterable
             @change="handleEnvChange"
           >
@@ -25,22 +25,37 @@
         </el-form-item>
 
         <el-form-item label="命名空间">
-          <el-select
-            v-model="searchForm.ns"
-            placeholder="请选择命名空间"
-            class="!w-[180px]"
-            filterable
-            clearable
-            @change="handleSearch"
-            @clear="handleNamespaceClear"
-          >
-            <el-option
-              v-for="item in nsOptions"
-              :key="item"
-              :label="item"
-              :value="item"
-            />
-          </el-select>
+          <div class="namespace-select-wrapper">
+            <el-select
+              v-model="searchForm.ns"
+              placeholder="请选择命名空间"
+              class="!w-[180px]"
+              filterable
+              clearable
+              @change="handleSearch"
+              @clear="handleNamespaceClear"
+            >
+              <el-option
+                v-for="item in nsOptions"
+                :key="item"
+                :label="item"
+                :value="item"
+              />
+            </el-select>
+            <el-icon
+              :class="[
+                'namespace-refresh-icon',
+                {
+                  disabled: !searchForm.env || nsRefreshing,
+                  'is-loading': nsRefreshing
+                }
+              ]"
+              title="刷新命名空间"
+              @click="handleNamespaceRefresh"
+            >
+              <Refresh />
+            </el-icon>
+          </div>
         </el-form-item>
 
         <el-form-item label="关键字">
@@ -685,6 +700,7 @@ const searchForm = reactive({
 
 const envOptions = ref<string[]>([]);
 const nsOptions = ref<string[]>([]);
+const nsRefreshing = ref(false);
 const tableData = ref<any[]>([]);
 const loading = ref(false);
 const expandedRowKeys = ref<string[]>([]);
@@ -764,16 +780,16 @@ const getEnvOptions = async () => {
   }
 };
 
-const getNsOptions = async (env: string) => {
+const getNsOptions = async (env: string, flush = false): Promise<boolean> => {
   if (!env) {
     nsOptions.value = [];
     searchForm.ns = "";
     searchStore.setNamespace("");
     tableData.value = [];
-    return;
+    return false;
   }
   try {
-    const res = await getPromNamespace(env);
+    const res = await getPromNamespace(env, flush);
     if (res.data && res.data.length > 0) {
       nsOptions.value = res.data.map((item: string) => item);
       if (
@@ -792,9 +808,11 @@ const getNsOptions = async (env: string) => {
       searchStore.setNamespace("");
       tableData.value = [];
     }
+    return true;
   } catch (error) {
     console.error("获取命名空间失败:", error);
     ElMessage.error("获取命名空间失败");
+    return false;
   }
 };
 
@@ -806,6 +824,24 @@ const handleEnvChange = async (val: string) => {
     await getNsOptions(val);
   } else {
     tableData.value = [];
+  }
+};
+
+const handleNamespaceRefresh = async () => {
+  if (!searchForm.env || nsRefreshing.value) {
+    return;
+  }
+
+  nsRefreshing.value = true;
+  try {
+    const refreshed = await getNsOptions(searchForm.env, true);
+    if (refreshed) {
+      ElMessage.success("命名空间已刷新");
+    }
+  } catch (error) {
+    console.error("刷新命名空间列表失败:", error);
+  } finally {
+    nsRefreshing.value = false;
   }
 };
 
@@ -1547,8 +1583,8 @@ onMounted(async () => {
 
 .query-form {
   display: flex;
-  align-items: center;
   flex-wrap: nowrap;
+  align-items: center;
   width: 100%;
 }
 
@@ -1557,8 +1593,8 @@ onMounted(async () => {
 }
 
 .query-form .el-form-item.right-auto {
-  margin-left: auto;
   margin-right: 0;
+  margin-left: auto;
 }
 
 .mt-2 {
@@ -1567,8 +1603,8 @@ onMounted(async () => {
 
 .pod-detail-container {
   padding: 16px;
-  border-radius: 4px;
   background-color: #f8f9fa;
+  border-radius: 4px;
 }
 
 .no-data {
@@ -1579,24 +1615,24 @@ onMounted(async () => {
 }
 
 .edit-container {
-  height: 82vh;
   display: flex;
   flex-direction: column;
+  height: 82vh;
 }
 
 .yaml-editor-container {
-  flex: 1;
   display: flex;
+  flex: 1;
   flex-direction: column;
+  overflow: hidden;
   border: 1px solid #dcdfe6;
   border-radius: 4px;
-  overflow: hidden;
 }
 
 .editor-header {
   display: flex;
-  justify-content: space-between;
   align-items: center;
+  justify-content: space-between;
   padding: 12px 16px;
   background-color: #f5f7fa;
   border-bottom: 1px solid #dcdfe6;
@@ -1622,18 +1658,18 @@ onMounted(async () => {
 }
 
 .method-description {
-  margin-top: 16px;
   padding: 12px;
+  margin-top: 16px;
   background-color: #f5f7fa;
-  border-radius: 4px;
   border-left: 4px solid #409eff;
+  border-radius: 4px;
 }
 
 .method-description p {
   margin: 0;
-  color: #606266;
   font-size: 14px;
   line-height: 1.5;
+  color: #606266;
 }
 
 .log-toolbar {
@@ -1642,9 +1678,9 @@ onMounted(async () => {
 
 .ellipsis-text {
   overflow: hidden;
+  text-align: left;
   text-overflow: ellipsis;
   white-space: nowrap;
-  text-align: left;
 }
 </style>
 
@@ -1762,36 +1798,37 @@ onMounted(async () => {
 </style>
 
 <style>
-/* 搜索高亮样式（非 scoped） */
+@keyframes pulse {
+  0% {
+    box-shadow: 0 0 4px rgb(255 102 0 / 80%);
+  }
+
+  50% {
+    box-shadow: 0 0 8px rgb(255 102 0 / 100%);
+  }
+
+  100% {
+    box-shadow: 0 0 4px rgb(255 102 0 / 80%);
+  }
+}
+
 .search-highlight {
   padding: 1px 3px;
-  color: #000 !important;
-  background-color: #ffff00 !important;
-  border-radius: 3px;
   font-weight: bold;
-  box-shadow: 0 0 2px rgba(255, 255, 0, 0.5);
+  color: #000 !important;
+  background-color: #ff0 !important;
+  border-radius: 3px;
+  box-shadow: 0 0 2px rgb(255 255 0 / 50%);
 }
 
 .search-highlight-current {
   padding: 1px 3px;
   font-weight: bold;
   color: #fff !important;
-  background-color: #ff6600 !important;
+  background-color: #f60 !important;
   border-radius: 3px;
-  box-shadow: 0 0 4px rgba(255, 102, 0, 0.8);
+  box-shadow: 0 0 4px rgb(255 102 0 / 80%);
   animation: pulse 1s infinite;
-}
-
-@keyframes pulse {
-  0% {
-    box-shadow: 0 0 4px rgba(255, 102, 0, 0.8);
-  }
-  50% {
-    box-shadow: 0 0 8px rgba(255, 102, 0, 1);
-  }
-  100% {
-    box-shadow: 0 0 4px rgba(255, 102, 0, 0.8);
-  }
 }
 
 /* 优化日志弹窗的标题栏样式 */
@@ -1825,4 +1862,6 @@ onMounted(async () => {
   font-size: 12px !important;
   line-height: 1.2 !important;
 }
+
+/* 搜索高亮样式（非 scoped） */
 </style>

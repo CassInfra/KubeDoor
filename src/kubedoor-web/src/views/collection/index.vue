@@ -36,7 +36,7 @@ const {
         <el-form-item :label="transformI18n('resource.column.env')" prop="env">
           <el-select
             v-model="queryForm.env"
-            class="!w-[180px]"
+            class="!w-[220px]"
             :placeholder="transformI18n('resource.placeholder')"
             clearable
           >

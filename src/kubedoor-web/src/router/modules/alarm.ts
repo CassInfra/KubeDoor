@@ -27,7 +27,8 @@ export default {
       component: () => import("@/views/alarm/detail.vue"),
       meta: {
         title: $t("menus.alarmDetail"),
-        icon: "ep:list"
+        icon: "ep:list",
+        usePathKey: true
       }
     },
     {
@@ -36,7 +37,8 @@ export default {
       component: () => import("@/views/alarm/events.vue"),
       meta: {
         title: "K8S事件详情",
-        icon: "ep:video-camera-filled"
+        icon: "ep:video-camera-filled",
+        usePathKey: true
       }
     },
     {

@@ -28,6 +28,8 @@ declare global {
     auths?: Array<string>;
     /** 路由组件缓存（开启 `true`、关闭 `false`）`可选` */
     keepAlive?: boolean;
+    /** 是否在保持query变化但沿用path重用组件实例 */
+    usePathKey?: boolean;
     /** 内嵌的`iframe`链接 `可选` */
     frameSrc?: string;
     /** `iframe`页是否开启首次加载动画（默认`true`）`可选` */

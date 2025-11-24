@@ -12,7 +12,7 @@
           <el-select
             v-model="searchForm.env"
             placeholder="请选择K8S环境"
-            class="!w-[180px]"
+            class="!w-[220px]"
             filterable
             @change="handleEnvChange"
           >
@@ -26,21 +26,36 @@
         </el-form-item>
 
         <el-form-item label="命名空间">
-          <el-select
-            v-model="searchForm.ns"
-            placeholder="请选择命名空间"
-            class="!w-[180px]"
-            filterable
-            clearable
-            @change="handleNamespaceChange"
-          >
-            <el-option
-              v-for="item in nsOptions"
-              :key="item"
-              :label="item"
-              :value="item"
-            />
-          </el-select>
+          <div class="namespace-select-wrapper">
+            <el-select
+              v-model="searchForm.ns"
+              placeholder="请选择命名空间"
+              class="!w-[180px]"
+              filterable
+              clearable
+              @change="handleNamespaceChange"
+            >
+              <el-option
+                v-for="item in nsOptions"
+                :key="item"
+                :label="item"
+                :value="item"
+              />
+            </el-select>
+            <el-icon
+              :class="[
+                'namespace-refresh-icon',
+                {
+                  disabled: !searchForm.env || nsRefreshing,
+                  'is-loading': nsRefreshing
+                }
+              ]"
+              title="刷新命名空间"
+              @click="handleNamespaceRefresh"
+            >
+              <Refresh />
+            </el-icon>
+          </div>
         </el-form-item>
 
         <el-form-item label="关键字">
@@ -529,6 +544,7 @@ const searchForm = reactive({
 // 定义选项数据
 const envOptions = ref<string[]>([]);
 const nsOptions = ref<string[]>([]);
+const nsRefreshing = ref(false);
 
 // 表格数据
 const tableData = ref<any[]>([]);
@@ -536,7 +552,7 @@ const appliedKeyword = ref("");
 const lastFetchedEnv = ref<string | null>(null);
 const lastFetchedNamespace = ref<string | null>(null);
 const tableRef = ref<TableInstance>();
-const pageSizeOptions = [100, 200, 500, 1000];
+const pageSizeOptions = [50, 100, 200, 500, 1000];
 const pageSize = ref<number>(pageSizeOptions[0]);
 const currentPage = ref(1);
 const loading = ref(false);
@@ -780,15 +796,35 @@ const handleNamespaceChange = (val: string) => {
   resetPagination();
 };
 
+const handleNamespaceRefresh = async () => {
+  if (!searchForm.env || nsRefreshing.value) {
+    return;
+  }
+
+  nsRefreshing.value = true;
+  try {
+    const refreshed = await getNsOptions(searchForm.env, true);
+    if (refreshed) {
+      ElMessage.success("命名空间已刷新");
+    }
+  } catch (error) {
+    console.error("刷新命名空间列表失败:", error);
+  } finally {
+    nsRefreshing.value = false;
+  }
+};
+
 // 获取命名空间列表
-const getNsOptions = async (env: string): Promise<void> => {
+const getNsOptions = async (env: string, flush = false): Promise<boolean> => {
   if (!env) {
     nsOptions.value = [];
-    return Promise.resolve();
+    searchForm.ns = "";
+    searchStore.setNamespace("");
+    return false;
   }
 
   try {
-    const res = await getPromNamespace(env);
+    const res = await getPromNamespace(env, flush);
     if (res.data) {
       nsOptions.value = res.data.map(item => item);
       if (
@@ -800,12 +836,19 @@ const getNsOptions = async (env: string): Promise<void> => {
         searchForm.ns = res.data[0] || "";
         searchStore.setNamespace(res.data[0] || "");
       }
+    } else {
+      nsOptions.value = [];
+      searchForm.ns = "";
+      searchStore.setNamespace("");
     }
-    return Promise.resolve();
+    return true;
   } catch (error) {
     console.error("获取命名空间列表失败:", error);
     ElMessage.error("获取命名空间列表失败");
-    return Promise.reject(error);
+    nsOptions.value = [];
+    searchForm.ns = "";
+    searchStore.setNamespace("");
+    return false;
   }
 };
 
@@ -1264,9 +1307,9 @@ onMounted(async () => {
 
 .method-radio-row {
   display: flex;
-  align-items: center;
-  gap: 12px;
   flex-wrap: nowrap;
+  gap: 12px;
+  align-items: center;
 }
 </style>
 
@@ -1281,8 +1324,8 @@ onMounted(async () => {
 
 .query-form {
   display: flex;
-  align-items: center;
   flex-wrap: nowrap;
+  align-items: center;
   width: 100%;
 }
 
@@ -1296,8 +1339,8 @@ onMounted(async () => {
 
 .endpoints-detail-container {
   padding: 16px;
-  border-radius: 4px;
   background-color: #f8f9fa;
+  border-radius: 4px;
 }
 
 .subset-container {
@@ -1305,17 +1348,17 @@ onMounted(async () => {
 }
 
 .subset-container h4 {
-  margin: 0 0 12px 0;
-  color: #409eff;
+  margin: 0 0 12px;
   font-size: 16px;
   font-weight: bold;
+  color: #409eff;
 }
 
 .subset-container h5 {
-  margin: 0 0 8px 0;
-  color: #606266;
+  margin: 0 0 8px;
   font-size: 14px;
   font-weight: bold;
+  color: #606266;
 }
 
 .addresses-section,
@@ -1331,24 +1374,24 @@ onMounted(async () => {
 }
 
 .edit-container {
-  height: 82vh;
   display: flex;
   flex-direction: column;
+  height: 82vh;
 }
 
 .yaml-editor-container {
-  flex: 1;
   display: flex;
+  flex: 1;
   flex-direction: column;
+  overflow: hidden;
   border: 1px solid #dcdfe6;
   border-radius: 4px;
-  overflow: hidden;
 }
 
 .editor-header {
   display: flex;
-  justify-content: space-between;
   align-items: center;
+  justify-content: space-between;
   padding: 12px 16px;
   background-color: #f5f7fa;
   border-bottom: 1px solid #dcdfe6;
@@ -1382,18 +1425,18 @@ onMounted(async () => {
 }
 
 .method-description {
-  margin-top: 20px;
   padding: 12px;
+  margin-top: 20px;
   background-color: #f5f7fa;
-  border-radius: 4px;
   border-left: 4px solid #409eff;
+  border-radius: 4px;
 }
 
 .method-description p {
   margin: 0;
-  color: #606266;
   font-size: 14px;
   line-height: 1.5;
+  color: #606266;
 }
 
 .table-pagination {

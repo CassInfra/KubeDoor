@@ -26,13 +26,13 @@ defineOptions({
 
 .card-header {
   display: flex;
-  justify-content: space-between;
   align-items: center;
+  justify-content: space-between;
 }
 
 .content {
   padding: 20px;
-  text-align: center;
   color: #666;
+  text-align: center;
 }
 </style>

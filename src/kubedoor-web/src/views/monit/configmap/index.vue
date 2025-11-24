@@ -11,7 +11,7 @@
           <el-select
             v-model="searchForm.env"
             placeholder="请选择K8S环境"
-            class="!w-[180px]"
+            class="!w-[220px]"
             filterable
             @change="handleEnvChange"
           >
@@ -25,21 +25,36 @@
         </el-form-item>
 
         <el-form-item label="命名空间">
-          <el-select
-            v-model="searchForm.ns"
-            placeholder="请选择命名空间"
-            class="!w-[180px]"
-            filterable
-            clearable
-            @change="handleSearch"
-          >
-            <el-option
-              v-for="item in nsOptions"
-              :key="item"
-              :label="item"
-              :value="item"
-            />
-          </el-select>
+          <div class="namespace-select-wrapper">
+            <el-select
+              v-model="searchForm.ns"
+              placeholder="请选择命名空间"
+              class="!w-[180px]"
+              filterable
+              clearable
+              @change="handleSearch"
+            >
+              <el-option
+                v-for="item in nsOptions"
+                :key="item"
+                :label="item"
+                :value="item"
+              />
+            </el-select>
+            <el-icon
+              :class="[
+                'namespace-refresh-icon',
+                {
+                  disabled: !searchForm.env || nsRefreshing,
+                  'is-loading': nsRefreshing
+                }
+              ]"
+              title="刷新命名空间"
+              @click="handleNamespaceRefresh"
+            >
+              <Refresh />
+            </el-icon>
+          </div>
         </el-form-item>
 
         <el-form-item label="关键字">
@@ -317,6 +332,7 @@ const searchForm = reactive({
 
 const envOptions = ref<string[]>([]);
 const nsOptions = ref<string[]>([]);
+const nsRefreshing = ref(false);
 const tableData = ref<any[]>([]);
 const loading = ref(false);
 
@@ -383,13 +399,13 @@ const getEnvOptions = async () => {
   }
 };
 
-const getNsOptions = async (env: string) => {
+const getNsOptions = async (env: string, flush = false): Promise<boolean> => {
   if (!env) {
     nsOptions.value = [];
-    return;
+    return false;
   }
   try {
-    const res = await getPromNamespace(env);
+    const res = await getPromNamespace(env, flush);
     if (res.data && res.data.length > 0) {
       nsOptions.value = res.data.map((item: string) => item);
       if (
@@ -408,9 +424,11 @@ const getNsOptions = async (env: string) => {
       searchStore.setNamespace("");
       tableData.value = [];
     }
+    return true;
   } catch (error) {
     console.error("获取命名空间失败:", error);
     ElMessage.error("获取命名空间失败");
+    return false;
   }
 };
 
@@ -422,6 +440,24 @@ const handleEnvChange = async (val: string) => {
     await getNsOptions(val);
   } else {
     tableData.value = [];
+  }
+};
+
+const handleNamespaceRefresh = async () => {
+  if (!searchForm.env || nsRefreshing.value) {
+    return;
+  }
+
+  nsRefreshing.value = true;
+  try {
+    const refreshed = await getNsOptions(searchForm.env, true);
+    if (refreshed) {
+      ElMessage.success("命名空间已刷新");
+    }
+  } catch (error) {
+    console.error("刷新命名空间列表失败:", error);
+  } finally {
+    nsRefreshing.value = false;
   }
 };
 
@@ -747,8 +783,8 @@ onMounted(async () => {
 
 .query-form {
   display: flex;
-  align-items: center;
   flex-wrap: nowrap;
+  align-items: center;
   width: 100%;
 }
 
@@ -761,24 +797,24 @@ onMounted(async () => {
 }
 
 .edit-container {
-  height: 82vh;
   display: flex;
   flex-direction: column;
+  height: 82vh;
 }
 
 .yaml-editor-container {
-  flex: 1;
   display: flex;
+  flex: 1;
   flex-direction: column;
+  overflow: hidden;
   border: 1px solid #dcdfe6;
   border-radius: 4px;
-  overflow: hidden;
 }
 
 .editor-header {
   display: flex;
-  justify-content: space-between;
   align-items: center;
+  justify-content: space-between;
   padding: 12px 16px;
   background-color: #f5f7fa;
   border-bottom: 1px solid #dcdfe6;
@@ -810,24 +846,24 @@ onMounted(async () => {
 }
 
 .method-description {
-  margin-top: 20px;
   padding: 12px;
+  margin-top: 20px;
   background-color: #f5f7fa;
-  border-radius: 4px;
   border-left: 4px solid #409eff;
+  border-radius: 4px;
 }
 
 .method-description p {
   margin: 0;
-  color: #606266;
   font-size: 14px;
   line-height: 1.5;
+  color: #606266;
 }
 
 .data-keys-container {
   display: flex;
-  gap: 6px;
   flex-wrap: wrap;
+  gap: 6px;
 }
 
 .ml-2 {

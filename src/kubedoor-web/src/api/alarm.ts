@@ -19,6 +19,8 @@ interface AlarmDetailParams {
   status?: string[];
   severity?: string[];
   startTime?: string;
+  namespace?: string;
+  pod?: string;
   page: number;
   pageSize: number;
 }
@@ -30,6 +32,8 @@ interface AlarmDetailTotalParams {
   status?: string[];
   severity?: string[];
   startTime?: string;
+  namespace?: string;
+  pod?: string;
 }
 
 export const getEnv = () => {
@@ -99,6 +103,8 @@ export const getAlarmDetail = ({
   status,
   severity,
   startTime,
+  namespace,
+  pod,
   page,
   pageSize
 }: AlarmDetailParams) => {
@@ -121,6 +127,12 @@ export const getAlarmDetail = ({
   }
   if (startTime) {
     conditions.push(`start_time >= '${startTime}'`);
+  }
+  if (namespace) {
+    conditions.push(`namespace = '${namespace}'`);
+  }
+  if (pod) {
+    conditions.push(`pod = '${pod}'`);
   }
 
   const whereClause =
@@ -152,7 +164,9 @@ export const getAlarmDetailTotal = ({
   operate,
   status,
   severity,
-  startTime
+  startTime,
+  namespace,
+  pod
 }: AlarmDetailTotalParams) => {
   const conditions = [];
 
@@ -173,6 +187,12 @@ export const getAlarmDetailTotal = ({
   }
   if (startTime) {
     conditions.push(`start_time >= '${startTime}'`);
+  }
+  if (namespace) {
+    conditions.push(`namespace = '${namespace}'`);
+  }
+  if (pod) {
+    conditions.push(`pod = '${pod}'`);
   }
 
   const whereClause =

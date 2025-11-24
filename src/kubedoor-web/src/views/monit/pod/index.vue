@@ -11,7 +11,7 @@
           <el-select
             v-model="searchForm.env"
             placeholder="请选择K8S环境"
-            class="!w-[180px]"
+            class="!w-[220px]"
             filterable
             @change="handleEnvChange"
           >
@@ -25,22 +25,37 @@
         </el-form-item>
 
         <el-form-item label="命名空间">
-          <el-select
-            v-model="searchForm.namespace"
-            placeholder="请选择命名空间"
-            class="!w-[180px]"
-            filterable
-            clearable
-            :disabled="!envOptions.length"
-            @change="handleNamespaceChange"
-          >
-            <el-option
-              v-for="item in nsOptions"
-              :key="item"
-              :label="item"
-              :value="item"
-            />
-          </el-select>
+          <div class="namespace-select-wrapper">
+            <el-select
+              v-model="searchForm.namespace"
+              placeholder="请选择命名空间"
+              class="!w-[180px]"
+              filterable
+              clearable
+              :disabled="!envOptions.length"
+              @change="handleNamespaceChange"
+            >
+              <el-option
+                v-for="item in nsOptions"
+                :key="item"
+                :label="item"
+                :value="item"
+              />
+            </el-select>
+            <el-icon
+              :class="[
+                'namespace-refresh-icon',
+                {
+                  disabled: !searchForm.env || nsRefreshing,
+                  'is-loading': nsRefreshing
+                }
+              ]"
+              title="刷新命名空间"
+              @click="handleNamespaceRefresh"
+            >
+              <Refresh />
+            </el-icon>
+          </div>
         </el-form-item>
 
         <el-form-item label="关键字">
@@ -90,6 +105,7 @@
         <el-table
           ref="tableRef"
           :data="paginatedTableData"
+          :default-sort="tableDefaultSort"
           style="width: 100%"
           stripe
           border
@@ -106,7 +122,19 @@
             show-overflow-tooltip
             align="center"
             sortable="custom"
-          />
+          >
+            <template #default="scope">
+              <el-tag
+                v-if="scope.row.namespace"
+                type="primary"
+                effect="plain"
+                size="small"
+              >
+                {{ scope.row.namespace }}
+              </el-tag>
+              <span v-else>-</span>
+            </template>
+          </el-table-column>
 
           <el-table-column
             prop="name"
@@ -181,7 +209,7 @@
           <el-table-column
             prop="pod_ip"
             label="Pod IP"
-            min-width="120"
+            min-width="100"
             align="center"
             show-overflow-tooltip
             sortable="custom"
@@ -311,7 +339,7 @@
           <el-table-column
             prop="creation_timestamp"
             label="创建时间"
-            min-width="120"
+            min-width="100"
             align="center"
             sortable="custom"
           >
@@ -319,88 +347,113 @@
               {{ formatCreationTime(scope.row.creation_timestamp) }}
             </template>
           </el-table-column>
-          <el-table-column label="操作" width="80" align="center" fixed="right">
+          <el-table-column
+            label="操作"
+            min-width="130"
+            align="center"
+            fixed="right"
+          >
             <template #default="podScope">
-              <el-dropdown>
-                <el-button type="primary" size="small"> 操作 </el-button>
-                <template #dropdown>
-                  <el-dropdown-menu>
-                    <el-dropdown-item
-                      @click="
-                        handleViewLogs(
-                          searchForm.env,
-                          podScope.row.namespace,
-                          podScope.row.name,
-                          extractDeploymentName(podScope.row.controlled_by)
-                        )
-                      "
-                      >日志</el-dropdown-item
-                    >
-                    <el-dropdown-item
-                      @click="
-                        handleModifyPod(
-                          searchForm.env,
-                          podScope.row.namespace,
-                          podScope.row.name,
-                          extractDeploymentName(podScope.row.controlled_by),
-                          podScope.row.controlled_by
-                        )
-                      "
-                      >隔离</el-dropdown-item
-                    >
-                    <el-dropdown-item
-                      @click="
-                        handleDeletePod(
-                          searchForm.env,
-                          podScope.row.namespace,
-                          podScope.row.name
-                        )
-                      "
-                      >删除</el-dropdown-item
-                    >
-                    <el-dropdown-item
-                      @click="
-                        handleAutoDump(
-                          searchForm.env,
-                          podScope.row.namespace,
-                          podScope.row.name
-                        )
-                      "
-                      >Dump</el-dropdown-item
-                    >
-                    <el-dropdown-item
-                      @click="
-                        handleAutoJstack(
-                          searchForm.env,
-                          podScope.row.namespace,
-                          podScope.row.name
-                        )
-                      "
-                      >Jstack</el-dropdown-item
-                    >
-                    <el-dropdown-item
-                      @click="
-                        handleAutoJfr(
-                          searchForm.env,
-                          podScope.row.namespace,
-                          podScope.row.name
-                        )
-                      "
-                      >JFR</el-dropdown-item
-                    >
-                    <el-dropdown-item
-                      @click="
-                        handleAutoJvmMem(
-                          searchForm.env,
-                          podScope.row.namespace,
-                          podScope.row.name
-                        )
-                      "
-                      >JVM</el-dropdown-item
-                    >
-                  </el-dropdown-menu>
-                </template>
-              </el-dropdown>
+              <div class="operation-cell">
+                <el-button
+                  type="warning"
+                  size="small"
+                  :disabled="!searchForm.env"
+                  plain
+                  @click="handleViewEvents(podScope.row)"
+                >
+                  事件
+                </el-button>
+                <el-button
+                  type="danger"
+                  size="small"
+                  :disabled="!searchForm.env"
+                  plain
+                  @click="handleViewAlarmDetail(podScope.row)"
+                >
+                  告警
+                </el-button>
+                <el-dropdown class="operation-dropdown">
+                  <el-button type="primary" size="small"> 操作 </el-button>
+                  <template #dropdown>
+                    <el-dropdown-menu>
+                      <el-dropdown-item
+                        @click="
+                          handleViewLogs(
+                            searchForm.env,
+                            podScope.row.namespace,
+                            podScope.row.name,
+                            extractDeploymentName(podScope.row.controlled_by)
+                          )
+                        "
+                        >日志</el-dropdown-item
+                      >
+                      <el-dropdown-item
+                        @click="
+                          handleModifyPod(
+                            searchForm.env,
+                            podScope.row.namespace,
+                            podScope.row.name,
+                            extractDeploymentName(podScope.row.controlled_by),
+                            podScope.row.controlled_by
+                          )
+                        "
+                        >隔离</el-dropdown-item
+                      >
+                      <el-dropdown-item
+                        @click="
+                          handleDeletePod(
+                            searchForm.env,
+                            podScope.row.namespace,
+                            podScope.row.name
+                          )
+                        "
+                        >删除</el-dropdown-item
+                      >
+                      <el-dropdown-item
+                        @click="
+                          handleAutoDump(
+                            searchForm.env,
+                            podScope.row.namespace,
+                            podScope.row.name
+                          )
+                        "
+                        >Dump</el-dropdown-item
+                      >
+                      <el-dropdown-item
+                        @click="
+                          handleAutoJstack(
+                            searchForm.env,
+                            podScope.row.namespace,
+                            podScope.row.name
+                          )
+                        "
+                        >Jstack</el-dropdown-item
+                      >
+                      <el-dropdown-item
+                        @click="
+                          handleAutoJfr(
+                            searchForm.env,
+                            podScope.row.namespace,
+                            podScope.row.name
+                          )
+                        "
+                        >JFR</el-dropdown-item
+                      >
+                      <el-dropdown-item
+                        @click="
+                          handleAutoJvmMem(
+                            searchForm.env,
+                            podScope.row.namespace,
+                            podScope.row.name
+                          )
+                        "
+                        >JVM</el-dropdown-item
+                      >
+                    </el-dropdown-menu>
+                  </template>
+                </el-dropdown>
+              </div>
             </template>
           </el-table-column>
         </el-table>
@@ -651,6 +704,7 @@ import { ElMessage, ElMessageBox } from "element-plus";
 import type { TableInstance } from "element-plus";
 import { Refresh } from "@element-plus/icons-vue";
 import { AnsiUp } from "ansi_up";
+import dayjs from "dayjs";
 import { getAgentNames } from "@/api/istio";
 import {
   getPromNamespace,
@@ -700,6 +754,7 @@ const searchForm = reactive<SearchForm>({
 
 const envOptions = ref<string[]>([]);
 const nsOptions = ref<string[]>([]);
+const nsRefreshing = ref(false);
 const tableData = ref<PodItem[]>([]);
 const tableRef = ref<TableInstance>();
 const selectedPods = ref<PodItem[]>([]);
@@ -708,7 +763,7 @@ const loading = ref(false);
 const appliedKeyword = ref("");
 const lastFetchedEnv = ref<string | null>(null);
 const lastFetchedNamespace = ref<string | null>(null);
-const pageSizeOptions = [100, 200, 500, 1000];
+const pageSizeOptions = [50, 100, 200, 500, 1000];
 const pageSize = ref<number>(pageSizeOptions[0]);
 const currentPage = ref(1);
 const resetPagination = () => {
@@ -799,6 +854,40 @@ const clearTableSelection = () => {
 
 const handleSelectionChange = (selection: PodItem[]) => {
   selectedPods.value = selection;
+};
+
+const handleViewEvents = (pod: PodItem) => {
+  if (!searchForm.env) {
+    ElMessage.warning("请先选择K8S环境");
+    return;
+  }
+  const endDate = dayjs();
+  const startDate = endDate.subtract(7, "day");
+  const params = new URLSearchParams({
+    start_time: startDate.format("YYYY-MM-DD"),
+    end_time: endDate.format("YYYY-MM-DD"),
+    k8s: searchForm.env,
+    limit: "50",
+    namespace: pod.namespace,
+    kind: "Pod",
+    name: pod.name
+  });
+  window.open(`/#/alarm/events?${params.toString()}`, "_blank");
+};
+
+const handleViewAlarmDetail = (pod: PodItem) => {
+  if (!searchForm.env) {
+    ElMessage.warning("请先选择K8S环境");
+    return;
+  }
+  const params = new URLSearchParams({
+    timeRange: "7",
+    env: searchForm.env,
+    status: "firing",
+    namespace: pod.namespace,
+    pod: pod.name
+  });
+  window.open(`/#/alarm/detail?${params.toString()}`, "_blank");
 };
 
 const formatCreationTime = (timestamp: string | null) => {
@@ -905,8 +994,16 @@ const sortByCreation = (a: PodItem, b: PodItem) => {
 
 type SortOrder = "ascending" | "descending" | null;
 
-const sortField = ref<string>("");
-const sortOrder = ref<SortOrder>(null);
+const DEFAULT_SORT_FIELD = "creation_timestamp";
+const DEFAULT_SORT_ORDER: Exclude<SortOrder, null> = "descending";
+
+const tableDefaultSort = {
+  prop: DEFAULT_SORT_FIELD,
+  order: DEFAULT_SORT_ORDER
+};
+
+const sortField = ref<string>(DEFAULT_SORT_FIELD);
+const sortOrder = ref<SortOrder>(DEFAULT_SORT_ORDER);
 
 const columnComparators: Record<string, (a: PodItem, b: PodItem) => number> = {
   current_cpu_cores: sortByCpu,
@@ -995,10 +1092,10 @@ const handleSortChange = ({
 };
 
 const clearSortState = () => {
-  sortField.value = "";
-  sortOrder.value = null;
+  sortField.value = DEFAULT_SORT_FIELD;
+  sortOrder.value = DEFAULT_SORT_ORDER;
   nextTick(() => {
-    tableRef.value?.clearSort?.();
+    tableRef.value?.sort?.(DEFAULT_SORT_FIELD, DEFAULT_SORT_ORDER);
   });
 };
 
@@ -2147,6 +2244,24 @@ const handleNamespaceChange = (value: string) => {
   clearTableSelection();
 };
 
+const handleNamespaceRefresh = async () => {
+  if (!searchForm.env || nsRefreshing.value) {
+    return;
+  }
+
+  nsRefreshing.value = true;
+  try {
+    const refreshed = await fetchNamespaceOptions(searchForm.env, true);
+    if (refreshed) {
+      ElMessage.success("命名空间已刷新");
+    }
+  } catch (error) {
+    console.error("刷新命名空间列表失败:", error);
+  } finally {
+    nsRefreshing.value = false;
+  }
+};
+
 const handleQuery = async () => {
   appliedKeyword.value = searchForm.keyword.trim();
   resetPagination();
@@ -2162,6 +2277,7 @@ const handleQuery = async () => {
 };
 
 const handleRefresh = async () => {
+  appliedKeyword.value = searchForm.keyword.trim();
   await fetchPods();
 };
 
@@ -2191,22 +2307,25 @@ const fetchEnvOptions = async () => {
   }
 };
 
-const fetchNamespaceOptions = async (env: string) => {
+const fetchNamespaceOptions = async (
+  env: string,
+  flush = false
+): Promise<boolean> => {
   if (!env) {
     nsOptions.value = [];
     searchForm.namespace = "";
     searchStore.setNamespace("");
-    return;
+    return false;
   }
   try {
-    const res = await getPromNamespace(env);
+    const res = await getPromNamespace(env, flush);
     const options = res.data || [];
     nsOptions.value = options;
 
     if (!options.length) {
       searchForm.namespace = "";
       searchStore.setNamespace("");
-      return;
+      return true;
     }
 
     if (!options.includes(searchForm.namespace)) {
@@ -2218,12 +2337,14 @@ const fetchNamespaceOptions = async (env: string) => {
     }
 
     searchStore.setNamespace(searchForm.namespace || "");
+    return true;
   } catch (error) {
     console.error("获取命名空间列表失败:", error);
     ElMessage.error("获取命名空间列表失败");
     nsOptions.value = [];
     searchForm.namespace = "";
     searchStore.setNamespace("");
+    return false;
   }
 };
 
@@ -2303,8 +2424,8 @@ onBeforeUnmount(() => {
 
 .query-form {
   display: flex;
-  align-items: center;
   flex-wrap: nowrap;
+  align-items: center;
   width: 100%;
 }
 
@@ -2331,18 +2452,18 @@ onBeforeUnmount(() => {
 }
 
 .container-status-emoji {
+  display: inline-flex;
+  align-items: center;
   font-size: 14px;
   line-height: 1;
   cursor: default;
-  display: inline-flex;
-  align-items: center;
 }
 
 .container-tooltip {
+  max-width: 360px;
   margin: 0;
   font-size: 12px;
   line-height: 1.4;
-  max-width: 360px;
   white-space: pre-wrap;
 }
 
@@ -2385,24 +2506,24 @@ onBeforeUnmount(() => {
 }
 
 .edit-container {
-  height: 82vh;
   display: flex;
   flex-direction: column;
+  height: 82vh;
 }
 
 .yaml-editor-container {
-  flex: 1;
   display: flex;
+  flex: 1;
   flex-direction: column;
+  overflow: hidden;
   border: 1px solid #dcdfe6;
   border-radius: 4px;
-  overflow: hidden;
 }
 
 .editor-header {
   display: flex;
-  justify-content: space-between;
   align-items: center;
+  justify-content: space-between;
   padding: 12px 16px;
   background-color: #f5f7fa;
   border-bottom: 1px solid #dcdfe6;
@@ -2434,18 +2555,18 @@ onBeforeUnmount(() => {
 }
 
 .method-description {
-  margin-top: 20px;
   padding: 12px;
+  margin-top: 20px;
   background-color: #f5f7fa;
-  border-radius: 4px;
   border-left: 4px solid #409eff;
+  border-radius: 4px;
 }
 
 .method-description p {
   margin: 0;
-  color: #606266;
   font-size: 14px;
   line-height: 1.5;
+  color: #606266;
 }
 
 .log-container {
@@ -2472,9 +2593,9 @@ onBeforeUnmount(() => {
 
 .log-controls-header {
   display: flex;
+  flex-wrap: wrap;
   gap: 4px;
   align-items: center;
-  flex-wrap: wrap;
 }
 
 .log-controls-header .el-button {
@@ -2485,26 +2606,26 @@ onBeforeUnmount(() => {
 
 .log-status {
   display: flex;
+  gap: 6px;
   align-items: center;
   margin-left: 12px;
-  gap: 6px;
 }
 
 .status-connected {
-  color: #67c23a;
   font-weight: 600;
+  color: #67c23a;
 }
 
 .status-disconnected {
-  color: #f56c6c;
   font-weight: 600;
+  color: #f56c6c;
 }
 
 .log-search-container {
   display: flex;
-  align-items: center;
-  gap: 8px;
   flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
 }
 
 .search-info {
@@ -2555,29 +2676,45 @@ onBeforeUnmount(() => {
 }
 
 .search-highlight {
-  background: rgba(247, 186, 29, 0.4);
-  color: #fff;
   padding: 0 2px;
+  color: #fff;
+  background: rgb(247 186 29 / 40%);
   border-radius: 2px;
 }
 
 .search-highlight-current {
-  background: rgba(64, 158, 255, 0.6);
-  color: #fff;
   padding: 0 2px;
+  color: #fff;
+  background: rgb(64 158 255 / 60%);
   border-radius: 2px;
-  box-shadow: 0 0 0 1px rgba(64, 158, 255, 0.8);
+  box-shadow: 0 0 0 1px rgb(64 158 255 / 80%);
 }
 
 .result-content {
   font-size: 13px;
-  white-space: pre-wrap;
   word-break: break-all;
+  white-space: pre-wrap;
 }
 
 .table-pagination {
   display: flex;
   justify-content: flex-end;
   margin-top: 12px;
+}
+
+.operation-cell {
+  display: flex;
+  flex-wrap: nowrap;
+  gap: 8px;
+  align-items: center;
+  justify-content: center;
+}
+
+.operation-cell > .el-button + .el-button {
+  margin-left: 0;
+}
+
+.operation-dropdown {
+  flex-shrink: 0;
 }
 </style>

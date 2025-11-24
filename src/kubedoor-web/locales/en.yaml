@@ -83,6 +83,7 @@ menus:
   resourceCollection: Resource Collection
   resourceStatistics: Resource Statistics
   resourceMonit: Resource Management
+  k8sOverview: K8s Overview
   RealtimeResource: Realtime Resource
   resourceMonitk8s: Resource K8S
   resourceMonitnode: Resource Node

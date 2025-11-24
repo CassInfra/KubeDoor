@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref } from "vue";
+import { computed, reactive, ref, watch } from "vue";
 import { transformI18n } from "@/plugins/i18n";
 import { useResource } from "./utils/hook";
 import { PureTableBar } from "@/components/RePureTableBar";
@@ -48,6 +48,109 @@ const {
   onChangeCapacity,
   onReboot
 } = useResource(tableRef, searchStore);
+
+type SortOrder = "ascending" | "descending" | "";
+interface SortState {
+  prop: string;
+  order: SortOrder;
+}
+
+const pageSizeOptions = [50, 100, 200, 500, 1000];
+const defaultSort: SortState = { prop: "p95_pod_cpu_pct", order: "descending" };
+const pagination = reactive({
+  currentPage: 1,
+  pageSize: pageSizeOptions[0],
+  pageSizes: pageSizeOptions
+});
+const sortState = ref<SortState>({ ...defaultSort });
+
+const sortedData = computed(() => {
+  const data = [...dataList.value];
+  const { prop, order } = sortState.value;
+  if (!prop || !order) return data;
+  const activeOrder = order as Exclude<SortOrder, "">;
+  return data.sort((a: Record<string, unknown>, b: Record<string, unknown>) =>
+    compareValues(a[prop], b[prop], activeOrder)
+  );
+});
+
+const paginatedData = computed(() => {
+  const start = (pagination.currentPage - 1) * pagination.pageSize;
+  return sortedData.value.slice(start, start + pagination.pageSize);
+});
+
+const totalItems = computed(() => dataList.value.length);
+
+function handleSortChange({ prop, order }: { prop: string; order: SortOrder }) {
+  if (!prop || !order) {
+    sortState.value = { prop: "", order: "" };
+    return;
+  }
+  sortState.value = { prop, order };
+  pagination.currentPage = 1;
+}
+
+function handlePageSizeChange(size: number) {
+  pagination.pageSize = size;
+  pagination.currentPage = 1;
+}
+
+function handleCurrentChange(page: number) {
+  pagination.currentPage = page;
+}
+
+function compareValues(
+  valueA: unknown,
+  valueB: unknown,
+  order: Exclude<SortOrder, "">
+) {
+  const direction = order === "ascending" ? 1 : -1;
+
+  if (valueA == null && valueB == null) return 0;
+  if (valueA == null) return -direction;
+  if (valueB == null) return direction;
+
+  const numA = Number(valueA);
+  const numB = Number(valueB);
+  const bothNumbers = !Number.isNaN(numA) && !Number.isNaN(numB);
+
+  if (bothNumbers) {
+    return (numA - numB) * direction;
+  }
+
+  return (
+    String(valueA).localeCompare(String(valueB), undefined, {
+      numeric: true,
+      sensitivity: "base"
+    }) * direction
+  );
+}
+
+watch(
+  dataList,
+  () => {
+    pagination.currentPage = 1;
+  },
+  { deep: false }
+);
+
+watch(
+  () => ({
+    total: dataList.value.length,
+    size: pagination.pageSize
+  }),
+  ({ total }) => {
+    if (total === 0) {
+      pagination.currentPage = 1;
+      return;
+    }
+    const maxPage = Math.max(1, Math.ceil(total / pagination.pageSize));
+    if (pagination.currentPage > maxPage) {
+      pagination.currentPage = maxPage;
+    }
+  },
+  { immediate: true }
+);
 </script>
 
 <template>
@@ -62,7 +165,7 @@ const {
           <el-select
             v-model="queryForm.env"
             :placeholder="transformI18n('resource.placeholder')"
-            class="!w-[180px]"
+            class="!w-[220px]"
             filterable
             @change="onEnvChange"
           >
@@ -215,10 +318,11 @@ const {
             :adaptiveConfig="{ offsetBottom: 28 }"
             table-layout="auto"
             :loading="loading"
-            :data="dataList"
+            :data="paginatedData"
             :columns="dynamicColumns"
-            :default-sort="{ prop: 'p95_pod_cpu_pct', order: 'descending' }"
+            :default-sort="defaultSort"
             @selection-change="handleSelectionChange"
+            @sort-change="handleSortChange"
           >
             <template #operation="{ row }">
               <el-button
@@ -252,6 +356,18 @@ const {
               </el-button> -->
             </template>
           </pure-table>
+          <div class="pagination-container">
+            <el-pagination
+              background
+              layout="sizes, prev, pager, next, jumper, ->, total"
+              :total="totalItems"
+              :page-size="pagination.pageSize"
+              :current-page="pagination.currentPage"
+              :page-sizes="pagination.pageSizes"
+              @size-change="handlePageSizeChange"
+              @current-change="handleCurrentChange"
+            />
+          </div>
         </template>
       </PureTableBar>
     </div>
@@ -275,5 +391,11 @@ const {
   :deep(.el-form-item) {
     margin-bottom: 16px;
   }
+}
+
+.pagination-container {
+  display: flex;
+  justify-content: flex-end;
+  padding: 16px 0;
 }
 </style>

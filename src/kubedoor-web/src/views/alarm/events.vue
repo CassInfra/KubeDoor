@@ -20,7 +20,6 @@
               format="YYYY-MM-DD"
               value-format="YYYY-MM-DD"
               style="width: 220px"
-              @change="onDateRangeChange"
             />
           </div>
 
@@ -32,7 +31,6 @@
               placeholder="请选择K8S集群"
               filterable
               style="width: 180px"
-              @change="onK8sChange"
             >
               <el-option
                 v-for="item in k8sList"
@@ -53,7 +51,6 @@
               clearable
               :disabled="!selectedK8s"
               style="width: 100px"
-              @change="onNamespaceChange"
               @clear="() => (selectedNamespace = '[全部]')"
             >
               <el-option
@@ -166,14 +163,10 @@
             </el-button>
           </div>
 
-          <!-- 查询按钮 -->
+          <!-- 刷新按钮 -->
           <div class="filter-item">
-            <el-button
-              type="primary"
-              :loading="loading"
-              @click="queryEventsData"
-            >
-              查询
+            <el-button type="primary" :loading="loading" @click="handleRefresh">
+              刷新
             </el-button>
           </div>
 
@@ -261,6 +254,7 @@
                 placeholder="请选择Limit"
                 style="width: 100px"
               >
+                <el-option label="50" :value="50" />
                 <el-option label="100" :value="100" />
                 <el-option label="200" :value="200" />
                 <el-option label="300" :value="300" />
@@ -304,7 +298,7 @@
             </el-tag>
           </template>
         </el-table-column>
-        <el-table-column label="级别" align="center" width="80">
+        <el-table-column label="级别" align="center" width="90">
           <template #default="{ row }">
             <el-tag
               :type="
@@ -328,17 +322,19 @@
           prop="2"
         >
           <template #default="{ row }">
-            {{ row[2] }}
+            <span :style="getCountStyle(row[2])">{{ row[2] }}</span>
           </template>
         </el-table-column>
-        <el-table-column label="类型" width="80" show-overflow-tooltip>
+        <el-table-column
+          label="类型"
+          width="100"
+          align="center"
+          show-overflow-tooltip
+        >
           <template #default="{ row }">
-            {{ row[3] }}
-          </template>
-        </el-table-column>
-        <el-table-column label="K8S集群" width="120" show-overflow-tooltip>
-          <template #default="{ row }">
-            {{ row[4] }}
+            <el-tag size="small" :type="success">
+              {{ row[3] || "-" }}
+            </el-tag>
           </template>
         </el-table-column>
         <el-table-column label="命名空间" width="100">
@@ -353,7 +349,7 @@
         </el-table-column>
         <el-table-column label="原因" width="140" show-overflow-tooltip>
           <template #default="{ row }">
-            <span style="color: #ff5555">{{ row[7] }}</span>
+            <span style="color: #f55">{{ row[7] }}</span>
           </template>
         </el-table-column>
         <el-table-column label="消息" min-width="200" show-overflow-tooltip>
@@ -361,15 +357,17 @@
             {{ row[8] }}
           </template>
         </el-table-column>
-        <el-table-column label="首次时间" width="150">
+        <el-table-column label="首次时间" width="160">
           <template #default="{ row }">
-            {{ new Date(row[9]).toLocaleString() }}
+            <span style="font-weight: bold; color: #409eff">
+              {{ formatEventDate(row[9]) }}
+            </span>
           </template>
         </el-table-column>
-        <el-table-column label="最后时间" width="150">
+        <el-table-column label="最后时间" width="160">
           <template #default="{ row }">
-            <span style="color: #409eff; font-weight: bold">{{
-              new Date(row[10]).toLocaleString()
+            <span style="font-weight: bold; color: #409eff">{{
+              formatEventDate(row[10])
             }}</span>
           </template>
         </el-table-column>
@@ -394,15 +392,28 @@
 </template>
 
 <script lang="ts" setup>
-import { ref, onMounted, watch } from "vue";
+import { ref, onMounted, watch, nextTick } from "vue";
+import { useRoute, useRouter } from "vue-router";
+import type { LocationQueryRaw, LocationQueryValue } from "vue-router";
 import { ElMessage } from "element-plus";
+import dayjs from "dayjs";
 import { ArrowDown } from "@element-plus/icons-vue";
 import { getAgentNames } from "@/api/istio";
 import { getEventsMenu, queryEvents } from "@/api/alarm";
 import { useSearchStoreHook } from "@/store/modules/search";
 const searchStore = useSearchStoreHook();
+const route = useRoute();
+const router = useRouter();
+
+const getDefaultDateRange = (): [string, string] => {
+  const now = new Date();
+  const beijingTime = new Date(now.getTime() + 8 * 60 * 60 * 1000);
+  const today = beijingTime.toISOString().split("T")[0];
+  return [today, today];
+};
+
 // 响应式数据
-const dateRange = ref<[string, string] | null>(null);
+const dateRange = ref<[string, string] | null>(getDefaultDateRange());
 const selectedK8s = ref<string>(searchStore.env || "");
 const selectedNamespace = ref<string>("");
 const selectedKind = ref<string>("");
@@ -414,7 +425,7 @@ const showAdvancedFilters = ref<boolean>(false);
 const selectedLevel = ref<string>("");
 const selectedCount = ref<number | null>(null);
 const selectedMessage = ref<string>("");
-const selectedLimit = ref<number>(100);
+const selectedLimit = ref<number>(50);
 const k8sList = ref<string[]>([]);
 const namespaceList = ref<string[]>([]);
 const kindList = ref<string[]>([]);
@@ -426,12 +437,287 @@ const eventsMenuData = ref<Record<string, any[]> | null>(null);
 const eventsData = ref<any[]>([]);
 const loading = ref(false);
 
+const getStringFromQuery = (
+  value: LocationQueryValue | LocationQueryValue[] | undefined
+): string | undefined => {
+  if (value === undefined || value === null) {
+    return undefined;
+  }
+  const list = Array.isArray(value) ? value : [value];
+  for (const item of list) {
+    const normalized = (item ?? "").toString().trim();
+    if (normalized.length > 0) {
+      return normalized;
+    }
+  }
+  return undefined;
+};
+
+const getNumberFromQuery = (
+  value: LocationQueryValue | LocationQueryValue[] | undefined
+): number | undefined => {
+  const str = getStringFromQuery(value);
+  if (str === undefined) {
+    return undefined;
+  }
+  const parsed = Number(str);
+  return Number.isNaN(parsed) ? undefined : parsed;
+};
+
+const areDateRangesEqual = (
+  a: [string, string] | null,
+  b: [string, string] | null
+) => {
+  if (a === b) {
+    return true;
+  }
+  if (!a || !b) {
+    return false;
+  }
+  return a[0] === b[0] && a[1] === b[1];
+};
+
+const buildRouteQueryFromFilters = (): Record<string, string | undefined> => {
+  const query: Record<string, string | undefined> = {};
+  if (dateRange.value && dateRange.value.length === 2) {
+    query.start_time = dateRange.value[0];
+    query.end_time = dateRange.value[1];
+  }
+  if (selectedK8s.value) {
+    query.k8s = selectedK8s.value;
+  }
+  const isPlaceholder = (value?: string) =>
+    !value || value === "[全部]" || value === "[空值]";
+
+  if (!isPlaceholder(selectedNamespace.value)) {
+    query.namespace = selectedNamespace.value;
+  }
+  if (!isPlaceholder(selectedKind.value)) {
+    query.kind = selectedKind.value;
+  }
+  if (!isPlaceholder(selectedName.value)) {
+    query.name = selectedName.value;
+  }
+  if (!isPlaceholder(selectedReason.value)) {
+    query.reason = selectedReason.value;
+  }
+  if (!isPlaceholder(selectedReportingComponent.value)) {
+    query.reporting_component = selectedReportingComponent.value;
+  }
+  if (!isPlaceholder(selectedReportingInstance.value)) {
+    query.reporting_instance = selectedReportingInstance.value;
+  }
+  if (selectedLevel.value) {
+    query.level = selectedLevel.value;
+  }
+  if (selectedCount.value !== null && selectedCount.value !== undefined) {
+    query.count = String(selectedCount.value);
+  }
+  if (selectedMessage.value) {
+    query.message = selectedMessage.value;
+  }
+  if (selectedLimit.value) {
+    query.limit = String(selectedLimit.value);
+  }
+  return query;
+};
+
+let pendingRouteSyncs = 0;
+let applyingRouteToFilters = false;
+let filtersInitialized = false;
+let filterWatcherSuppressDepth = 0;
+let allowWatcherDrivenReloads = false;
+let routeWatcherReady = false;
+let agentNamesCache: string[] | null = null;
+let agentNamesPromise: Promise<string[]> | null = null;
+
+const syncRouteQueryFromFilters = () => {
+  const serializedQuery = buildRouteQueryFromFilters();
+  const keys = new Set([
+    ...Object.keys(route.query),
+    ...Object.keys(serializedQuery)
+  ]);
+  const nextQuery: LocationQueryRaw = { ...route.query };
+  let changed = false;
+
+  const setOrDelete = (key: string, value: string | undefined) => {
+    const current = route.query[key];
+    const normalizedCurrent = Array.isArray(current)
+      ? current[current.length - 1]
+      : (current as string | undefined);
+    if (value === undefined) {
+      if (normalizedCurrent !== undefined) {
+        delete nextQuery[key];
+        changed = true;
+      }
+      return;
+    }
+    if (normalizedCurrent !== value) {
+      nextQuery[key] = value;
+      changed = true;
+    }
+  };
+
+  keys.forEach(key => {
+    setOrDelete(key, serializedQuery[key]);
+  });
+
+  if (changed) {
+    pendingRouteSyncs += 1;
+    router
+      .replace({
+        path: route.path,
+        query: nextQuery,
+        hash: route.hash
+      })
+      .finally(() => {
+        pendingRouteSyncs = Math.max(0, pendingRouteSyncs - 1);
+      });
+  }
+};
+
+const applyRouteQueryToFilters = () => {
+  let changed = false;
+
+  runWithFilterWatcherSuppressed(() => {
+    const start = getStringFromQuery(route.query.start_time);
+    const end = getStringFromQuery(route.query.end_time);
+    const resolvedRange = (
+      start && end ? [start, end] : (dateRange.value ?? getDefaultDateRange())
+    ) as [string, string];
+    if (!areDateRangesEqual(dateRange.value, resolvedRange)) {
+      dateRange.value = resolvedRange;
+      changed = true;
+    }
+
+    const resolveString = (current: string, incoming?: string) =>
+      incoming !== undefined ? incoming : current;
+
+    const resolveNumber = (current: number, incoming?: number) =>
+      incoming !== undefined ? incoming : current;
+
+    const nextK8s = resolveString(
+      selectedK8s.value || searchStore.env || k8sList.value[0] || "",
+      getStringFromQuery(route.query.k8s)
+    );
+    if (selectedK8s.value !== nextK8s) {
+      selectedK8s.value = nextK8s;
+      changed = true;
+    }
+
+    const stringTargets: Array<
+      [
+        { value: string },
+        string,
+        LocationQueryValue | LocationQueryValue[] | undefined
+      ]
+    > = [
+      [selectedNamespace, selectedNamespace.value || "", route.query.namespace],
+      [selectedKind, selectedKind.value || "", route.query.kind],
+      [selectedName, selectedName.value || "", route.query.name],
+      [selectedReason, selectedReason.value || "", route.query.reason],
+      [
+        selectedReportingComponent,
+        selectedReportingComponent.value || "",
+        route.query.reporting_component
+      ],
+      [
+        selectedReportingInstance,
+        selectedReportingInstance.value || "",
+        route.query.reporting_instance
+      ],
+      [selectedLevel, selectedLevel.value || "", route.query.level],
+      [selectedMessage, selectedMessage.value || "", route.query.message]
+    ];
+
+    stringTargets.forEach(([target, fallback, source]) => {
+      const nextValue = resolveString(fallback, getStringFromQuery(source));
+      if (target.value !== nextValue) {
+        target.value = nextValue;
+        changed = true;
+      }
+    });
+
+    const countValue = getNumberFromQuery(route.query.count);
+    const resolvedCount = countValue ?? null;
+    if (selectedCount.value !== resolvedCount) {
+      selectedCount.value = resolvedCount;
+      changed = true;
+    }
+
+    const limitValue = resolveNumber(
+      selectedLimit.value || 100,
+      getNumberFromQuery(route.query.limit)
+    );
+    if (selectedLimit.value !== limitValue) {
+      selectedLimit.value = limitValue;
+      changed = true;
+    }
+  });
+
+  return changed;
+};
+
 // 格式化日期为本地时间字符串
 const formatLocalDate = (date: Date): string => {
   const year = date.getFullYear();
   const month = String(date.getMonth() + 1).padStart(2, "0");
   const day = String(date.getDate()).padStart(2, "0");
   return `${year}-${month}-${day}`;
+};
+
+const formatEventDate = (value: string | number | Date | null) => {
+  if (!value) {
+    return "-";
+  }
+  const parsed = dayjs(value);
+  if (!parsed.isValid()) {
+    return value as string;
+  }
+  return parsed.format("YY/MM/DD HH:mm:ss");
+};
+
+const runWithFilterWatcherSuppressed = (fn: () => void) => {
+  filterWatcherSuppressDepth += 1;
+  try {
+    fn();
+  } finally {
+    nextTick(() => {
+      filterWatcherSuppressDepth = Math.max(0, filterWatcherSuppressDepth - 1);
+    });
+  }
+};
+
+const areFilterWatchersSuppressed = () => filterWatcherSuppressDepth > 0;
+
+const getCountStyle = (value: string | number) => {
+  const count = Number(value) || 0;
+  return {
+    fontWeight: 600,
+    color: count >= 10 ? "#f56c6c" : "#303133"
+  };
+};
+
+const getEventTypeTagType = (value: string) => {
+  if (!value) {
+    return "info";
+  }
+  const lower = value.toLowerCase();
+  if (lower.includes("warn")) {
+    return "warning";
+  }
+  if (lower.includes("normal") || lower.includes("success")) {
+    return "success";
+  }
+  if (
+    lower.includes("error") ||
+    lower.includes("fail") ||
+    lower.includes("crit") ||
+    lower.includes("alarm")
+  ) {
+    return "danger";
+  }
+  return "info";
 };
 
 // 时间快捷选项
@@ -510,41 +796,47 @@ const shortcuts = [
 // 加载K8S列表
 const loadK8sList = async () => {
   try {
-    const response = await getAgentNames();
-    console.log("K8S API响应:", response);
-    if (response.success && response.data) {
-      console.log("K8S数据:", response.data);
-      // 检查数据格式，如果是字符串数组直接使用，如果是对象数组则取第一个字段
-      if (Array.isArray(response.data) && response.data.length > 0) {
-        if (typeof response.data[0] === "string") {
-          k8sList.value = response.data;
-        } else if (Array.isArray(response.data[0])) {
-          k8sList.value = response.data.map(item => item[0]);
-        } else {
-          // 如果是对象，尝试获取第一个属性值
-          k8sList.value = response.data.map(
+    if (!agentNamesCache) {
+      if (!agentNamesPromise) {
+        agentNamesPromise = getAgentNames();
+      }
+      const response = await agentNamesPromise;
+      agentNamesPromise = null;
+      if (response.success && Array.isArray(response.data)) {
+        if (response.data.length > 0 && typeof response.data[0] === "string") {
+          agentNamesCache = response.data;
+        } else if (
+          response.data.length > 0 &&
+          Array.isArray(response.data[0])
+        ) {
+          agentNamesCache = response.data.map(item => item[0]);
+        } else if (
+          response.data.length > 0 &&
+          typeof response.data[0] === "object"
+        ) {
+          agentNamesCache = response.data.map(
             item => Object.values(item)[0] as string
           );
+        } else {
+          agentNamesCache = [];
         }
-        // 优先使用 store 中的值，如果不存在或无效则使用第一个
+      } else {
+        agentNamesCache = [];
+      }
+    }
+
+    if (agentNamesCache) {
+      runWithFilterWatcherSuppressed(() => {
+        k8sList.value = [...agentNamesCache!];
         if (k8sList.value.length > 0) {
           if (searchStore.env && k8sList.value.includes(searchStore.env)) {
             selectedK8s.value = searchStore.env;
           } else {
             selectedK8s.value = k8sList.value[0];
-            // 更新 store 中的值
             searchStore.setEnv(k8sList.value[0]);
           }
-
-          // 如果有时间范围，自动加载事件菜单数据
-          if (dateRange.value) {
-            loadEventsMenu();
-          }
         }
-      }
-      console.log("处理后的K8S列表:", k8sList.value);
-    } else {
-      console.log("K8S API返回数据为空或失败");
+      });
     }
   } catch (error) {
     console.error("加载K8S列表失败:", error);
@@ -559,36 +851,45 @@ const toggleAdvancedFilters = () => {
 
 // 重置筛选条件
 const resetFilters = () => {
-  // 重置时间范围为今天（北京时间）
-  const now = new Date();
-  // 转换为北京时间（UTC+8）
-  const beijingTime = new Date(now.getTime() + 8 * 60 * 60 * 1000);
-  const today = beijingTime.toISOString().split("T")[0]; // 格式化为 YYYY-MM-DD
-  dateRange.value = [today, today];
+  runWithFilterWatcherSuppressed(() => {
+    dateRange.value = getDefaultDateRange();
 
-  // 重置K8S选择为第一个
-  if (k8sList.value.length > 0) {
-    selectedK8s.value = k8sList.value[0];
-  }
+    if (k8sList.value.length > 0) {
+      if (searchStore.env && k8sList.value.includes(searchStore.env)) {
+        selectedK8s.value = searchStore.env;
+      } else {
+        selectedK8s.value = k8sList.value[0];
+      }
+    } else {
+      selectedK8s.value = searchStore.env || "";
+    }
 
-  // 重置其他筛选条件
-  selectedNamespace.value = "[全部]";
-  selectedName.value = "[全部]";
-  selectedReason.value = "";
-  selectedLevel.value = "";
-  selectedReportingComponent.value = "[全部]";
-  selectedReportingInstance.value = "[全部]";
-  selectedCount.value = "";
-  selectedMessage.value = "";
-  selectedLimit.value = 100;
+    selectedNamespace.value = "[全部]";
+    selectedKind.value = "";
+    selectedName.value = "[全部]";
+    selectedReason.value = "";
+    selectedLevel.value = "";
+    selectedReportingComponent.value = "[全部]";
+    selectedReportingInstance.value = "[全部]";
+    selectedCount.value = null;
+    selectedMessage.value = "";
+    selectedLimit.value = 100;
+  });
 
-  // 清空事件数据
   eventsData.value = [];
-
-  // 收起高级筛选
   showAdvancedFilters.value = false;
 
   ElMessage.success("筛选条件已重置");
+  handleLocalFilterChange({ reloadMenu: true, clearMenu: true, force: true });
+};
+
+const handleRefresh = () => {
+  if (!selectedK8s.value || !dateRange.value) {
+    ElMessage.warning("请选择K8S集群和时间范围");
+    return;
+  }
+  syncRouteQueryFromFilters();
+  requestDataReload();
 };
 
 // 查询事件数据
@@ -715,39 +1016,40 @@ const loadEventsMenu = async () => {
     console.log("事件菜单API响应:", response);
     if (response.success && response.data) {
       // 处理菜单字段的数据
-      namespaceList.value = response.data.namespace || [];
-      kindList.value = response.data.kind || [];
-      nameList.value = response.data.name || [];
-      reasonList.value = response.data.reason || [];
-      reportingComponentList.value = response.data.reportingComponent || [];
-      reportingInstanceList.value = response.data.reportingInstance || [];
+      runWithFilterWatcherSuppressed(() => {
+        namespaceList.value = response.data.namespace || [];
+        kindList.value = response.data.kind || [];
+        nameList.value = response.data.name || [];
+        reasonList.value = response.data.reason || [];
+        reportingComponentList.value = response.data.reportingComponent || [];
+        reportingInstanceList.value = response.data.reportingInstance || [];
 
-      // 自动选择每个字段的第一个值（仅在没有选中值时）
-      if (namespaceList.value.length > 0 && !selectedNamespace.value) {
-        selectedNamespace.value = namespaceList.value[0];
-      }
+        if (namespaceList.value.length > 0 && !selectedNamespace.value) {
+          selectedNamespace.value = namespaceList.value[0];
+        }
 
-      if (kindList.value.length > 0 && !selectedKind.value) {
-        selectedKind.value = kindList.value[0];
-      }
-      if (nameList.value.length > 0 && !selectedName.value) {
-        selectedName.value = nameList.value[0];
-      }
-      if (reasonList.value.length > 0 && !selectedReason.value) {
-        selectedReason.value = reasonList.value[0];
-      }
-      if (
-        reportingComponentList.value.length > 0 &&
-        !selectedReportingComponent.value
-      ) {
-        selectedReportingComponent.value = reportingComponentList.value[0];
-      }
-      if (
-        reportingInstanceList.value.length > 0 &&
-        !selectedReportingInstance.value
-      ) {
-        selectedReportingInstance.value = reportingInstanceList.value[0];
-      }
+        if (kindList.value.length > 0 && !selectedKind.value) {
+          selectedKind.value = kindList.value[0];
+        }
+        if (nameList.value.length > 0 && !selectedName.value) {
+          selectedName.value = nameList.value[0];
+        }
+        if (reasonList.value.length > 0 && !selectedReason.value) {
+          selectedReason.value = reasonList.value[0];
+        }
+        if (
+          reportingComponentList.value.length > 0 &&
+          !selectedReportingComponent.value
+        ) {
+          selectedReportingComponent.value = reportingComponentList.value[0];
+        }
+        if (
+          reportingInstanceList.value.length > 0 &&
+          !selectedReportingInstance.value
+        ) {
+          selectedReportingInstance.value = reportingInstanceList.value[0];
+        }
+      });
 
       console.log("处理后的菜单数据:", {
         namespace: namespaceList.value,
@@ -786,67 +1088,173 @@ const loadEventsMenu = async () => {
   }
 };
 
-// 事件处理函数
-const onDateRangeChange = () => {
-  eventsMenuData.value = null;
-
-  // 如果有K8S和时间范围，重新加载事件菜单数据
-  if (selectedK8s.value && dateRange.value) {
-    loadEventsMenu();
-  }
-};
-
-const onK8sChange = () => {
-  // 清空菜单数据但不清空选中值
+const clearMenuLists = () => {
   namespaceList.value = [];
   kindList.value = [];
   nameList.value = [];
   reasonList.value = [];
   reportingComponentList.value = [];
   reportingInstanceList.value = [];
-  eventsMenuData.value = null;
-
-  // 当选择K8S时，如果有时间范围，则加载事件菜单数据
-  if (selectedK8s.value && dateRange.value) {
-    loadEventsMenu();
-  }
 };
 
-const onNamespaceChange = () => {
-  // 清空事件菜单数据但不清空选中值
-  eventsMenuData.value = null;
-
-  // 如果有K8S和时间范围，重新加载事件菜单数据
-  if (selectedK8s.value && dateRange.value) {
-    loadEventsMenu();
-  }
+type RequestReloadOptions = {
+  reloadMenu?: boolean;
+  clearMenu?: boolean;
+  force?: boolean;
 };
 
-// 监听 K8S 选择变化，更新 store
+let reloadScheduled = false;
+let menuReloadNeeded = false;
+
+const requestDataReload = (options: RequestReloadOptions = {}) => {
+  const { reloadMenu = false, clearMenu = false } = options;
+  if (clearMenu) {
+    clearMenuLists();
+  }
+  if (reloadMenu) {
+    menuReloadNeeded = true;
+  }
+  if (reloadScheduled) {
+    return;
+  }
+  reloadScheduled = true;
+  Promise.resolve().then(async () => {
+    try {
+      if (!filtersInitialized || applyingRouteToFilters) {
+        return;
+      }
+      if (!selectedK8s.value || !dateRange.value) {
+        return;
+      }
+      const shouldReloadMenu = menuReloadNeeded;
+      menuReloadNeeded = false;
+      if (shouldReloadMenu) {
+        await loadEventsMenu();
+      }
+      await queryEventsData();
+    } catch (error) {
+      console.error("刷新事件数据失败:", error);
+    } finally {
+      allowWatcherDrivenReloads = true;
+      routeWatcherReady = true;
+      reloadScheduled = false;
+    }
+  });
+};
+
+const handleLocalFilterChange = (options?: RequestReloadOptions) => {
+  if (
+    !filtersInitialized ||
+    applyingRouteToFilters ||
+    areFilterWatchersSuppressed() ||
+    (!allowWatcherDrivenReloads && !options?.force)
+  ) {
+    return;
+  }
+  syncRouteQueryFromFilters();
+  requestDataReload(options);
+};
+
+const dataOnlyFilterSources = [
+  selectedKind,
+  selectedName,
+  selectedReason,
+  selectedReportingComponent,
+  selectedReportingInstance,
+  selectedLevel,
+  selectedCount,
+  selectedMessage,
+  selectedLimit
+];
+
 watch(
   () => selectedK8s.value,
   newVal => {
     if (newVal) {
       searchStore.setEnv(newVal);
     }
+    handleLocalFilterChange({ reloadMenu: true, clearMenu: true });
   }
 );
 
-// 组件挂载时加载数据
-onMounted(() => {
-  loadK8sList();
+watch(
+  () => dateRange.value,
+  () => {
+    handleLocalFilterChange({ reloadMenu: true, clearMenu: true });
+  },
+  { deep: true }
+);
 
-  // 设置默认时间范围为今天（使用本地时间）
-  const today = new Date();
-  const year = today.getFullYear();
-  const month = String(today.getMonth() + 1).padStart(2, "0");
-  const day = String(today.getDate()).padStart(2, "0");
-  const todayStr = `${year}-${month}-${day}`;
-  dateRange.value = [todayStr, todayStr];
+watch(
+  () => selectedNamespace.value,
+  () => {
+    handleLocalFilterChange({ reloadMenu: true });
+  }
+);
+
+watch(
+  dataOnlyFilterSources,
+  () => {
+    handleLocalFilterChange();
+  },
+  { deep: true }
+);
+
+watch(
+  () => route.query,
+  () => {
+    if (!routeWatcherReady) {
+      return;
+    }
+    if (pendingRouteSyncs > 0) {
+      return;
+    }
+    if (!filtersInitialized) {
+      return;
+    }
+    applyingRouteToFilters = true;
+    const changed = applyRouteQueryToFilters();
+    applyingRouteToFilters = false;
+    if (changed && filtersInitialized) {
+      requestDataReload({ reloadMenu: true, clearMenu: true });
+    }
+  },
+  { deep: true }
+);
+
+// 组件挂载时加载数据
+onMounted(async () => {
+  await loadK8sList();
+  applyingRouteToFilters = true;
+  applyRouteQueryToFilters();
+  applyingRouteToFilters = false;
+  filtersInitialized = true;
+  syncRouteQueryFromFilters();
+  if (selectedK8s.value && dateRange.value) {
+    requestDataReload({ reloadMenu: true });
+  }
 });
 </script>
 
 <style scoped>
+/* 响应式设计 */
+@media screen and (width <= 768px) {
+  .filter-row {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .filter-item {
+    flex-direction: column;
+    gap: 4px;
+    align-items: stretch;
+  }
+
+  .filter-label {
+    font-size: 14px;
+  }
+}
+
 .events-container {
   padding: 8px;
 }
@@ -861,15 +1269,15 @@ onMounted(() => {
 
 .filter-row {
   display: flex;
-  align-items: center;
-  gap: 20px;
   flex-wrap: wrap;
+  gap: 20px;
+  align-items: center;
 }
 
 .filter-item {
   display: flex;
-  align-items: center;
   gap: 4px;
+  align-items: center;
 }
 
 .filter-label {
@@ -880,19 +1288,19 @@ onMounted(() => {
 
 /* 高级筛选区域样式 */
 .advanced-filters {
-  margin-top: 16px;
   padding-top: 16px;
+  margin-top: 16px;
   border-top: 1px solid #e4e7ed;
 }
 
 /* 展开/收起按钮样式 */
 .toggle-btn {
   display: flex;
-  align-items: center;
   gap: 4px;
-  color: #409eff;
+  align-items: center;
+  padding: 4px;
   font-size: 14px;
-  padding: 4px 4px;
+  color: #409eff;
 }
 
 .toggle-btn:hover {
@@ -913,8 +1321,8 @@ onMounted(() => {
 
 .card-header {
   display: flex;
-  justify-content: space-between;
   align-items: center;
+  justify-content: space-between;
 }
 
 .menu-content {
@@ -923,21 +1331,21 @@ onMounted(() => {
 }
 
 .menu-section {
-  margin-bottom: 24px;
   padding-bottom: 16px;
+  margin-bottom: 24px;
   border-bottom: 1px solid var(--el-border-color-lighter);
 }
 
 .menu-section:last-child {
-  border-bottom: none;
   margin-bottom: 0;
+  border-bottom: none;
 }
 
 .menu-title {
+  margin: 0 0 12px;
   font-size: 16px;
   font-weight: 600;
   color: var(--el-text-color-primary);
-  margin: 0 0 12px 0;
 }
 
 .menu-items {
@@ -952,27 +1360,9 @@ onMounted(() => {
 
 .empty-state {
   display: flex;
-  justify-content: center;
   align-items: center;
+  justify-content: center;
   min-height: 300px;
-}
-
-/* 响应式设计 */
-@media screen and (max-width: 768px) {
-  .filter-row {
-    flex-direction: column;
-    align-items: stretch;
-  }
-
-  .filter-item {
-    flex-direction: column;
-    align-items: stretch;
-    gap: 4px;
-  }
-
-  .filter-label {
-    font-size: 14px;
-  }
 }
 
 /* 事件表格样式 */
@@ -982,8 +1372,8 @@ onMounted(() => {
 
 .card-header {
   display: flex;
-  justify-content: space-between;
   align-items: center;
+  justify-content: space-between;
 }
 
 .event-count {
@@ -992,15 +1382,15 @@ onMounted(() => {
 }
 
 .no-data {
+  padding: 40px 0;
   margin-top: 20px;
   text-align: center;
-  padding: 40px 0;
 }
 
 /* 覆盖全局main-content的margin设置，只影响当前页面 */
 .events-page {
-  margin: 0px !important;
   /* 抵消父级的24px margin，设置为10px效果 */
   padding: 10px;
+  margin: 0 !important;
 }
 </style>

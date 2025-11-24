@@ -18,7 +18,7 @@
           <el-select
             v-model="searchForm.env"
             placeholder="请选择K8S环境"
-            class="!w-[180px]"
+            class="!w-[220px]"
             filterable
             @change="handleEnvChange"
           >
@@ -32,21 +32,36 @@
         </el-form-item>
 
         <el-form-item label="命名空间">
-          <el-select
-            v-model="searchForm.ns"
-            placeholder="请选择命名空间"
-            class="!w-[180px]"
-            filterable
-            clearable
-            @change="handleSearch"
-          >
-            <el-option
-              v-for="item in nsOptions"
-              :key="item"
-              :label="item"
-              :value="item"
-            />
-          </el-select>
+          <div class="namespace-select-wrapper">
+            <el-select
+              v-model="searchForm.ns"
+              placeholder="请选择命名空间"
+              class="!w-[180px]"
+              filterable
+              clearable
+              @change="handleSearch"
+            >
+              <el-option
+                v-for="item in nsOptions"
+                :key="item"
+                :label="item"
+                :value="item"
+              />
+            </el-select>
+            <el-icon
+              :class="[
+                'namespace-refresh-icon',
+                {
+                  disabled: !searchForm.env || nsRefreshing,
+                  'is-loading': nsRefreshing
+                }
+              ]"
+              title="刷新命名空间"
+              @click="handleNamespaceRefresh"
+            >
+              <Refresh />
+            </el-icon>
+          </div>
         </el-form-item>
 
         <el-form-item label="关键字">
@@ -262,7 +277,7 @@
         <!-- Route类型的字段 -->
         <template v-if="createForm.df_forward_type === 'route'">
           <el-form-item label="Service" prop="route_service">
-            <div style="display: flex; align-items: center; gap: 8px">
+            <div style="display: flex; gap: 8px; align-items: center">
               <el-select
                 v-model="createForm.route_service"
                 placeholder="请先选择命名空间"
@@ -322,7 +337,7 @@
           <el-row :gutter="20">
             <el-col :span="12">
               <el-form-item label="端口" prop="route_port">
-                <div style="display: flex; align-items: center; gap: 8px">
+                <div style="display: flex; gap: 8px; align-items: center">
                   <el-input-number
                     v-model="createForm.route_port"
                     :min="0"
@@ -354,7 +369,7 @@
 
           <!-- Headers -->
           <el-form-item label="Headers">
-            <div style="display: flex; align-items: flex-start; gap: 8px">
+            <div style="display: flex; gap: 8px; align-items: flex-start">
               <el-checkbox
                 v-model="createForm.route_headers.enabled"
                 label="启用"
@@ -439,7 +454,7 @@
             placeholder="请输入 yes 确认操作"
             style="width: 100%"
           />
-          <div style="color: #f56c6c; font-size: 10px; margin-top: 4px">
+          <div style="margin-top: 4px; font-size: 10px; color: #f56c6c">
             注意：如果该K8S已关联的VS也关联了别的K8S，则该VS关联的所有K8S也会解除该VS的关联，如果您没有一条VS关联多K8S则无影响。建议仅在首次初始化时候使用，请谨慎操作!
           </div>
         </el-form-item>
@@ -490,6 +505,7 @@ const searchForm = reactive({
 // 定义选项数据
 const envOptions = ref<string[]>([]);
 const nsOptions = ref<string[]>([]);
+const nsRefreshing = ref(false);
 
 // 表格数据
 const tableData = ref<any[]>([]);
@@ -632,29 +648,52 @@ const handleEnvChange = async (val: string) => {
   }
 };
 
+const handleNamespaceRefresh = async () => {
+  if (!searchForm.env || nsRefreshing.value) {
+    return;
+  }
+
+  nsRefreshing.value = true;
+  try {
+    const refreshed = await getNsOptions(searchForm.env, true);
+    if (refreshed) {
+      ElMessage.success("命名空间已刷新");
+    }
+  } catch (error) {
+    console.error("刷新命名空间列表失败:", error);
+  } finally {
+    nsRefreshing.value = false;
+  }
+};
+
 // 获取命名空间列表
-const getNsOptions = async (env: string): Promise<void> => {
+const getNsOptions = async (env: string, flush = false): Promise<boolean> => {
   if (!env) {
     nsOptions.value = [];
-    return Promise.resolve();
+    searchForm.ns = "";
+    return false;
   }
 
   try {
-    const res = await getPromNamespace(env);
+    const res = await getPromNamespace(env, flush);
     if (res.data) {
       nsOptions.value = res.data.map(item => item);
-      // 默认选择istio-system，如果不存在则选择第一个
       if (res.data.includes("istio-system")) {
         searchForm.ns = "istio-system";
       } else {
         searchForm.ns = res.data[0] || "";
       }
+    } else {
+      nsOptions.value = [];
+      searchForm.ns = "";
     }
-    return Promise.resolve();
+    return true;
   } catch (error) {
     console.error("获取命名空间列表失败:", error);
     ElMessage.error("获取命名空间列表失败");
-    return Promise.reject(error);
+    nsOptions.value = [];
+    searchForm.ns = "";
+    return false;
   }
 };
 

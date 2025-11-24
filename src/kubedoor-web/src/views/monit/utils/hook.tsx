@@ -190,11 +190,15 @@ export function useResource() {
         beforeSure: async done => {
           const scaleData = await ScaleRef.value.getData();
           let res;
+          params.map(item => {
+            return item;
+          });
+          const requestData = params;
           if (scaleData.tempData) {
             if (params.length > 1 || scaleData.tempData.type == 1) {
               res = await rebootResource(
                 currentEnv,
-                params,
+                requestData,
                 params.length > 1 ? scaleData.tempData.interval : undefined,
                 scaleData.scheduler,
                 scaleData.selectedNodes
@@ -202,7 +206,7 @@ export function useResource() {
             } else {
               let tempData = {
                 type: "restart",
-                service: params,
+                service: requestData,
                 time: "",
                 cron: ""
               };
@@ -219,7 +223,7 @@ export function useResource() {
                 tempData,
                 false,
                 undefined,
-                false
+                scaleData.scheduler
               );
             }
 

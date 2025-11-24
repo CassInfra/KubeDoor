@@ -197,7 +197,7 @@ export const execTimeCron = (
 
 export const rebootResource = (
   env: string,
-  data: any[],
+  data: any,
   interval?: number,
   scheduler?: boolean,
   selectedNodes?: string[]
@@ -215,7 +215,10 @@ export const rebootResource = (
       node_scheduler: selectedNodes
     };
   } else {
-    requestData = data;
+    requestData = {
+      deployment_list: data,
+      node_scheduler: []
+    };
   }
 
   return http.request<ResultTable>("post", url, {

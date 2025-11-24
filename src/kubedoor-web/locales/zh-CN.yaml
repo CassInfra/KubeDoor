@@ -83,6 +83,7 @@ menus:
   resourceCollection: 每日高峰资源
   resourceStatistics: 高峰资源看板📊
   resourceMonit: 资源管理
+  k8sOverview: K8S资源总览
   RealtimeResource: Deployment
   resourceMonitk8s: K8S监控看板📊
   resourceMonitnode: 节点监控看板📊
@@ -120,7 +121,7 @@ login:
   purePassWordRuleReg: 密码格式应为8-18位数字、字母、符号的任意两种组合
 resource:
   add: 新增资源
-  edit: 设置
+  edit: 配置
   keyword: 关键字
   keywordPlaceholder: 命名空间或微服务匹配
   placeholder: 请选择

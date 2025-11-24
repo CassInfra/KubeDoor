@@ -11,6 +11,9 @@ from loguru import logger
 import utils, prom_real_time_data
 from multidict import MultiDict
 from istio_route import istio_route
+from func_manager import namespace_cache
+from func_manager import prom_overview
+from func_manager import ck_top_queries
 import image_tags_fetcher
 from k8s_event import process_k8s_event_async, init_clickhouse_tables
 from k8s_event.event_query_api import query_k8s_events_handler, get_k8s_events_menu_options
@@ -30,9 +33,7 @@ def custom_formatter(record):
     custom_record["level"] = type('Level', (), {'name': level_name, 'no': record["level"].no})()
 
     return (
-        '<green>{time:YYYY-MM-DD HH:mm:ss.SSS}</green> [<level>'
-        + level_name
-        + '</level>] <level>{message}</level>\n{exception}'
+        '<green>{time:YYYY-MM-DD HH:mm:ss.SSS}</green> [<level>' + level_name + '</level>] <level>{message}</level>\n{exception}'
     )
 
 
@@ -85,9 +86,7 @@ async def forward_request(request):
             logger.info("📐SQL: 数据更新完成")
             return web.json_response({"success": True, "msg": "SQL: 数据更新完成"})
         else:
-            TARGET_URL = (
-                f'http://{utils.CK_HOST}:{utils.CK_HTTP_PORT}/?add_http_cors_header=1&default_format=JSONCompact'
-            )
+            TARGET_URL = f'http://{utils.CK_HOST}:{utils.CK_HTTP_PORT}/?add_http_cors_header=1&default_format=JSONCompact'
             headers = {
                 'Authorization': await get_authorization_header(utils.CK_USER, utils.CK_PASSWORD),
                 'Cache-Control': 'no-cache',
@@ -390,6 +389,10 @@ async def http_handler(request):
             if username not in user_list:
                 return web.json_response({"error": f"拒绝操作：当前用户{username}禁止操作"}, status=403)
 
+    elif path == "/api/agent/namespaces" and query_params.get("flush") != 'true':
+        cached_namespaces = namespace_cache.get_namespaces_from_cache(env)
+        if cached_namespaces is not None:
+            return web.json_response({"success": True, "data": cached_namespaces})
     # 扩缩容接口要查询节点cpu使用率并传给agent
     elif path in ["/api/scale", "/api/pod/modify_pod"] and query_params.get("add_label") == 'true':
         res_type = query_params.get("type", "cpu")
@@ -452,7 +455,8 @@ async def http_handler(request):
                     vs_list = response.get('data', [])
                     processed_response = await istio_route.sync_vs_from_k8s(env, vs_list)
                     return web.json_response(processed_response)
-
+                elif path == '/api/agent/namespaces':
+                    namespace_cache.update_namespace_cache(env, response.get('data', []))
                 return web.json_response({"success": True, **response})
             await asyncio.sleep(0.1)
     except Exception as e:
@@ -543,6 +547,15 @@ async def prom_node_rank_handler(request):
             node_data["cpod_num"] = cpod_num
 
         return web.json_response({'success': True, 'data': node_rank_data})
+    except Exception as e:
+        return web.json_response({'message': str(e)}, status=500)
+
+
+async def prom_overview_handler(request):
+    try:
+        env = request.query.get('env')
+        data = await prom_overview.get_overview_counts_async(env)
+        return web.json_response({'success': True, 'data': data})
     except Exception as e:
         return web.json_response({'message': str(e)}, status=500)
 
@@ -658,6 +671,10 @@ app.router.add_get("/api/prom_env", prom_env_handler)
 app.router.add_get("/api/prom_services", prom_services_handler)
 app.router.add_get("/api/prom_query", prom_query_handler)
 app.router.add_get("/api/prom_node_rank", prom_node_rank_handler)
+app.router.add_get("/api/prom_overview", prom_overview_handler)
+app.router.add_get("/api/ck_top10_events", ck_top_queries.top10_events_handler)
+app.router.add_get("/api/ck_top10_pod_alerts", ck_top_queries.top10_pod_alerts_handler)
+app.router.add_get("/api/ck_day10_alert_daily", ck_top_queries.alert_daily_stats_handler)
 app.router.add_post("/api/image/tags", image_tags_fetcher.get_image_tags_handler)  # 8
 
 # 查询K8S事件相关接口

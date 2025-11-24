@@ -24,3 +24,46 @@
 .html-weakness {
   filter: invert(80%);
 }
+
+.namespace-select-wrapper {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.namespace-refresh-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: 28px;
+  font-size: 16px;
+  color: #409eff;
+  cursor: pointer;
+  transition:
+    color 0.2s ease,
+    transform 0.2s ease;
+}
+
+.namespace-refresh-icon:not(.disabled):hover {
+  color: #66b1ff;
+}
+
+.namespace-refresh-icon.disabled {
+  color: #c0c4cc;
+  cursor: not-allowed;
+  pointer-events: none;
+}
+
+.namespace-refresh-icon.is-loading {
+  animation: namespace-refresh-spin 1s linear infinite;
+}
+
+@keyframes namespace-refresh-spin {
+  from {
+    transform: rotate(0deg);
+  }
+
+  to {
+    transform: rotate(360deg);
+  }
+}

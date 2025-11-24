@@ -28,7 +28,9 @@ const getBreadcrumb = (): void => {
         currentRoute = toRaw(item);
       }
     });
-  } else {
+  }
+
+  if (!currentRoute) {
     currentRoute = findRouteByPath(router.currentRoute.value.path, routes);
   }
 
@@ -43,7 +45,14 @@ const getBreadcrumb = (): void => {
 
   // 获取每个父级路径对应的路由信息
   parentRoutes.forEach(path => {
-    if (path !== "/") matched.push(findRouteByPath(path, routes));
+    const parentRoute = findRouteByPath(path, routes);
+    if (!parentRoute) return;
+    if (
+      parentRoute.path === "/" &&
+      !router.currentRoute.value.path?.startsWith("/monit")
+    )
+      return;
+    matched.push(parentRoute);
   });
 
   matched.push(currentRoute);
@@ -94,12 +103,9 @@ onMounted(() => {
 });
 
 watch(
-  () => route.path,
+  () => route.fullPath,
   () => {
     getBreadcrumb();
-  },
-  {
-    deep: true
   }
 );
 </script>

@@ -12,7 +12,7 @@ from kubernetes_asyncio import client, watch
 from kubernetes_asyncio.client.rest import ApiException
 from loguru import logger
 from utils import PROM_K8S_TAG_VALUE, MSG_TOKEN
-from event_monitor_config import *
+from func_manager.event_monitor_config import *
 
 
 class K8sEventMonitor:
@@ -110,12 +110,14 @@ class K8sEventMonitor:
             ws_message = {"type": "k8s_event", "data": event_data, "timestamp": datetime.now().isoformat()}
 
             await self.ws_conn.send_json(ws_message)
-            
+
             # 更新统计信息
             self.event_count += 1
             self.last_event_time = datetime.now()
-            
-            logger.debug(f"事件已发送 (#{self.event_count}): {event_data['kind']}/{event_data['name']} - {event_data['reason']}")
+
+            logger.debug(
+                f"事件已发送 (#{self.event_count}): {event_data['kind']}/{event_data['name']} - {event_data['reason']}"
+            )
 
         except Exception as e:
             logger.error(f"发送事件到master失败: {e}")
@@ -127,12 +129,12 @@ class K8sEventMonitor:
         retry_count = 0
         max_retries = 5
         base_delay = 1  # 基础重试延迟（秒）
-        
+
         while self.is_running and retry_count < max_retries:
             try:
                 logger.info("🚀 开始监控K8S事件...")
                 logger.info(f"📍 监控范围: {'所有命名空间' if not namespace else f'命名空间 {namespace}'}")
-                
+
                 if retry_count > 0:
                     logger.info(f"🔄 第 {retry_count} 次重试监控K8S事件")
 
@@ -180,8 +182,8 @@ class K8sEventMonitor:
                 if retry_count >= K8S_EVENT_MAX_RETRIES:
                     logger.error(f"K8s API异常达到最大重试次数({K8S_EVENT_MAX_RETRIES}): {e}")
                     break
-                
-                delay = min(K8S_EVENT_RETRY_DELAY ** retry_count, 60)  # 指数退避，最大60秒
+
+                delay = min(K8S_EVENT_RETRY_DELAY**retry_count, 60)  # 指数退避，最大60秒
                 logger.warning(f"K8s API异常，{delay}秒后重试 (第{retry_count}/{K8S_EVENT_MAX_RETRIES}次): {e}")
                 await asyncio.sleep(delay)
                 continue
@@ -191,12 +193,12 @@ class K8sEventMonitor:
                 if retry_count >= K8S_EVENT_MAX_RETRIES:
                     logger.error(f"监控事件时发生异常达到最大重试次数({K8S_EVENT_MAX_RETRIES}): {e}")
                     break
-                
-                delay = min(K8S_EVENT_RETRY_DELAY ** retry_count, 60)  # 指数退避，最大60秒
+
+                delay = min(K8S_EVENT_RETRY_DELAY**retry_count, 60)  # 指数退避，最大60秒
                 logger.warning(f"监控事件异常，{delay}秒后重试 (第{retry_count}/{K8S_EVENT_MAX_RETRIES}次): {e}")
                 await asyncio.sleep(delay)
                 continue
-        
+
         self.is_running = False
 
     async def start_monitoring(self, namespace=None):
@@ -208,7 +210,7 @@ class K8sEventMonitor:
         # 重置统计信息
         self.event_count = 0
         self.last_event_time = None
-        
+
         self.is_running = True
         self.monitor_task = asyncio.create_task(self.monitor_events(namespace))
         logger.info(f"🎯 K8S事件监控已启动 (WebSocket健康: {self.is_websocket_healthy()})")
@@ -229,6 +231,8 @@ class K8sEventMonitor:
 
         # 输出统计信息
         if self.event_count > 0:
-            logger.info(f"🛑 K8S事件监控已停止 (共处理 {self.event_count} 个事件，最后事件时间: {self.last_event_time})")
+            logger.info(
+                f"🛑 K8S事件监控已停止 (共处理 {self.event_count} 个事件，最后事件时间: {self.last_event_time})"
+            )
         else:
             logger.info("🛑 K8S事件监控已停止 (未处理任何事件)")

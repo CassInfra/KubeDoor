@@ -26,21 +26,36 @@
         </el-form-item>
 
         <el-form-item label="命名空间">
-          <el-select
-            v-model="searchForm.ns"
-            placeholder="请选择命名空间"
-            class="!w-[180px]"
-            filterable
-            clearable
-            @change="handleNamespaceChange"
-          >
-            <el-option
-              v-for="item in nsOptions"
-              :key="item"
-              :label="item"
-              :value="item"
-            />
-          </el-select>
+          <div class="namespace-select-wrapper">
+            <el-select
+              v-model="searchForm.ns"
+              placeholder="请选择命名空间"
+              class="!w-[180px]"
+              filterable
+              clearable
+              @change="handleNamespaceChange"
+            >
+              <el-option
+                v-for="item in nsOptions"
+                :key="item"
+                :label="item"
+                :value="item"
+              />
+            </el-select>
+            <el-icon
+              :class="[
+                'namespace-refresh-icon',
+                {
+                  disabled: !searchForm.env || nsRefreshing,
+                  'is-loading': nsRefreshing
+                }
+              ]"
+              title="刷新命名空间"
+              @click="handleNamespaceRefresh"
+            >
+              <Refresh />
+            </el-icon>
+          </div>
         </el-form-item>
 
         <el-form-item label="关键字">
@@ -87,13 +102,13 @@
         <div
           v-if="updateForm.currentImageInfo.length > 0"
           style="
-            margin-bottom: 20px;
             padding: 15px;
+            margin-bottom: 20px;
             border: 2px solid #dcdfe6;
             border-radius: 4px;
           "
         >
-          <div style="font-weight: bold; margin-bottom: 10px">当前镜像：</div>
+          <div style="margin-bottom: 10px; font-weight: bold">当前镜像：</div>
           <div style="margin-bottom: 5px">
             地址：{{ updateForm.currentImageInfo[0] || "" }}
           </div>
@@ -912,7 +927,6 @@ import {
 } from "@/api/alarm";
 import { ArrowDown, Refresh } from "@element-plus/icons-vue";
 import {
-  getPromEnv,
   getPromNamespace,
   getPromQueryData,
   getPodData,
@@ -922,6 +936,7 @@ import {
   getImageTags,
   getNodeResourceRank
 } from "@/api/monit";
+import { getAgentNames } from "@/api/istio";
 import { useResource } from "./utils/hook";
 import { useSearchStoreHook } from "@/store/modules/search";
 import { AnsiUp } from "ansi_up";
@@ -946,11 +961,12 @@ const searchForm = reactive({
 // 定义选项数据
 const envOptions = ref<string[]>([]);
 const nsOptions = ref<string[]>([]);
+const nsRefreshing = ref(false);
 
 // 表格数据
 const tableData = ref<any[]>([]);
 const tableRef = ref<TableInstance>();
-const pageSizeOptions = [100, 200, 500, 1000];
+const pageSizeOptions = [50, 100, 200, 500, 1000];
 const pageSize = ref<number>(pageSizeOptions[0]);
 const currentPage = ref(1);
 const appliedKeyword = ref("");
@@ -1215,8 +1231,8 @@ const handleEdit = async (row: any) => {
       yamlEditor.setValue(res.data);
     }
   } catch (error) {
-    console.error("��ȡDeployment����ʧ��:", error);
-    ElMessage.error("��ȡDeployment����ʧ��");
+    console.error("获取Deployment配置失败:", error);
+    ElMessage.error("获取Deployment配置失败");
   }
 };
 
@@ -1346,7 +1362,7 @@ const confirmUpdate = async () => {
 // 获取K8S环境列表
 const getEnvOptions = async (): Promise<void> => {
   try {
-    const res = await getPromEnv();
+    const res = await getAgentNames();
     if (res.data && res.data.length > 0) {
       envOptions.value = res.data.map(item => item);
       // 如果 store 中有值且存在于选项中，则使用 store 中的值
@@ -1397,32 +1413,63 @@ const handleNamespaceChange = (val: string) => {
   restoreDefaultSortState();
 };
 
+const handleNamespaceRefresh = async () => {
+  if (!searchForm.env || nsRefreshing.value) {
+    return;
+  }
+
+  nsRefreshing.value = true;
+  try {
+    await getNsOptions(searchForm.env, true);
+    ElMessage.success("命名空间已刷新");
+  } catch (error) {
+    console.error("刷新命名空间列表失败:", error);
+  } finally {
+    nsRefreshing.value = false;
+  }
+};
+
 // 获取命名空间列表
-const getNsOptions = async (env: string): Promise<void> => {
+const getNsOptions = async (env: string, flush = false): Promise<void> => {
   if (!env) {
     nsOptions.value = [];
-    return Promise.resolve();
+    searchForm.ns = "";
+    searchStore.setNamespace("");
+    return;
   }
 
   try {
-    const res = await getPromNamespace(env);
-    if (res.data) {
-      nsOptions.value = res.data.map(item => item);
-      if (
-        searchStore.namespace &&
-        nsOptions.value.includes(searchStore.namespace)
-      ) {
-        searchForm.ns = searchStore.namespace;
-      } else {
-        searchForm.ns = res.data[0];
-        searchStore.setNamespace(res.data[0]);
-      }
+    const res = await getPromNamespace(env, flush);
+    const namespaces = Array.isArray(res.data)
+      ? res.data.map(item => item)
+      : [];
+
+    nsOptions.value = namespaces;
+
+    if (!namespaces.length) {
+      searchForm.ns = "";
+      searchStore.setNamespace("");
+      return;
     }
-    return Promise.resolve();
+
+    const preferredNs = (() => {
+      const formNs = searchForm.ns;
+      if (formNs && namespaces.includes(formNs)) {
+        return formNs;
+      }
+      const storeNs = searchStore.namespace;
+      if (storeNs && namespaces.includes(storeNs)) {
+        return storeNs;
+      }
+      return namespaces[0];
+    })();
+
+    searchForm.ns = preferredNs;
+    searchStore.setNamespace(preferredNs);
   } catch (error) {
     console.error("获取命名空间列表失败:", error);
     ElMessage.error("获取命名空间列表失败");
-    return Promise.reject(error);
+    throw error;
   }
 };
 
@@ -2766,30 +2813,30 @@ onMounted(async () => {
 
 .method-radio-row {
   display: flex;
-  align-items: center;
-  gap: 12px;
   flex-wrap: nowrap;
+  gap: 12px;
+  align-items: center;
 }
 
 .edit-container {
-  height: 82vh;
   display: flex;
   flex-direction: column;
+  height: 82vh;
 }
 
 .yaml-editor-container {
-  flex: 1;
   display: flex;
+  flex: 1;
   flex-direction: column;
+  overflow: hidden;
   border: 1px solid #dcdfe6;
   border-radius: 4px;
-  overflow: hidden;
 }
 
 .editor-header {
   display: flex;
-  justify-content: space-between;
   align-items: center;
+  justify-content: space-between;
   padding: 12px 16px;
   background-color: #f5f7fa;
   border-bottom: 1px solid #dcdfe6;
@@ -2823,18 +2870,18 @@ onMounted(async () => {
 }
 
 .method-description {
-  margin-top: 20px;
   padding: 12px;
+  margin-top: 20px;
   background-color: #f5f7fa;
-  border-radius: 4px;
   border-left: 4px solid #409eff;
+  border-radius: 4px;
 }
 
 .method-description p {
   margin: 0;
-  color: #606266;
   font-size: 14px;
   line-height: 1.5;
+  color: #606266;
 }
 </style>
 
@@ -2849,8 +2896,8 @@ onMounted(async () => {
 
 .query-form {
   display: flex;
-  align-items: center;
   flex-wrap: nowrap;
+  align-items: center;
   width: 100%;
 }
 
@@ -3013,6 +3060,20 @@ onMounted(async () => {
 </style>
 
 <style>
+@keyframes pulse {
+  0% {
+    box-shadow: 0 0 4px rgb(255 102 0 / 80%);
+  }
+
+  50% {
+    box-shadow: 0 0 8px rgb(255 102 0 / 100%);
+  }
+
+  100% {
+    box-shadow: 0 0 4px rgb(255 102 0 / 80%);
+  }
+}
+
 .hide-expand .el-table__expand-icon {
   display: none;
 }
@@ -3020,35 +3081,21 @@ onMounted(async () => {
 /* 搜索高亮样式 - 针对黑色背景优化，必须在非scoped样式中定义 */
 .search-highlight {
   padding: 1px 3px;
-  color: #000 !important;
-  background-color: #ffff00 !important;
-  border-radius: 3px;
   font-weight: bold;
-  box-shadow: 0 0 2px rgba(255, 255, 0, 0.5);
+  color: #000 !important;
+  background-color: #ff0 !important;
+  border-radius: 3px;
+  box-shadow: 0 0 2px rgb(255 255 0 / 50%);
 }
 
 .search-highlight-current {
   padding: 1px 3px;
   font-weight: bold;
   color: #fff !important;
-  background-color: #ff6600 !important;
+  background-color: #f60 !important;
   border-radius: 3px;
-  box-shadow: 0 0 4px rgba(255, 102, 0, 0.8);
+  box-shadow: 0 0 4px rgb(255 102 0 / 80%);
   animation: pulse 1s infinite;
-}
-
-@keyframes pulse {
-  0% {
-    box-shadow: 0 0 4px rgba(255, 102, 0, 0.8);
-  }
-
-  50% {
-    box-shadow: 0 0 8px rgba(255, 102, 0, 1);
-  }
-
-  100% {
-    box-shadow: 0 0 4px rgba(255, 102, 0, 0.8);
-  }
 }
 
 /* 优化日志弹窗的标题栏样式 */
@@ -3066,7 +3113,7 @@ onMounted(async () => {
   /* 垂直居中对齐 */
 }
 
-/* 禁用对话框遮罩层的滚动条*/
+/* 禁用对话框遮罩层的滚动条 */
 .el-overlay-dialog {
   overflow: hidden !important;
 }

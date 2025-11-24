@@ -3,15 +3,14 @@ FROM registry.cn-shenzhen.aliyuncs.com/starsl/python:3.11-alpine
 # 设置工作目录
 WORKDIR /app
 
-# 拷贝 Python 脚本到容器中
-COPY *.py version requirements.txt /app/
-
-COPY tls.crt tls.key /serving-certs/
+COPY requirements.txt .
 
 RUN pip install --no-cache-dir -r requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple/
 
 # 安装 runit 和其他必要工具
 RUN sed -i 's/dl-cdn.alpinelinux.org/repo.huaweicloud.com/g' /etc/apk/repositories && apk add --no-cache runit bash
+
+ADD . /app/
 
 # 创建服务目录
 RUN mkdir -p /etc/service/kubedoor-agent /etc/service/pod-mgr

@@ -56,3 +56,22 @@ async def get_configmap_list(core_v1, request):
     except Exception as e:
         logger.error(f"查询ConfigMap列表异常: {e}")
         return web.json_response({"error": f"服务器内部错误: {str(e)}"}, status=500)
+
+
+async def get_namespace_list(core_v1, request):
+    try:
+        env = request.query.get('env')
+        if not env:
+            return web.json_response({"error": "缺少必要参数: env"}, status=400)
+
+        ns_list = await core_v1.list_namespace()
+        names = [ns.metadata.name for ns in ns_list.items if ns.metadata and ns.metadata.name]
+        names_sorted = sorted(names)
+
+        return web.json_response({"success": True, "data": names_sorted})
+    except ApiException as e:
+        logger.error(f"查询命名空间列表失败: {e}")
+        return web.json_response({"success": False, "data": f"Kubernetes API错误: {e.reason}"})
+    except Exception as e:
+        logger.error(f"查询命名空间列表异常: {e}")
+        return web.json_response({"success": False, "data": f"服务器内部错误: {str(e)}"})

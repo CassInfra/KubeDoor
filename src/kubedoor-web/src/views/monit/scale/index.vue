@@ -269,13 +269,13 @@ defineExpose({ getData });
           <!-- 调度到指定节点的资源类型选择 -->
           <re-col v-if="schedulerRef" :offset="2" :value="20" :xs="24" :sm="24">
             <el-form-item :label="'资源类型'" label-width="80px">
-              <div style="display: flex; gap: 12px; flex-wrap: wrap">
+              <div style="display: flex; flex-wrap: wrap; gap: 12px">
                 <label
                   style="
                     display: flex;
                     align-items: center;
-                    cursor: pointer;
                     font-size: 12px;
+                    cursor: pointer;
                   "
                 >
                   <input
@@ -298,8 +298,8 @@ defineExpose({ getData });
                   style="
                     display: flex;
                     align-items: center;
-                    cursor: pointer;
                     font-size: 12px;
+                    cursor: pointer;
                   "
                 >
                   <input
@@ -322,8 +322,8 @@ defineExpose({ getData });
                   style="
                     display: flex;
                     align-items: center;
-                    cursor: pointer;
                     font-size: 12px;
+                    cursor: pointer;
                   "
                 >
                   <input
@@ -346,8 +346,8 @@ defineExpose({ getData });
                   style="
                     display: flex;
                     align-items: center;
-                    cursor: pointer;
                     font-size: 12px;
+                    cursor: pointer;
                   "
                 >
                   <input
@@ -370,8 +370,8 @@ defineExpose({ getData });
                   style="
                     display: flex;
                     align-items: center;
-                    cursor: pointer;
                     font-size: 12px;
+                    cursor: pointer;
                   "
                 >
                   <input
@@ -400,10 +400,10 @@ defineExpose({ getData });
               style="
                 display: none;
                 max-height: 200px;
+                padding: 8px;
                 overflow-y: auto;
                 border: 1px solid #e4e7ed;
                 border-radius: 4px;
-                padding: 8px;
               "
             />
           </re-col>
@@ -448,13 +448,13 @@ defineExpose({ getData });
           <!-- 调度到指定节点的资源类型选择 -->
           <re-col v-if="schedulerRef" :offset="2" :value="20" :xs="24" :sm="24">
             <el-form-item :label="'资源类型'" label-width="80px">
-              <div style="display: flex; gap: 12px; flex-wrap: wrap">
+              <div style="display: flex; flex-wrap: wrap; gap: 12px">
                 <label
                   style="
                     display: flex;
                     align-items: center;
-                    cursor: pointer;
                     font-size: 12px;
+                    cursor: pointer;
                   "
                 >
                   <input
@@ -477,8 +477,8 @@ defineExpose({ getData });
                   style="
                     display: flex;
                     align-items: center;
-                    cursor: pointer;
                     font-size: 12px;
+                    cursor: pointer;
                   "
                 >
                   <input
@@ -501,8 +501,8 @@ defineExpose({ getData });
                   style="
                     display: flex;
                     align-items: center;
-                    cursor: pointer;
                     font-size: 12px;
+                    cursor: pointer;
                   "
                 >
                   <input
@@ -525,8 +525,8 @@ defineExpose({ getData });
                   style="
                     display: flex;
                     align-items: center;
-                    cursor: pointer;
                     font-size: 12px;
+                    cursor: pointer;
                   "
                 >
                   <input
@@ -549,8 +549,8 @@ defineExpose({ getData });
                   style="
                     display: flex;
                     align-items: center;
-                    cursor: pointer;
                     font-size: 12px;
+                    cursor: pointer;
                   "
                 >
                   <input
@@ -579,10 +579,10 @@ defineExpose({ getData });
               style="
                 display: none;
                 max-height: 200px;
+                padding: 8px;
                 overflow-y: auto;
                 border: 1px solid #e4e7ed;
                 border-radius: 4px;
-                padding: 8px;
               "
             />
           </re-col>

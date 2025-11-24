@@ -4,7 +4,7 @@ import { $t } from "@/plugins/i18n";
 
 export default {
   path: "/",
-  redirect: "/monit/index",
+  redirect: "/monit/overview",
   component: Layout,
   meta: {
     icon: "ep:monitor",
@@ -13,12 +13,12 @@ export default {
   },
   children: [
     {
-      path: "/monit/index",
-      name: "Monit",
-      component: () => import("@/views/monit/index.vue"),
+      path: "/monit/overview",
+      name: "K8sOverview",
+      component: () => import("@/views/monit/overview/index.vue"),
       meta: {
-        title: $t("menus.RealtimeResource"),
-        icon: "ep:data-analysis",
+        title: $t("menus.k8sOverview"),
+        icon: "ep:odometer",
         showLink: VITE_HIDE_HOME === "true" ? false : true
       }
     },
@@ -29,6 +29,16 @@ export default {
       meta: {
         title: "Pod",
         icon: "ep:box",
+        showLink: VITE_HIDE_HOME === "true" ? false : true
+      }
+    },
+    {
+      path: "/monit/index",
+      name: "Monit",
+      component: () => import("@/views/monit/index.vue"),
+      meta: {
+        title: $t("menus.RealtimeResource"),
+        icon: "ep:data-analysis",
         showLink: VITE_HIDE_HOME === "true" ? false : true
       }
     },

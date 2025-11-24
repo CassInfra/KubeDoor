@@ -451,6 +451,7 @@
 <script setup lang="ts">
 import { ref, onMounted, onUnmounted, watch, h } from "vue";
 import { useRoute, useRouter } from "vue-router";
+import type { LocationQueryRaw, LocationQueryValue } from "vue-router";
 import {
   VideoPlay,
   VideoPause,
@@ -481,6 +482,87 @@ import { useSearchStoreHook } from "@/store/modules/search";
 const route = useRoute();
 const router = useRouter();
 const searchStore = useSearchStoreHook();
+
+const getArrayFromQuery = (
+  value: LocationQueryValue | LocationQueryValue[] | undefined
+): string[] | undefined => {
+  if (value === undefined || value === null) {
+    return undefined;
+  }
+  const list = Array.isArray(value) ? value : [value];
+  const normalized = list
+    .reduce<string[]>((acc, item) => {
+      const segments = (item ?? "")
+        .toString()
+        .split(",")
+        .map(segment => segment.trim())
+        .filter(Boolean);
+      return acc.concat(segments);
+    }, [])
+    .filter(Boolean);
+  return normalized;
+};
+
+const getStringFromQuery = (
+  value: LocationQueryValue | LocationQueryValue[] | undefined
+): string | undefined => {
+  if (value === undefined || value === null) {
+    return undefined;
+  }
+  const list = Array.isArray(value) ? value : [value];
+  for (const item of list) {
+    const normalized = (item ?? "").toString().trim();
+    if (normalized.length > 0) {
+      return normalized;
+    }
+  }
+  return "";
+};
+
+const getOptionalQueryString = (
+  value: LocationQueryValue | LocationQueryValue[] | undefined
+): string | undefined => {
+  const normalized = getStringFromQuery(value);
+  return normalized && normalized.length > 0 ? normalized : undefined;
+};
+
+const getNumberFromQuery = (
+  value: LocationQueryValue | LocationQueryValue[] | undefined
+): number | undefined => {
+  const str = getStringFromQuery(value);
+  if (str === undefined || str === "") {
+    return undefined;
+  }
+  const parsed = Number(str);
+  return Number.isNaN(parsed) ? undefined : parsed;
+};
+
+const areArraysEqual = (a: string[], b: string[]) => {
+  if (a === b) {
+    return true;
+  }
+  if (a.length !== b.length) {
+    return false;
+  }
+  return a.every((item, index) => item === b[index]);
+};
+
+const getDefaultQueryState = () => ({
+  timeRange: 0,
+  env: searchStore.env ? [searchStore.env] : [],
+  alertName: [] as string[],
+  status: ["firing"] as string[],
+  severity: [] as string[],
+  operate: ""
+});
+
+const initialDefaults = getDefaultQueryState();
+const initialEnvFromQuery = getArrayFromQuery(route.query.env);
+const initialAlertNameFromQuery = getArrayFromQuery(route.query.alertName);
+const initialStatusFromQuery = getArrayFromQuery(route.query.status);
+const initialSeverityFromQuery = getArrayFromQuery(route.query.severity);
+const initialOperateFromQuery = getStringFromQuery(route.query.operate);
+const initialTimeRange = getNumberFromQuery(route.query.timeRange);
 const loading = ref(false);
 const tableData = ref([]);
 const currentPage = ref(1);
@@ -491,18 +573,24 @@ const operateOptions = [
   { label: "已处理", value: "已处理" }
 ];
 const searchForm = ref({
-  timeRange: route.query.timeRange ? Number(route.query.timeRange) : 0,
-  env: searchStore.env
-    ? [searchStore.env]
-    : (route.query.env as string)
-      ? [route.query.env as string]
-      : [],
-  alertName: (route.query.alertName as string)
-    ? [route.query.alertName as string]
-    : [],
-  status: ["firing"],
-  severity: [],
-  operate: "",
+  timeRange: initialTimeRange ?? initialDefaults.timeRange,
+  env:
+    initialEnvFromQuery !== undefined
+      ? [...initialEnvFromQuery]
+      : [...initialDefaults.env],
+  alertName:
+    initialAlertNameFromQuery !== undefined
+      ? [...initialAlertNameFromQuery]
+      : [...initialDefaults.alertName],
+  status:
+    initialStatusFromQuery !== undefined
+      ? [...initialStatusFromQuery]
+      : [...initialDefaults.status],
+  severity:
+    initialSeverityFromQuery !== undefined
+      ? [...initialSeverityFromQuery]
+      : [...initialDefaults.severity],
+  operate: initialOperateFromQuery ?? initialDefaults.operate,
   startTime: dayjs().startOf("day").format("YYYY-MM-DD HH:mm:ss")
 });
 const envOptions = ref([]);
@@ -518,6 +606,205 @@ const severityOptions = [
   { label: "信息", value: "Info" }
 ];
 
+const namespaceFilter = ref<string | undefined>(
+  getOptionalQueryString(route.query.namespace)
+);
+const podFilter = ref<string | undefined>(
+  getOptionalQueryString(route.query.pod)
+);
+
+const querySyncKeys = [
+  "timeRange",
+  "env",
+  "alertName",
+  "status",
+  "severity",
+  "operate"
+] as const;
+
+type QuerySyncKey = (typeof querySyncKeys)[number];
+
+const buildQueryFromSearchForm = () => {
+  const query: Partial<Record<QuerySyncKey, string | string[]>> = {
+    timeRange: String(searchForm.value.timeRange ?? 0)
+  };
+
+  if (searchForm.value.env && searchForm.value.env.length > 0) {
+    query.env = [...searchForm.value.env];
+  }
+  if (searchForm.value.alertName && searchForm.value.alertName.length > 0) {
+    query.alertName = [...searchForm.value.alertName];
+  }
+  if (searchForm.value.status && searchForm.value.status.length > 0) {
+    query.status = [...searchForm.value.status];
+  }
+  if (searchForm.value.severity && searchForm.value.severity.length > 0) {
+    query.severity = [...searchForm.value.severity];
+  }
+  if (searchForm.value.operate) {
+    query.operate = searchForm.value.operate;
+  }
+
+  return query;
+};
+
+const isQueryValueEqual = (
+  current: LocationQueryValue | LocationQueryValue[] | undefined,
+  target: string | string[] | undefined
+) => {
+  if (target === undefined) {
+    return current === undefined || current === null;
+  }
+  if (Array.isArray(target)) {
+    const currentArray = getArrayFromQuery(current);
+    if (currentArray === undefined) {
+      return target.length === 0;
+    }
+    return areArraysEqual(currentArray, target);
+  }
+
+  if (Array.isArray(current)) {
+    return current.length === 1 && current[0] === target;
+  }
+
+  return (current ?? undefined) === target;
+};
+
+let pendingRouteSyncs = 0;
+
+const syncRouteQueryFromSearchForm = () => {
+  const serialized = buildQueryFromSearchForm();
+  const nextQuery: LocationQueryRaw = { ...route.query };
+  let changed = false;
+
+  querySyncKeys.forEach(key => {
+    const targetValue = serialized[key];
+    const currentValue = route.query[key] as
+      | LocationQueryValue
+      | LocationQueryValue[]
+      | undefined;
+
+    if (isQueryValueEqual(currentValue, targetValue)) {
+      return;
+    }
+
+    if (targetValue === undefined) {
+      if (currentValue !== undefined && currentValue !== null) {
+        delete nextQuery[key];
+        changed = true;
+      }
+      return;
+    }
+
+    nextQuery[key] = targetValue;
+    changed = true;
+  });
+
+  if (changed) {
+    pendingRouteSyncs += 1;
+    router
+      .replace({
+        path: route.path,
+        query: nextQuery,
+        hash: route.hash
+      })
+      .finally(() => {
+        pendingRouteSyncs = Math.max(0, pendingRouteSyncs - 1);
+      });
+  }
+};
+
+const applyRouteQueryToSearchForm = (useDefaults: boolean) => {
+  let changed = false;
+  const defaults = useDefaults ? getDefaultQueryState() : undefined;
+
+  const timeRangeFromRoute = getNumberFromQuery(route.query.timeRange);
+  const nextTimeRange =
+    timeRangeFromRoute !== undefined
+      ? timeRangeFromRoute
+      : useDefaults
+        ? (defaults?.timeRange ?? 0)
+        : searchForm.value.timeRange;
+  if (searchForm.value.timeRange !== nextTimeRange) {
+    searchForm.value.timeRange = nextTimeRange;
+    changed = true;
+  }
+
+  const resolveArrayValue = (
+    valueFromRoute: string[] | undefined,
+    currentValue: string[],
+    fallbackValue: string[]
+  ) => {
+    if (valueFromRoute !== undefined) {
+      return valueFromRoute;
+    }
+    return useDefaults ? fallbackValue : currentValue;
+  };
+
+  const nextEnv = resolveArrayValue(
+    getArrayFromQuery(route.query.env),
+    searchForm.value.env,
+    defaults?.env ?? []
+  );
+  if (!areArraysEqual(nextEnv, searchForm.value.env)) {
+    searchForm.value.env = [...nextEnv];
+    changed = true;
+  }
+
+  const nextAlertName = resolveArrayValue(
+    getArrayFromQuery(route.query.alertName),
+    searchForm.value.alertName,
+    defaults?.alertName ?? []
+  );
+  if (!areArraysEqual(nextAlertName, searchForm.value.alertName)) {
+    searchForm.value.alertName = [...nextAlertName];
+    changed = true;
+  }
+
+  const nextStatus = resolveArrayValue(
+    getArrayFromQuery(route.query.status),
+    searchForm.value.status,
+    defaults?.status ?? []
+  );
+  if (!areArraysEqual(nextStatus, searchForm.value.status)) {
+    searchForm.value.status = [...nextStatus];
+    changed = true;
+  }
+
+  const nextSeverity = resolveArrayValue(
+    getArrayFromQuery(route.query.severity),
+    searchForm.value.severity,
+    defaults?.severity ?? []
+  );
+  if (!areArraysEqual(nextSeverity, searchForm.value.severity)) {
+    searchForm.value.severity = [...nextSeverity];
+    changed = true;
+  }
+
+  const resolveStringValue = (
+    valueFromRoute: string | undefined,
+    currentValue: string,
+    fallbackValue: string
+  ) => {
+    if (valueFromRoute !== undefined) {
+      return valueFromRoute;
+    }
+    return useDefaults ? fallbackValue : currentValue;
+  };
+
+  const nextOperate = resolveStringValue(
+    getStringFromQuery(route.query.operate),
+    searchForm.value.operate,
+    defaults?.operate ?? ""
+  );
+  if (searchForm.value.operate !== nextOperate) {
+    searchForm.value.operate = nextOperate;
+    changed = true;
+  }
+
+  return changed;
+};
+
 // 返回上一页
 const goBack = () => {
   router.back();
@@ -528,7 +815,9 @@ const fetchTotal = async () => {
   try {
     const { data } = await getAlarmDetailTotal({
       ...searchForm.value,
-      startTime: getStartTime(searchForm.value.timeRange)
+      startTime: getStartTime(searchForm.value.timeRange),
+      namespace: namespaceFilter.value,
+      pod: podFilter.value
     });
     if (data && data.length > 0) {
       total.value = Number(data[0][0]) || 0;
@@ -559,7 +848,9 @@ const getDetailData = async () => {
       page: currentPage.value,
       pageSize: pageSize.value,
       ...searchForm.value,
-      startTime: getStartTime(searchForm.value.timeRange)
+      startTime: getStartTime(searchForm.value.timeRange),
+      namespace: namespaceFilter.value,
+      pod: podFilter.value
     });
     if (data) {
       tableData.value = data.map(item => {
@@ -624,6 +915,36 @@ const handleSearch = async () => {
   getDetailData();
 };
 
+watch(
+  searchForm,
+  () => {
+    syncRouteQueryFromSearchForm();
+  },
+  { deep: true }
+);
+
+watch(
+  () => route.query,
+  newQuery => {
+    const nextNamespace = getOptionalQueryString(newQuery.namespace);
+    const nextPod = getOptionalQueryString(newQuery.pod);
+    const namespaceChanged = namespaceFilter.value !== nextNamespace;
+    const podChanged = podFilter.value !== nextPod;
+
+    namespaceFilter.value = nextNamespace;
+    podFilter.value = nextPod;
+
+    const changed = applyRouteQueryToSearchForm(pendingRouteSyncs === 0);
+    if (
+      pendingRouteSyncs === 0 &&
+      (changed || namespaceChanged || podChanged)
+    ) {
+      handleSearch();
+    }
+  },
+  { deep: true }
+);
+
 // 处理排序变化
 const handleSortChange = ({
   prop,
@@ -659,13 +980,14 @@ const handleSortChange = ({
 
 // 处理重置
 const handleReset = () => {
+  const defaults = getDefaultQueryState();
   searchForm.value = {
-    timeRange: route.query.timeRange ? Number(route.query.timeRange) : 0,
-    env: [],
-    alertName: [],
-    status: ["firing"],
-    severity: [],
-    operate: undefined,
+    timeRange: defaults.timeRange,
+    env: [...defaults.env],
+    alertName: [...defaults.alertName],
+    status: [...defaults.status],
+    severity: [...defaults.severity],
+    operate: defaults.operate,
     startTime: dayjs().startOf("day").format("YYYY-MM-DD HH:mm:ss")
   };
   handleSearch();
@@ -676,12 +998,21 @@ const getEnvOptions = async () => {
   try {
     const res = await getEnv();
     envOptions.value = res.data.map((item: string[]) => item[0]);
-    // 如果 store 中有值且存在于选项中，则使用 store 中的值
-    if (searchStore.env && envOptions.value.includes(searchStore.env)) {
+    const validCurrentEnv = (searchForm.value.env || []).filter(env =>
+      envOptions.value.includes(env)
+    );
+
+    if (validCurrentEnv.length > 0) {
+      searchForm.value.env = [...validCurrentEnv];
+      searchStore.setEnv(validCurrentEnv[0]);
+    } else if (searchStore.env && envOptions.value.includes(searchStore.env)) {
       searchForm.value.env = [searchStore.env];
-    } else {
-      searchForm.value.env = envOptions.value[0];
+      searchStore.setEnv(searchStore.env);
+    } else if (envOptions.value.length > 0) {
+      searchForm.value.env = [envOptions.value[0]];
       searchStore.setEnv(envOptions.value[0]);
+    } else {
+      searchForm.value.env = [];
     }
     return Promise.resolve(envOptions.value);
   } catch (error) {
@@ -696,7 +1027,6 @@ watch(
   newVal => {
     if (newVal && newVal.length > 0) {
       searchStore.setEnv(newVal[0]);
-      handleSearch();
     }
   }
 );

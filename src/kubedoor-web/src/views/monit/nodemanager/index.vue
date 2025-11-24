@@ -12,7 +12,7 @@
           <el-select
             v-model="searchForm.env"
             placeholder="请选择K8S环境"
-            class="!w-[180px]"
+            class="!w-[220px]"
             filterable
             @change="handleEnvChange"
           >
@@ -111,11 +111,11 @@
             <template #default="scope">
               <div>
                 <div>
-                  <span style="color: #f56c6c; font-weight: bold">{{
+                  <span style="font-weight: bold; color: #f56c6c">{{
                     formatCpuCores(scope.row.current_cpu_m)
                   }}</span>
                   /
-                  <span style="color: #409eff; font-weight: bold">{{
+                  <span style="font-weight: bold; color: #409eff">{{
                     formatCpuCores(scope.row.allocatable_cpu_m)
                   }}</span>
                 </div>
@@ -137,11 +137,11 @@
             <template #default="scope">
               <div>
                 <div style="white-space: nowrap">
-                  <span style="color: #f56c6c; font-weight: bold">{{
+                  <span style="font-weight: bold; color: #f56c6c">{{
                     formatNumber(scope.row.current_memory_gi)
                   }}</span>
                   /
-                  <span style="color: #409eff; font-weight: bold">{{
+                  <span style="font-weight: bold; color: #409eff">{{
                     formatNumber(scope.row.allocatable_memory_gi)
                   }}</span>
                 </div>
@@ -163,11 +163,11 @@
             <template #default="scope">
               <div>
                 <div style="white-space: nowrap">
-                  <span style="color: #f56c6c; font-weight: bold">{{
+                  <span style="font-weight: bold; color: #f56c6c">{{
                     formatNumber(scope.row.nodefs_used_gib)
                   }}</span>
                   /
-                  <span style="color: #409eff; font-weight: bold">{{
+                  <span style="font-weight: bold; color: #409eff">{{
                     formatNumber(scope.row.nodefs_capacity_gib)
                   }}</span>
                 </div>
@@ -219,11 +219,11 @@
             <template #default="scope">
               <div>
                 <div>
-                  <span style="color: #f56c6c; font-weight: bold">{{
+                  <span style="font-weight: bold; color: #f56c6c">{{
                     scope.row.current_pods
                   }}</span>
                   /
-                  <span style="color: #409eff; font-weight: bold">{{
+                  <span style="font-weight: bold; color: #409eff">{{
                     scope.row.allocatable_pods
                   }}</span>
                 </div>
@@ -923,8 +923,8 @@ onMounted(() => {
 
 .query-form {
   display: flex;
-  align-items: center;
   flex-wrap: nowrap;
+  align-items: center;
   width: 100%;
 }
 
@@ -945,24 +945,24 @@ onMounted(() => {
 }
 
 .edit-container {
-  height: 82vh;
   display: flex;
   flex-direction: column;
+  height: 82vh;
 }
 
 .yaml-editor-container {
-  flex: 1;
   display: flex;
+  flex: 1;
   flex-direction: column;
+  overflow: hidden;
   border: 1px solid #dcdfe6;
   border-radius: 4px;
-  overflow: hidden;
 }
 
 .editor-header {
   display: flex;
-  justify-content: space-between;
   align-items: center;
+  justify-content: space-between;
   padding: 12px 16px;
   background-color: #f5f7fa;
   border-bottom: 1px solid #dcdfe6;
@@ -990,17 +990,17 @@ onMounted(() => {
 }
 
 .method-description {
-  margin-top: 16px;
   padding: 12px;
+  margin-top: 16px;
   background-color: #f5f7fa;
-  border-radius: 4px;
   border-left: 4px solid #409eff;
+  border-radius: 4px;
 }
 
 .method-description p {
   margin: 0;
-  color: #606266;
   font-size: 14px;
   line-height: 1.5;
+  color: #606266;
 }
 </style>

@@ -150,7 +150,7 @@
                 <span class="detail-label">名称: </span>
                 <span
                   class="detail-value"
-                  style="color: #e74c3c; font-weight: bold; font-size: 1.1em"
+                  style="font-size: 1.1em; font-weight: bold; color: #e74c3c"
                   >{{ detailData.name }}</span
                 >
               </div>
@@ -301,16 +301,16 @@
               <template #default="{ row }">
                 <el-tooltip placement="top" raw-content trigger="click">
                   <template #content>
-                    <pre style="white-space: pre-wrap; margin: 0">{{
+                    <pre style="margin: 0; white-space: pre-wrap">{{
                       formatJsonString(row.match_rules)
                     }}</pre>
                   </template>
                   <span
                     style="
-                      white-space: nowrap;
+                      display: block;
                       overflow: hidden;
                       text-overflow: ellipsis;
-                      display: block;
+                      white-space: nowrap;
                     "
                     >{{ formatJsonString(row.match_rules) }}</span
                   >
@@ -326,16 +326,16 @@
                 <span v-if="row.rewrite_rules">
                   <el-tooltip placement="top" raw-content trigger="click">
                     <template #content>
-                      <pre style="white-space: pre-wrap; margin: 0">{{
+                      <pre style="margin: 0; white-space: pre-wrap">{{
                         formatJsonString(row.rewrite_rules)
                       }}</pre>
                     </template>
                     <span
                       style="
-                        white-space: nowrap;
+                        display: block;
                         overflow: hidden;
                         text-overflow: ellipsis;
-                        display: block;
+                        white-space: nowrap;
                       "
                       >{{ formatJsonString(row.rewrite_rules) }}</span
                     >
@@ -367,16 +367,16 @@
               <template #default="{ row }">
                 <el-tooltip placement="top" raw-content trigger="click">
                   <template #content>
-                    <pre style="white-space: pre-wrap; margin: 0">{{
+                    <pre style="margin: 0; white-space: pre-wrap">{{
                       formatJsonString(row.forward_detail)
                     }}</pre>
                   </template>
                   <span
                     style="
-                      white-space: nowrap;
+                      display: block;
                       overflow: hidden;
                       text-overflow: ellipsis;
-                      display: block;
+                      white-space: nowrap;
                     "
                     >{{ formatJsonString(row.forward_detail) }}</span
                   >
@@ -684,7 +684,7 @@
                     <el-col :span="24">
                       <el-form-item label="Service" label-width="60px">
                         <div
-                          style="display: flex; align-items: center; gap: 8px"
+                          style="display: flex; gap: 8px; align-items: center"
                         >
                           <el-select
                             v-model="detail.service"
@@ -744,7 +744,7 @@
                     <el-col :span="8">
                       <el-form-item label="端口" label-width="60px">
                         <div
-                          style="display: flex; align-items: center; gap: 8px"
+                          style="display: flex; gap: 8px; align-items: center"
                         >
                           <el-input-number
                             v-model="detail.port"
@@ -768,7 +768,7 @@
                     <el-col :span="8">
                       <el-form-item>
                         <div
-                          style="display: flex; align-items: center; gap: 8px"
+                          style="display: flex; gap: 8px; align-items: center"
                         >
                           <el-checkbox
                             v-model="detail.subset.enabled"
@@ -786,7 +786,7 @@
                     <el-col :span="8">
                       <el-form-item>
                         <div
-                          style="display: flex; align-items: center; gap: 8px"
+                          style="display: flex; gap: 8px; align-items: center"
                         >
                           <el-checkbox
                             v-model="detail.weight.enabled"
@@ -812,8 +812,8 @@
                         <div
                           style="
                             display: flex;
-                            align-items: flex-start;
                             gap: 8px;
+                            align-items: flex-start;
                           "
                         >
                           <el-checkbox
@@ -1145,7 +1145,7 @@
                     <el-col :span="24">
                       <el-form-item label="Service" label-width="60px">
                         <div
-                          style="display: flex; align-items: center; gap: 8px"
+                          style="display: flex; gap: 8px; align-items: center"
                         >
                           <el-select
                             v-model="detail.service"
@@ -1205,7 +1205,7 @@
                     <el-col :span="8">
                       <el-form-item label="端口" label-width="60px">
                         <div
-                          style="display: flex; align-items: center; gap: 8px"
+                          style="display: flex; gap: 8px; align-items: center"
                         >
                           <el-input-number
                             v-model="detail.port"
@@ -1229,7 +1229,7 @@
                     <el-col :span="8">
                       <el-form-item>
                         <div
-                          style="display: flex; align-items: center; gap: 8px"
+                          style="display: flex; gap: 8px; align-items: center"
                         >
                           <el-checkbox
                             v-model="detail.subset.enabled"
@@ -1247,7 +1247,7 @@
                     <el-col :span="8">
                       <el-form-item>
                         <div
-                          style="display: flex; align-items: center; gap: 8px"
+                          style="display: flex; gap: 8px; align-items: center"
                         >
                           <el-checkbox
                             v-model="detail.weight.enabled"
@@ -1273,8 +1273,8 @@
                         <div
                           style="
                             display: flex;
-                            align-items: flex-start;
                             gap: 8px;
+                            align-items: flex-start;
                           "
                         >
                           <el-checkbox
@@ -1470,7 +1470,7 @@
         <!-- Route类型的字段 -->
         <template v-if="editVSForm.df_forward_type === 'route'">
           <el-form-item label="Service" prop="route_service">
-            <div style="display: flex; align-items: center; gap: 8px">
+            <div style="display: flex; gap: 8px; align-items: center">
               <el-select
                 v-model="editVSForm.route_service"
                 filterable
@@ -1523,7 +1523,7 @@
           <el-row :gutter="20">
             <el-col :span="12">
               <el-form-item label="端口" prop="route_port">
-                <div style="display: flex; align-items: center; gap: 8px">
+                <div style="display: flex; gap: 8px; align-items: center">
                   <el-input-number
                     v-model="editVSForm.route_port"
                     :min="0"
@@ -1555,7 +1555,7 @@
 
           <!-- Headers -->
           <el-form-item label="Headers">
-            <div style="display: flex; align-items: flex-start; gap: 8px">
+            <div style="display: flex; gap: 8px; align-items: flex-start">
               <el-checkbox
                 v-model="editVSForm.route_headers.enabled"
                 label="启用"
@@ -3261,20 +3261,28 @@ onMounted(() => {
 </script>
 
 <style scoped>
-.vs-detail-container {
-  padding: 20px;
+@media (width <= 768px) {
+  .detail-row {
+    grid-template-columns: 1fr;
+  }
 
+  .cluster-list {
+    grid-template-columns: 1fr;
+  }
+}
+
+.vs-detail-container {
   min-height: calc(100vh - 60px);
+  padding: 20px;
 }
 
 .page-header {
   display: flex;
   align-items: center;
-  margin-bottom: 20px;
   padding: 16px 20px;
-
+  margin-bottom: 20px;
   border-radius: 8px;
-  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.1);
+  box-shadow: 0 2px 10px rgb(0 0 0 / 10%);
 }
 
 .back-btn {
@@ -3289,8 +3297,8 @@ onMounted(() => {
 }
 
 .loading-container {
-  background: white;
   padding: 20px;
+  background: white;
   border-radius: 8px;
 }
 
@@ -3308,8 +3316,8 @@ onMounted(() => {
 
 .card-header {
   display: flex;
-  justify-content: space-between;
   align-items: center;
+  justify-content: space-between;
   font-size: 16px;
   font-weight: 600;
   color: #303133;
@@ -3344,9 +3352,8 @@ onMounted(() => {
 .cluster-item {
   position: relative;
   padding: 16px;
-
-  border-radius: 6px;
   border: 1px solid #e4e7ed;
+  border-radius: 6px;
 }
 
 .cluster-actions {
@@ -3363,8 +3370,8 @@ onMounted(() => {
 
 .add-cluster-item {
   display: flex;
-  justify-content: center;
   align-items: center;
+  justify-content: center;
   padding: 16px;
 }
 
@@ -3391,8 +3398,8 @@ onMounted(() => {
 
 .meta-item {
   display: flex;
-  align-items: center;
   gap: 4px;
+  align-items: center;
 }
 
 .detail-container {
@@ -3402,15 +3409,15 @@ onMounted(() => {
 }
 
 .detail-left {
-  flex: 3;
   display: flex;
+  flex: 3;
   flex-direction: column;
   gap: 20px;
 }
 
 .detail-right {
-  flex: 1;
   display: flex;
+  flex: 1;
   flex-direction: column;
 }
 
@@ -3462,9 +3469,9 @@ onMounted(() => {
 }
 
 .detail-label {
+  font-size: 14px;
   font-weight: 600;
   color: #606266;
-  font-size: 14px;
 }
 
 .detail-value {
@@ -3479,12 +3486,11 @@ onMounted(() => {
 }
 
 .json-textarea {
+  height: 80px;
   font-family: "Courier New", monospace;
   font-size: 12px;
   line-height: 1.4;
-
   border-radius: 4px;
-  height: 80px;
 }
 
 .table-json-textarea {
@@ -3497,49 +3503,49 @@ onMounted(() => {
 }
 
 .table-json-textarea .el-textarea__inner {
-  padding: 8px;
   min-height: auto !important;
+  padding: 8px;
 }
 
 .table-json-display {
+  min-height: 20px;
+  padding: 8px;
+  overflow: hidden;
   font-family: "Courier New", monospace;
   font-size: 11px;
   line-height: 1.3;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  cursor: pointer;
   background-color: #f8f9fa;
   border: 1px solid #e4e7ed;
   border-radius: 4px;
-  padding: 8px;
-  min-height: 20px;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  cursor: pointer;
 }
 
 .no-data {
-  color: #909399;
   font-style: italic;
+  color: #909399;
 }
 
 .error-container {
-  background: white;
   padding: 40px;
-  border-radius: 8px;
   text-align: center;
+  background: white;
+  border-radius: 8px;
 }
 
 /* 卡片头部样式 */
 .card-header {
   display: flex;
-  justify-content: flex-start;
   align-items: center;
+  justify-content: flex-start;
 }
 
 /* HTTP路由规则卡片头部样式 */
 .route-card-header {
   display: flex;
-  justify-content: space-between;
   align-items: center;
+  justify-content: space-between;
   width: 100%;
 }
 
@@ -3568,8 +3574,8 @@ onMounted(() => {
 
 .rule-header {
   display: flex;
-  justify-content: space-between;
   align-items: center;
+  justify-content: space-between;
   font-weight: 600;
 }
 
@@ -3596,8 +3602,8 @@ onMounted(() => {
 
 .detail-header {
   display: flex;
-  justify-content: space-between;
   align-items: center;
+  justify-content: space-between;
   font-weight: 600;
 }
 
@@ -3608,15 +3614,5 @@ onMounted(() => {
 
 .dialog-footer {
   text-align: right;
-}
-
-@media (max-width: 768px) {
-  .detail-row {
-    grid-template-columns: 1fr;
-  }
-
-  .cluster-list {
-    grid-template-columns: 1fr;
-  }
 }
 </style>

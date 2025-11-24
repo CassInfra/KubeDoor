@@ -61,11 +61,13 @@ export function useResource(tableRef: Ref, searchStore: any) {
     {
       label: transformI18n("resource.column.k8s"),
       prop: "env",
-      showOverflowTooltip: true
+      showOverflowTooltip: true,
+      hide: true
     },
     {
       label: transformI18n("resource.column.namespace"),
       prop: "namespace",
+      minWidth: 60,
       sortable: true,
       resizable: true,
       showOverflowTooltip: true
@@ -73,7 +75,7 @@ export function useResource(tableRef: Ref, searchStore: any) {
     {
       label: transformI18n("resource.column.deployment"),
       prop: "deployment",
-      minWidth: 150,
+      minWidth: 120,
       sortable: true,
       resizable: true,
       showOverflowTooltip: true
@@ -675,15 +677,19 @@ export function useResource(tableRef: Ref, searchStore: any) {
           let res;
           if (data) {
             if (params.length > 1 || data.type == 1) {
+              const requestBody = params;
               res = await rebootResource(
                 currentEnv,
-                params,
+                requestBody,
                 params.length > 1 ? data.interval : undefined
               );
             } else {
               let tempData = {
                 type: "restart",
-                service: params,
+                service: {
+                  deployment_list: params,
+                  node_scheduler: []
+                },
                 time: "",
                 cron: ""
               };
