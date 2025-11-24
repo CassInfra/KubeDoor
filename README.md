@@ -45,7 +45,7 @@
 ## 💠全新架构
 <div align="center">
 
-#### 🎉新增K8S事件监控，Pod实时日志，K8S MCP支持！K8S统一管控，多K8S监控、告警、展示的最佳实践🎉
+#### 🎉新增多K8S监控大屏，K8S各资源管理，K8S事件监控，Pod实时日志，K8S MCP支持！K8S统一管控，多K8S监控、告警、展示的最佳实践🎉
 
 <img width="2560" height="1440" alt="kb1 7" src="https://github.com/user-attachments/assets/7d478e6c-817e-414b-8b49-db4b9e15773a" />
 
