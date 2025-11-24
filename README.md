@@ -46,11 +46,15 @@
 <div align="center">
 
 #### 🎉新增K8S事件监控，Pod实时日志，K8S MCP支持！K8S统一管控，多K8S监控、告警、展示的最佳实践🎉
+<img width="2560" height="1440" alt="图片" src="https://github.com/user-attachments/assets/9fcd87bb-636e-4775-8a9c-26c500961a6f" />
+
 ![KubeDoor1.6.0](screenshot/KubeDoor1.3.3.png)
 </div>
 
 ## 💎功能描述
 ### 0. 💥新版功能亮点
+##### **💎花折1.7.0：新增K8S集群监控大屏看板！大量前端优化！**
+
 ##### **💎花折1.6.0：新增各类K8S资源管理能力及资源的批量操作！**
 <details close>
 <summary>🔍点击展开 ...</summary>
