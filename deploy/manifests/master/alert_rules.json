@@ -1,0 +1,103 @@
+{
+  "global_ignore_rules": [
+    {
+      "name": "环境过滤规则(排除非生产环境的K8S)",
+      "enabled": true,
+      "conditions": {
+        "k8s": {
+          "contains": ["cassmall-hwbeta-kunlun", "cassmall-hwbeta-penglai"]
+        }
+      }
+    },
+    {
+      "name": "常见忽略事件[示例:防止告警规则中有正常事件被匹配到,可以加到忽略规则中]",
+      "enabled": true,
+      "conditions": {
+        "reason": {
+          "contains": ["BackOffStart", "SuccessfulCreate", "SuccessfulMountVolume"]
+        }
+      }
+    }
+  ],
+  "alert_rules": [
+    {
+      "name": "关键事件告警",
+      "enabled": true,
+      "severity": "critical",
+      "conditions": {
+        "reason": {
+          "contains": ["OOMKilling", "NodeNotReady", "SystemOOM", "Unreachable"]
+        },
+        "level": {
+          "contains": ["Warning"]
+        }
+      }
+    },
+    {
+      "name": "重启事件告警",
+      "enabled": true,
+      "severity": "warning",
+      "conditions": {
+        "message": {
+          "contains": ["restart"]
+        }
+      }
+    },
+    {
+      "name": "健康检查失败告警",
+      "enabled": true,
+      "severity": "warning",
+      "conditions": {
+        "reason": {
+          "contains": ["Unhealthy"]
+        },
+        "name": {
+          "not_starts_with": ["deploy-micro-service-", "deploy-integration-changyuan-", "deploy-datax-cloud-"]
+        },
+        "count": {
+          "greater_than": 1
+        }
+      }
+    },
+    {
+      "name": "挂载失败告警",
+      "enabled": true,
+      "severity": "warning",
+      "conditions": {
+        "reason": {
+          "contains": ["FailedMount", "FailedAttachVolume"]
+        }
+      }
+    },
+    {
+      "name": "调度失败告警",
+      "enabled": true,
+      "severity": "warning",
+      "conditions": {
+        "reason": {
+          "contains": ["FailedScheduling", "Insufficient"]
+        }
+      }
+    },
+    {
+      "name": "资源压力告警",
+      "enabled": true,
+      "severity": "warning",
+      "conditions": {
+        "reason": {
+          "contains": ["Pressure", "OutOf", "Evict"]
+        }
+      }
+    },
+    {
+      "name": "僵尸进程告警",
+      "enabled": true,
+      "severity": "warning",
+      "conditions": {
+        "reason": {
+          "contains": ["ProcessZ"]
+        }
+      }
+    }
+  ]
+}

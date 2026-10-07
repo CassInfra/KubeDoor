@@ -1,0 +1,6477 @@
+{
+  "annotations": {
+    "list": [
+      {
+        "$$hashKey": "object:2875",
+        "builtIn": 1,
+        "datasource": {
+          "type": "datasource",
+          "uid": "grafana"
+        },
+        "enable": true,
+        "hide": true,
+        "iconColor": "rgba(0, 211, 255, 1)",
+        "name": "Annotations & Alerts",
+        "target": {
+          "limit": 100,
+          "matchAny": false,
+          "tags": [],
+          "type": "dashboard"
+        },
+        "type": "dashboard"
+      }
+    ]
+  },
+  "description": "KubeDoor - K8S节点资源实时监控",
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 0,
+  "id": 713,
+  "links": [
+    {
+      "$$hashKey": "object:2300",
+      "icon": "bolt",
+      "tags": [],
+      "targetBlank": true,
+      "title": "Update",
+      "tooltip": "更多仪表板",
+      "type": "link",
+      "url": "https://grafana.com/orgs/starsliao/dashboards"
+    },
+    {
+      "$$hashKey": "object:2301",
+      "icon": "question",
+      "tags": [],
+      "targetBlank": true,
+      "title": "GitHub",
+      "tooltip": "GITHUB：TenSunS",
+      "type": "link",
+      "url": "https://github.com/starsliao/TenSunS"
+    }
+  ],
+  "panels": [
+    {
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 0
+      },
+      "id": 187,
+      "panels": [],
+      "title": "🏡资源总览【K8S：$ext_value】",
+      "type": "row"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "KubeDoor-Prometheus"
+      },
+      "description": "标记*字段解释：\n注意： 分区默认只统计ext?和XFS格式的分区。\n- 最大分区：该主机最大的分区的总容量\n- 最大分区使用率：总容量最大的那个分区的磁盘使用率\n- 最大使用率：磁盘使用率最高的那个分区的磁盘使用率\n- IOutil使用率：IOutil最大的那个分区的磁盘IOutil\n- 磁盘读写：读写最大的那个分区的磁盘读写速度\n- 网络上下载带宽：带宽使用最多的那个网卡的带宽使用量\n\n- 连接数：状态为 ESTABLISHED 或 CLOSE-WAIT 的 TCP 连接数\n- TCPtw：等待关闭的TCP连接数\n\n健康值是一个新增的指标：\n- 根据CPU，内存，IO计算出来的一个值，低于90分说明系统的资源使用情况需要注意了。\n- 这是一个正在测试的指标参数可能需要根据实际情况再优化，如果展示的主机量较多，该查询可能会消耗较多资源引起卡顿，您可以编辑表格，禁用这个查询的promql。",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "custom": {
+            "align": "auto",
+            "cellOptions": {
+              "type": "auto"
+            },
+            "filterable": false,
+            "inspect": false
+          },
+          "decimals": 1,
+          "mappings": [],
+          "max": 100,
+          "min": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "unit": "none"
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "内存"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "bytes"
+              },
+              {
+                "id": "custom.width",
+                "value": 66
+              },
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "blue",
+                  "mode": "fixed"
+                }
+              },
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "type": "color-text"
+                }
+              },
+              {
+                "id": "decimals",
+                "value": 0
+              },
+              {
+                "id": "custom.filterable",
+                "value": true
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "启动(天)"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "none"
+              },
+              {
+                "id": "custom.width",
+                "value": 66
+              },
+              {
+                "id": "decimals"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "磁盘读取*"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "binBps"
+              },
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "mode": "gradient",
+                  "type": "color-background"
+                }
+              },
+              {
+                "id": "thresholds",
+                "value": {
+                  "mode": "absolute",
+                  "steps": [
+                    {
+                      "color": "green",
+                      "value": null
+                    },
+                    {
+                      "color": "orange",
+                      "value": 10485760
+                    },
+                    {
+                      "color": "red",
+                      "value": 20485760
+                    }
+                  ]
+                }
+              },
+              {
+                "id": "custom.width",
+                "value": 89
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "磁盘写入*"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "binBps"
+              },
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "mode": "gradient",
+                  "type": "color-background"
+                }
+              },
+              {
+                "id": "thresholds",
+                "value": {
+                  "mode": "absolute",
+                  "steps": [
+                    {
+                      "color": "green",
+                      "value": null
+                    },
+                    {
+                      "color": "orange",
+                      "value": 10485760
+                    },
+                    {
+                      "color": "red",
+                      "value": 20485760
+                    }
+                  ]
+                }
+              },
+              {
+                "id": "custom.width",
+                "value": 89
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "下载带宽*"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "binbps"
+              },
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "mode": "gradient",
+                  "type": "color-background"
+                }
+              },
+              {
+                "id": "thresholds",
+                "value": {
+                  "mode": "absolute",
+                  "steps": [
+                    {
+                      "color": "green",
+                      "value": null
+                    },
+                    {
+                      "color": "orange",
+                      "value": 30485760
+                    },
+                    {
+                      "color": "red",
+                      "value": 104857600
+                    }
+                  ]
+                }
+              },
+              {
+                "id": "custom.width",
+                "value": 91
+              },
+              {
+                "id": "decimals"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "上传带宽*"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "binbps"
+              },
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "mode": "gradient",
+                  "type": "color-background"
+                }
+              },
+              {
+                "id": "thresholds",
+                "value": {
+                  "mode": "absolute",
+                  "steps": [
+                    {
+                      "color": "green",
+                      "value": null
+                    },
+                    {
+                      "color": "orange",
+                      "value": 30485760
+                    },
+                    {
+                      "color": "red",
+                      "value": 104857600
+                    }
+                  ]
+                }
+              },
+              {
+                "id": "custom.width",
+                "value": 85
+              },
+              {
+                "id": "decimals"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "负载"
+            },
+            "properties": [
+              {
+                "id": "decimals",
+                "value": 2
+              },
+              {
+                "id": "custom.width",
+                "value": 55
+              },
+              {
+                "id": "fieldMinMax",
+                "value": true
+              },
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "type": "color-text"
+                }
+              },
+              {
+                "id": "color",
+                "value": {
+                  "mode": "continuous-YlRd"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "连接数"
+            },
+            "properties": [
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "mode": "gradient",
+                  "type": "color-background"
+                }
+              },
+              {
+                "id": "thresholds",
+                "value": {
+                  "mode": "absolute",
+                  "steps": [
+                    {
+                      "color": "green",
+                      "value": null
+                    },
+                    {
+                      "color": "orange",
+                      "value": 1000
+                    },
+                    {
+                      "color": "red",
+                      "value": 1500
+                    }
+                  ]
+                }
+              },
+              {
+                "id": "custom.width",
+                "value": 55
+              },
+              {
+                "id": "decimals"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "TCPtw"
+            },
+            "properties": [
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "mode": "gradient",
+                  "type": "color-background"
+                }
+              },
+              {
+                "id": "thresholds",
+                "value": {
+                  "mode": "absolute",
+                  "steps": [
+                    {
+                      "color": "green",
+                      "value": null
+                    },
+                    {
+                      "color": "orange",
+                      "value": 5000
+                    },
+                    {
+                      "color": "red",
+                      "value": 20000
+                    }
+                  ]
+                }
+              },
+              {
+                "id": "custom.width",
+                "value": 60
+              },
+              {
+                "id": "decimals"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "CPU"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 60
+              },
+              {
+                "id": "decimals",
+                "value": 0
+              },
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "type": "color-text"
+                }
+              },
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "blue",
+                  "mode": "fixed"
+                }
+              },
+              {
+                "id": "custom.filterable",
+                "value": true
+              },
+              {
+                "id": "mappings",
+                "value": [
+                  {
+                    "options": {
+                      "pattern": "/(.*)2.*/",
+                      "result": {
+                        "index": 0,
+                        "text": "$1"
+                      }
+                    },
+                    "type": "regex"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "IP"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 102
+              },
+              {
+                "id": "custom.filterable",
+                "value": true
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "名称"
+            },
+            "properties": [
+              {
+                "id": "custom.filterable",
+                "value": true
+              },
+              {
+                "id": "custom.width",
+                "value": 123
+              },
+              {
+                "id": "links",
+                "value": [
+                  {
+                    "targetBlank": false,
+                    "title": "跳转主机资源明细",
+                    "url": "/d/StarsL-TenSunS-node/?${group:queryparam}&${sname:queryparam}&var-name=${__data.fields.名称}&orgId=1&var-instance=${__data.fields.IP}"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "健康值"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 56
+              },
+              {
+                "id": "thresholds",
+                "value": {
+                  "mode": "absolute",
+                  "steps": [
+                    {
+                      "color": "red",
+                      "value": null
+                    },
+                    {
+                      "color": "orange",
+                      "value": 80
+                    },
+                    {
+                      "color": "green",
+                      "value": 90
+                    }
+                  ]
+                }
+              },
+              {
+                "id": "color",
+                "value": {
+                  "mode": "thresholds"
+                }
+              },
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "mode": "gradient",
+                  "type": "color-background"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": "/.*使用率.*/"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "percent"
+              },
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "mode": "gradient",
+                  "type": "gauge",
+                  "valueDisplayMode": "color"
+                }
+              },
+              {
+                "id": "color",
+                "value": {
+                  "mode": "continuous-GrYlRd"
+                }
+              },
+              {
+                "id": "custom.width",
+                "value": 110
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "到期日"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 97
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "实例ID"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 71
+              },
+              {
+                "id": "custom.inspect",
+                "value": true
+              },
+              {
+                "id": "custom.filterable",
+                "value": true
+              },
+              {
+                "id": "links"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byType",
+              "options": "number"
+            },
+            "properties": [
+              {
+                "id": "custom.align",
+                "value": "center"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "属组"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 118
+              },
+              {
+                "id": "custom.filterable",
+                "value": true
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": "/.*/"
+            },
+            "properties": [
+              {
+                "id": "filterable"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "最大分区*"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 77
+              },
+              {
+                "id": "unit",
+                "value": "bytes"
+              },
+              {
+                "id": "decimals",
+                "value": 0
+              },
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "blue",
+                  "mode": "fixed"
+                }
+              },
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "type": "color-text"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "最大分区使用率*"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 120
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "主机名"
+            },
+            "properties": [
+              {
+                "id": "custom.width"
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "h": 9,
+        "w": 24,
+        "x": 0,
+        "y": 1
+      },
+      "id": 198,
+      "options": {
+        "cellHeight": "sm",
+        "footer": {
+          "countRows": false,
+          "fields": [
+            "Value #B",
+            "Value #C",
+            "Value #L",
+            "Value #H",
+            "Value #I",
+            "Value #M",
+            "Value #N",
+            "Value #J",
+            "Value #K"
+          ],
+          "reducer": [
+            "sum"
+          ],
+          "show": false
+        },
+        "showHeader": true,
+        "sortBy": [
+          {
+            "desc": false,
+            "displayName": "健康值"
+          }
+        ]
+      },
+      "pluginVersion": "11.4.0",
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "KubeDoor-Prometheus"
+          },
+          "editorMode": "code",
+          "exemplar": false,
+          "expr": "node_uname_info{$ext_key=~\"$ext_value\"} - 0",
+          "format": "table",
+          "hide": false,
+          "instant": true,
+          "interval": "",
+          "legendFormat": "主机名",
+          "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "KubeDoor-Prometheus"
+          },
+          "editorMode": "code",
+          "exemplar": false,
+          "expr": "sum(time() - node_boot_time_seconds{$ext_key=~\"$ext_value\"})by(instance)/86400",
+          "format": "table",
+          "hide": false,
+          "instant": true,
+          "interval": "",
+          "legendFormat": "运行时间",
+          "refId": "D"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "KubeDoor-Prometheus"
+          },
+          "editorMode": "code",
+          "exemplar": false,
+          "expr": "node_memory_MemTotal_bytes{$ext_key=~\"$ext_value\"} - 0",
+          "format": "table",
+          "hide": false,
+          "instant": true,
+          "interval": "",
+          "legendFormat": "总内存",
+          "refId": "B"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "KubeDoor-Prometheus"
+          },
+          "editorMode": "code",
+          "exemplar": false,
+          "expr": "count(node_cpu_seconds_total{$ext_key=~\"$ext_value\",mode='system'}) by (instance)",
+          "format": "table",
+          "hide": false,
+          "instant": true,
+          "interval": "",
+          "legendFormat": "总核数",
+          "refId": "C"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "KubeDoor-Prometheus"
+          },
+          "editorMode": "code",
+          "exemplar": false,
+          "expr": "node_load5{$ext_key=~\"$ext_value\"}",
+          "format": "table",
+          "instant": true,
+          "interval": "",
+          "legendFormat": "5分钟负载",
+          "refId": "L"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "KubeDoor-Prometheus"
+          },
+          "editorMode": "code",
+          "exemplar": false,
+          "expr": "(1 - avg(irate(node_cpu_seconds_total{$ext_key=~\"$ext_value\",mode=\"idle\"}[$interval])) by (instance)) * 100",
+          "format": "table",
+          "hide": false,
+          "instant": true,
+          "interval": "",
+          "legendFormat": "CPU使用率",
+          "refId": "F"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "KubeDoor-Prometheus"
+          },
+          "editorMode": "code",
+          "exemplar": false,
+          "expr": "(1 - (node_memory_MemAvailable_bytes{$ext_key=~\"$ext_value\"} / (node_memory_MemTotal_bytes{$ext_key=~\"$ext_value\"})))* 100",
+          "format": "table",
+          "hide": false,
+          "instant": true,
+          "interval": "",
+          "legendFormat": "内存使用率",
+          "refId": "G"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "KubeDoor-Prometheus"
+          },
+          "editorMode": "code",
+          "exemplar": false,
+          "expr": "max((node_filesystem_size_bytes{$ext_key=~\"$ext_value\",fstype=~\"ext.?|xfs\"}-node_filesystem_free_bytes{$ext_key=~\"$ext_value\",fstype=~\"ext.?|xfs\"}) *100/(node_filesystem_avail_bytes {$ext_key=~\"$ext_value\",fstype=~\"ext.?|xfs\"}+(node_filesystem_size_bytes{$ext_key=~\"$ext_value\",fstype=~\"ext.?|xfs\"}-node_filesystem_free_bytes{$ext_key=~\"$ext_value\",fstype=~\"ext.?|xfs\"})))by(instance)",
+          "format": "table",
+          "hide": false,
+          "instant": true,
+          "interval": "",
+          "legendFormat": "__auto",
+          "refId": "E"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "KubeDoor-Prometheus"
+          },
+          "editorMode": "code",
+          "exemplar": false,
+          "expr": "max(irate(node_disk_read_bytes_total{$ext_key=~\"$ext_value\"}[$interval])) by (instance)",
+          "format": "table",
+          "hide": false,
+          "instant": true,
+          "interval": "",
+          "legendFormat": "最大读取",
+          "refId": "H"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "KubeDoor-Prometheus"
+          },
+          "editorMode": "code",
+          "exemplar": false,
+          "expr": "max(irate(node_disk_written_bytes_total{$ext_key=~\"$ext_value\"}[$interval])) by (instance)",
+          "format": "table",
+          "hide": false,
+          "instant": true,
+          "interval": "",
+          "legendFormat": "最大写入",
+          "refId": "I"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "KubeDoor-Prometheus"
+          },
+          "editorMode": "code",
+          "exemplar": false,
+          "expr": "node_netstat_Tcp_CurrEstab{$ext_key=~\"$ext_value\"} - 0",
+          "format": "table",
+          "hide": false,
+          "instant": true,
+          "interval": "",
+          "legendFormat": "连接数",
+          "refId": "M"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "KubeDoor-Prometheus"
+          },
+          "editorMode": "code",
+          "exemplar": false,
+          "expr": "node_sockstat_TCP_tw{$ext_key=~\"$ext_value\"} - 0",
+          "format": "table",
+          "hide": false,
+          "instant": true,
+          "interval": "",
+          "legendFormat": "TIME_WAIT",
+          "refId": "N"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "KubeDoor-Prometheus"
+          },
+          "editorMode": "code",
+          "exemplar": false,
+          "expr": "max(irate(node_network_receive_bytes_total{$ext_key=~\"$ext_value\",device=~\"$device\"}[$interval])*8) by (instance)",
+          "format": "table",
+          "hide": false,
+          "instant": true,
+          "interval": "",
+          "legendFormat": "下载带宽",
+          "refId": "J"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "KubeDoor-Prometheus"
+          },
+          "editorMode": "code",
+          "exemplar": false,
+          "expr": "max(irate(node_network_transmit_bytes_total{$ext_key=~\"$ext_value\",device=~\"$device\"}[$interval])*8) by (instance)",
+          "format": "table",
+          "hide": false,
+          "instant": true,
+          "interval": "",
+          "legendFormat": "上传带宽",
+          "refId": "K"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "KubeDoor-Prometheus"
+          },
+          "editorMode": "code",
+          "exemplar": false,
+          "expr": "((1-(1 - avg(irate(node_cpu_seconds_total{$ext_key=~\"$ext_value\",mode=\"idle\"}[$interval])) by (instance))^1.3)^(1/3)*0.5 + \r\n(1-(1 - avg(node_memory_MemAvailable_bytes{$ext_key=~\"$ext_value\"} / node_memory_MemTotal_bytes{$ext_key=~\"$ext_value\"})by (instance))^6)^(1/3)*0.3 + \r\n(1 - max(irate(node_disk_io_time_seconds_total{$ext_key=~\"$ext_value\"}[$interval]))by (instance)^1.1)^(1/2)*0.2)*100",
+          "format": "table",
+          "hide": false,
+          "instant": true,
+          "interval": "",
+          "legendFormat": "__auto",
+          "refId": "O"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "KubeDoor-Prometheus"
+          },
+          "editorMode": "code",
+          "exemplar": false,
+          "expr": "max(irate(node_disk_io_time_seconds_total{$ext_key=~\"$ext_value\"}[$interval])) by (instance) *100",
+          "format": "table",
+          "hide": false,
+          "instant": true,
+          "interval": "",
+          "legendFormat": "IOutil使用率",
+          "refId": "P"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "KubeDoor-Prometheus"
+          },
+          "editorMode": "code",
+          "exemplar": false,
+          "expr": "max(node_filesystem_size_bytes{$ext_key=~\"$ext_value\",fstype=~\"ext.*|xfs\",mountpoint !~\".*pod.*\"}) by(instance)",
+          "format": "table",
+          "hide": false,
+          "instant": true,
+          "interval": "",
+          "legendFormat": "最大分区容量",
+          "refId": "Q"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "KubeDoor-Prometheus"
+          },
+          "editorMode": "code",
+          "exemplar": false,
+          "expr": "max by(instance,mountpoint)(node_filesystem_size_bytes{$ext_key=~\"$ext_value\",fstype=~\"ext.?|xfs\"}-node_filesystem_free_bytes{$ext_key=~\"$ext_value\",fstype=~\"ext.?|xfs\"}) *100/topk (1,(max by (instance,mountpoint)(node_filesystem_avail_bytes {$ext_key=~\"$ext_value\",fstype=~\"ext.?|xfs\"}+(node_filesystem_size_bytes{$ext_key=~\"$ext_value\",fstype=~\"ext.?|xfs\"}-node_filesystem_free_bytes{$ext_key=~\"$ext_value\",fstype=~\"ext.?|xfs\"})))) by (instance)",
+          "format": "table",
+          "hide": false,
+          "instant": true,
+          "interval": "",
+          "legendFormat": "__auto",
+          "refId": "R"
+        }
+      ],
+      "title": "服务器资源总览表【主机总数：$total】",
+      "transformations": [
+        {
+          "id": "merge",
+          "options": {
+            "reducers": []
+          }
+        },
+        {
+          "id": "filterFieldsByName",
+          "options": {
+            "include": {
+              "pattern": "/^Value #[^A]|^instance$|^nodename$/"
+            }
+          }
+        },
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "exp": true
+            },
+            "includeByName": {},
+            "indexByName": {
+              "Value #B": 6,
+              "Value #C": 3,
+              "Value #D": 18,
+              "Value #E": 10,
+              "Value #F": 5,
+              "Value #G": 7,
+              "Value #H": 12,
+              "Value #I": 13,
+              "Value #J": 16,
+              "Value #K": 17,
+              "Value #L": 4,
+              "Value #M": 14,
+              "Value #N": 15,
+              "Value #O": 2,
+              "Value #P": 11,
+              "Value #Q": 8,
+              "Value #R": 9,
+              "instance": 1,
+              "nodename": 0
+            },
+            "renameByName": {
+              "Value #B": "内存",
+              "Value #C": "CPU",
+              "Value #D": "启动(天)",
+              "Value #E": "最大使用率*",
+              "Value #F": "CPU使用率",
+              "Value #G": "内存使用率",
+              "Value #H": "磁盘读取*",
+              "Value #I": "磁盘写入*",
+              "Value #J": "下载带宽*",
+              "Value #K": "上传带宽*",
+              "Value #L": "负载",
+              "Value #M": "连接数",
+              "Value #N": "TCPtw",
+              "Value #O": "健康值",
+              "Value #P": "IOutil使用率*",
+              "Value #Q": "最大分区*",
+              "Value #R": "最大分区使用率*",
+              "Value #S": "oom3d",
+              "exp": "到期日",
+              "group": "属组",
+              "iid": "实例ID",
+              "instance": "IP",
+              "name": "名称",
+              "nodename": "主机名",
+              "release": "内核"
+            }
+          }
+        }
+      ],
+      "type": "table"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "KubeDoor-Prometheus"
+      },
+      "description": "- P99：数据集按升序排列，第99分位置大的数据。（即升序排列后排在99%位置的数据）\n- 该表格需要在Prometheus增加记录规则（参考看板下载页）\n- 采集1小时后出数据\n- 时间范围[7d:1h]表示要查看过去 7 天内每小时的数据点。\n- node_vmstat_oom_kill需要 Linux 内核版本 4.13及更高版本。",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "align": "center",
+            "cellOptions": {
+              "type": "color-text"
+            },
+            "inspect": false
+          },
+          "mappings": [],
+          "max": 100,
+          "min": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 80
+              }
+            ]
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": "/.*%/"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "percent"
+              },
+              {
+                "id": "decimals",
+                "value": 1
+              },
+              {
+                "id": "custom.width",
+                "value": 72
+              },
+              {
+                "id": "color",
+                "value": {
+                  "mode": "continuous-GrYlRd"
+                }
+              },
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "type": "color-background"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "IP"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 85
+              },
+              {
+                "id": "mappings",
+                "value": [
+                  {
+                    "options": {
+                      "pattern": "/(.+):.+/",
+                      "result": {
+                        "index": 0,
+                        "text": "$1"
+                      }
+                    },
+                    "type": "regex"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "主机名"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 113
+              },
+              {
+                "id": "custom.align",
+                "value": "left"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byType",
+              "options": "string"
+            },
+            "properties": [
+              {
+                "id": "filterable",
+                "value": false
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "P99CPU%"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 75
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "3天oom"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 65
+              },
+              {
+                "id": "thresholds",
+                "value": {
+                  "mode": "absolute",
+                  "steps": [
+                    {
+                      "color": "green",
+                      "value": null
+                    },
+                    {
+                      "color": "#EAB839",
+                      "value": 1
+                    },
+                    {
+                      "color": "red",
+                      "value": 2
+                    }
+                  ]
+                }
+              },
+              {
+                "id": "unit",
+                "value": "none"
+              },
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "applyToRow": false,
+                  "mode": "gradient",
+                  "type": "color-background"
+                }
+              },
+              {
+                "id": "color"
+              },
+              {
+                "id": "mappings",
+                "value": [
+                  {
+                    "options": {
+                      "match": "null+nan",
+                      "result": {
+                        "color": "#808080",
+                        "index": 0,
+                        "text": "不支持"
+                      }
+                    },
+                    "type": "special"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "P99内存%"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 78
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 6,
+        "x": 0,
+        "y": 10
+      },
+      "id": 200,
+      "links": [
+        {
+          "targetBlank": true,
+          "title": "https://grafana.com/grafana/dashboards/8919-node-exporter-dashboard-20240520-tensuns/",
+          "url": "https://grafana.com/grafana/dashboards/8919-node-exporter-dashboard-20240520-tensuns/﻿"
+        }
+      ],
+      "options": {
+        "cellHeight": "sm",
+        "footer": {
+          "countRows": false,
+          "fields": "",
+          "reducer": [
+            "sum"
+          ],
+          "show": false
+        },
+        "showHeader": true,
+        "sortBy": [
+          {
+            "desc": true,
+            "displayName": "P99CPU%"
+          }
+        ]
+      },
+      "pluginVersion": "11.4.0",
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "KubeDoor-Prometheus"
+          },
+          "editorMode": "code",
+          "exemplar": false,
+          "expr": "node_uname_info{$ext_key=~\"$ext_value\"} - 0",
+          "format": "table",
+          "hide": false,
+          "instant": true,
+          "interval": "",
+          "legendFormat": "__auto",
+          "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "KubeDoor-Prometheus"
+          },
+          "editorMode": "code",
+          "exemplar": false,
+          "expr": "quantile_over_time(0.99, cpu:usage:rate1m{$ext_key=~\"$ext_value\"}[7d:1h])",
+          "format": "table",
+          "hide": false,
+          "instant": true,
+          "interval": "",
+          "legendFormat": "CPU使用率P99",
+          "refId": "B"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "KubeDoor-Prometheus"
+          },
+          "editorMode": "code",
+          "exemplar": false,
+          "expr": "quantile_over_time(0.99, mem:usage:rate1m{$ext_key=~\"$ext_value\"}[7d:1h])",
+          "format": "table",
+          "hide": false,
+          "instant": true,
+          "interval": "",
+          "legendFormat": "内存使用率P99",
+          "refId": "C"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "KubeDoor-Prometheus"
+          },
+          "editorMode": "code",
+          "exemplar": false,
+          "expr": "increase(node_vmstat_oom_kill{$ext_key=~\"$ext_value\"}[3d])",
+          "format": "table",
+          "hide": false,
+          "instant": true,
+          "interval": "",
+          "legendFormat": "OOM3d",
+          "refId": "E"
+        }
+      ],
+      "title": "最近7天P99资源使用率",
+      "transformations": [
+        {
+          "id": "seriesToColumns",
+          "options": {
+            "byField": "instance"
+          }
+        },
+        {
+          "id": "filterFieldsByName",
+          "options": {
+            "include": {
+              "pattern": "/^Value #[^A]|^instance$|^nodename$/"
+            }
+          }
+        },
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {},
+            "includeByName": {},
+            "indexByName": {
+              "Value #B": 2,
+              "Value #C": 3,
+              "Value #E": 4,
+              "instance": 1,
+              "nodename": 0
+            },
+            "renameByName": {
+              "Value #B": "P99CPU%",
+              "Value #C": "P99内存%",
+              "Value #E": "3天oom",
+              "instance": "IP",
+              "name": "名称",
+              "name 1": "名称",
+              "nodename": "主机名"
+            }
+          }
+        }
+      ],
+      "type": "table"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "KubeDoor-Prometheus"
+      },
+      "description": "",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisBorderShow": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "series",
+            "axisLabel": "总5分钟负载",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "barWidthFactor": 0.6,
+            "drawStyle": "line",
+            "fillOpacity": 0,
+            "gradientMode": "none",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "insertNulls": false,
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "pointSize": 5,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "never",
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "links": [],
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 80
+              }
+            ]
+          },
+          "unit": "none"
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "CPU%"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "percent"
+              },
+              {
+                "id": "custom.axisLabel",
+                "value": "CPU核使用率"
+              },
+              {
+                "id": "custom.pointSize",
+                "value": 2
+              },
+              {
+                "id": "custom.drawStyle",
+                "value": "points"
+              },
+              {
+                "id": "custom.hideFrom",
+                "value": {
+                  "legend": true,
+                  "tooltip": false,
+                  "viz": false
+                }
+              },
+              {
+                "id": "decimals",
+                "value": 1
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "核数"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "#C4162A",
+                  "mode": "fixed"
+                }
+              },
+              {
+                "id": "custom.pointSize",
+                "value": 3
+              },
+              {
+                "id": "custom.drawStyle",
+                "value": "line"
+              },
+              {
+                "id": "custom.showPoints",
+                "value": "always"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "5m负载"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "orange",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 6,
+        "x": 6,
+        "y": 10
+      },
+      "id": 191,
+      "maxDataPoints": 100,
+      "options": {
+        "legend": {
+          "calcs": [
+            "max"
+          ],
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "maxHeight": 600,
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "pluginVersion": "11.4.0",
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "KubeDoor-Prometheus"
+          },
+          "editorMode": "code",
+          "exemplar": true,
+          "expr": "sum(node_load5{$ext_key=~\"$ext_value\"})",
+          "format": "time_series",
+          "hide": false,
+          "interval": "",
+          "intervalFactor": 1,
+          "legendFormat": "5m负载",
+          "range": true,
+          "refId": "A",
+          "step": 240
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "KubeDoor-Prometheus"
+          },
+          "editorMode": "code",
+          "exemplar": true,
+          "expr": "count(node_cpu_seconds_total{$ext_key=~\"$ext_value\",mode='system'})",
+          "format": "time_series",
+          "hide": false,
+          "instant": false,
+          "interval": "2m",
+          "intervalFactor": 1,
+          "legendFormat": "核数",
+          "refId": "B",
+          "step": 240
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "KubeDoor-Prometheus"
+          },
+          "editorMode": "code",
+          "exemplar": true,
+          "expr": "sum(node_load5{$ext_key=~\"$ext_value\"})/count(node_cpu_seconds_total{$ext_key=~\"$ext_value\",mode='system'}) *100",
+          "format": "time_series",
+          "hide": false,
+          "interval": "",
+          "intervalFactor": 1,
+          "legendFormat": "CPU%",
+          "range": true,
+          "refId": "F",
+          "step": 240
+        }
+      ],
+      "title": "整体总负载【K8S：$ext_value】",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "KubeDoor-Prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisBorderShow": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "series",
+            "axisLabel": "总已用内存",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "barWidthFactor": 0.6,
+            "drawStyle": "line",
+            "fillOpacity": 0,
+            "gradientMode": "none",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "insertNulls": false,
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "pointSize": 5,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "never",
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "decimals": 0,
+          "links": [],
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 80
+              }
+            ]
+          },
+          "unit": "bytes"
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "总内存"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "#C4162A",
+                  "mode": "fixed"
+                }
+              },
+              {
+                "id": "custom.drawStyle",
+                "value": "line"
+              },
+              {
+                "id": "custom.pointSize",
+                "value": 3
+              },
+              {
+                "id": "custom.showPoints",
+                "value": "always"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "内存%"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "percent"
+              },
+              {
+                "id": "decimals",
+                "value": 1
+              },
+              {
+                "id": "custom.axisLabel",
+                "value": "内存使用率"
+              },
+              {
+                "id": "custom.drawStyle",
+                "value": "points"
+              },
+              {
+                "id": "custom.pointSize",
+                "value": 2
+              },
+              {
+                "id": "custom.hideFrom",
+                "value": {
+                  "legend": true,
+                  "tooltip": false,
+                  "viz": false
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "总已用"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "orange",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 6,
+        "x": 12,
+        "y": 10
+      },
+      "id": 195,
+      "maxDataPoints": 100,
+      "options": {
+        "legend": {
+          "calcs": [
+            "max"
+          ],
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "maxHeight": 600,
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "pluginVersion": "11.4.0",
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "KubeDoor-Prometheus"
+          },
+          "editorMode": "code",
+          "exemplar": true,
+          "expr": "sum(node_memory_MemTotal_bytes{$ext_key=~\"$ext_value\"} - node_memory_MemAvailable_bytes{$ext_key=~\"$ext_value\"})",
+          "format": "time_series",
+          "hide": false,
+          "interval": "",
+          "intervalFactor": 1,
+          "legendFormat": "总已用",
+          "range": true,
+          "refId": "B",
+          "step": 4
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "KubeDoor-Prometheus"
+          },
+          "editorMode": "code",
+          "exemplar": true,
+          "expr": "sum(node_memory_MemTotal_bytes{$ext_key=~\"$ext_value\"})",
+          "format": "time_series",
+          "hide": false,
+          "instant": false,
+          "interval": "2m",
+          "intervalFactor": 1,
+          "legendFormat": "总内存",
+          "refId": "A",
+          "step": 4
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "KubeDoor-Prometheus"
+          },
+          "editorMode": "code",
+          "exemplar": true,
+          "expr": "(sum(node_memory_MemTotal_bytes{$ext_key=~\"$ext_value\"} - node_memory_MemAvailable_bytes{$ext_key=~\"$ext_value\"}) / sum(node_memory_MemTotal_bytes{$ext_key=~\"$ext_value\"}))*100",
+          "format": "time_series",
+          "hide": false,
+          "interval": "",
+          "intervalFactor": 1,
+          "legendFormat": "内存%",
+          "range": true,
+          "refId": "H"
+        }
+      ],
+      "title": "整体总内存【K8S：$ext_value】",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "KubeDoor-Prometheus"
+      },
+      "description": "",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisBorderShow": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "series",
+            "axisLabel": "总磁盘使用量",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "barWidthFactor": 0.6,
+            "drawStyle": "line",
+            "fillOpacity": 0,
+            "gradientMode": "none",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "insertNulls": false,
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "pointSize": 5,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "never",
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "fieldMinMax": false,
+          "links": [],
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 80
+              }
+            ]
+          },
+          "unit": "bytes"
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "磁盘%"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "percent"
+              },
+              {
+                "id": "decimals",
+                "value": 1
+              },
+              {
+                "id": "custom.axisLabel",
+                "value": "磁盘使用率"
+              },
+              {
+                "id": "custom.pointSize",
+                "value": 2
+              },
+              {
+                "id": "custom.hideFrom",
+                "value": {
+                  "legend": true,
+                  "tooltip": false,
+                  "viz": false
+                }
+              },
+              {
+                "id": "custom.drawStyle",
+                "value": "points"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "总磁盘量"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "#C4162A",
+                  "mode": "fixed"
+                }
+              },
+              {
+                "id": "custom.drawStyle",
+                "value": "line"
+              },
+              {
+                "id": "custom.pointSize",
+                "value": 3
+              },
+              {
+                "id": "custom.showPoints",
+                "value": "always"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "总使用量"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "orange",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 6,
+        "x": 18,
+        "y": 10
+      },
+      "id": 197,
+      "maxDataPoints": 100,
+      "options": {
+        "legend": {
+          "calcs": [
+            "max"
+          ],
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "maxHeight": 600,
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "pluginVersion": "11.4.0",
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "KubeDoor-Prometheus"
+          },
+          "editorMode": "code",
+          "exemplar": true,
+          "expr": "sum(avg(node_filesystem_size_bytes{$ext_key=~\"$ext_value\",fstype=~\"xfs|ext.*\"})by(device,instance)) - sum(avg(node_filesystem_free_bytes{$ext_key=~\"$ext_value\",fstype=~\"xfs|ext.*\"})by(device,instance))",
+          "format": "time_series",
+          "instant": false,
+          "interval": "",
+          "intervalFactor": 1,
+          "legendFormat": "总使用量",
+          "refId": "C"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "KubeDoor-Prometheus"
+          },
+          "editorMode": "code",
+          "exemplar": true,
+          "expr": "sum(avg(node_filesystem_size_bytes{$ext_key=~\"$ext_value\",fstype=~\"xfs|ext.*\"})by(device,instance))",
+          "format": "time_series",
+          "instant": false,
+          "interval": "2m",
+          "intervalFactor": 1,
+          "legendFormat": "总磁盘量",
+          "refId": "E"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "KubeDoor-Prometheus"
+          },
+          "editorMode": "code",
+          "exemplar": true,
+          "expr": "(sum(avg(node_filesystem_size_bytes{$ext_key=~\"$ext_value\",fstype=~\"xfs|ext.*\"})by(device,instance)) - sum(avg(node_filesystem_free_bytes{$ext_key=~\"$ext_value\",fstype=~\"xfs|ext.*\"})by(device,instance))) *100/sum(avg(node_filesystem_size_bytes{$ext_key=~\"$ext_value\",fstype=~\"xfs|ext.*\"})by(device,instance))",
+          "format": "time_series",
+          "hide": false,
+          "instant": false,
+          "interval": "",
+          "intervalFactor": 1,
+          "legendFormat": "磁盘%",
+          "refId": "A"
+        }
+      ],
+      "title": "整体总磁盘（EXT.*/XFS）【K8S：$ext_value】",
+      "type": "timeseries"
+    },
+    {
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 17
+      },
+      "id": 189,
+      "panels": [],
+      "title": "🧮资源明细【$show_name】【$instance】",
+      "type": "row"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "KubeDoor-Prometheus"
+      },
+      "description": "本看板中的：磁盘总量、使用量、可用量、使用率保持和df命令的Size、Used、Avail、Use% 列的值一致，并且Use%的值会四舍五入保留一位小数，会更加准确。\n\n注：df中Use%算法为：(size - free) * 100 / (avail + (size - free))，结果是整除则为该值，非整除则为该值+1，结果的单位是%。\n参考df命令源码：",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "custom": {
+            "align": "center",
+            "cellOptions": {
+              "type": "auto"
+            },
+            "inspect": false
+          },
+          "displayName": "",
+          "mappings": [],
+          "thresholds": {
+            "mode": "percentage",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "unit": "none"
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "分区"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 142
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "剩余空间"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "bytes"
+              },
+              {
+                "id": "decimals"
+              },
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "type": "color-text"
+                }
+              },
+              {
+                "id": "thresholds",
+                "value": {
+                  "mode": "absolute",
+                  "steps": [
+                    {
+                      "color": "red",
+                      "value": null
+                    },
+                    {
+                      "color": "orange",
+                      "value": 10000000000
+                    },
+                    {
+                      "color": "green",
+                      "value": 20000000000
+                    }
+                  ]
+                }
+              },
+              {
+                "id": "custom.width",
+                "value": 72
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "使用率"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "percent"
+              },
+              {
+                "id": "decimals",
+                "value": 1
+              },
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "mode": "gradient",
+                  "type": "gauge",
+                  "valueDisplayMode": "color"
+                }
+              },
+              {
+                "id": "custom.width",
+                "value": 115
+              },
+              {
+                "id": "min",
+                "value": 0
+              },
+              {
+                "id": "max",
+                "value": 100
+              },
+              {
+                "id": "color",
+                "value": {
+                  "mode": "continuous-GrYlRd"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "总空间"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "bytes"
+              },
+              {
+                "id": "custom.width",
+                "value": 69
+              },
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "blue",
+                  "mode": "fixed"
+                }
+              },
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "type": "color-text"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "类型"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 51
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "设备名"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 121
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byType",
+              "options": "string"
+            },
+            "properties": [
+              {
+                "id": "custom.align",
+                "value": "left"
+              },
+              {
+                "id": "filterable"
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "h": 6,
+        "w": 8,
+        "x": 0,
+        "y": 18
+      },
+      "id": 181,
+      "links": [
+        {
+          "targetBlank": true,
+          "title": "https://github.com/coreutils/coreutils/blob/master/src/df.c",
+          "url": "https://github.com/coreutils/coreutils/blob/master/src/df.c"
+        }
+      ],
+      "options": {
+        "cellHeight": "sm",
+        "footer": {
+          "countRows": false,
+          "fields": "",
+          "reducer": [
+            "sum"
+          ],
+          "show": false
+        },
+        "showHeader": true,
+        "sortBy": [
+          {
+            "desc": true,
+            "displayName": "使用率"
+          }
+        ]
+      },
+      "pluginVersion": "11.4.0",
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "KubeDoor-Prometheus"
+          },
+          "editorMode": "code",
+          "exemplar": false,
+          "expr": "node_filesystem_size_bytes{instance=~\"$instance\",fstype=~\"ext.*|xfs|nfs\",mountpoint !~\".*pod.*\"}-0",
+          "format": "table",
+          "hide": false,
+          "instant": true,
+          "interval": "",
+          "intervalFactor": 1,
+          "legendFormat": "总量",
+          "refId": "C"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "KubeDoor-Prometheus"
+          },
+          "editorMode": "code",
+          "exemplar": false,
+          "expr": "node_filesystem_avail_bytes {instance=~\"$instance\",fstype=~\"ext.*|xfs|nfs\",mountpoint !~\".*pod.*\"}-0",
+          "format": "table",
+          "hide": false,
+          "instant": true,
+          "interval": "10s",
+          "intervalFactor": 1,
+          "legendFormat": "",
+          "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "KubeDoor-Prometheus"
+          },
+          "exemplar": false,
+          "expr": "(node_filesystem_size_bytes{instance=~\"$instance\",fstype=~\"ext.*|xfs|nfs\",mountpoint !~\".*pod.*\"}-node_filesystem_free_bytes{instance=~\"$instance\",fstype=~\"ext.*|xfs|nfs\",mountpoint !~\".*pod.*\"}) *100/(node_filesystem_avail_bytes {instance=~\"$instance\",fstype=~\"ext.*|xfs|nfs\",mountpoint !~\".*pod.*\"}+(node_filesystem_size_bytes{instance=~\"$instance\",fstype=~\"ext.*|xfs|nfs\",mountpoint !~\".*pod.*\"}-node_filesystem_free_bytes{instance=~\"$instance\",fstype=~\"ext.*|xfs|nfs\",mountpoint !~\".*pod.*\"}))",
+          "format": "table",
+          "hide": false,
+          "instant": true,
+          "interval": "",
+          "intervalFactor": 1,
+          "legendFormat": "",
+          "refId": "B"
+        }
+      ],
+      "title": "分区可用空间(EXT.*/XFS/NFS)",
+      "transformations": [
+        {
+          "id": "merge",
+          "options": {
+            "reducers": []
+          }
+        },
+        {
+          "id": "filterFieldsByName",
+          "options": {
+            "include": {
+              "names": [
+                "device",
+                "fstype",
+                "mountpoint",
+                "Value #C",
+                "Value #A",
+                "Value #B"
+              ]
+            }
+          }
+        },
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {},
+            "indexByName": {},
+            "renameByName": {
+              "Value #A": "剩余空间",
+              "Value #B": "使用率",
+              "Value #C": "总空间",
+              "device": "设备名",
+              "fstype": "类型",
+              "mountpoint": "分区"
+            }
+          }
+        }
+      ],
+      "type": "table"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "KubeDoor-Prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "decimals": 0,
+          "mappings": [],
+          "max": 100,
+          "min": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "#EAB839",
+                "value": 70
+              },
+              {
+                "color": "red",
+                "value": 90
+              }
+            ]
+          },
+          "unit": "percent"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 6,
+        "w": 4,
+        "x": 8,
+        "y": 18
+      },
+      "id": 177,
+      "options": {
+        "displayMode": "lcd",
+        "legend": {
+          "calcs": [],
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": false
+        },
+        "maxVizHeight": 300,
+        "minVizHeight": 45,
+        "minVizWidth": 0,
+        "namePlacement": "auto",
+        "orientation": "horizontal",
+        "reduceOptions": {
+          "calcs": [
+            "last"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "showUnfilled": true,
+        "sizing": "auto",
+        "text": {
+          "valueSize": 25
+        },
+        "valueMode": "color"
+      },
+      "pluginVersion": "11.4.0",
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "KubeDoor-Prometheus"
+          },
+          "exemplar": false,
+          "expr": "100 - (avg(irate(node_cpu_seconds_total{instance=~\"$instance\",mode=\"idle\"}[$interval])) * 100)",
+          "instant": true,
+          "interval": "",
+          "legendFormat": "总CPU使用率",
+          "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "KubeDoor-Prometheus"
+          },
+          "editorMode": "code",
+          "exemplar": false,
+          "expr": "avg(irate(node_cpu_seconds_total{instance=~\"$instance\",mode=\"iowait\"}[$interval])) * 100",
+          "hide": false,
+          "instant": true,
+          "interval": "",
+          "legendFormat": "IOwait使用率",
+          "refId": "C"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "KubeDoor-Prometheus"
+          },
+          "exemplar": false,
+          "expr": "(1 - (node_memory_MemAvailable_bytes{instance=~\"$instance\"} / (node_memory_MemTotal_bytes{instance=~\"$instance\"})))* 100",
+          "instant": true,
+          "interval": "",
+          "legendFormat": "内存使用率",
+          "refId": "B"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "KubeDoor-Prometheus"
+          },
+          "editorMode": "code",
+          "exemplar": false,
+          "expr": "(node_filesystem_size_bytes{instance=~\"$instance\",fstype=~\"ext.*|xfs\",mountpoint=\"$maxmount\"}-node_filesystem_free_bytes{instance=~\"$instance\",fstype=~\"ext.*|xfs\",mountpoint=\"$maxmount\"})*100 /(node_filesystem_avail_bytes {instance=~\"$instance\",fstype=~\"ext.*|xfs\",mountpoint=\"$maxmount\"}+(node_filesystem_size_bytes{instance=~\"$instance\",fstype=~\"ext.*|xfs\",mountpoint=\"$maxmount\"}-node_filesystem_free_bytes{instance=~\"$instance\",fstype=~\"ext.*|xfs\",mountpoint=\"$maxmount\"}))",
+          "hide": false,
+          "instant": true,
+          "interval": "",
+          "legendFormat": "最大分区使用率({{mountpoint}})",
+          "refId": "D"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "KubeDoor-Prometheus"
+          },
+          "editorMode": "code",
+          "exemplar": false,
+          "expr": "(1 - ((node_memory_SwapFree_bytes{instance=~\"$instance\"} + 1)/ (node_memory_SwapTotal_bytes{instance=~\"$instance\"} + 1))) * 100",
+          "hide": true,
+          "instant": true,
+          "interval": "",
+          "legendFormat": "交换分区使用率",
+          "refId": "F"
+        }
+      ],
+      "title": "",
+      "type": "bargauge"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "KubeDoor-Prometheus"
+      },
+      "description": "- 【最大打开文件数】是统计的node-exporter进程的process_max_fds，如果你的node-exporter是使用systemd启动，那么可能你所有使用systemd方式启动的服务的process_max_fds都是该值。\n- 【OOM次数】node_vmstat_oom_kill需要 Linux 内核版本 4.13及更高版本。\n- 【1h等待时间】PSI 资源压力指标需要 Linux 内核版本 4.20 及更高版本。如果构建您自己的内核，请确保在构建配置中设置 CONFIG_PSI=y 每个资源的压力信息通过/proc/pressure/获取。",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "fieldMinMax": false,
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "unit": "none"
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "运行时间"
+            },
+            "properties": [
+              {
+                "id": "thresholds",
+                "value": {
+                  "mode": "absolute",
+                  "steps": [
+                    {
+                      "color": "red",
+                      "value": null
+                    },
+                    {
+                      "color": "orange",
+                      "value": 3600
+                    },
+                    {
+                      "color": "green",
+                      "value": 7200
+                    }
+                  ]
+                }
+              },
+              {
+                "id": "unit",
+                "value": "s"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "总内存"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "bytes"
+              },
+              {
+                "id": "decimals",
+                "value": 0
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "CPU iowait"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "percent"
+              },
+              {
+                "id": "thresholds",
+                "value": {
+                  "mode": "percentage",
+                  "steps": [
+                    {
+                      "color": "green",
+                      "value": null
+                    },
+                    {
+                      "color": "orange",
+                      "value": 40
+                    },
+                    {
+                      "color": "red",
+                      "value": 60
+                    }
+                  ]
+                }
+              },
+              {
+                "id": "decimals",
+                "value": 2
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "总文件描述符"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "short"
+              },
+              {
+                "id": "thresholds",
+                "value": {
+                  "mode": "absolute",
+                  "steps": [
+                    {
+                      "color": "red",
+                      "value": null
+                    },
+                    {
+                      "color": "orange",
+                      "value": 50000
+                    },
+                    {
+                      "color": "green",
+                      "value": 200000
+                    }
+                  ]
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "最大打开文件"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "none"
+              },
+              {
+                "id": "thresholds",
+                "value": {
+                  "mode": "absolute",
+                  "steps": [
+                    {
+                      "color": "red",
+                      "value": null
+                    },
+                    {
+                      "color": "orange",
+                      "value": 1024
+                    },
+                    {
+                      "color": "green",
+                      "value": 50000
+                    }
+                  ]
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": "/.*等待时间/"
+            },
+            "properties": [
+              {
+                "id": "decimals",
+                "value": 0
+              },
+              {
+                "id": "unit",
+                "value": "s"
+              },
+              {
+                "id": "thresholds",
+                "value": {
+                  "mode": "absolute",
+                  "steps": [
+                    {
+                      "color": "green",
+                      "value": null
+                    },
+                    {
+                      "color": "yellow",
+                      "value": 60
+                    },
+                    {
+                      "color": "red",
+                      "value": 120
+                    }
+                  ]
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "1天OOM次数"
+            },
+            "properties": [
+              {
+                "id": "thresholds",
+                "value": {
+                  "mode": "absolute",
+                  "steps": [
+                    {
+                      "color": "green",
+                      "value": null
+                    },
+                    {
+                      "color": "red",
+                      "value": 1
+                    }
+                  ]
+                }
+              },
+              {
+                "id": "mappings",
+                "value": [
+                  {
+                    "options": {
+                      "-1": {
+                        "color": "#808080",
+                        "index": 0,
+                        "text": "不支持"
+                      }
+                    },
+                    "type": "value"
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "h": 6,
+        "w": 4,
+        "x": 12,
+        "y": 18
+      },
+      "id": 206,
+      "interval": "15s",
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "orientation": "auto",
+        "percentChangeColorMode": "standard",
+        "reduceOptions": {
+          "calcs": [
+            "last"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "showPercentChange": false,
+        "text": {
+          "valueSize": 15
+        },
+        "textMode": "auto",
+        "wideLayout": true
+      },
+      "pluginVersion": "11.4.0",
+      "targets": [
+        {
+          "alias": "",
+          "bucketAggs": [
+            {
+              "id": "2",
+              "settings": {
+                "interval": "auto"
+              },
+              "type": "date_histogram"
+            }
+          ],
+          "datasource": {
+            "type": "prometheus",
+            "uid": "KubeDoor-Prometheus"
+          },
+          "editorMode": "code",
+          "exemplar": false,
+          "expr": "avg(time() - node_boot_time_seconds{instance=~\"$instance\"})",
+          "hide": false,
+          "instant": true,
+          "interval": "",
+          "legendFormat": "运行时间",
+          "metrics": [
+            {
+              "id": "1",
+              "type": "count"
+            }
+          ],
+          "query": "",
+          "refId": "C",
+          "timeField": "@timestamp"
+        },
+        {
+          "alias": "",
+          "bucketAggs": [
+            {
+              "id": "2",
+              "settings": {
+                "interval": "auto"
+              },
+              "type": "date_histogram"
+            }
+          ],
+          "datasource": {
+            "type": "prometheus",
+            "uid": "KubeDoor-Prometheus"
+          },
+          "editorMode": "code",
+          "exemplar": false,
+          "expr": "count(node_cpu_seconds_total{instance=~\"$instance\", mode='system'})",
+          "instant": true,
+          "interval": "",
+          "legendFormat": "CPU 核",
+          "metrics": [
+            {
+              "id": "1",
+              "type": "count"
+            }
+          ],
+          "query": "",
+          "refId": "A",
+          "timeField": "@timestamp"
+        },
+        {
+          "alias": "",
+          "bucketAggs": [
+            {
+              "id": "2",
+              "settings": {
+                "interval": "auto"
+              },
+              "type": "date_histogram"
+            }
+          ],
+          "datasource": {
+            "type": "prometheus",
+            "uid": "KubeDoor-Prometheus"
+          },
+          "exemplar": false,
+          "expr": "sum(node_memory_MemTotal_bytes{instance=~\"$instance\"})",
+          "hide": false,
+          "instant": true,
+          "interval": "",
+          "legendFormat": "总内存",
+          "metrics": [
+            {
+              "id": "1",
+              "type": "count"
+            }
+          ],
+          "query": "",
+          "refId": "B",
+          "timeField": "@timestamp"
+        },
+        {
+          "alias": "",
+          "bucketAggs": [
+            {
+              "id": "2",
+              "settings": {
+                "interval": "auto"
+              },
+              "type": "date_histogram"
+            }
+          ],
+          "datasource": {
+            "type": "prometheus",
+            "uid": "KubeDoor-Prometheus"
+          },
+          "editorMode": "code",
+          "exemplar": false,
+          "expr": "max(increase(node_vmstat_oom_kill{instance=~\"$instance\"}[1d])) or -1",
+          "hide": false,
+          "instant": true,
+          "interval": "",
+          "legendFormat": "1天OOM次数",
+          "metrics": [
+            {
+              "id": "1",
+              "type": "count"
+            }
+          ],
+          "query": "",
+          "refId": "D",
+          "timeField": "@timestamp"
+        },
+        {
+          "alias": "",
+          "bucketAggs": [
+            {
+              "id": "2",
+              "settings": {
+                "interval": "auto"
+              },
+              "type": "date_histogram"
+            }
+          ],
+          "datasource": {
+            "type": "prometheus",
+            "uid": "KubeDoor-Prometheus"
+          },
+          "editorMode": "code",
+          "exemplar": false,
+          "expr": "node_filefd_maximum{instance=~\"$instance\"}",
+          "hide": false,
+          "instant": true,
+          "interval": "",
+          "legendFormat": "总文件描述符",
+          "metrics": [
+            {
+              "id": "1",
+              "type": "count"
+            }
+          ],
+          "query": "",
+          "refId": "E",
+          "timeField": "@timestamp"
+        },
+        {
+          "alias": "",
+          "bucketAggs": [
+            {
+              "id": "2",
+              "settings": {
+                "interval": "auto"
+              },
+              "type": "date_histogram"
+            }
+          ],
+          "datasource": {
+            "type": "prometheus",
+            "uid": "KubeDoor-Prometheus"
+          },
+          "editorMode": "code",
+          "exemplar": false,
+          "expr": "process_max_fds{job=\"node_exporter\",instance=~\"$instance\"}",
+          "hide": false,
+          "instant": true,
+          "interval": "",
+          "legendFormat": "最大打开文件",
+          "metrics": [
+            {
+              "id": "1",
+              "type": "count"
+            }
+          ],
+          "query": "",
+          "refId": "F",
+          "timeField": "@timestamp"
+        },
+        {
+          "alias": "",
+          "bucketAggs": [
+            {
+              "id": "2",
+              "settings": {
+                "interval": "auto"
+              },
+              "type": "date_histogram"
+            }
+          ],
+          "datasource": {
+            "type": "prometheus",
+            "uid": "KubeDoor-Prometheus"
+          },
+          "editorMode": "code",
+          "exemplar": false,
+          "expr": "increase(node_pressure_cpu_waiting_seconds_total{instance=~\"$instance\"}[1h])",
+          "hide": false,
+          "instant": true,
+          "interval": "",
+          "legendFormat": "CPU1h等待时间",
+          "metrics": [
+            {
+              "id": "1",
+              "type": "count"
+            }
+          ],
+          "query": "",
+          "refId": "G",
+          "timeField": "@timestamp"
+        },
+        {
+          "alias": "",
+          "bucketAggs": [
+            {
+              "id": "2",
+              "settings": {
+                "interval": "auto"
+              },
+              "type": "date_histogram"
+            }
+          ],
+          "datasource": {
+            "type": "prometheus",
+            "uid": "KubeDoor-Prometheus"
+          },
+          "editorMode": "code",
+          "exemplar": false,
+          "expr": "increase(node_pressure_io_waiting_seconds_total{instance=~\"$instance\"}[1h])",
+          "hide": false,
+          "instant": true,
+          "interval": "",
+          "legendFormat": "IO1h等待时间",
+          "metrics": [
+            {
+              "id": "1",
+              "type": "count"
+            }
+          ],
+          "query": "",
+          "refId": "H",
+          "timeField": "@timestamp"
+        },
+        {
+          "alias": "",
+          "bucketAggs": [
+            {
+              "id": "2",
+              "settings": {
+                "interval": "auto"
+              },
+              "type": "date_histogram"
+            }
+          ],
+          "datasource": {
+            "type": "prometheus",
+            "uid": "KubeDoor-Prometheus"
+          },
+          "editorMode": "code",
+          "exemplar": false,
+          "expr": "increase(node_pressure_memory_waiting_seconds_total{instance=~\"$instance\"}[1h])",
+          "hide": false,
+          "instant": true,
+          "interval": "",
+          "legendFormat": "内存1h等待时间",
+          "metrics": [
+            {
+              "id": "1",
+              "type": "count"
+            }
+          ],
+          "query": "",
+          "refId": "I",
+          "timeField": "@timestamp"
+        }
+      ],
+      "title": "",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "KubeDoor-Prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisBorderShow": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "barWidthFactor": 0.6,
+            "drawStyle": "bars",
+            "fillOpacity": 60,
+            "gradientMode": "opacity",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "insertNulls": false,
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "pointSize": 5,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "never",
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "links": [],
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 80
+              }
+            ]
+          },
+          "unit": "bytes"
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byValue",
+              "options": {
+                "op": "gte",
+                "reducer": "allIsZero",
+                "value": 0
+              }
+            },
+            "properties": [
+              {
+                "id": "custom.hideFrom",
+                "value": {
+                  "legend": true,
+                  "tooltip": true,
+                  "viz": true
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "h": 6,
+        "w": 8,
+        "x": 16,
+        "y": 18
+      },
+      "id": 183,
+      "options": {
+        "legend": {
+          "calcs": [],
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "maxHeight": 600,
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "pluginVersion": "11.4.0",
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "KubeDoor-Prometheus"
+          },
+          "exemplar": true,
+          "expr": "increase(node_network_receive_bytes_total{instance=~\"$instance\",device=~\"$device\"}[1m])",
+          "interval": "1m",
+          "intervalFactor": 2,
+          "legendFormat": "{{device}}_in下载",
+          "metric": "",
+          "refId": "A",
+          "step": 600,
+          "target": ""
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "KubeDoor-Prometheus"
+          },
+          "editorMode": "code",
+          "exemplar": true,
+          "expr": "increase(node_network_transmit_bytes_total{instance=~\"$instance\",device=~\"$device\"}[1m])",
+          "hide": false,
+          "interval": "1m",
+          "intervalFactor": 2,
+          "legendFormat": "{{device}}_out上传",
+          "range": true,
+          "refId": "B",
+          "step": 600
+        }
+      ],
+      "title": "每分钟流量$device",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "KubeDoor-Prometheus"
+      },
+      "description": "",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisBorderShow": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "series",
+            "axisLabel": "总使用率",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "barWidthFactor": 0.6,
+            "drawStyle": "line",
+            "fillOpacity": 0,
+            "gradientMode": "none",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "insertNulls": false,
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "pointSize": 5,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "never",
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "links": [],
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 80
+              }
+            ]
+          },
+          "unit": "percent"
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": "/.*总使用率/"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "dark-red",
+                  "mode": "fixed"
+                }
+              },
+              {
+                "id": "custom.lineWidth",
+                "value": 1
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "磁盘IO使用率"
+            },
+            "properties": [
+              {
+                "id": "custom.axisPlacement",
+                "value": "right"
+              },
+              {
+                "id": "custom.axisLabel",
+                "value": "磁盘IO使用率"
+              },
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "#0ad4ff",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "用户使用率"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "yellow",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "系统使用率"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "dark-orange",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "总使用率"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "semi-dark-red",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 0,
+        "y": 24
+      },
+      "id": 207,
+      "options": {
+        "legend": {
+          "calcs": [
+            "mean",
+            "lastNotNull",
+            "max"
+          ],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true,
+          "sortBy": "Last *",
+          "sortDesc": true
+        },
+        "tooltip": {
+          "maxHeight": 600,
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "pluginVersion": "11.4.0",
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "KubeDoor-Prometheus"
+          },
+          "expr": "(1 - avg(irate(node_cpu_seconds_total{instance=~\"$instance\",mode=\"idle\"}[$interval])) by (instance))*100",
+          "format": "time_series",
+          "hide": false,
+          "interval": "",
+          "intervalFactor": 1,
+          "legendFormat": "总使用率",
+          "refId": "F",
+          "step": 240
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "KubeDoor-Prometheus"
+          },
+          "editorMode": "code",
+          "expr": "avg(irate(node_cpu_seconds_total{instance=~\"$instance\",mode=\"system\"}[$interval])) by (instance) *100",
+          "format": "time_series",
+          "hide": false,
+          "instant": false,
+          "interval": "",
+          "intervalFactor": 1,
+          "legendFormat": "系统使用率",
+          "refId": "A",
+          "step": 20
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "KubeDoor-Prometheus"
+          },
+          "expr": "avg(irate(node_cpu_seconds_total{instance=~\"$instance\",mode=\"user\"}[$interval])) by (instance) *100",
+          "format": "time_series",
+          "hide": false,
+          "interval": "",
+          "intervalFactor": 1,
+          "legendFormat": "用户使用率",
+          "refId": "B",
+          "step": 240
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "KubeDoor-Prometheus"
+          },
+          "expr": "avg(irate(node_cpu_seconds_total{instance=~\"$instance\",mode=\"iowait\"}[$interval])) by (instance) *100",
+          "format": "time_series",
+          "hide": false,
+          "instant": false,
+          "interval": "",
+          "intervalFactor": 1,
+          "legendFormat": "磁盘IO使用率",
+          "refId": "D",
+          "step": 240
+        }
+      ],
+      "title": "CPU使用率",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "KubeDoor-Prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisBorderShow": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "series",
+            "axisLabel": "剩余内存",
+            "axisPlacement": "left",
+            "barAlignment": 0,
+            "barWidthFactor": 0.6,
+            "drawStyle": "line",
+            "fillOpacity": 0,
+            "gradientMode": "none",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "insertNulls": false,
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "pointSize": 5,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "never",
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "links": [],
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 80
+              }
+            ]
+          },
+          "unit": "bytes"
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "可用"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "#9ac48a",
+                  "mode": "fixed"
+                }
+              },
+              {
+                "id": "custom.lineWidth",
+                "value": 1
+              },
+              {
+                "id": "custom.pointSize",
+                "value": 3
+              },
+              {
+                "id": "custom.showPoints",
+                "value": "always"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "总内存"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "dark-red",
+                  "mode": "fixed"
+                }
+              },
+              {
+                "id": "custom.lineWidth",
+                "value": 1
+              },
+              {
+                "id": "custom.pointSize",
+                "value": 3
+              },
+              {
+                "id": "custom.showPoints",
+                "value": "always"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "使用率"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "#00d1ff",
+                  "mode": "fixed"
+                }
+              },
+              {
+                "id": "custom.lineWidth",
+                "value": 1
+              },
+              {
+                "id": "unit",
+                "value": "percent"
+              },
+              {
+                "id": "custom.axisLabel",
+                "value": "内存使用率"
+              },
+              {
+                "id": "custom.axisPlacement",
+                "value": "right"
+              },
+              {
+                "id": "custom.axisSoftMin"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "已用"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "light-red",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 8,
+        "y": 24
+      },
+      "id": 156,
+      "options": {
+        "legend": {
+          "calcs": [
+            "mean",
+            "lastNotNull",
+            "max"
+          ],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true,
+          "sortBy": "Last *",
+          "sortDesc": true
+        },
+        "tooltip": {
+          "maxHeight": 600,
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "pluginVersion": "11.4.0",
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "KubeDoor-Prometheus"
+          },
+          "editorMode": "code",
+          "exemplar": false,
+          "expr": "node_memory_MemAvailable_bytes{instance=~\"$instance\"}",
+          "format": "time_series",
+          "hide": false,
+          "interval": "",
+          "intervalFactor": 1,
+          "legendFormat": "可用",
+          "range": true,
+          "refId": "F",
+          "step": 4
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "KubeDoor-Prometheus"
+          },
+          "exemplar": true,
+          "expr": "node_memory_MemTotal_bytes{instance=~\"$instance\"}",
+          "format": "time_series",
+          "hide": false,
+          "instant": false,
+          "interval": "2m",
+          "intervalFactor": 1,
+          "legendFormat": "总内存",
+          "refId": "A",
+          "step": 4
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "KubeDoor-Prometheus"
+          },
+          "expr": "node_memory_MemTotal_bytes{instance=~\"$instance\"} - node_memory_MemAvailable_bytes{instance=~\"$instance\"}",
+          "format": "time_series",
+          "hide": false,
+          "interval": "",
+          "intervalFactor": 1,
+          "legendFormat": "已用",
+          "refId": "B",
+          "step": 4
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "KubeDoor-Prometheus"
+          },
+          "editorMode": "code",
+          "exemplar": false,
+          "expr": "(1 - (node_memory_MemAvailable_bytes{instance=~\"$instance\"} / (node_memory_MemTotal_bytes{instance=~\"$instance\"})))* 100",
+          "format": "time_series",
+          "hide": false,
+          "interval": "",
+          "intervalFactor": 1,
+          "legendFormat": "使用率",
+          "range": true,
+          "refId": "H"
+        }
+      ],
+      "title": "内存信息",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "KubeDoor-Prometheus"
+      },
+      "description": "",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisBorderShow": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "series",
+            "axisLabel": "容量使用率",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "barWidthFactor": 0.6,
+            "drawStyle": "line",
+            "fillOpacity": 0,
+            "gradientMode": "none",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "insertNulls": false,
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "pointSize": 5,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "never",
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "decimals": 1,
+          "links": [],
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 80
+              }
+            ]
+          },
+          "unit": "percent"
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": "/Inodes.*/"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "#00d1ff",
+                  "mode": "fixed"
+                }
+              },
+              {
+                "id": "custom.axisLabel",
+                "value": "Inodes使用率"
+              },
+              {
+                "id": "custom.drawStyle",
+                "value": "points"
+              },
+              {
+                "id": "custom.pointSize",
+                "value": 2
+              },
+              {
+                "id": "custom.hideFrom",
+                "value": {
+                  "legend": false,
+                  "tooltip": true,
+                  "viz": false
+                }
+              },
+              {
+                "id": "max",
+                "value": 100
+              },
+              {
+                "id": "min",
+                "value": 0
+              },
+              {
+                "id": "decimals"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "使用率：/"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "orange",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 16,
+        "y": 24
+      },
+      "id": 174,
+      "options": {
+        "legend": {
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true,
+          "sortBy": "Last *",
+          "sortDesc": true
+        },
+        "tooltip": {
+          "maxHeight": 600,
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "pluginVersion": "11.4.0",
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "KubeDoor-Prometheus"
+          },
+          "editorMode": "code",
+          "exemplar": true,
+          "expr": "(node_filesystem_size_bytes{instance=~\"$instance\",fstype=~\"ext.*|xfs|nfs\",mountpoint !~\".*pod.*\"}-node_filesystem_free_bytes{instance=~\"$instance\",fstype=~\"ext.*|xfs|nfs\",mountpoint !~\".*pod.*\"}) *100/(node_filesystem_avail_bytes {instance=~\"$instance\",fstype=~\"ext.*|xfs|nfs\",mountpoint !~\".*pod.*\"}+(node_filesystem_size_bytes{instance=~\"$instance\",fstype=~\"ext.*|xfs|nfs\",mountpoint !~\".*pod.*\"}-node_filesystem_free_bytes{instance=~\"$instance\",fstype=~\"ext.*|xfs|nfs\",mountpoint !~\".*pod.*\"}))",
+          "format": "time_series",
+          "instant": false,
+          "interval": "",
+          "intervalFactor": 1,
+          "legendFormat": "使用率：{{mountpoint}}",
+          "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "KubeDoor-Prometheus"
+          },
+          "editorMode": "code",
+          "exemplar": true,
+          "expr": "(1 - node_filesystem_files_free{instance=~\"$instance\",fstype=~\"ext.?|xfs|nfs\",mountpoint !~\".*pod.*\"} / node_filesystem_files{instance=~\"$instance\",fstype=~\"ext.?|xfs|nfs\",mountpoint !~\".*pod.*\"}) * 100",
+          "hide": false,
+          "interval": "",
+          "legendFormat": "Inodes%：{{mountpoint}}",
+          "range": true,
+          "refId": "B"
+        }
+      ],
+      "title": "磁盘使用率",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "KubeDoor-Prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisBorderShow": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "series",
+            "axisLabel": "1分钟负载",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "barWidthFactor": 0.6,
+            "drawStyle": "line",
+            "fillOpacity": 0,
+            "gradientMode": "none",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "insertNulls": false,
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "pointSize": 5,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "never",
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "links": [],
+          "mappings": [],
+          "min": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 80
+              }
+            ]
+          },
+          "unit": "none"
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "15分钟负载"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "purple",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "1分钟负载"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "orange",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "5分钟负载"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "blue",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": "/.*总核数/"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "#C4162A",
+                  "mode": "fixed"
+                }
+              },
+              {
+                "id": "custom.lineWidth",
+                "value": 1
+              },
+              {
+                "id": "custom.pointSize",
+                "value": 4
+              },
+              {
+                "id": "custom.showPoints",
+                "value": "always"
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 0,
+        "y": 32
+      },
+      "id": 13,
+      "options": {
+        "legend": {
+          "calcs": [
+            "mean",
+            "lastNotNull",
+            "max"
+          ],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true,
+          "sortBy": "Last *",
+          "sortDesc": true
+        },
+        "tooltip": {
+          "maxHeight": 600,
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "pluginVersion": "11.4.0",
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "KubeDoor-Prometheus"
+          },
+          "exemplar": true,
+          "expr": "node_load1{instance=~\"$instance\"}",
+          "format": "time_series",
+          "instant": false,
+          "interval": "",
+          "intervalFactor": 1,
+          "legendFormat": "1分钟负载",
+          "metric": "",
+          "refId": "A",
+          "step": 20,
+          "target": ""
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "KubeDoor-Prometheus"
+          },
+          "editorMode": "code",
+          "exemplar": true,
+          "expr": " sum(count(node_cpu_seconds_total{instance=~\"$instance\", mode='system'}) by (cpu,instance)) by(instance)",
+          "format": "time_series",
+          "instant": false,
+          "interval": "2m",
+          "intervalFactor": 1,
+          "legendFormat": "CPU总核数",
+          "refId": "D",
+          "step": 20
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "KubeDoor-Prometheus"
+          },
+          "expr": "node_load5{instance=~\"$instance\"}",
+          "format": "time_series",
+          "instant": false,
+          "interval": "",
+          "intervalFactor": 1,
+          "legendFormat": "5分钟负载",
+          "refId": "B",
+          "step": 20
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "KubeDoor-Prometheus"
+          },
+          "expr": "node_load15{instance=~\"$instance\"}",
+          "format": "time_series",
+          "instant": false,
+          "interval": "",
+          "intervalFactor": 1,
+          "legendFormat": "15分钟负载",
+          "refId": "C",
+          "step": 20
+        }
+      ],
+      "title": "系统平均负载",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "KubeDoor-Prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisBorderShow": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "barWidthFactor": 0.6,
+            "drawStyle": "bars",
+            "fillOpacity": 100,
+            "gradientMode": "opacity",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "insertNulls": false,
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "pointSize": 5,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "never",
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "normal"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "mappings": [],
+          "min": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 80
+              }
+            ]
+          },
+          "unit": "none"
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "等待IO完成阻塞的进程"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "red",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "运行态的进程"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "green",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byValue",
+              "options": {
+                "op": "gte",
+                "reducer": "allIsZero",
+                "value": 0
+              }
+            },
+            "properties": [
+              {
+                "id": "custom.hideFrom",
+                "value": {
+                  "legend": true,
+                  "tooltip": true,
+                  "viz": false
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byValue",
+              "options": {
+                "op": "gte",
+                "reducer": "allIsNull",
+                "value": 0
+              }
+            },
+            "properties": [
+              {
+                "id": "custom.hideFrom",
+                "value": {
+                  "legend": true,
+                  "tooltip": true,
+                  "viz": false
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 8,
+        "y": 32
+      },
+      "id": 202,
+      "options": {
+        "legend": {
+          "calcs": [
+            "mean",
+            "lastNotNull",
+            "max"
+          ],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "maxHeight": 600,
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "pluginVersion": "11.4.0",
+      "targets": [
+        {
+          "calculatedInterval": "2m",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "KubeDoor-Prometheus"
+          },
+          "datasourceErrors": {},
+          "editorMode": "code",
+          "errors": {},
+          "exemplar": false,
+          "expr": "node_procs_running{instance=~\"$instance\"}",
+          "format": "time_series",
+          "interval": "1m",
+          "intervalFactor": 1,
+          "legendFormat": "运行态的进程",
+          "metric": "",
+          "prometheusLink": "/api/datasources/proxy/1/graph#%5B%7B%22expr%22%3A%22node_procs_running%7Binstance%3D%5C%22%24host%5C%22%7D%22%2C%22range_input%22%3A%2243200s%22%2C%22end_input%22%3A%222015-9-18%2013%3A46%22%2C%22step_input%22%3A%22%22%2C%22stacked%22%3Atrue%2C%22tab%22%3A0%7D%5D",
+          "range": true,
+          "refId": "A",
+          "step": 5,
+          "target": ""
+        },
+        {
+          "calculatedInterval": "2m",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "KubeDoor-Prometheus"
+          },
+          "datasourceErrors": {},
+          "editorMode": "code",
+          "errors": {},
+          "exemplar": true,
+          "expr": "node_procs_blocked{instance=~\"$instance\"}",
+          "format": "time_series",
+          "interval": "1m",
+          "intervalFactor": 1,
+          "legendFormat": "等待IO完成阻塞的进程",
+          "metric": "",
+          "prometheusLink": "/api/datasources/proxy/1/graph#%5B%7B%22expr%22%3A%22node_procs_blocked%7Binstance%3D%5C%22%24host%5C%22%7D%22%2C%22range_input%22%3A%2243200s%22%2C%22end_input%22%3A%222015-9-18%2013%3A46%22%2C%22step_input%22%3A%22%22%2C%22stacked%22%3Atrue%2C%22tab%22%3A0%7D%5D",
+          "range": true,
+          "refId": "B",
+          "step": 5,
+          "target": ""
+        }
+      ],
+      "title": "进程运行状态",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "KubeDoor-Prometheus"
+      },
+      "description": "",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisBorderShow": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "series",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "barWidthFactor": 0.6,
+            "drawStyle": "line",
+            "fillOpacity": 0,
+            "gradientMode": "opacity",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "insertNulls": false,
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "pointSize": 5,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "never",
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "links": [],
+          "mappings": [],
+          "min": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 80
+              }
+            ]
+          },
+          "unit": "short"
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "总使用FD"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "orange",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "总使用FD占比"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "blue",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "每秒上下文切换"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "yellow",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": "/.*占比/"
+            },
+            "properties": [
+              {
+                "id": "custom.lineWidth",
+                "value": 0
+              },
+              {
+                "id": "unit",
+                "value": "percent"
+              },
+              {
+                "id": "custom.showPoints",
+                "value": "always"
+              },
+              {
+                "id": "custom.pointSize",
+                "value": 2
+              },
+              {
+                "id": "custom.axisSoftMax"
+              },
+              {
+                "id": "custom.axisSoftMin"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "进程使用FD占比"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "dark-orange",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "conntrack占比"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "green",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Conntrack使用占比"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "purple",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 16,
+        "y": 32
+      },
+      "id": 16,
+      "options": {
+        "legend": {
+          "calcs": [],
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "maxHeight": 600,
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "pluginVersion": "11.4.0",
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "KubeDoor-Prometheus"
+          },
+          "editorMode": "code",
+          "exemplar": true,
+          "expr": "irate(node_context_switches_total{instance=~\"$instance\"}[$interval])",
+          "interval": "",
+          "intervalFactor": 1,
+          "legendFormat": "每秒上下文切换",
+          "range": true,
+          "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "KubeDoor-Prometheus"
+          },
+          "editorMode": "code",
+          "exemplar": true,
+          "expr": "node_nf_conntrack_entries{instance=~\"$instance\"}/node_nf_conntrack_entries_limit{instance=~\"$instance\"} * 100",
+          "format": "time_series",
+          "hide": false,
+          "instant": false,
+          "interval": "",
+          "intervalFactor": 1,
+          "legendFormat": "Conntrack使用占比",
+          "refId": "E"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "KubeDoor-Prometheus"
+          },
+          "editorMode": "code",
+          "exemplar": true,
+          "expr": "node_filefd_allocated{instance=~\"$instance\"}",
+          "format": "time_series",
+          "instant": false,
+          "interval": "",
+          "intervalFactor": 1,
+          "legendFormat": "总使用FD",
+          "refId": "B"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "KubeDoor-Prometheus"
+          },
+          "editorMode": "code",
+          "exemplar": true,
+          "expr": "(node_filefd_allocated{instance=~\"$instance\"}/node_filefd_maximum{instance=~\"$instance\"}) *100",
+          "format": "time_series",
+          "hide": false,
+          "instant": false,
+          "interval": "",
+          "intervalFactor": 1,
+          "legendFormat": "总使用FD占比",
+          "refId": "C"
+        }
+      ],
+      "title": "文件描述符(FD)/每秒上下文切换",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "KubeDoor-Prometheus"
+      },
+      "description": "Read time seconds 每个磁盘分区读操作花费的秒数\n\nWrite time seconds 每个磁盘分区写操作花费的秒数\n\nIO time seconds 每个磁盘分区输入/输出操作花费的秒数\n\nIO time weighted seconds每个磁盘分区输入/输出操作花费的加权秒数",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisBorderShow": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "读取（-）/写入（+）",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "barWidthFactor": 0.6,
+            "drawStyle": "line",
+            "fillOpacity": 10,
+            "gradientMode": "opacity",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "insertNulls": false,
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "pointSize": 5,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "never",
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "links": [],
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 80
+              }
+            ]
+          },
+          "unit": "s"
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "vda"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "#6ED0E0",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": "/,*_读取$/"
+            },
+            "properties": [
+              {
+                "id": "custom.transform",
+                "value": "negative-Y"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byValue",
+              "options": {
+                "op": "gte",
+                "reducer": "allIsZero",
+                "value": 0
+              }
+            },
+            "properties": [
+              {
+                "id": "custom.hideFrom",
+                "value": {
+                  "legend": true,
+                  "tooltip": true,
+                  "viz": false
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byValue",
+              "options": {
+                "op": "gte",
+                "reducer": "allIsNull",
+                "value": 0
+              }
+            },
+            "properties": [
+              {
+                "id": "custom.hideFrom",
+                "value": {
+                  "legend": true,
+                  "tooltip": true,
+                  "viz": false
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 6,
+        "x": 0,
+        "y": 40
+      },
+      "id": 160,
+      "options": {
+        "legend": {
+          "calcs": [
+            "mean",
+            "lastNotNull",
+            "max"
+          ],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true,
+          "sortBy": "Last *",
+          "sortDesc": true
+        },
+        "tooltip": {
+          "maxHeight": 600,
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "pluginVersion": "11.4.0",
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "KubeDoor-Prometheus"
+          },
+          "expr": "irate(node_disk_read_time_seconds_total{instance=~\"$instance\"}[$interval]) / irate(node_disk_reads_completed_total{instance=~\"$instance\"}[$interval])",
+          "format": "time_series",
+          "hide": false,
+          "instant": false,
+          "interval": "",
+          "intervalFactor": 1,
+          "legendFormat": "{{device}}_读取",
+          "refId": "B"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "KubeDoor-Prometheus"
+          },
+          "expr": "irate(node_disk_write_time_seconds_total{instance=~\"$instance\"}[$interval]) / irate(node_disk_writes_completed_total{instance=~\"$instance\"}[$interval])",
+          "format": "time_series",
+          "hide": false,
+          "instant": false,
+          "interval": "",
+          "intervalFactor": 1,
+          "legendFormat": "{{device}}_写入",
+          "refId": "C"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "KubeDoor-Prometheus"
+          },
+          "expr": "irate(node_disk_io_time_seconds_total{instance=~\"$instance\"}[$interval])",
+          "format": "time_series",
+          "hide": true,
+          "interval": "",
+          "intervalFactor": 1,
+          "legendFormat": "{{device}}",
+          "refId": "A",
+          "step": 10
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "KubeDoor-Prometheus"
+          },
+          "expr": "irate(node_disk_io_time_weighted_seconds_total{instance=~\"$instance\"}[$interval])",
+          "format": "time_series",
+          "hide": true,
+          "interval": "",
+          "intervalFactor": 1,
+          "legendFormat": "{{device}}_加权",
+          "refId": "D"
+        }
+      ],
+      "title": "每次IO读写的耗时（参考：小于100ms）",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "KubeDoor-Prometheus"
+      },
+      "description": "Reads completed: 每个磁盘分区每秒读完成次数\n\nWrites completed: 每个磁盘分区每秒写完成次数\n\nIO now 每个磁盘分区每秒正在处理的输入/输出请求数",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisBorderShow": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "读取（-）/写入（+）I/O ops/sec",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "barWidthFactor": 0.6,
+            "drawStyle": "line",
+            "fillOpacity": 0,
+            "gradientMode": "none",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "insertNulls": false,
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "pointSize": 5,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "never",
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "links": [],
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 80
+              }
+            ]
+          },
+          "unit": "none"
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": "/.*_读取$/"
+            },
+            "properties": [
+              {
+                "id": "custom.transform",
+                "value": "negative-Y"
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 6,
+        "x": 6,
+        "y": 40
+      },
+      "id": 161,
+      "options": {
+        "legend": {
+          "calcs": [
+            "mean",
+            "lastNotNull",
+            "max"
+          ],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true,
+          "sortBy": "Last *",
+          "sortDesc": true
+        },
+        "tooltip": {
+          "maxHeight": 600,
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "pluginVersion": "11.4.0",
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "KubeDoor-Prometheus"
+          },
+          "expr": "irate(node_disk_reads_completed_total{instance=~\"$instance\"}[$interval])",
+          "format": "time_series",
+          "hide": false,
+          "interval": "",
+          "intervalFactor": 1,
+          "legendFormat": "{{device}}_读取",
+          "refId": "A",
+          "step": 10
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "KubeDoor-Prometheus"
+          },
+          "expr": "irate(node_disk_writes_completed_total{instance=~\"$instance\"}[$interval])",
+          "format": "time_series",
+          "hide": false,
+          "interval": "",
+          "intervalFactor": 1,
+          "legendFormat": "{{device}}_写入",
+          "refId": "B",
+          "step": 10
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "KubeDoor-Prometheus"
+          },
+          "expr": "node_disk_io_now{instance=~\"$instance\"}",
+          "format": "time_series",
+          "hide": true,
+          "interval": "",
+          "intervalFactor": 1,
+          "legendFormat": "{{device}}",
+          "refId": "C"
+        }
+      ],
+      "title": "磁盘读写速率（IOPS）",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "KubeDoor-Prometheus"
+      },
+      "description": "Read bytes 每个磁盘分区每秒读取的比特数\nWritten bytes 每个磁盘分区每秒写入的比特数",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisBorderShow": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "读取（-）/写入（+）",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "barWidthFactor": 0.6,
+            "drawStyle": "line",
+            "fillOpacity": 0,
+            "gradientMode": "none",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "insertNulls": false,
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "pointSize": 5,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "never",
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "links": [],
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 80
+              }
+            ]
+          },
+          "unit": "Bps"
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "vda_write"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "#6ED0E0",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": "/.*_读取$/"
+            },
+            "properties": [
+              {
+                "id": "custom.transform",
+                "value": "negative-Y"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byValue",
+              "options": {
+                "op": "gte",
+                "reducer": "allIsZero",
+                "value": 0
+              }
+            },
+            "properties": [
+              {
+                "id": "custom.hideFrom",
+                "value": {
+                  "legend": true,
+                  "tooltip": true,
+                  "viz": false
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byValue",
+              "options": {
+                "op": "gte",
+                "reducer": "allIsNull",
+                "value": 0
+              }
+            },
+            "properties": [
+              {
+                "id": "custom.hideFrom",
+                "value": {
+                  "legend": true,
+                  "tooltip": true,
+                  "viz": false
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 6,
+        "x": 12,
+        "y": 40
+      },
+      "id": 168,
+      "options": {
+        "legend": {
+          "calcs": [
+            "mean",
+            "lastNotNull",
+            "max"
+          ],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true,
+          "sortBy": "Last *",
+          "sortDesc": true
+        },
+        "tooltip": {
+          "maxHeight": 600,
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "pluginVersion": "11.4.0",
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "KubeDoor-Prometheus"
+          },
+          "expr": "irate(node_disk_read_bytes_total{instance=~\"$instance\"}[$interval])",
+          "format": "time_series",
+          "interval": "",
+          "intervalFactor": 1,
+          "legendFormat": "{{device}}_读取",
+          "refId": "A",
+          "step": 10
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "KubeDoor-Prometheus"
+          },
+          "expr": "irate(node_disk_written_bytes_total{instance=~\"$instance\"}[$interval])",
+          "format": "time_series",
+          "hide": false,
+          "interval": "",
+          "intervalFactor": 1,
+          "legendFormat": "{{device}}_写入",
+          "refId": "B",
+          "step": 10
+        }
+      ],
+      "title": "每秒磁盘读写容量",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "KubeDoor-Prometheus"
+      },
+      "description": "每一秒钟的自然时间内，花费在I/O上的耗时。（wall-clock time）\n\nnode_disk_io_time_seconds_total：\n磁盘花费在输入/输出操作上的秒数。该值为累加值。（Milliseconds Spent Doing I/Os）\n\nirate(node_disk_io_time_seconds_total[1m])：\n计算每秒的速率：(last值-last前一个值)/时间戳差值，即：1秒钟内磁盘花费在I/O操作的时间占比。",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisBorderShow": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "barWidthFactor": 0.6,
+            "drawStyle": "line",
+            "fillOpacity": 10,
+            "gradientMode": "opacity",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "insertNulls": false,
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "pointSize": 5,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "never",
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "links": [],
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 80
+              }
+            ]
+          },
+          "unit": "percentunit"
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Idle - Waiting for something to happen"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "#052B51",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "guest"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "#9AC48A",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "idle"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "#052B51",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "iowait"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "#EAB839",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "irq"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "#BF1B00",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "nice"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "#C15C17",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "sdb_每秒I/O操作%"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "#d683ce",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "softirq"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "#E24D42",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "steal"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "#FCE2DE",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "system"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "#508642",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "user"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "#5195CE",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "磁盘花费在I/O操作占比"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "#ba43a9",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byValue",
+              "options": {
+                "op": "gte",
+                "reducer": "allIsZero",
+                "value": 0
+              }
+            },
+            "properties": [
+              {
+                "id": "custom.hideFrom",
+                "value": {
+                  "legend": true,
+                  "tooltip": true,
+                  "viz": false
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byValue",
+              "options": {
+                "op": "gte",
+                "reducer": "allIsNull",
+                "value": 0
+              }
+            },
+            "properties": [
+              {
+                "id": "custom.hideFrom",
+                "value": {
+                  "legend": true,
+                  "tooltip": true,
+                  "viz": false
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 6,
+        "x": 18,
+        "y": 40
+      },
+      "id": 175,
+      "options": {
+        "legend": {
+          "calcs": [
+            "mean",
+            "lastNotNull",
+            "max"
+          ],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true,
+          "sortBy": "Last *",
+          "sortDesc": true
+        },
+        "tooltip": {
+          "maxHeight": 600,
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "pluginVersion": "11.4.0",
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "KubeDoor-Prometheus"
+          },
+          "exemplar": true,
+          "expr": "irate(node_disk_io_time_seconds_total{instance=~\"$instance\"}[$interval])",
+          "format": "time_series",
+          "interval": "",
+          "intervalFactor": 1,
+          "legendFormat": "{{device}}_每秒I/O操作%",
+          "refId": "C"
+        }
+      ],
+      "title": "每1秒内I/O操作耗时占比（I/O Util）",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "KubeDoor-Prometheus"
+      },
+      "description": "- Sockets_used - 已使用的所有协议套接字总量\n- CurrEstab - 当前状态为 ESTABLISHED 或 CLOSE-WAIT 的 TCP 连接数\n- TCP_alloc - 已分配（已建立、已申请到sk_buff）的TCP套接字数量\n- TCP_tw - 等待关闭的TCP连接数\n- UDP_inuse - 正在使用的 UDP 套接字数量\n- OutSegs - TCP 发送的报文数\n- InSegs - TCP 接收的报文数\n- RetransSegs - TCP 重传报文数\n\n- TcpExt_ListenDrops - 监听队列连接丢弃数\n- TcpExt_ListenOverflows - 监听 socket 的队列溢出\n- Tcp_InErrs - TCP 接收的错误报文数\n- Tcp_OutRsts - TCP 发送的RST报文数\n- TcpExt_SyncookiesSent - 发送的 SYN cookies 的数量\n- TcpExt_SyncookiesRecv - 接收的 SYN cookies 的数量\n- TcpExt_SyncookiesFailed - 无效的 SYN cookies 的数量",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisBorderShow": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "series",
+            "axisLabel": "CurrEstab",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "barWidthFactor": 0.6,
+            "drawStyle": "line",
+            "fillOpacity": 0,
+            "gradientMode": "none",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "insertNulls": false,
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "pointSize": 5,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "never",
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "links": [],
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 80
+              }
+            ]
+          },
+          "unit": "none"
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "TCP_alloc"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "blue",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": "/.*Sockets_used/"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "#E02F44",
+                  "mode": "fixed"
+                }
+              },
+              {
+                "id": "custom.lineWidth",
+                "value": 1
+              },
+              {
+                "id": "custom.axisLabel",
+                "value": "已使用的所有协议套接字总量"
+              },
+              {
+                "id": "custom.showPoints",
+                "value": "always"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byValue",
+              "options": {
+                "op": "gte",
+                "reducer": "allIsZero",
+                "value": 0
+              }
+            },
+            "properties": [
+              {
+                "id": "custom.hideFrom",
+                "value": {
+                  "legend": true,
+                  "tooltip": true,
+                  "viz": true
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 16,
+        "x": 0,
+        "y": 48
+      },
+      "id": 158,
+      "options": {
+        "legend": {
+          "calcs": [
+            "last",
+            "max"
+          ],
+          "displayMode": "table",
+          "placement": "right",
+          "showLegend": true,
+          "sortBy": "Max",
+          "sortDesc": true
+        },
+        "tooltip": {
+          "maxHeight": 600,
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "pluginVersion": "11.4.0",
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "KubeDoor-Prometheus"
+          },
+          "editorMode": "code",
+          "expr": "node_netstat_Tcp_CurrEstab{instance=~\"$instance\"}",
+          "format": "time_series",
+          "hide": false,
+          "instant": false,
+          "interval": "",
+          "intervalFactor": 1,
+          "legendFormat": "CurrEstab",
+          "refId": "A",
+          "step": 20
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "KubeDoor-Prometheus"
+          },
+          "expr": "node_sockstat_TCP_tw{instance=~\"$instance\"}",
+          "format": "time_series",
+          "interval": "",
+          "intervalFactor": 1,
+          "legendFormat": "TCP_tw",
+          "refId": "D"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "KubeDoor-Prometheus"
+          },
+          "exemplar": true,
+          "expr": "node_sockstat_sockets_used{instance=~\"$instance\"}",
+          "hide": false,
+          "interval": "2m",
+          "intervalFactor": 1,
+          "legendFormat": "Sockets_used",
+          "refId": "B"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "KubeDoor-Prometheus"
+          },
+          "expr": "node_sockstat_UDP_inuse{instance=~\"$instance\"}",
+          "interval": "",
+          "legendFormat": "UDP_inuse",
+          "refId": "C"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "KubeDoor-Prometheus"
+          },
+          "expr": "node_sockstat_TCP_alloc{instance=~\"$instance\"}",
+          "interval": "",
+          "legendFormat": "TCP_alloc",
+          "refId": "E"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "KubeDoor-Prometheus"
+          },
+          "expr": "irate(node_netstat_Tcp_PassiveOpens{instance=~\"$instance\"}[$interval])",
+          "hide": true,
+          "interval": "",
+          "legendFormat": "{{instance}}_Tcp_PassiveOpens",
+          "refId": "G"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "KubeDoor-Prometheus"
+          },
+          "expr": "irate(node_netstat_Tcp_ActiveOpens{instance=~\"$instance\"}[$interval])",
+          "hide": true,
+          "interval": "",
+          "legendFormat": "{{instance}}_Tcp_ActiveOpens",
+          "refId": "F"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "KubeDoor-Prometheus"
+          },
+          "editorMode": "code",
+          "expr": "irate(node_netstat_Tcp_InSegs{instance=~\"$instance\"}[$interval])",
+          "interval": "",
+          "legendFormat": "Tcp_InSegs",
+          "range": true,
+          "refId": "H"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "KubeDoor-Prometheus"
+          },
+          "editorMode": "code",
+          "expr": "irate(node_netstat_Tcp_OutSegs{instance=~\"$instance\"}[$interval])",
+          "interval": "",
+          "legendFormat": "Tcp_OutSegs",
+          "range": true,
+          "refId": "I"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "KubeDoor-Prometheus"
+          },
+          "expr": "irate(node_netstat_Tcp_RetransSegs{instance=~\"$instance\"}[$interval])",
+          "hide": false,
+          "interval": "",
+          "legendFormat": "Tcp_RetransSegs",
+          "refId": "J"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "KubeDoor-Prometheus"
+          },
+          "editorMode": "code",
+          "expr": "irate(node_netstat_TcpExt_ListenDrops{instance=~\"$instance\"}[$interval])",
+          "hide": false,
+          "interval": "",
+          "legendFormat": "TcpExt_ListenDrops",
+          "range": true,
+          "refId": "K"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "KubeDoor-Prometheus"
+          },
+          "editorMode": "code",
+          "expr": "irate(node_netstat_TcpExt_ListenOverflows{instance=~\"$instance\"}[$interval])",
+          "hide": false,
+          "interval": "",
+          "legendFormat": "TcpExt_ListenOverflows",
+          "range": true,
+          "refId": "L"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "KubeDoor-Prometheus"
+          },
+          "editorMode": "code",
+          "expr": "irate(node_netstat_Tcp_InErrs{instance=~\"$instance\"}[$interval])",
+          "hide": false,
+          "interval": "",
+          "legendFormat": "Tcp_InErrs",
+          "range": true,
+          "refId": "M"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "KubeDoor-Prometheus"
+          },
+          "editorMode": "code",
+          "expr": "irate(node_netstat_Tcp_OutRsts{instance=~\"$instance\"}[$interval])",
+          "hide": false,
+          "interval": "",
+          "legendFormat": "Tcp_OutRsts",
+          "range": true,
+          "refId": "N"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "KubeDoor-Prometheus"
+          },
+          "editorMode": "code",
+          "expr": "irate(node_netstat_TcpExt_SyncookiesSent{instance=~\"$instance\"}[$interval])",
+          "hide": false,
+          "interval": "",
+          "legendFormat": "TcpExt_SyncookiesSent",
+          "range": true,
+          "refId": "O"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "KubeDoor-Prometheus"
+          },
+          "editorMode": "code",
+          "expr": "irate(node_netstat_TcpExt_SyncookiesRecv{instance=~\"$instance\"}[$interval])",
+          "hide": false,
+          "interval": "",
+          "legendFormat": "TcpExt_SyncookiesRecv",
+          "range": true,
+          "refId": "P"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "KubeDoor-Prometheus"
+          },
+          "editorMode": "code",
+          "expr": "irate(node_netstat_TcpExt_SyncookiesFailed{instance=~\"$instance\"}[$interval])",
+          "hide": false,
+          "interval": "",
+          "legendFormat": "TcpExt_SyncookiesFailed",
+          "range": true,
+          "refId": "Q"
+        }
+      ],
+      "title": "网络Socket连接信息",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "KubeDoor-Prometheus"
+      },
+      "description": "带宽的单位是bit/s",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisBorderShow": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "series",
+            "axisLabel": "上传（-）/下载（+）",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "barWidthFactor": 0.6,
+            "drawStyle": "line",
+            "fillOpacity": 0,
+            "gradientMode": "none",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "insertNulls": false,
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "pointSize": 5,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "never",
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "links": [],
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 80
+              }
+            ]
+          },
+          "unit": "binbps"
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": "/.*_out上传$/"
+            },
+            "properties": [
+              {
+                "id": "custom.transform",
+                "value": "negative-Y"
+              },
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "blue",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": "/.*_in下载$/"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "yellow",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": "/.*错误|.*丢弃/"
+            },
+            "properties": [
+              {
+                "id": "custom.axisPlacement",
+                "value": "right"
+              },
+              {
+                "id": "unit",
+                "value": "cps"
+              },
+              {
+                "id": "custom.axisLabel",
+                "value": "每秒异常次数"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byValue",
+              "options": {
+                "op": "gte",
+                "reducer": "allIsZero",
+                "value": 0
+              }
+            },
+            "properties": [
+              {
+                "id": "custom.hideFrom",
+                "value": {
+                  "legend": true,
+                  "tooltip": true,
+                  "viz": true
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 16,
+        "y": 48
+      },
+      "id": 157,
+      "options": {
+        "legend": {
+          "calcs": [
+            "mean",
+            "lastNotNull",
+            "max"
+          ],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true,
+          "sortBy": "Last *",
+          "sortDesc": true
+        },
+        "tooltip": {
+          "maxHeight": 600,
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "pluginVersion": "11.4.0",
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "KubeDoor-Prometheus"
+          },
+          "editorMode": "code",
+          "exemplar": true,
+          "expr": "irate(node_network_receive_bytes_total{instance=~\"$instance\",device=~\"$device\"}[$interval])*8",
+          "format": "time_series",
+          "interval": "",
+          "intervalFactor": 1,
+          "legendFormat": "{{device}}_in下载",
+          "range": true,
+          "refId": "A",
+          "step": 4
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "KubeDoor-Prometheus"
+          },
+          "editorMode": "code",
+          "expr": "irate(node_network_transmit_bytes_total{instance=~\"$instance\",device=~\"$device\"}[$interval])*8",
+          "format": "time_series",
+          "interval": "",
+          "intervalFactor": 1,
+          "legendFormat": "{{device}}_out上传",
+          "range": true,
+          "refId": "B",
+          "step": 4
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "KubeDoor-Prometheus"
+          },
+          "editorMode": "code",
+          "exemplar": false,
+          "expr": "irate(node_network_receive_drop_total{instance=~\"$instance\",device=~\"$device\"}[$interval])",
+          "format": "time_series",
+          "hide": false,
+          "interval": "",
+          "intervalFactor": 1,
+          "legendFormat": "{{device}}_in下载丢弃",
+          "range": true,
+          "refId": "C",
+          "step": 4
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "KubeDoor-Prometheus"
+          },
+          "editorMode": "code",
+          "expr": "irate(node_network_transmit_drop_total{instance=~\"$instance\",device=~\"$device\"}[$interval])",
+          "format": "time_series",
+          "hide": false,
+          "interval": "",
+          "intervalFactor": 1,
+          "legendFormat": "{{device}}_out上传丢弃",
+          "range": true,
+          "refId": "D",
+          "step": 4
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "KubeDoor-Prometheus"
+          },
+          "editorMode": "code",
+          "exemplar": true,
+          "expr": "irate(node_network_receive_errs_total{instance=~\"$instance\",device=~\"$device\"}[$interval])",
+          "format": "time_series",
+          "hide": false,
+          "interval": "",
+          "intervalFactor": 1,
+          "legendFormat": "{{device}}_in下载错误",
+          "range": true,
+          "refId": "E",
+          "step": 4
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "KubeDoor-Prometheus"
+          },
+          "editorMode": "code",
+          "expr": "irate(node_network_transmit_errs_total{instance=~\"$instance\",device=~\"$device\"}[$interval])",
+          "format": "time_series",
+          "hide": false,
+          "interval": "",
+          "intervalFactor": 1,
+          "legendFormat": "{{device}}_out上传错误",
+          "range": true,
+          "refId": "F",
+          "step": 4
+        }
+      ],
+      "title": "每秒网络带宽使用$device",
+      "type": "timeseries"
+    }
+  ],
+  "preload": false,
+  "refresh": "5m",
+  "schemaVersion": 40,
+  "tags": [
+    "Prometheus",
+    "node_exporter",
+    "StarsL.cn",
+    "KubeDoor"
+  ],
+  "templating": {
+    "list": [
+      {
+        "current": {
+          "text": "__PROM_K8S_TAG_KEY__",
+          "value": "__PROM_K8S_TAG_KEY__"
+        },
+        "hide": 2,
+        "label": "external_labels_key",
+        "name": "ext_key",
+        "options": [
+          {
+            "selected": true,
+            "text": "__PROM_K8S_TAG_KEY__",
+            "value": "__PROM_K8S_TAG_KEY__"
+          }
+        ],
+        "query": "__PROM_K8S_TAG_KEY__",
+        "type": "custom"
+      },
+      {
+        "current": {},
+        "datasource": {
+          "type": "prometheus",
+          "uid": "KubeDoor-Prometheus"
+        },
+        "definition": "label_values(node_uname_info,$ext_key)",
+        "includeAll": false,
+        "label": "K8S",
+        "name": "ext_value",
+        "options": [],
+        "query": {
+          "qryType": 1,
+          "query": "label_values(node_uname_info,$ext_key)",
+          "refId": "PrometheusVariableQueryEditor-VariableQuery"
+        },
+        "refresh": 1,
+        "regex": "",
+        "sort": 5,
+        "type": "query"
+      },
+      {
+        "current": {},
+        "datasource": {
+          "type": "prometheus",
+          "uid": "KubeDoor-Prometheus"
+        },
+        "definition": "label_values(node_uname_info{$ext_key=~\"$ext_value\"},nodename)",
+        "includeAll": false,
+        "label": "名称",
+        "name": "name",
+        "options": [],
+        "query": {
+          "qryType": 1,
+          "query": "label_values(node_uname_info{$ext_key=~\"$ext_value\"},nodename)",
+          "refId": "PrometheusVariableQueryEditor-VariableQuery"
+        },
+        "refresh": 1,
+        "regex": "",
+        "sort": 5,
+        "type": "query"
+      },
+      {
+        "current": {},
+        "datasource": {
+          "type": "prometheus",
+          "uid": "KubeDoor-Prometheus"
+        },
+        "definition": "label_values(node_uname_info{$ext_key=~\"$ext_value\", nodename=~\"$name\"},instance)",
+        "includeAll": false,
+        "label": "IP",
+        "name": "instance",
+        "options": [],
+        "query": {
+          "qryType": 1,
+          "query": "label_values(node_uname_info{$ext_key=~\"$ext_value\", nodename=~\"$name\"},instance)",
+          "refId": "PrometheusVariableQueryEditor-VariableQuery"
+        },
+        "refresh": 2,
+        "regex": "",
+        "sort": 5,
+        "type": "query"
+      },
+      {
+        "auto": false,
+        "auto_count": 100,
+        "auto_min": "1m",
+        "current": {
+          "text": "3m",
+          "value": "3m"
+        },
+        "hide": 2,
+        "label": "间隔",
+        "name": "interval",
+        "options": [
+          {
+            "selected": true,
+            "text": "3m",
+            "value": "3m"
+          }
+        ],
+        "query": "3m",
+        "refresh": 2,
+        "type": "interval"
+      },
+      {
+        "current": {
+          "text": "5",
+          "value": "5"
+        },
+        "datasource": {
+          "type": "prometheus",
+          "uid": "KubeDoor-Prometheus"
+        },
+        "definition": "query_result(count(node_uname_info{$ext_key=~\"$ext_value\"}))",
+        "hide": 2,
+        "includeAll": false,
+        "label": "主机数",
+        "name": "total",
+        "options": [],
+        "query": {
+          "qryType": 3,
+          "query": "query_result(count(node_uname_info{$ext_key=~\"$ext_value\"}))",
+          "refId": "PrometheusVariableQueryEditor-VariableQuery"
+        },
+        "refresh": 2,
+        "regex": "/{} (.*) .*/",
+        "type": "query"
+      },
+      {
+        "current": {
+          "text": "All",
+          "value": "$__all"
+        },
+        "datasource": {
+          "type": "prometheus",
+          "uid": "KubeDoor-Prometheus"
+        },
+        "definition": "label_values(node_network_info{$ext_key=~\"$ext_value\", instance=~\"$instance\", device!~\"tap.*|veth.*|br.*|docker.*|virbr.*|lo.*|cni.*|flannel.*\"},device)",
+        "includeAll": true,
+        "label": "网卡",
+        "multi": true,
+        "name": "device",
+        "options": [],
+        "query": {
+          "qryType": 1,
+          "query": "label_values(node_network_info{$ext_key=~\"$ext_value\", instance=~\"$instance\", device!~\"tap.*|veth.*|br.*|docker.*|virbr.*|lo.*|cni.*|flannel.*\"},device)",
+          "refId": "PrometheusVariableQueryEditor-VariableQuery"
+        },
+        "refresh": 1,
+        "regex": "",
+        "sort": 1,
+        "type": "query"
+      },
+      {
+        "current": {
+          "text": "/var/lib/docker",
+          "value": "/var/lib/docker"
+        },
+        "datasource": {
+          "type": "prometheus",
+          "uid": "KubeDoor-Prometheus"
+        },
+        "definition": "query_result(topk(1,sort_desc(max(node_filesystem_size_bytes{$ext_key=~\"$ext_value\",instance=~\"$instance\",fstype=~\"ext.?|xfs\",mountpoint!~\".*pods.*\"}) by (mountpoint))))",
+        "hide": 2,
+        "includeAll": false,
+        "label": "最大挂载目录",
+        "name": "maxmount",
+        "options": [],
+        "query": {
+          "qryType": 3,
+          "query": "query_result(topk(1,sort_desc(max(node_filesystem_size_bytes{$ext_key=~\"$ext_value\",instance=~\"$instance\",fstype=~\"ext.?|xfs\",mountpoint!~\".*pods.*\"}) by (mountpoint))))",
+          "refId": "PrometheusVariableQueryEditor-VariableQuery"
+        },
+        "refresh": 2,
+        "regex": "/.*\\\"(.*)\\\".*/",
+        "sort": 5,
+        "type": "query"
+      },
+      {
+        "current": {},
+        "datasource": {
+          "type": "prometheus",
+          "uid": "KubeDoor-Prometheus"
+        },
+        "definition": "label_values(node_uname_info{$ext_key=~\"$ext_value\", nodename=~\"$name\", instance=~\"$instance\"},nodename)",
+        "hide": 2,
+        "includeAll": false,
+        "label": "展示使用的名称",
+        "name": "show_name",
+        "options": [],
+        "query": {
+          "qryType": 1,
+          "query": "label_values(node_uname_info{$ext_key=~\"$ext_value\", nodename=~\"$name\", instance=~\"$instance\"},nodename)",
+          "refId": "PrometheusVariableQueryEditor-VariableQuery"
+        },
+        "refresh": 2,
+        "regex": "",
+        "sort": 5,
+        "type": "query"
+      }
+    ]
+  },
+  "time": {
+    "from": "now-1h",
+    "to": "now"
+  },
+  "timepicker": {
+    "refresh_intervals": [
+      "30s",
+      "1m",
+      "3m",
+      "5m",
+      "15m",
+      "30m"
+    ]
+  },
+  "timezone": "browser",
+  "title": "KubeDoor - K8S节点资源实时监控",
+  "uid": "KubeDoor-Node",
+  "version": 9,
+  "weekStart": ""
+}

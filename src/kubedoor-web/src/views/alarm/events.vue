@@ -332,7 +332,7 @@
           show-overflow-tooltip
         >
           <template #default="{ row }">
-            <el-tag size="small" :type="success">
+            <el-tag size="small" type="success">
               {{ row[3] || "-" }}
             </el-tag>
           </template>
@@ -399,7 +399,13 @@ import { ElMessage } from "element-plus";
 import dayjs from "dayjs";
 import { ArrowDown } from "@element-plus/icons-vue";
 import { getAgentNames } from "@/api/istio";
-import { getEventsMenu, queryEvents } from "@/api/alarm";
+import {
+  getEventsMenu,
+  queryEvents,
+  type EventQueryParams,
+  type EventMenuParams,
+  type EventMenuData
+} from "@/api/alarm";
 import { useSearchStoreHook } from "@/store/modules/search";
 const searchStore = useSearchStoreHook();
 const route = useRoute();
@@ -433,7 +439,7 @@ const nameList = ref<string[]>([]);
 const reasonList = ref<string[]>([]);
 const reportingComponentList = ref<string[]>([]);
 const reportingInstanceList = ref<string[]>([]);
-const eventsMenuData = ref<Record<string, any[]> | null>(null);
+const eventsMenuData = ref<EventMenuData | null>(null);
 const eventsData = ref<any[]>([]);
 const loading = ref(false);
 
@@ -529,7 +535,7 @@ let filterWatcherSuppressDepth = 0;
 let allowWatcherDrivenReloads = false;
 let routeWatcherReady = false;
 let agentNamesCache: string[] | null = null;
-let agentNamesPromise: Promise<string[]> | null = null;
+let agentNamesPromise: ReturnType<typeof getAgentNames> | null = null;
 
 const syncRouteQueryFromFilters = () => {
   const serializedQuery = buildRouteQueryFromFilters();
@@ -809,13 +815,13 @@ const loadK8sList = async () => {
           response.data.length > 0 &&
           Array.isArray(response.data[0])
         ) {
-          agentNamesCache = response.data.map(item => item[0]);
+          agentNamesCache = response.data.map((item: any) => item[0]);
         } else if (
           response.data.length > 0 &&
           typeof response.data[0] === "object"
         ) {
           agentNamesCache = response.data.map(
-            item => Object.values(item)[0] as string
+            (item: any) => Object.values(item)[0] as string
           );
         } else {
           agentNamesCache = [];
@@ -901,7 +907,7 @@ const queryEventsData = async () => {
 
   loading.value = true;
   try {
-    const params = {
+    const params: EventQueryParams = {
       k8s: selectedK8s.value,
       start_time: dateRange.value[0],
       end_time: dateRange.value[1],
@@ -984,7 +990,7 @@ const loadEventsMenu = async () => {
 
   loading.value = true;
   try {
-    const params = {
+    const params: EventMenuParams = {
       k8s: selectedK8s.value,
       start_time: dateRange.value[0],
       end_time: dateRange.value[1],

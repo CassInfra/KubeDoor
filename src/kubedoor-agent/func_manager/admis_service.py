@@ -9,6 +9,7 @@ from kubernetes_asyncio.client.rest import ApiException
 from loguru import logger
 
 import utils
+from func_manager.jvm_config import replace_jvm_flags
 
 
 class AdmisService:
@@ -86,10 +87,13 @@ class AdmisService:
             )
             return web.json_response(self._admis_fail(uid, 503, "连接 kubedoor-master 失败"))
 
-        response_future = asyncio.get_event_loop().create_future()
+        response_future = asyncio.get_running_loop().create_future()
         self.request_futures[uid] = response_future
         await self.ws_conn.send_json(
-            {"type": "admis", "request_id": uid, "namespace": namespace, "deployment": deployment_name}
+            {
+                "type": "admis", "request_id": uid, "namespace": namespace,
+                "deployment": deployment_name, "jvm_config": True,
+            }
         )
         try:
             result = await asyncio.wait_for(response_future, timeout=30)
@@ -108,6 +112,7 @@ class AdmisService:
                 return web.json_response(self._admis_pass(uid))
             return web.json_response(self._admis_fail(uid, result[0], result[1]))
 
+        jvm_config = result[8] if len(result) > 8 and isinstance(result[8], dict) else {}
         (
             pod_count,
             pod_count_ai,
@@ -117,7 +122,7 @@ class AdmisService:
             limit_cpu_m,
             limit_mem_mb,
             scheduler,
-        ) = result
+        ) = result[:8]
         replicas = pod_count_manual if pod_count_manual >= 0 else (pod_count_ai if pod_count_ai >= 0 else pod_count)
         request_cpu_m = 10 if 0 <= request_cpu_m < 10 else request_cpu_m
         request_mem_mb = 1 if request_mem_mb == 0 else request_mem_mb
@@ -155,6 +160,8 @@ class AdmisService:
                         resources_dict,
                         uid,
                         scheduler,
+                        obj['spec']['template']['spec']['containers'][0].get('args'),
+                        jvm_config,
                     )
                 )
             if (
@@ -182,6 +189,8 @@ class AdmisService:
                         resources_dict,
                         uid,
                         scheduler,
+                        obj['spec']['template']['spec']['containers'][0].get('args'),
+                        jvm_config,
                     )
                 )
             if (
@@ -331,6 +340,8 @@ class AdmisService:
         resources_dict,
         uid,
         scheduler,
+        container_args=None,
+        jvm_config=None,
     ):
         change_list = []
         scheduler_enabled = bool(scheduler)
@@ -389,6 +400,11 @@ class AdmisService:
                 "value": resources_dict,
             }
         )
+        updated_args = replace_jvm_flags(container_args, jvm_config or {})
+        if updated_args != container_args:
+            change_list.append({
+                "op": "replace", "path": "/spec/template/spec/containers/0/args", "value": updated_args,
+            })
         code = base64.b64encode(json.dumps(change_list).encode()).decode()
         return {
             "apiVersion": "admission.k8s.io/v1",

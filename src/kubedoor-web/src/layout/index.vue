@@ -7,6 +7,8 @@ import { useI18n } from "vue-i18n";
 import { useLayout } from "./hooks/useLayout";
 import { useAppStoreHook } from "@/store/modules/app";
 import { useSettingStoreHook } from "@/store/modules/settings";
+import { useAIStoreHook } from "@/store/modules/ai";
+import { useRoute } from "vue-router";
 import { useDataThemeChange } from "@/layout/hooks/useDataThemeChange";
 import {
   h,
@@ -15,6 +17,8 @@ import {
   computed,
   onMounted,
   onBeforeMount,
+  watch,
+  defineAsyncComponent,
   defineComponent
 } from "vue";
 import {
@@ -31,6 +35,7 @@ import LaySetting from "./components/lay-setting/index.vue";
 import NavVertical from "./components/lay-sidebar/NavVertical.vue";
 import NavHorizontal from "./components/lay-sidebar/NavHorizontal.vue";
 import BackTopIcon from "@/assets/svg/back_top.svg?component";
+import AIHeaderButton from "@/components/AI/AIHeaderButton.vue";
 import { getConfig } from "@/config";
 
 const { t } = useI18n();
@@ -39,7 +44,24 @@ const { isDark } = useDark();
 const { layout } = useLayout();
 const isMobile = deviceDetection();
 const pureSetting = useSettingStoreHook();
+const ai = useAIStoreHook();
+const route = useRoute();
+const AIChatDialog = defineAsyncComponent(
+  () => import("@/components/AI/AIChatDialog.vue")
+);
 const { $storage } = useGlobal<GlobalPropertiesApi>();
+
+watch(
+  () => route.query.ai_session,
+  value => {
+    const requested =
+      typeof value === "string"
+        ? value
+        : new URLSearchParams(window.location.search).get("ai_session");
+    if (requested) void ai.open(requested);
+  },
+  { immediate: true }
+);
 
 const set: setType = reactive({
   sidebar: computed(() => {
@@ -144,13 +166,19 @@ const LayHeader = defineComponent({
       },
       {
         default: () => [
-          !pureSetting.hiddenSideBar &&
-          (layout.value.includes("vertical") || layout.value.includes("mix"))
-            ? h(LayNavbar)
-            : null,
-          !pureSetting.hiddenSideBar && layout.value.includes("horizontal")
-            ? h(NavHorizontal)
-            : null,
+          h("div", { class: "ai-header-row" }, [
+            !pureSetting.hiddenSideBar &&
+            (layout.value.includes("vertical") || layout.value.includes("mix"))
+              ? h(LayNavbar)
+              : null,
+            !pureSetting.hiddenSideBar && layout.value.includes("horizontal")
+              ? h(NavHorizontal)
+              : null,
+            h(AIHeaderButton, {
+              expanded: ai.visible,
+              onOpen: () => void ai.open()
+            })
+          ]),
           h(LayTag)
         ]
       }
@@ -201,6 +229,7 @@ const LayHeader = defineComponent({
     </div>
     <!-- 系统设置 -->
     <LaySetting />
+    <AIChatDialog v-if="ai.mounted" />
   </div>
 </template>
 
@@ -234,5 +263,32 @@ const LayHeader = defineComponent({
 
 .re-screen {
   margin-top: 12px;
+}
+
+:deep(.ai-header-row) {
+  position: relative;
+  height: 48px;
+  background: var(--el-bg-color);
+
+  .breadcrumb-container {
+    max-width: calc(50% - 68px);
+    overflow: hidden;
+  }
+
+  .horizontal-header {
+    justify-content: flex-start;
+  }
+
+  .horizontal-header-menu {
+    max-width: calc(50% - 65px);
+  }
+
+  .horizontal-header:has(.horizontal-header-left) .horizontal-header-menu {
+    max-width: calc(50% - 265px);
+  }
+
+  .horizontal-header-right {
+    margin-left: auto;
+  }
 }
 </style>

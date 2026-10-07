@@ -88,6 +88,49 @@
               </template>
             </el-table-column>
             <el-table-column
+              label="AI Kubeconfig"
+              min-width="230"
+              align="center"
+            >
+              <template #default="scope">
+                <div class="ai-connection-cell">
+                  <el-tooltip
+                    :content="connectionSummary(scope.row.key)"
+                    placement="top"
+                  >
+                    <el-tag
+                      size="small"
+                      :type="
+                        connections[scope.row.key]?.configured
+                          ? 'success'
+                          : 'info'
+                      "
+                      effect="plain"
+                    >
+                      {{
+                        connections[scope.row.key]?.configured
+                          ? connections[scope.row.key].context || "已配置"
+                          : aiAvailable
+                            ? "未配置"
+                            : "AI 未启用"
+                      }}
+                    </el-tag>
+                  </el-tooltip>
+                  <el-button
+                    size="small"
+                    link
+                    type="primary"
+                    :disabled="!aiAvailable || aiPermission !== 'rw'"
+                    @click="manageConnection(scope.row.key)"
+                  >
+                    {{
+                      connections[scope.row.key]?.configured ? "管理" : "上传"
+                    }}
+                  </el-button>
+                </div>
+              </template>
+            </el-table-column>
+            <el-table-column
               prop="collect"
               label="自动采集"
               min-width="85"
@@ -230,6 +273,13 @@
           </span>
         </template>
       </el-dialog>
+      <KubeconfigDialog
+        v-if="connectionDialogMounted"
+        v-model="connectionDialogVisible"
+        :env="connectionEnv"
+        :connection="connections[connectionEnv]"
+        @changed="refreshConnections"
+      />
 
       <!-- 自动采集配置对话框 -->
       <el-dialog
@@ -348,7 +398,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, reactive, computed, onMounted } from "vue";
+import { ref, reactive, computed, onMounted, defineAsyncComponent } from "vue";
 import { ElMessage, ElMessageBox } from "element-plus";
 import {
   getAgentStatus,
@@ -366,6 +416,48 @@ import { getPromNamespace } from "@/api/monit";
 
 import { message } from "@/utils/message";
 import { transformI18n } from "@/plugins/i18n";
+import { aiApi, type AIConnection } from "@/api/ai";
+
+const KubeconfigDialog = defineAsyncComponent(
+  () => import("@/components/AI/KubeconfigDialog.vue")
+);
+const aiAvailable = ref(false);
+const aiPermission = ref("");
+const connections = ref<Record<string, AIConnection>>({});
+const connectionDialogMounted = ref(false);
+const connectionDialogVisible = ref(false);
+const connectionEnv = ref("");
+
+async function refreshConnections() {
+  try {
+    const bootstrap = await aiApi.bootstrap();
+    aiAvailable.value = bootstrap.enabled;
+    aiPermission.value = bootstrap.permission;
+    if (!bootstrap.enabled) return;
+    const response = await aiApi.connections();
+    connections.value = Object.fromEntries(
+      (response.connections || []).map(item => [item.env, item])
+    );
+  } catch {
+    aiAvailable.value = false;
+    aiPermission.value = "";
+  }
+}
+function manageConnection(env: string) {
+  if (aiPermission.value !== "rw") return;
+  connectionEnv.value = env;
+  connectionDialogMounted.value = true;
+  connectionDialogVisible.value = true;
+}
+function connectionSummary(env: string) {
+  const connection = connections.value[env];
+  if (!aiAvailable.value) return "AI 服务未启用或无法连接";
+  if (!connection?.configured)
+    return aiPermission.value === "rw"
+      ? "上传 YAML / JSON Kubeconfig 并测试连接"
+      : "只有写权限账号可以管理共享配置";
+  return `context: ${connection.context || ""}；测试: ${connection.test_status || "未测试"} ${connection.tested_at || ""}`;
+}
 
 // 定义Agent数据类型
 interface AgentData {
@@ -423,6 +515,7 @@ const loadNamespaceOptions = async (env: string) => {
 // 获取Agent状态数据
 const getAgentData = async () => {
   loading.value = true;
+  void refreshConnections();
   try {
     const { data } = await getAgentStatus();
     if (data) {
@@ -481,7 +574,7 @@ const handleCollectHistory = (row: AgentData) => {
 const submitCollectHistory = async () => {
   collectLoading.value = true;
   try {
-    await initPeakData(
+    const result = await initPeakData(
       collectForm.env,
       collectForm.days,
       collectForm.peak_hours
@@ -489,6 +582,9 @@ const submitCollectHistory = async () => {
     ElMessage.success(
       `K8S: ${collectForm.env} 采集 ${collectForm.days} 天历史数据完成`
     );
+    if (Array.isArray(result.warnings) && result.warnings.length > 0) {
+      ElMessage.warning(result.warnings.join("；"));
+    }
     collectDialogVisible.value = false;
   } catch (error) {
     console.error("采集历史数据失败:", error);
@@ -770,5 +866,12 @@ onMounted(() => {
 .warning-box p {
   margin: 8px 0;
   line-height: 1.5;
+}
+
+.ai-connection-cell {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  justify-content: center;
 }
 </style>

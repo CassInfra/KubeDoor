@@ -54,13 +54,21 @@ export interface DeletePodsResponse {
   error?: string;
 }
 
-export const getPodList = (env: string, namespace?: string) => {
+export const getPodList = (
+  env: string,
+  namespaces?: string[],
+  nodeName?: string
+) => {
   const params: Record<string, string> = {};
   if (env) {
     params.env = env;
   }
-  if (namespace) {
-    params.namespace = namespace;
+  if (namespaces && namespaces.length > 0) {
+    // 多个命名空间用逗号分隔
+    params.namespaces = namespaces.join(",");
+  }
+  if (nodeName) {
+    params.node_name = nodeName;
   }
   return http.request<PodListResponse>("get", "/api/agent/pods", {
     params

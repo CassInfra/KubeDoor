@@ -1,0 +1,72 @@
+# kubedoor-alarm:接收 alertmanager 推送的告警 -> 匹配屏蔽规则 -> 写 PostgreSQL -> 发 IM
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: kubedoor-alarm
+  namespace: __NAMESPACE__
+  labels:
+    app: kubedoor-alarm
+    app.kubernetes.io/part-of: kubedoor
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: kubedoor-alarm
+  template:
+    metadata:
+      labels:
+        app: kubedoor-alarm
+    spec:
+      containers:
+        - name: kubedoor-alarm
+          image: '__IMAGE_REPO__/kubedoor-alarm:__TAG_ALARM__'
+          imagePullPolicy: Always
+          envFrom:
+            - configMapRef:
+                name: kubedoor-config
+          env:
+            - name: TZ
+              value: Asia/Shanghai
+          ports:
+            - name: http
+              containerPort: 80
+          resources:
+            limits:
+              cpu: "1"
+              memory: 1Gi
+            requests:
+              cpu: 10m
+              memory: 64Mi
+          livenessProbe:
+            tcpSocket:
+              port: 80
+            initialDelaySeconds: 15
+            timeoutSeconds: 2
+            periodSeconds: 10
+            failureThreshold: 3
+          readinessProbe:
+            tcpSocket:
+              port: 80
+            initialDelaySeconds: 5
+            timeoutSeconds: 2
+            periodSeconds: 10
+            failureThreshold: 3
+      restartPolicy: Always
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: kubedoor-alarm
+  namespace: __NAMESPACE__
+  labels:
+    app: kubedoor-alarm
+spec:
+  type: ClusterIP
+  ports:
+    - name: http
+      protocol: TCP
+      port: 80
+      targetPort: 80
+  selector:
+    app: kubedoor-alarm

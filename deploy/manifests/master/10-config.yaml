@@ -1,0 +1,51 @@
+# kubedoor-config:master / web / alarm 三个组件共用的环境变量
+# 改完后需要重启对应 Deployment 才生效:
+#   kubectl -n __NAMESPACE__ rollout restart deploy/kubedoor-master deploy/kubedoor-alarm
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: kubedoor-config
+  namespace: __NAMESPACE__
+  labels:
+    app.kubernetes.io/part-of: kubedoor
+data:
+  # --- PostgreSQL(统一数据库,已不再使用 ClickHouse / MySQL)---
+  PG_HOST: '__PG_HOST__'
+  PG_PORT: '__PG_PORT__'
+  PG_USER: '__PG_USER__'
+  PG_PASSWORD: '__PG_PASSWORD__'
+  PG_DATABASE: '__PG_DATABASE__'
+  PG_POOL_MIN: '__PG_POOL_MIN__'
+  PG_POOL_MAX: '__PG_POOL_MAX__'
+  PG_CMD_TIMEOUT: '__PG_CMD_TIMEOUT__'
+
+  # --- 时序库 ---
+  PROM_TYPE: '__PROM_TYPE__'
+  PROM_URL: '__PROM_URL__'
+  PROM_K8S_TAG_KEY: '__PROM_K8S_TAG_KEY__'
+
+  # --- 通知 ---
+  MSG_TYPE: '__MSG_TYPE__'
+  MSG_TOKEN: '__MSG_TOKEN__'
+  DEFAULT_AT: '__DEFAULT_AT__'
+  ALERTMANAGER_EXTURL: '__ALERTMANAGER_EXTURL__'
+  KUBEDOOR_EXTURL: '__KUBEDOOR_EXTURL__'
+
+  # --- 行为参数 ---
+  LOG_LEVEL: "INFO"
+  ALERT_DEDUP_WINDOW: '__ALERT_DEDUP_WINDOW__'
+  SILENCE_CACHE_TTL: '__SILENCE_CACHE_TTL__'
+  # admis 准入校验的热路径查询缓存(秒)。改管控配置后会主动失效,不必调小
+  ADMIS_CACHE_TTL: "60"
+  # 过期数据保留天数,master 每天清理一次;设为 0 表示不清理
+  RETENTION_EVENTS_DAYS: "90"
+  RETENTION_ALERTS_DAYS: "365"
+  RETENTION_RESOURCES_DAYS: "365"
+
+  # --- 改镜像的权限控制:哪个集群、什么时间段、谁可以改 ---
+  UPDATE_IMAGE: |
+    __UPDATE_IMAGE_JSON__
+
+  # --- 查询镜像 tag 用的仓库凭据 ---
+  REGISTRY_SECRET: |
+    __REGISTRY_SECRET_JSON__

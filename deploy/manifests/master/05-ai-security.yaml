@@ -1,0 +1,13 @@
+# Keep these keys across upgrades: changing the encryption key makes stored
+# kubeconfigs unreadable. install.sh persists generated values beside its config.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: kubedoor-ai-security
+  namespace: __NAMESPACE__
+type: Opaque
+stringData:
+  AI_INTERNAL_TOKEN: '__AI_INTERNAL_TOKEN__'
+  AI_ENCRYPTION_KEY: '__AI_ENCRYPTION_KEY__'
+  gateway.conf: |
+    proxy_set_header X-Kubedoor-Token '__AI_INTERNAL_TOKEN__';

@@ -1,27 +1,30 @@
 #!/usr/bin/python3
-import json, requests, utils
+import json, requests, utils, silence
 from flask import Flask, Response, request, jsonify
-from clickhouse_pool import ChPool
+from psycopg_pool import ConnectionPool
+from psycopg.rows import tuple_row
 from datetime import datetime, UTC
 import pytz
 import logging
 import hashlib
+import urllib.parse
 
 logging.basicConfig(level=getattr(logging, utils.LOG_LEVEL), format='%(asctime)s - %(levelname)s - %(message)s')
-pool = ChPool(
-    host=utils.CK_HOST,
-    port=utils.CK_PORT,
-    user=utils.CK_USER,
-    password=utils.CK_PASSWORD,
-    database=utils.CK_DATABASE,
-    connections_min=1,
-    connections_max=10,
+# PostgreSQL 连接池
+_conninfo = (
+    f"host={utils.PG_HOST} port={utils.PG_PORT} user={utils.PG_USER} "
+    f"password={utils.PG_PASSWORD} dbname={utils.PG_DATABASE}"
 )
+pool = ConnectionPool(conninfo=_conninfo, min_size=1, max_size=10, open=True)
+
+# 告警屏蔽引擎(内存缓存 alert_silences 规则,详见 silence.py)
+silence.init_engine(pool)
 
 MSG_TOKEN = utils.MSG_TOKEN
 MSG_TYPE = utils.MSG_TYPE
 DEFAULT_AT = utils.DEFAULT_AT
 ALERTMANAGER_EXTURL = utils.ALERTMANAGER_EXTURL
+KUBEDOOR_EXTURL = utils.KUBEDOOR_EXTURL
 PROM_K8S_TAG_KEY = utils.PROM_K8S_TAG_KEY
 
 
@@ -214,101 +217,115 @@ def process_single_alert(alert):
         }
         send_resolved = False if labels.get('send_resolved', True) == 'false' else True
 
+        # 屏蔽判断:命中规则的告警仍然入库(带 silenced 标记),只是不会走通知路径。
+        # 通知路径 /msg 会独立判断并计数,这里不重复累加 match_count。
+        silence_id = silence.match_alert(labels, annotations, count_hit=False)
+        if silence_id:
+            logging.info(f"告警命中屏蔽规则 #{silence_id},入库但标记为已屏蔽: {alert_name}")
+
         if alert['status'] == 'firing':
-            handle_firing_alert(alert_data, send_resolved)
+            handle_firing_alert(alert_data, send_resolved, silence_id)
         else:
-            handle_resolved_alert(alert_data, send_resolved)
+            handle_resolved_alert(alert_data, send_resolved, silence_id)
 
     except Exception as e:
         logging.error(f"处理告警失败: {str(e)}", exc_info=True)
 
 
-def handle_firing_alert(alert_data, send_resolved):
-    check_query = f"""
-        SELECT 1 FROM kubedoor.k8s_pod_alert_days
-        WHERE toDate(start_time) = '{alert_data['start_time'].split()[0]}' and 
-        fingerprint = '{alert_data['fingerprint']}'
-        LIMIT 1
+def handle_firing_alert(alert_data, send_resolved, silence_id=None):
+    """处理 firing 告警:当天同 fingerprint 已存在则累加计数,否则插入新记录。
+
+    用 INSERT ... ON CONFLICT (start_time, fingerprint) 需要精确匹配唯一键;
+    但这里的去重语义是「当天(start_time::date)+fingerprint」,与唯一索引
+    (start_time, fingerprint) 不完全一致,故沿用「先查后改/插」逻辑,改为 PG 语法。
+
+    silenced/silence_id 采用覆盖写,反映"最近一次告警是否被屏蔽",
+    这样解除屏蔽后新来的告警会把当天记录改回未屏蔽状态。
     """
+    day = alert_data['start_time'].split()[0]
+    silenced = silence_id is not None
+    with pool.connection() as conn:
+        existing = conn.execute(
+            "SELECT 1 FROM k8s_pod_alert_days "
+            "WHERE start_time::date = %s AND fingerprint = %s LIMIT 1",
+            (day, alert_data['fingerprint']),
+        ).fetchone()
 
-    with pool.get_client() as client:
-        existing = client.execute(check_query)
-
-    if existing:
-        # 获取当前时间并格式化为字符串
-        current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        update_query = f"""
-            ALTER TABLE kubedoor.k8s_pod_alert_days
-            UPDATE count_firing = count_firing + 1, end_time = '{current_time}', 
-            alert_status = 'firing', operate = '未处理', description = '{alert_data['description']}'
-            WHERE toDate(start_time) = '{alert_data['start_time'].split()[0]}' and 
-            fingerprint = '{alert_data['fingerprint']}'
-        """
-
-        with pool.get_client() as client:
-            client.execute(update_query)
-        logging.info(f"更新告警计数: {alert_data['fingerprint']}: {alert_data['alert_name']}")
-    else:
-        # 插入新记录
-        count_resolved = 0 if send_resolved else -1
-        insert_query = f"""
-            INSERT INTO kubedoor.k8s_pod_alert_days (
-                fingerprint, alert_status, send_resolved, operate, 
-                start_time,count_firing,count_resolved,
-                severity, alert_group, alert_name,
-                env, namespace,
-                container, pod, description
-            ) VALUES (
-                '{alert_data['fingerprint']}', 'firing', {send_resolved}, '未处理',
-                '{alert_data['start_time']}', 1, {count_resolved},
-                '{alert_data['severity']}', '{alert_data['alert_group']}', '{alert_data['alert_name']}',
-                '{alert_data['env']}', '{alert_data['namespace']}',
-                '{alert_data['container']}', '{alert_data['pod']}', '{alert_data['description']}'
+        if existing:
+            current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            conn.execute(
+                "UPDATE k8s_pod_alert_days SET "
+                "count_firing = count_firing + 1, end_time = %s, "
+                "alert_status = 'firing', operate = '未处理', description = %s, "
+                "silenced = %s, silence_id = %s "
+                "WHERE start_time::date = %s AND fingerprint = %s",
+                (
+                    current_time, alert_data['description'], silenced, silence_id,
+                    day, alert_data['fingerprint'],
+                ),
             )
-        """
-        with pool.get_client() as client:
-            client.execute(insert_query)
-        logging.info(f"新建告警记录: {alert_data['fingerprint']}: {alert_data['alert_name']}")
+            logging.info(f"更新告警计数: {alert_data['fingerprint']}: {alert_data['alert_name']}")
+        else:
+            count_resolved = 0 if send_resolved else -1
+            conn.execute(
+                "INSERT INTO k8s_pod_alert_days ("
+                "fingerprint, alert_status, send_resolved, operate, "
+                "start_time, count_firing, count_resolved, "
+                "severity, alert_group, alert_name, env, namespace, "
+                "container, pod, description, silenced, silence_id"
+                ") VALUES (%s,'firing',%s,'未处理',%s,1,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+                (
+                    alert_data['fingerprint'], send_resolved, alert_data['start_time'],
+                    count_resolved, alert_data['severity'], alert_data['alert_group'],
+                    alert_data['alert_name'], alert_data['env'], alert_data['namespace'],
+                    alert_data['container'], alert_data['pod'], alert_data['description'],
+                    silenced, silence_id,
+                ),
+            )
+            logging.info(f"新建告警记录: {alert_data['fingerprint']}: {alert_data['alert_name']}")
     return True, ''
 
 
-def handle_resolved_alert(alert_data, send_resolved):
+def handle_resolved_alert(alert_data, send_resolved, silence_id=None):
     if not send_resolved:
         err = f"告警 {alert_data['fingerprint']}: {alert_data['alert_name']} 的 send_resolved 为 false，不入库"
         logging.warning(err)
         return False, err
 
-    check_query = f"""
-        SELECT 1 FROM kubedoor.k8s_pod_alert_days
-        WHERE toDate(start_time) = '{alert_data['start_time'].split()[0]}' and fingerprint = '{alert_data['fingerprint']}'
-        LIMIT 1
-    """
-    with pool.get_client() as client:
-        existing = client.execute(check_query)
+    day = alert_data['start_time'].split()[0]
+    silenced = silence_id is not None
+    with pool.connection() as conn:
+        existing = conn.execute(
+            "SELECT 1 FROM k8s_pod_alert_days "
+            "WHERE start_time::date = %s AND fingerprint = %s LIMIT 1",
+            (day, alert_data['fingerprint']),
+        ).fetchone()
 
-    if existing:
-        update_query = f"""
-            ALTER TABLE kubedoor.k8s_pod_alert_days
-            UPDATE alert_status = 'resolved', end_time = '{alert_data['end_time']}', 
-            count_resolved = count_resolved + 1, description = '{alert_data['description']}'
-            WHERE toDate(start_time) = '{alert_data['start_time'].split()[0]}' AND 
-            fingerprint = '{alert_data['fingerprint']}'
-        """
-        with pool.get_client() as client:
-            client.execute(update_query)
-
-        logging.info(f"标记告警解决: {alert_data['fingerprint']}: {alert_data['alert_name']}")
-        return True, ''
-    else:
-        err = f"未找到对应告警记录: {alert_data['fingerprint']}: {alert_data['alert_name']}"
-        logging.error(err)
-        return False, err
+        if existing:
+            conn.execute(
+                "UPDATE k8s_pod_alert_days SET "
+                "alert_status = 'resolved', end_time = %s, "
+                "count_resolved = count_resolved + 1, description = %s, "
+                "silenced = %s, silence_id = %s "
+                "WHERE start_time::date = %s AND fingerprint = %s",
+                (
+                    alert_data['end_time'], alert_data['description'], silenced, silence_id,
+                    day, alert_data['fingerprint'],
+                ),
+            )
+            logging.info(f"标记告警解决: {alert_data['fingerprint']}: {alert_data['alert_name']}")
+            return True, ''
+        else:
+            err = f"未找到对应告警记录: {alert_data['fingerprint']}: {alert_data['alert_name']}"
+            logging.error(err)
+            return False, err
 
 
 app = Flask(__name__)
 
 
-@app.route('/clickhouse', methods=['POST'])
+# Alertmanager 的入库 webhook:把 Pod 类告警写进 PostgreSQL 的 k8s_pod_alert_days
+@app.route('/alert/store', methods=['POST'])
 def handle_alert():
     try:
         data = request.get_json()
@@ -408,18 +425,49 @@ def handle_custom_alert():
         send_resolved = data['send_resolved']
         alert_status = data['alert_status']
 
+        # 屏蔽判断:自定义告警没有原始 Alertmanager labels,用规范化字段构造匹配上下文
+        silence_id = silence.match_alert(silence.build_match_labels_from_record(alert_data), count_hit=True)
+        if silence_id:
+            logging.info(f"自定义告警命中屏蔽规则 #{silence_id}: {alert_data['alert_name']}")
+
         # 根据alert_status调用相应的处理函数
         if alert_status == 'firing':
-            result, msg = handle_firing_alert(alert_data, send_resolved)
+            result, msg = handle_firing_alert(alert_data, send_resolved, silence_id)
         else:
-            result, msg = handle_resolved_alert(alert_data, send_resolved)
+            result, msg = handle_resolved_alert(alert_data, send_resolved, silence_id)
         if result:
-            return jsonify({'status': 'success', 'message': '自定义告警处理完成'}), 200
+            return jsonify({'status': 'success', 'message': '自定义告警处理完成', 'silenced': bool(silence_id)}), 200
         else:
             return jsonify({'status': 'error', 'message': msg}), 400
     except Exception as e:
         logging.error(f"处理自定义告警时发生异常: {str(e)}")
         return jsonify({'status': 'error', 'message': str(e)}), 500
+
+
+def build_silence_url(labels):
+    """构造通知里【屏蔽】链接。
+
+    配置了 KUBEDOOR_EXTURL 就指向 KubeDoor 的屏蔽管理页,并把当前告警的关键标签
+    通过 prefill 参数带过去,页面会自动打开新建弹窗并预填匹配条件;
+    未配置时退回原来的 Alertmanager 链接。
+    """
+    alertname = labels.get('alertname', '')
+    if not KUBEDOOR_EXTURL:
+        quoted = urllib.parse.quote(f'{{alertname="{alertname}"}}')
+        return f"{ALERTMANAGER_EXTURL}/#/alerts?silenced=false&inhibited=false&active=true&filter={quoted}"
+
+    prefill = {'alertname': alertname}
+    for canonical, candidates in (
+        ('env', (PROM_K8S_TAG_KEY,)),
+        ('namespace', ('namespace', 'k8s_ns')),
+        ('pod', ('pod', 'k8s_pod')),
+    ):
+        for candidate in candidates:
+            if candidate and labels.get(candidate):
+                prefill[canonical] = labels[candidate]
+                break
+    quoted = urllib.parse.quote(json.dumps(prefill, ensure_ascii=False))
+    return f"{KUBEDOOR_EXTURL.rstrip('/')}/#/alarm/silence?prefill={quoted}"
 
 
 @app.route("/msg/<path:token>", methods=['POST'])
@@ -442,7 +490,19 @@ def alertnode(token):
         allmd = []
     else:
         allmd = ''
+    at = DEFAULT_AT
+    silenced_count = 0
     for i in req["alerts"]:
+        # 屏蔽判断:命中规则的告警直接跳过通知(故障与恢复一并屏蔽,避免只收到恢复消息)
+        silence_id = silence.match_alert(i.get('labels', {}), i.get('annotations', {}), count_hit=True)
+        if silence_id:
+            silenced_count += 1
+            logging.info(
+                f"【silence】已屏蔽通知 规则#{silence_id}: "
+                f"{i.get('labels', {}).get('alertname', '')} status={i.get('status', '')}"
+            )
+            continue
+
         status = "故障" if i['status'] == "firing" else "恢复"
         try:
             firstime = datetime.strptime(i['startsAt'], '%Y-%m-%dT%H:%M:%SZ')
@@ -467,7 +527,7 @@ def alertnode(token):
         message = i['annotations']['description']
         at = i['annotations'].get('at', DEFAULT_AT)
 
-        url = f"{ALERTMANAGER_EXTURL}/#/alerts?silenced=false&inhibited=false&active=true&filter=%7Balertname%3D%22{i['labels']['alertname']}%22%7D"
+        url = build_silence_url(i['labels'])
 
         if im == 'slack':
             if status == '恢复':
@@ -481,6 +541,12 @@ def alertnode(token):
             else:
                 info = f"### {status}<font color=\"#ff0000\">{summary}</font>\n- {message}[【屏蔽】]({url})\n\n"
             allmd = allmd + info
+
+    if not allmd:
+        logging.info(f"本批 {silenced_count} 条告警全部被屏蔽，不发送通知")
+        return Response(status=204)
+    if silenced_count:
+        logging.info(f"本批告警中 {silenced_count} 条被屏蔽，其余正常通知")
 
     if im == 'wecom':
         wecom(key, allmd, at)

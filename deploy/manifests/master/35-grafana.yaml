@@ -1,0 +1,260 @@
+# kubedoor-dash:Grafana 看板
+#   KubeDoor-Dash  -> PostgreSQL(每日高峰时段资源数据分析)
+#   KubeDoor-K8S   -> Prometheus(集群/工作负载监控)
+#   KubeDoor-Node  -> Prometheus(节点监控)
+#
+# Grafana 自身不暴露 NodePort,统一通过 kubedoor-web 的 /grafana/ 访问,
+# 由 web 的 basic auth 把关;因此这里开了匿名 Admin。
+apiVersion: v1
+kind: Secret
+metadata:
+  name: kubedoor-grafana
+  namespace: __NAMESPACE__
+  labels:
+    app.kubernetes.io/name: grafana
+type: Opaque
+stringData:
+  admin-user: '__GRAFANA_ADMIN_USER__'
+  admin-password: '__GRAFANA_ADMIN_PASSWORD__'
+
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: kubedoor-grafana-config
+  namespace: __NAMESPACE__
+  labels:
+    app.kubernetes.io/name: grafana
+data:
+  dashboardproviders.yaml: |
+    apiVersion: 1
+    providers:
+      - name: default
+        orgId: 1
+        folder: ""
+        type: file
+        disableDeletion: false
+        editable: true
+        options:
+          path: /var/lib/grafana/dashboards
+
+  datasources.yaml: |
+    apiVersion: 1
+    datasources:
+      # 统一数据库。KubeDoor-Dash 看板的全部面板都查这里。
+      - name: KubeDoor-Postgres
+        uid: KubeDoor-Postgres
+        type: grafana-postgresql-datasource
+        access: proxy
+        url: __PG_HOST__:__PG_PORT__
+        user: __PG_USER__
+        database: __PG_DATABASE__
+        isDefault: true
+        secureJsonData:
+          password: '__PG_PASSWORD__'
+        jsonData:
+          sslmode: disable
+          postgresVersion: 1500
+          maxOpenConns: 10
+          maxIdleConns: 5
+          connMaxLifetime: 14400
+
+      - name: KubeDoor-Prometheus
+        uid: KubeDoor-Prometheus
+        type: prometheus
+        access: proxy
+        url: '__PROM_URL__'
+        jsonData:
+          httpMethod: POST
+
+  grafana.ini: |
+    app_mode = production
+    [analytics]
+    check_for_updates = false
+    reporting_enabled = false
+    [auth]
+    disable_login_form = false
+    disable_signout_menu = false
+    [auth.basic]
+    enabled = false
+    [auth.anonymous]
+    enabled = true
+    hide_version = true
+    org_name = Main Org.
+    org_role = Admin
+    [database]
+    type = sqlite3
+    [grafana_net]
+    url = https://grafana.net
+    [log]
+    level = error
+    mode = console
+    [news]
+    news_feed_enabled = false
+    [paths]
+    data = /var/lib/grafana/
+    logs = /var/log/grafana
+    plugins = /var/lib/grafana/plugins
+    provisioning = /etc/grafana/provisioning
+    [profile]
+    enabled = false
+    [quota]
+    enabled = false
+    [security]
+    allow_embedding = true
+    disable_gravatar = true
+    disable_initial_admin_creation = false
+    [server]
+    http_port = 3000
+    domain = kubedoor-dash.__NAMESPACE__
+    enable_gzip = true
+    enforce_domain = false
+    protocol = http
+    root_url = %(protocol)s://%(domain)s:%(http_port)s/grafana/
+    serve_from_sub_path = true
+    [live]
+    allowed_origins = *
+    [snapshots]
+    external_enabled = false
+    [users]
+    allow_org_create = true
+    allow_sign_up = true
+    auto_assign_org_role = Admin
+    default_language = zh-Hans
+    home_page = /grafana/d/KubeDoor
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: kubedoor-dash
+  namespace: __NAMESPACE__
+  labels:
+    app.kubernetes.io/name: grafana
+    app.kubernetes.io/instance: kubedoor
+    app.kubernetes.io/part-of: kubedoor
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: grafana
+      app.kubernetes.io/instance: kubedoor
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: grafana
+        app.kubernetes.io/instance: kubedoor
+    spec:
+      volumes:
+        - name: grafana-config
+          configMap:
+            name: kubedoor-grafana-config
+        # 每个看板单独一个 ConfigMap,再投影到同一个目录。
+        # 合成一个 ConfigMap 的话,三个看板加起来 500KB+,kubectl apply 还会把
+        # 整份内容再写进 last-applied 注解,对象直接超过 etcd 的 1MiB 上限。
+        - name: grafana-dash
+          projected:
+            sources:
+              __GRAFANA_DASH_SOURCES__
+        - name: grafana-storage
+          emptyDir: {}
+        - name: grafana-plugins
+          emptyDir: {}
+      containers:
+        # 所有看板只用 Grafana 内置面板类型和内置数据源(postgres / prometheus),
+        # 不需要再用 init 容器预装插件。
+        - name: grafana
+          image: '__IMAGE_GRAFANA__'
+          imagePullPolicy: Always
+          ports:
+            - name: grafana
+              containerPort: 3000
+              protocol: TCP
+          env:
+            - name: TZ
+              value: Asia/Shanghai
+            - name: GF_SECURITY_ADMIN_USER
+              valueFrom:
+                secretKeyRef:
+                  name: kubedoor-grafana
+                  key: admin-user
+            - name: GF_SECURITY_ADMIN_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: kubedoor-grafana
+                  key: admin-password
+            - name: GF_PATHS_DATA
+              value: /var/lib/grafana/
+            - name: GF_PATHS_LOGS
+              value: /var/log/grafana
+            - name: GF_PATHS_PLUGINS
+              value: /var/lib/grafana/plugins
+            - name: GF_PATHS_PROVISIONING
+              value: /etc/grafana/provisioning
+          volumeMounts:
+            - name: grafana-storage
+              mountPath: /var/lib/grafana
+            - name: grafana-config
+              mountPath: /etc/grafana/grafana.ini
+              subPath: grafana.ini
+            - name: grafana-config
+              mountPath: /etc/grafana/provisioning/datasources/datasources.yaml
+              subPath: datasources.yaml
+            - name: grafana-config
+              mountPath: /etc/grafana/provisioning/dashboards/dashboardproviders.yaml
+              subPath: dashboardproviders.yaml
+            - name: grafana-plugins
+              mountPath: /var/lib/grafana/plugins
+            - name: grafana-dash
+              mountPath: /var/lib/grafana/dashboards
+          resources:
+            limits:
+              cpu: "1"
+              memory: 1Gi
+            requests:
+              cpu: 50m
+              memory: 128Mi
+          livenessProbe:
+            httpGet:
+              path: /api/health
+              port: 3000
+            initialDelaySeconds: 60
+            timeoutSeconds: 30
+            periodSeconds: 10
+            failureThreshold: 10
+          readinessProbe:
+            httpGet:
+              path: /api/health
+              port: 3000
+            initialDelaySeconds: 20
+            timeoutSeconds: 5
+            periodSeconds: 10
+            failureThreshold: 6
+          securityContext:
+            capabilities:
+              drop:
+                - ALL
+            allowPrivilegeEscalation: false
+            seccompProfile:
+              type: RuntimeDefault
+      restartPolicy: Always
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: kubedoor-dash
+  namespace: __NAMESPACE__
+  labels:
+    app.kubernetes.io/name: grafana
+    app.kubernetes.io/instance: kubedoor
+spec:
+  type: ClusterIP
+  ports:
+    - name: service
+      protocol: TCP
+      port: 3000
+      targetPort: 3000
+  selector:
+    app.kubernetes.io/name: grafana
+    app.kubernetes.io/instance: kubedoor

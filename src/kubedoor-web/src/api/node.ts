@@ -7,10 +7,11 @@ type ResultTable = {
 };
 
 // 获取节点列表
-export const getNodesList = (env: string) => {
+export const getNodesList = (env: string, simple?: boolean) => {
   return http.request<ResultTable>("get", "/api/nodes/list", {
     params: {
-      env: env
+      env: env,
+      ...(simple && { simple: "true" })
     }
   });
 };

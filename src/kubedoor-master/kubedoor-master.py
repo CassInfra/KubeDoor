@@ -4,20 +4,29 @@ import sys
 import time
 import base64
 import re
+import uuid
 import aiohttp
 from datetime import datetime, timedelta
 from aiohttp import web, WSMsgType
 from loguru import logger
 import utils, prom_real_time_data
+import db
+import jvm_config
 from multidict import MultiDict
 from istio_route import istio_route
 from func_manager import namespace_cache
 from func_manager import prom_overview
-from func_manager import ck_top_queries
+from func_manager import top_queries
+from func_manager import db_api
+from func_manager import silence_api
+from func_manager import data_retention
+from func_manager import ai_api
+from func_manager.workload_relay import WorkloadRelay
 import image_tags_fetcher
-from k8s_event import process_k8s_event_async, init_clickhouse_tables
+from k8s_event import process_k8s_event_async, init_pg_tables_async
 from k8s_event.event_query_api import query_k8s_events_handler, get_k8s_events_menu_options
 from promql import deployment_node
+from load_balance import get_service as get_lb_service
 
 logger.remove()
 
@@ -45,17 +54,20 @@ logger.add(
 )
 
 
-def ensure_clickhouse_schema_initialized():
-    """在程序启动时初始化ClickHouse表结构"""
+async def init_db_and_schema(app):
+    """aiohttp on_startup:初始化 PG 连接池并建表。失败则退出。"""
     try:
-        init_clickhouse_tables()
-        logger.info("ClickHouse表结构初始化成功")
+        await db.init_pool()
+        await init_pg_tables_async()
+        logger.info("PostgreSQL 连接池与表结构初始化成功")
     except Exception as exc:
-        logger.error(f"ClickHouse表结构初始化失败: {exc}")
+        logger.error(f"PostgreSQL 初始化失败: {exc}")
         sys.exit(1)
 
 
-ensure_clickhouse_schema_initialized()
+async def close_db(app):
+    """aiohttp on_cleanup:关闭 PG 连接池。"""
+    await db.close_pool()
 
 
 async def get_authorization_header(username, password):
@@ -64,52 +76,33 @@ async def get_authorization_header(username, password):
     return f'Basic {encoded_credentials}'
 
 
-async def forward_request(request):
-    try:
-        data = await request.text()
-
-        permission = request.headers.get('X-User-Permission', '')
-        if permission == 'read' and not data.strip().lower().startswith('select'):
-            return web.json_response({"error": "权限不足，只能执行SELECT查询"}, status=403)
-        if not data.strip().lower().startswith(('select', 'alter', 'insert')):
-            return web.json_response({"error": "不支持的SQL操作"}, status=403)
-
-        # 替换数据库名称
-        data = data.replace('__KUBEDOORDB__', utils.CK_DATABASE)
-        logger.info(f'📐{data}')
-
-        if data.strip().lower().startswith(('alter')):
-            table_name_match = re.search(rf'{re.escape(utils.CK_DATABASE)}\.(\w+)', data)
-            table_name = table_name_match.group(1) if table_name_match else None
-            utils.ck_alter(data)
-            utils.ck_optimize(table_name)
-            logger.info("📐SQL: 数据更新完成")
-            return web.json_response({"success": True, "msg": "SQL: 数据更新完成"})
-        else:
-            TARGET_URL = f'http://{utils.CK_HOST}:{utils.CK_HTTP_PORT}/?add_http_cors_header=1&default_format=JSONCompact'
-            headers = {
-                'Authorization': await get_authorization_header(utils.CK_USER, utils.CK_PASSWORD),
-                'Cache-Control': 'no-cache',
-                'Pragma': 'no-cache',
-                'Content-Type': 'text/plain',
-            }
-            async with aiohttp.ClientSession() as session:
-                async with session.post(TARGET_URL, data=data, headers=headers) as response:
-                    if response.content_type == 'application/json':
-                        response_data = await response.json()
-                    else:
-                        text = await response.text()
-                        response_data = {"msg": text}
-                    logger.info("📐SQL: 数据查询完成")
-                    return web.json_response({"success": True, **response_data})
-    except Exception as e:
-        logger.error(f"Error in forward_request: {e}")
-        return web.json_response({"error": str(e)}, status=500)
-
-
 clients = {}
 # 存储Pod日志WebSocket连接
 pod_logs_connections = {}
+# Deployment/Pod 实时状态推送(浏览器 /ws/workload-status ⇄ agent)
+workload_relay = WorkloadRelay(clients)
+
+
+async def handle_admis_request(ws, env, data):
+    """处理 admis 请求的独立协程，避免阻塞 WebSocket 消息循环"""
+    request_id = data["request_id"]
+    namespace = data["namespace"]
+    deployment = data["deployment"]
+    try:
+        logger.info(f"==========客户端 env={env} {request_id} {namespace} {deployment}")
+        deploy_res = await utils.get_deploy_admis_async(
+            env, namespace, deployment, include_jvm=data.get('jvm_config') is True
+        )
+        await ws.send_json({"type": "admis", "request_id": request_id, "deploy_res": deploy_res})
+    except Exception as e:
+        logger.error(f"处理 admis 请求失败: env={env}, request_id={request_id}, error={e}")
+        # 必须回发响应，否则 agent 端 future 收不到结果会干等满 30s 导致 webhook 超时
+        try:
+            await ws.send_json(
+                {"type": "admis", "request_id": request_id, "deploy_res": [503, "master 处理 admis 请求异常"]}
+            )
+        except Exception as send_err:
+            logger.error(f"回发 admis 异常响应失败: request_id={request_id}, error={send_err}")
 
 
 async def websocket_handler(request):
@@ -120,20 +113,22 @@ async def websocket_handler(request):
     if env in clients and clients[env]["online"]:
         return web.json_response({"error": "目标客户端已在线"}, status=409)
 
-    ws = web.WebSocketResponse()
+    ws = web.WebSocketResponse(max_msg_size=16 * 1024 * 1024)
     await ws.prepare(request)
 
     logger.info(f"客户端连接成功，env={env} ver={ver}")
     if env not in clients:
         # 如果是新客户端，初始化状态
         clients[env] = {"ws": ws, "ver": ver, "last_heartbeat": time.time(), "online": True}
-        utils.ck_init_agent_status(env)
+        await utils.init_agent_status(env)
     else:
         # 如果是重连客户端，更新 WebSocket 和状态
         clients[env]["ws"] = ws
         clients[env]["ver"] = ver
         clients[env]["last_heartbeat"] = time.time()
         clients[env]["online"] = True
+    clients[env]["ai_tools"] = request.query.get("ai_tools") == "1"
+    asyncio.create_task(workload_relay.on_agent_connected(env))
 
     try:
         async for msg in ws:
@@ -148,20 +143,22 @@ async def websocket_handler(request):
                         clients[env]["online"] = True
                         # logger.info(f"[心跳]客户端 env={env} ver={ver}")
                     elif data.get("type") == "admis":
-                        request_id = data["request_id"]
-                        namespace = data["namespace"]
-                        deployment = data["deployment"]
-                        logger.info(f"==========客户端 env={env} {request_id} {namespace} {deployment}")
-                        deploy_res = utils.get_deploy_admis(env, namespace, deployment)
-                        await ws.send_json({"type": "admis", "request_id": request_id, "deploy_res": deploy_res})
+                        # 使用 create_task 处理 admis 请求，避免阻塞消息循环
+                        asyncio.create_task(handle_admis_request(ws, env, data))
 
                     elif data.get("type") == "response":
                         # 收到客户端的响应，存储到客户端的响应队列中
                         request_id = data["request_id"]
                         response = data["response"]
-                        if "response_queue" in clients[env]:
-                            clients[env]["response_queue"][request_id] = response
-                        logger.info(f"[响应]客户端 env={env}: request_id={request_id}：{response}")
+                        # 只收有人在等的回包:超时后才到的不再存,免得 response_queue 越积越多
+                        response_event = clients[env].get("response_events", {}).get(request_id)
+                        if response_event is not None:
+                            clients[env].setdefault("response_queue", {})[request_id] = response
+                            response_event.set()
+                        if data.get("ai") is True or request_id in clients[env].get("ai_request_ids", set()):
+                            logger.info(f"[AI响应]客户端 env={env}: request_id={request_id}")
+                        else:
+                            logger.info(f"[响应]客户端 env={env}: request_id={request_id}：{str(response)[:500]}")
 
                     elif data.get("type") == "pod_logs":
                         # 处理来自agent的Pod日志数据，转发给前端
@@ -175,25 +172,29 @@ async def websocket_handler(request):
                                 # 清理断开的连接
                                 if connection_id in pod_logs_connections:
                                     del pod_logs_connections[connection_id]
+                    elif data.get("type") in ("workload_snapshot", "workload_update"):
+                        # Deployment/Pod 实时状态:只入队不等待,原样转给对应的浏览器
+                        workload_relay.dispatch(env, data, msg.data)
                     elif data.get("type") == "k8s_event":
-                        # 处理来自agent的K8S事件消息
+                        # 处理来自agent的K8S事件消息（单条）
+                        # 使用 create_task 发射后不管，避免阻塞WebSocket消息循环
                         logger.debug(f"💯[K8S事件]客户端 env={env}: {data}")
-
-                        # 异步存储K8S事件到ClickHouse，避免阻塞WebSocket消息循环
-                        try:
-                            success = await process_k8s_event_async(data)
-                            if success:
-                                logger.debug(f"K8S事件已成功存储到ClickHouse: {data.get('data', {}).get('eventUid')}")
-                            else:
-                                logger.warning(f"K8S事件存储失败: {data.get('data', {}).get('eventUid')}")
-                        except Exception as e:
-                            logger.error(f"处理K8S事件时发生错误: {e}")
+                        asyncio.create_task(process_k8s_event_async(data))
+                    elif data.get("type") == "k8s_event_batch":
+                        # 处理来自agent的K8S事件批量消息
+                        # 使用 create_task 发射后不管，避免阻塞WebSocket消息循环
+                        events = data.get("data", [])
+                        logger.debug(f"💯[K8S事件批量]客户端 env={env}: 收到 {len(events)} 个事件")
+                        for event_data in events:
+                            single_event = {"type": "k8s_event", "data": event_data}
+                            asyncio.create_task(process_k8s_event_async(single_event))
                     else:
                         logger.info(f"收到客户端消息：{msg.data}")
 
                 except json.JSONDecodeError:
-                    # 如果不是JSON格式，可能是纯文本日志消息
-                    # 需要根据当前活跃的日志连接来转发消息
+                    # 兜底：非JSON的纯文本消息。正常日志已由agent以 type==pod_logs 的JSON
+                    # 按 connection_id 精确转发（见上），此分支仅作旧版本/异常兜底，
+                    # 按 env 广播给该环境下所有日志连接。
                     log_message = msg.data.strip()
                     if log_message:
                         # 转发给所有活跃的前端日志连接
@@ -212,10 +213,11 @@ async def websocket_handler(request):
     except Exception as e:
         logger.error(f"客户端连接异常断开，env={env}，错误：{e}")
     finally:
-        # 标记客户端为离线
-        if env in clients:
+        # 标记客户端为离线。只处理自己这条连接:agent 重连后,旧连接迟到的收尾不能把新连接标成离线
+        if env in clients and clients[env]["ws"] is ws:
             clients[env]["online"] = False
             logger.info(f"客户端连接关闭，标记为离线，env={env}")
+            workload_relay.on_agent_disconnected(env, ws)
 
     return ws
 
@@ -411,8 +413,8 @@ async def http_handler(request):
         logger.info(body)
 
         # 查询源节点所有deployment列表
-        source_deployment_list = utils.get_node_deployments(source, env)
-        target_deployment_list = utils.get_node_deployments(target, env)
+        source_deployment_list = await utils.run_blocking(utils.get_node_deployments, source, env)
+        target_deployment_list = await utils.run_blocking(utils.get_node_deployments, target, env)
         deployment_list = []
         for i in source_deployment_list:
             flag = True
@@ -424,11 +426,11 @@ async def http_handler(request):
                 deployment_list.append(i)
         logger.info(f'deployment_list去重前：{source_deployment_list}')
         logger.info(f'deployment_list去重后：{deployment_list}')
-        top_deployments = utils.get_deployment_from_control_data(deployment_list, num, type, env)
+        top_deployments = await utils.get_deployment_from_control_data(deployment_list, num, type, env)
         body['top_deployments'] = top_deployments
 
     # 向目标客户端发送消息
-    request_id = str(time.time())  # 使用时间戳作为唯一请求 ID
+    request_id = uuid.uuid4().hex  # 时间戳在并发时会撞,用 uuid
     message = {
         "type": "request",
         "request_id": request_id,
@@ -437,36 +439,95 @@ async def http_handler(request):
         "query": query_params,
         "body": body,
     }
-    await clients[env]["ws"].send_json(message)  # 使用 send_json 发送 JSON 数据
-    logger.info(f"[请求]客户端 env={env}: {message}")
-
-    # 等待客户端响应
-    if "response_queue" not in clients[env]:
-        clients[env]["response_queue"] = {}
+    response_queue = clients[env].setdefault("response_queue", {})
+    response_events = clients[env].setdefault("response_events", {})
+    # 先注册等待再发送:agent 的快速响应不能早于等待器创建(否则回包会被丢掉)
+    response_event = asyncio.Event()
+    response_events[request_id] = response_event
 
     try:
-        for _ in range(120 * 10):  # 等待 120 秒，检查响应队列
-            if request_id in clients[env]["response_queue"]:
-                response = clients[env]["response_queue"].pop(request_id)
+        await clients[env]["ws"].send_json(message)  # 使用 send_json 发送 JSON 数据
+        logger.info(f"[请求]客户端 env={env}: {message}")
+        # 使用 Event 等待响应，超时300秒（支持大文件下载）
+        await asyncio.wait_for(response_event.wait(), timeout=300)
 
-                # 特殊处理：如果是 /api/agent/istio/vs 接口，需要对响应进行额外处理
-                if path == "/api/agent/istio/vs":
-                    # 在这里添加你的额外处理逻辑
-                    vs_list = response.get('data', [])
-                    processed_response = await istio_route.sync_vs_from_k8s(env, vs_list)
-                    return web.json_response(processed_response)
-                elif path == '/api/agent/namespaces':
-                    namespace_cache.update_namespace_cache(env, response.get('data', []))
-                return web.json_response({"success": True, **response})
-            await asyncio.sleep(0.1)
+        if request_id in response_queue:
+            response = response_queue.pop(request_id)
+
+            # 处理二进制响应（如 gzip 文件下载）
+            if response.get("binary"):
+                binary_data = base64.b64decode(response["data"])
+                return web.Response(
+                    body=binary_data,
+                    content_type=response.get("content_type", "application/octet-stream"),
+                    headers={"Content-Disposition": response.get("content_disposition", "")}
+                )
+
+            # 特殊处理：如果是 /api/agent/istio/vs 接口，需要对响应进行额外处理
+            if path == "/api/agent/istio/vs":
+                vs_list = response.get('data', [])
+                processed_response = await istio_route.sync_vs_from_k8s(env, vs_list)
+                return web.json_response(processed_response)
+            elif path == '/api/agent/namespaces':
+                namespace_cache.update_namespace_cache(env, response.get('data', []))
+            # 根据 agent 返回的真实结果标记 success，避免把失败响应伪装成成功
+            # agent 明确返回 success 字段时以其为准；否则含 error 字段即视为失败
+            if isinstance(response, dict):
+                success = response.get("success", "error" not in response)
+                return web.json_response({**response, "success": success})
+            return web.json_response({"success": True, "data": response})
+    except asyncio.TimeoutError:
+        logger.warning(f"等待客户端响应超时，env={env}, request_id={request_id}")
     except Exception as e:
         logger.error(f"等待客户端响应时发生错误，env={env}, 错误：{e}")
+    finally:
+        # 清理事件和超时后才到的回包
+        response_events.pop(request_id, None)
+        response_queue.pop(request_id, None)
 
     return web.json_response({"error": "客户端未响应"}, status=504)
 
 
+async def call_agent_api(env, path, query=None, method="GET", body=None, timeout=30):
+    """master 内部调用 agent 只读接口的辅助函数（精简版转发）。
+
+    复用 http_handler 的 WS send + Event 等待机制，供 prom_services 等 handler
+    在内部向 agent 取 K8S 数据时使用。成功返回 agent 响应 dict，失败抛异常。
+    与 http_handler 不同：不处理二进制/istio/namespace 特判，只返回解析后的 dict。
+    """
+    if env not in clients or not clients[env]["online"]:
+        raise Exception(f"目标客户端 {env} 不在线")
+
+    client = clients[env]
+    request_id = uuid.uuid4().hex
+    message = {
+        "type": "request",
+        "request_id": request_id,
+        "method": method,
+        "path": path,
+        "query": query or {},
+        "body": body if body is not None else False,
+    }
+    response_queue = client.setdefault("response_queue", {})
+    response_events = client.setdefault("response_events", {})
+    response_event = asyncio.Event()
+    # 在 send 前注册，agent 的快速响应不能早于等待器创建。
+    response_events[request_id] = response_event
+    try:
+        await client["ws"].send_json(message)
+        await asyncio.wait_for(response_event.wait(), timeout=timeout)
+        if request_id in response_queue:
+            return response_queue.pop(request_id)
+        raise Exception(f"未收到 {env} 对 {path} 的响应")
+    except asyncio.TimeoutError:
+        raise Exception(f"等待 {env} 对 {path} 的响应超时")
+    finally:
+        response_events.pop(request_id, None)
+        response_queue.pop(request_id, None)
+
+
 async def status_handler(request):
-    agent_info = utils.ck_agent_info()
+    agent_info = await utils.agent_info()
     agents_status = {
         env: {
             "online": data["online"],
@@ -482,8 +543,9 @@ async def status_handler(request):
 async def prom_query_handler(request):
     env_value = request.query.get('env')
     namespace_value = request.query.get('ns')
-    metrics_data = prom_real_time_data.get_metrics_data(env_value, namespace_value)
-    final_data = prom_real_time_data.process_metrics_data(metrics_data)
+    # 10 条 PromQL 串行查询 + 数据整合都是阻塞操作,放进线程池,不能卡住主 loop
+    metrics_data = await utils.run_blocking(prom_real_time_data.get_metrics_data, env_value, namespace_value)
+    final_data = await utils.run_blocking(prom_real_time_data.process_metrics_data, metrics_data)
     return web.json_response({'success': True, 'data': final_data})
 
 
@@ -492,7 +554,7 @@ async def prom_ns_handler(request):
     if not env_value:
         return web.json_response({'message': 'env query parameter is required'}, status=400)
     try:
-        namespaces = utils.fetch_prom_namespaces(env_value)
+        namespaces = await utils.run_blocking(utils.fetch_prom_namespaces, env_value)
         return web.json_response({'success': True, 'data': namespaces})
     except Exception as e:
         return web.json_response({'message': str(e)}, status=500)
@@ -504,17 +566,27 @@ async def prom_services_handler(request):
     if not env_value or not namespace:
         return web.json_response({'message': 'env and namespace query parameters are required'}, status=400)
     try:
-        services = utils.fetch_prom_services(env_value, namespace)
+        # 改为经 agent 直取 K8S（原查 Prometheus kube_service_info）。
+        # agent /api/agent/services 返回对象数组，拍平成 service 名字数组，
+        # 保持前端 response.data 仍是字符串数组，无需改动前端。
+        resp = await call_agent_api(env_value, '/api/agent/services', query={'namespace': namespace})
+        if isinstance(resp, dict) and resp.get('error'):
+            return web.json_response({'message': resp['error']}, status=500)
+        items = resp.get('data', []) if isinstance(resp, dict) else []
+        services = sorted({item.get('name') for item in items if item.get('name')})
         return web.json_response({'success': True, 'data': services})
     except Exception as e:
         return web.json_response({'message': str(e)}, status=500)
 
 
 async def prom_env_handler(request):
+    username = request.headers.get('X-User-Name', '')
+    permission = request.headers.get('X-User-Permission', '')
     try:
-        username = request.headers.get('X-User-Name', '')
-        permission = request.headers.get('X-User-Permission', '')
-        envs = utils.fetch_prom_envs()
+        # 环境(集群)列表即已连接的 agent 列表，直接取自内存 clients，
+        # 无需查 Prometheus，避免依赖监控系统且实时反映在线状态。
+        envs = [env for env, data in clients.items() if data.get("online")]
+        envs.sort()
         return web.json_response({'success': True, 'data': envs, 'username': username, 'permission': permission})
     except Exception as e:
         return web.json_response({'message': str(e), 'username': username, 'permission': permission}, status=500)
@@ -562,7 +634,7 @@ async def prom_overview_handler(request):
 
 async def agent_names(request):
     try:
-        k8s_names = utils.ck_get_k8s_names()
+        k8s_names = await utils.get_k8s_names()
         return web.json_response({'success': True, 'data': k8s_names})
     except Exception as e:
         return web.json_response({'message': str(e)}, status=500)
@@ -580,7 +652,7 @@ async def heartbeat_check():
 
 
 async def cron_peak_data(request):
-    param_combinations = utils.ck_agent_collect_info()
+    param_combinations = await utils.agent_collect_info()
 
     # 使用 streaming response 给客户端逐个返回响应
     async def stream_responses():
@@ -621,23 +693,25 @@ async def init_peak_data(request):
             if datetime.now() < end_time_full:
                 logger.info(f"今天的高峰期还未结束，跳过{current_date}的数据采集")
                 continue
-            utils.check_and_delete_day_data(end_time_full, env_value)
+            await utils.check_and_delete_day_data(end_time_full, env_value)
             logger.info(f"🚀获取{end_time_full}的数据======")
-            k8s_metrics_list = utils.merged_dict(env_key, env_value, duration_str, end_time_full)
-            utils.metrics_to_ck(k8s_metrics_list)
+            k8s_metrics_list = await utils.run_blocking(
+                utils.merged_dict, env_key, env_value, duration_str, end_time_full
+            )
+            await utils.metrics_to_pg(k8s_metrics_list)
         logger.info(f"🚀{env_value}: 高峰期数据采集流程结束,开始取最近10天cpu使用最高的一天pod数据, 写入管控表")
 
         # 采集完成后，取最近10天cpu数据最高的一天pod，数据写入管控表
-        resources = utils.get_list_from_resources(env_value)
-        if utils.is_init_or_update(env_value):
+        resources = await utils.get_list_from_resources(env_value)
+        if await utils.is_init_or_update(env_value):
             # 初始化
             logger.info(f"🌊{env_value}: 初始化管控表======")
-            flag = utils.init_control_data(resources)
+            flag = await utils.init_control_data(resources)
             logger.info(f"✨{env_value}: 更新完成")
         else:
             # 更新
             logger.info(f"🌊{env_value}: 更新管控表======")
-            flag = utils.update_control_data(resources)
+            flag = await utils.update_control_data(resources)
             logger.info(f"✨{env_value}: 更新完成")
 
         if not flag:
@@ -645,7 +719,14 @@ async def init_peak_data(request):
                 {"message": f"{env_value}: 写入管控表执行失败，详情见kubedoor-master日志"},
                 status=500,
             )
-        return web.json_response({"success": True, "message": f"{env_value}: 执行完成"})
+        # 只补采当前管控配置，不把实时 args 写入上面的历史 days 资源数据。
+        jvm_result = await jvm_config.collect_current_configs(
+            env_value, call_agent_api, utils.invalidate_admis_cache
+        )
+        result = {"success": True, "message": f"{env_value}: 执行完成", "jvm": jvm_result}
+        if jvm_result.get('warning'):
+            result['warnings'] = [jvm_result['warning']]
+        return web.json_response(result)
     except Exception as e:
         logger.error(f"Error in table: {e}")
         return web.json_response({"message": str(e)}, status=500)
@@ -654,27 +735,398 @@ async def init_peak_data(request):
 async def start_background_tasks(app):
     """启动后台任务"""
     app["heartbeat_task"] = asyncio.create_task(heartbeat_check())
+    app["retention_task"] = asyncio.create_task(data_retention.retention_loop())  # 每天清理过期数据
 
 
 async def cleanup_background_tasks(app):
-    """清理后台任务"""
-    app["heartbeat_task"].cancel()
-    await app["heartbeat_task"]
+    """清理后台任务。逐个取消并等待,某个任务抛出 CancelledError 不影响后面的清理"""
+    for name in ("heartbeat_task", "retention_task", "load_balance_task"):
+        task = app.get(name)
+        if task is None:
+            continue
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+
+# ==================== 负载均衡接口 ====================
+
+async def lb_get_config_handler(request):
+    """获取负载均衡配置"""
+    lb_service = get_lb_service()
+    return web.json_response({"success": True, "data": lb_service.get_config()})
+
+
+async def lb_update_config_handler(request):
+    """更新负载均衡配置"""
+    try:
+        body = await request.json()
+        lb_service = get_lb_service()
+        config = lb_service.update_config(body)
+        return web.json_response({"success": True, "data": config})
+    except Exception as e:
+        logger.error(f"❌ 更新负载均衡配置失败: {e}")
+        return web.json_response({"success": False, "error": str(e)}, status=500)
+
+
+async def lb_get_status_handler(request):
+    """获取负载均衡状态"""
+    lb_service = get_lb_service()
+    return web.json_response({"success": True, "data": lb_service.get_status()})
+
+
+async def lb_get_plan_handler(request):
+    """获取待确认的迁移清单"""
+    lb_service = get_lb_service()
+    plan = lb_service.get_pending_plan()
+    return web.json_response({"success": True, "data": plan})
+
+
+async def lb_get_logs_handler(request):
+    """获取操作日志"""
+    limit = int(request.query.get("limit", 50))
+    lb_service = get_lb_service()
+    logs = lb_service.get_logs(limit)
+    return web.json_response({"success": True, "data": logs})
+
+
+async def lb_analyze_handler(request):
+    """触发负载分析，转发到Agent"""
+    env = request.query.get("env")
+    if not env:
+        return web.json_response({"error": "缺少 env 参数"}, status=400)
+    if env not in clients or not clients[env]["online"]:
+        return web.json_response({"error": "目标客户端不在线"}, status=404)
+
+    lb_service = get_lb_service()
+    lb_service.log_analyze_start()
+
+    try:
+        # 转发请求到Agent
+        request_id = str(time.time())
+        message = {
+            "type": "request",
+            "request_id": request_id,
+            "method": "POST",
+            "path": "/api/load-balance/analyze",
+            "query": {},
+            "body": {"config": lb_service.get_config()},
+        }
+        await clients[env]["ws"].send_json(message)
+
+        # 等待响应
+        if "response_queue" not in clients[env]:
+            clients[env]["response_queue"] = {}
+        if "response_events" not in clients[env]:
+            clients[env]["response_events"] = {}
+
+        response_event = asyncio.Event()
+        clients[env]["response_events"][request_id] = response_event
+
+        try:
+            await asyncio.wait_for(response_event.wait(), timeout=120)
+            if request_id in clients[env]["response_queue"]:
+                response = clients[env]["response_queue"].pop(request_id)
+                if response.get("success"):
+                    plan = response.get("data", {})
+                    lb_service.log_analyze_done(plan)
+                    if plan.get("migrations"):
+                        lb_service.set_pending_plan(plan)
+                    return web.json_response({"success": True, "data": plan})
+                else:
+                    return web.json_response(response, status=500)
+        except asyncio.TimeoutError:
+            return web.json_response({"error": "Agent响应超时"}, status=504)
+        finally:
+            clients[env]["response_events"].pop(request_id, None)
+
+    except Exception as e:
+        logger.error(f"❌ 负载分析失败: {e}")
+        return web.json_response({"success": False, "error": str(e)}, status=500)
+
+    return web.json_response({"error": "未知错误"}, status=500)
+
+
+async def lb_execute_handler(request):
+    """执行迁移计划，转发到Agent"""
+    env = request.query.get("env")
+    if not env:
+        return web.json_response({"error": "缺少 env 参数"}, status=400)
+    if env not in clients or not clients[env]["online"]:
+        return web.json_response({"error": "目标客户端不在线"}, status=404)
+
+    try:
+        body = await request.json()
+        migrations = body.get("migrations", [])
+        if not migrations:
+            return web.json_response({"error": "迁移列表为空"}, status=400)
+
+        lb_service = get_lb_service()
+        lb_service.log_execute_start(len(migrations))
+
+        # 获取排除节点配置
+        exclude_nodes = lb_service.config.get("exclude_nodes", [])
+
+        # 转发请求到Agent
+        request_id = str(time.time())
+        message = {
+            "type": "request",
+            "request_id": request_id,
+            "method": "POST",
+            "path": "/api/load-balance/execute",
+            "query": {},
+            "body": {"migrations": migrations, "exclude_nodes": exclude_nodes},
+        }
+        await clients[env]["ws"].send_json(message)
+
+        # 等待响应
+        if "response_queue" not in clients[env]:
+            clients[env]["response_queue"] = {}
+        if "response_events" not in clients[env]:
+            clients[env]["response_events"] = {}
+
+        response_event = asyncio.Event()
+        clients[env]["response_events"][request_id] = response_event
+
+        try:
+            await asyncio.wait_for(response_event.wait(), timeout=300)  # 执行可能需要更长时间
+            if request_id in clients[env]["response_queue"]:
+                response = clients[env]["response_queue"].pop(request_id)
+                if response.get("success"):
+                    result = response.get("data", {})
+                    lb_service.log_execute_done(result)
+                    lb_service.clear_pending_plan()
+                    return web.json_response({"success": True, "data": result})
+                else:
+                    return web.json_response(response, status=500)
+        except asyncio.TimeoutError:
+            return web.json_response({"error": "Agent响应超时"}, status=504)
+        finally:
+            clients[env]["response_events"].pop(request_id, None)
+
+    except Exception as e:
+        logger.error(f"❌ 执行迁移失败: {e}")
+        return web.json_response({"success": False, "error": str(e)}, status=500)
+
+    return web.json_response({"error": "未知错误"}, status=500)
+
+
+async def lb_isolated_handler(request):
+    """获取隔离Pod列表，转发到Agent"""
+    env = request.query.get("env")
+    if not env:
+        return web.json_response({"error": "缺少 env 参数"}, status=400)
+    if env not in clients or not clients[env]["online"]:
+        return web.json_response({"error": "目标客户端不在线"}, status=404)
+
+    try:
+        # 转发请求到Agent
+        request_id = str(time.time())
+        message = {
+            "type": "request",
+            "request_id": request_id,
+            "method": "GET",
+            "path": "/api/load-balance/isolated",
+            "query": dict(request.query),
+            "body": {},
+        }
+        await clients[env]["ws"].send_json(message)
+
+        # 等待响应
+        if "response_queue" not in clients[env]:
+            clients[env]["response_queue"] = {}
+        if "response_events" not in clients[env]:
+            clients[env]["response_events"] = {}
+
+        response_event = asyncio.Event()
+        clients[env]["response_events"][request_id] = response_event
+
+        try:
+            await asyncio.wait_for(response_event.wait(), timeout=60)
+            if request_id in clients[env]["response_queue"]:
+                response = clients[env]["response_queue"].pop(request_id)
+                return web.json_response(response)
+        except asyncio.TimeoutError:
+            return web.json_response({"error": "Agent响应超时"}, status=504)
+        finally:
+            clients[env]["response_events"].pop(request_id, None)
+
+    except Exception as e:
+        logger.error(f"❌ 获取隔离Pod列表失败: {e}")
+        return web.json_response({"success": False, "error": str(e)}, status=500)
+
+    return web.json_response({"error": "未知错误"}, status=500)
+
+
+async def lb_cleanup_handler(request):
+    """清理隔离Pod，转发到Agent"""
+    env = request.query.get("env")
+    if not env:
+        return web.json_response({"error": "缺少 env 参数"}, status=400)
+    if env not in clients or not clients[env]["online"]:
+        return web.json_response({"error": "目标客户端不在线"}, status=404)
+
+    try:
+        body = await request.json()
+        pods = body.get("pods", [])
+        if not pods:
+            return web.json_response({"error": "Pod列表为空"}, status=400)
+
+        # 转发请求到Agent
+        request_id = str(time.time())
+        message = {
+            "type": "request",
+            "request_id": request_id,
+            "method": "POST",
+            "path": "/api/load-balance/cleanup",
+            "query": {},
+            "body": {"pods": pods},
+        }
+        await clients[env]["ws"].send_json(message)
+
+        # 等待响应
+        if "response_queue" not in clients[env]:
+            clients[env]["response_queue"] = {}
+        if "response_events" not in clients[env]:
+            clients[env]["response_events"] = {}
+
+        response_event = asyncio.Event()
+        clients[env]["response_events"][request_id] = response_event
+
+        try:
+            await asyncio.wait_for(response_event.wait(), timeout=120)
+            if request_id in clients[env]["response_queue"]:
+                response = clients[env]["response_queue"].pop(request_id)
+                if response.get("success"):
+                    lb_service = get_lb_service()
+                    lb_service.log_cleanup(response.get("data", {}))
+                return web.json_response(response)
+        except asyncio.TimeoutError:
+            return web.json_response({"error": "Agent响应超时"}, status=504)
+        finally:
+            clients[env]["response_events"].pop(request_id, None)
+
+    except Exception as e:
+        logger.error(f"❌ 清理隔离Pod失败: {e}")
+        return web.json_response({"success": False, "error": str(e)}, status=500)
+
+    return web.json_response({"error": "未知错误"}, status=500)
+
+
+async def lb_nodes_cpu_handler(request):
+    """获取节点CPU使用率，转发到Agent"""
+    env = request.query.get("env")
+    if not env:
+        return web.json_response({"error": "缺少 env 参数"}, status=400)
+    if env not in clients or not clients[env]["online"]:
+        return web.json_response({"error": "目标客户端不在线"}, status=404)
+
+    try:
+        # 转发请求到Agent
+        request_id = str(time.time())
+        message = {
+            "type": "request",
+            "request_id": request_id,
+            "method": "GET",
+            "path": "/api/load-balance/nodes-cpu",
+            "query": {},
+            "body": {},
+        }
+        await clients[env]["ws"].send_json(message)
+
+        # 等待响应
+        if "response_queue" not in clients[env]:
+            clients[env]["response_queue"] = {}
+        if "response_events" not in clients[env]:
+            clients[env]["response_events"] = {}
+
+        response_event = asyncio.Event()
+        clients[env]["response_events"][request_id] = response_event
+
+        try:
+            await asyncio.wait_for(response_event.wait(), timeout=60)
+            if request_id in clients[env]["response_queue"]:
+                response = clients[env]["response_queue"].pop(request_id)
+                return web.json_response(response)
+        except asyncio.TimeoutError:
+            return web.json_response({"error": "Agent响应超时"}, status=504)
+        finally:
+            clients[env]["response_events"].pop(request_id, None)
+
+    except Exception as e:
+        logger.error(f"❌ 获取节点CPU失败: {e}")
+        return web.json_response({"success": False, "error": str(e)}, status=500)
+
+    return web.json_response({"error": "未知错误"}, status=500)
+
+
+async def lb_check_pods_handler(request):
+    """检查Pod Ready状态，转发到Agent"""
+    env = request.query.get("env")
+    if not env:
+        return web.json_response({"error": "缺少 env 参数"}, status=400)
+    if env not in clients or not clients[env]["online"]:
+        return web.json_response({"error": "目标客户端不在线"}, status=404)
+
+    try:
+        body = await request.json()
+        pods = body.get("pods", [])
+
+        # 转发请求到Agent
+        request_id = str(time.time())
+        message = {
+            "type": "request",
+            "request_id": request_id,
+            "method": "POST",
+            "path": "/api/load-balance/check-pods",
+            "query": {},
+            "body": {"pods": pods},
+        }
+        await clients[env]["ws"].send_json(message)
+
+        # 等待响应
+        if "response_queue" not in clients[env]:
+            clients[env]["response_queue"] = {}
+        if "response_events" not in clients[env]:
+            clients[env]["response_events"] = {}
+
+        response_event = asyncio.Event()
+        clients[env]["response_events"][request_id] = response_event
+
+        try:
+            await asyncio.wait_for(response_event.wait(), timeout=30)
+            if request_id in clients[env]["response_queue"]:
+                response = clients[env]["response_queue"].pop(request_id)
+                return web.json_response(response)
+        except asyncio.TimeoutError:
+            return web.json_response({"error": "Agent响应超时"}, status=504)
+        finally:
+            clients[env]["response_events"].pop(request_id, None)
+
+    except Exception as e:
+        logger.error(f"❌ 检查Pod状态失败: {e}")
+        return web.json_response({"success": False, "error": str(e)}, status=500)
+
+    return web.json_response({"error": "未知错误"}, status=500)
 
 
 app = web.Application()
 app.router.add_get("/ws", websocket_handler)
 app.router.add_get("/ws/pod-logs", pod_logs_websocket_handler)
-app.router.add_post('/api/sql', forward_request)
+workload_relay.register_routes(app)  # Deployment/Pod 实时状态推送(/ws/workload-status)
+db_api.register_routes(app)  # 参数化数据库 REST 接口(/api/db/*)
+silence_api.register_routes(app)  # 告警屏蔽规则(/api/db/silence/*)
 app.router.add_get("/api/prom_ns", prom_ns_handler)
 app.router.add_get("/api/prom_env", prom_env_handler)
 app.router.add_get("/api/prom_services", prom_services_handler)
 app.router.add_get("/api/prom_query", prom_query_handler)
 app.router.add_get("/api/prom_node_rank", prom_node_rank_handler)
 app.router.add_get("/api/prom_overview", prom_overview_handler)
-app.router.add_get("/api/ck_top10_events", ck_top_queries.top10_events_handler)
-app.router.add_get("/api/ck_top10_pod_alerts", ck_top_queries.top10_pod_alerts_handler)
-app.router.add_get("/api/ck_day10_alert_daily", ck_top_queries.alert_daily_stats_handler)
+app.router.add_get("/api/stats/top10_events", top_queries.top10_events_handler)
+app.router.add_get("/api/stats/top10_pod_alerts", top_queries.top10_pod_alerts_handler)
+app.router.add_get("/api/stats/alert_daily", top_queries.alert_daily_stats_handler)
 app.router.add_post("/api/image/tags", image_tags_fetcher.get_image_tags_handler)  # 8
 
 # 查询K8S事件相关接口
@@ -709,12 +1161,29 @@ app.router.add_get("/api/istio/health", istio_route.health_check_handler)
 app.router.add_post("/api/istio/vs/k8s", istio_route.update_k8s_vs_handler)  # 7
 
 
+# ==================== 负载均衡路由注册 ====================
+app.router.add_get("/api/load-balance/config", lb_get_config_handler)
+app.router.add_put("/api/load-balance/config", lb_update_config_handler)
+app.router.add_get("/api/load-balance/status", lb_get_status_handler)
+app.router.add_get("/api/load-balance/plan", lb_get_plan_handler)
+app.router.add_get("/api/load-balance/logs", lb_get_logs_handler)
+app.router.add_post("/api/load-balance/analyze", lb_analyze_handler)
+app.router.add_post("/api/load-balance/execute", lb_execute_handler)
+app.router.add_get("/api/load-balance/isolated", lb_isolated_handler)
+app.router.add_post("/api/load-balance/cleanup", lb_cleanup_handler)
+app.router.add_get("/api/load-balance/nodes-cpu", lb_nodes_cpu_handler)
+app.router.add_post("/api/load-balance/check-pods", lb_check_pods_handler)
+
+
 # ==================== 其它接口转发到各个agent ====================
+ai_api.register_routes(app, clients, utils)
 app.router.add_route('*', "/api/{tail:.*}", http_handler)
 
-# 在应用启动和关闭时管理后台任务
+# 数据库初始化必须最先执行(建池 + 建表),再启动依赖 DB 的后台任务
+app.on_startup.append(init_db_and_schema)
 app.on_startup.append(start_background_tasks)
 app.on_cleanup.append(cleanup_background_tasks)
+app.on_cleanup.append(close_db)
 
 if __name__ == '__main__':
     logger.info("🌻kubedoor-master is starting on port 80🚀...")

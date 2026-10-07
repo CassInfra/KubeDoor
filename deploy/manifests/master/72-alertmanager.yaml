@@ -1,0 +1,125 @@
+# Alertmanager:告警分组、去重、路由。两条 receiver 都指向 kubedoor-alarm:
+#   1) K8S_Pod.* 开头的告警额外投一份到 /alert/store 做入库(写 PostgreSQL 的
+#      k8s_pod_alert_days 表),用于 Web 上的告警分析页;
+#   2) 所有告警都走 /msg/<类型>=<token> 发到 IM。
+#
+# 告警屏蔽在 kubedoor-alarm 侧做(见 docs/alert-silence.md),命中屏蔽的告警
+# 仍然入库并标记 silenced=true,只拦通知,所以这里不需要配 Alertmanager 的 silence。
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: alertmanager-config
+  namespace: __NAMESPACE__
+  labels:
+    app: alertmanager
+data:
+  config.yml: |-
+    global:
+      resolve_timeout: 10m
+    route:
+      group_by: [...]
+      group_wait: 0s
+      group_interval: 30s
+      repeat_interval: 30m
+      receiver: kubedoor-alarm
+      routes:
+        # Pod 类告警先复制一份去入库,continue: true 让它继续往下走通知
+        - receiver: kubedoor-alarm-store
+          group_by: [...]
+          group_wait: 0s
+          group_interval: 30s
+          repeat_interval: 30m
+          continue: true
+          match_re:
+            alertname: K8S_Pod.*
+
+        - receiver: kubedoor-alarm
+          group_by: ['__PROM_K8S_TAG_KEY__', 'namespace', 'alertname']
+          group_wait: 15s
+          group_interval: 30s
+          repeat_interval: 30m
+          continue: false
+          match_re:
+            alertname: .*
+
+    receivers:
+      - name: 'kubedoor-alarm-store'
+        webhook_configs:
+          - url: 'http://kubedoor-alarm.__NAMESPACE__/alert/store'
+            send_resolved: true
+
+      - name: 'kubedoor-alarm'
+        webhook_configs:
+          - url: 'http://kubedoor-alarm.__NAMESPACE__/msg/__MSG_TYPE__=__MSG_TOKEN__'
+            send_resolved: true
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: alertmanager
+  namespace: __NAMESPACE__
+  labels:
+    app: alertmanager
+    app.kubernetes.io/part-of: kubedoor
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: alertmanager
+  template:
+    metadata:
+      labels:
+        app: alertmanager
+    spec:
+      volumes:
+        - name: alertcfg
+          configMap:
+            name: alertmanager-config
+      containers:
+        - name: alertmanager
+          image: '__IMAGE_ALERTMANAGER__'
+          imagePullPolicy: Always
+          args:
+            - --config.file=/etc/alertmanager/config.yml
+            - --cluster.listen-address=
+          env:
+            - name: TZ
+              value: Asia/Shanghai
+          ports:
+            - name: http
+              containerPort: 9093
+          volumeMounts:
+            - name: alertcfg
+              mountPath: /etc/alertmanager
+          resources:
+            limits:
+              cpu: "2"
+              memory: 2Gi
+            requests:
+              cpu: 100m
+              memory: 256Mi
+          readinessProbe:
+            httpGet:
+              path: /-/ready
+              port: 9093
+            initialDelaySeconds: 10
+            periodSeconds: 10
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: alertmanager
+  namespace: __NAMESPACE__
+  labels:
+    app: alertmanager
+spec:
+  type: NodePort
+  ports:
+    - name: web
+      port: 9093
+      targetPort: http
+__ALERTMANAGER_NODEPORT_LINE__
+  selector:
+    app: alertmanager

@@ -94,7 +94,7 @@ def build_queries(env=None):
 
 async def _fetch(session, url, name, q):
     try:
-        # logger.info("prom_overview query [{}]: {}?query={}", name, url, q)
+        logger.info(f"📊【{name}】:\n{q}\n")
         async with session.get(url, params={"query": q}) as resp:
             resp.raise_for_status()
             data = await resp.json()

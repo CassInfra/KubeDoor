@@ -440,8 +440,8 @@ async def get_image_tags_handler(request):
         if image_url == 'retry':
             k8s_name, image_url = await utils.get_deployment_image(deployment_image_min, k8s, namespace, deployment)
 
-        # 调用镜像标签获取函数
-        result = get_image_tags(k8s_name, image_url)
+        # 调用镜像标签获取函数(镜像仓库 SDK / HTTP 都是阻塞调用,放进线程池)
+        result = await utils.run_blocking(get_image_tags, k8s_name, image_url)
 
         return web.json_response({"success": True, "data": result})
 
@@ -462,9 +462,7 @@ if __name__ == '__main__':
         print("")
         print("示例:")
         print("  阿里云ACR: python image_tags_fetcher.py prod registry.cn-hangzhou.aliyuncs.com/namespace/repo:tag")
-        print(
-            "  华为云SWR: python image_tags_fetcher.py prod swr.cn-south-1.myhuaweicloud.com/cassmall/cass-webagent:cassmall-release-2.0.10-b3455-f43a99d9"
-        )
+        print("  华为云SWR: python image_tags_fetcher.py prod swr.cn-south-1.myhuaweicloud.com/namespace/repo:tag")
         print("  Harbor: python image_tags_fetcher.py prod harbor.example.com/namespace/repo:latest")
         print("")
         print("注意: 镜像URL支持带标签格式，程序会自动提取仓库信息")

@@ -1,0 +1,96 @@
+# VictoriaMetrics 单机版:KubeDoor 自带的时序库
+# 只在 ENABLE_VICTORIA_METRICS=true 时部署;已有 Prometheus/VM 的场景不装这个,
+# 改为在 kubedoor.conf 里填 PROM_URL。
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: kubedoor-victoriametrics-data
+  namespace: __NAMESPACE__
+  labels:
+    app: victoria-metrics
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: '__VM_STORAGE__'
+__STORAGE_CLASS_LINE__
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: victoria-metrics
+  namespace: __NAMESPACE__
+  labels:
+    app: victoria-metrics
+    app.kubernetes.io/part-of: kubedoor
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: victoria-metrics
+  strategy:
+    # 单副本 + RWO 的 PVC,不能并存两个 Pod
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app: victoria-metrics
+    spec:
+      volumes:
+        - name: storage
+          persistentVolumeClaim:
+            claimName: kubedoor-victoriametrics-data
+      containers:
+        - name: vm
+          image: '__IMAGE_VICTORIA_METRICS__'
+          imagePullPolicy: Always
+          args:
+            - -storageDataPath=/var/lib/victoria-metrics-data
+            - '-retentionPeriod=__VM_RETENTION__'
+            - '-httpAuth.username=__VM_USER__'
+            - '-httpAuth.password=__VM_PASSWORD__'
+            - -search.maxQueryLen=655350
+            - -maxLabelsPerTimeseries=100
+          ports:
+            - name: http
+              containerPort: 8428
+          volumeMounts:
+            - name: storage
+              mountPath: /var/lib/victoria-metrics-data
+          env:
+            - name: TZ
+              value: Asia/Shanghai
+          resources:
+            limits:
+              cpu: "4"
+              memory: 8Gi
+            requests:
+              cpu: 150m
+              memory: 512Mi
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8428
+            initialDelaySeconds: 10
+            periodSeconds: 10
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: victoria-metrics
+  namespace: __NAMESPACE__
+  labels:
+    app: victoria-metrics
+spec:
+  # 暴露 NodePort 是为了让其它集群的 vmagent 能远程写进来
+  type: NodePort
+  ports:
+    - name: http
+      port: 8428
+      targetPort: 8428
+__VM_NODEPORT_LINE__
+  selector:
+    app: victoria-metrics

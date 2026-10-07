@@ -2,13 +2,53 @@ import os
 import sys
 import time
 import json
+import math
+import asyncio
+import threading
+from concurrent.futures import ThreadPoolExecutor
 import requests
-from datetime import datetime
-from clickhouse_driver import Client
-from clickhouse_driver.errors import ServerException
+from datetime import datetime, timedelta
 from functools import wraps
 from loguru import logger
 from promql import query_dict, node_rank_query
+from jvm_config import JVM_FIELDS
+import db
+from db import (
+    pg_fetch,
+    pg_fetchrow,
+    pg_fetchval,
+    pg_execute,
+    pg_executemany,
+)
+
+# 用于异步执行同步操作的线程池
+_executor = ThreadPoolExecutor(max_workers=10)
+
+
+async def run_blocking(func, *args):
+    """在 _executor 里执行阻塞的同步函数(Prometheus / IM / 镜像仓库等 HTTP 调用)。
+
+    handler 都跑在主 event loop 上,直接调 requests 会卡住整个 master(所有接口和 agent 心跳都停)。
+    """
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(_executor, func, *args)
+
+
+# admis 查询缓存：key=(env, namespace, deployment, include_jvm) -> (result, expire_ts)
+# TTL 兜底，写表时主动失效
+_admis_cache = {}
+_admis_cache_lock = threading.Lock()
+ADMIS_CACHE_TTL = int(os.environ.get('ADMIS_CACHE_TTL', '60'))
+
+
+def invalidate_admis_cache():
+    """清空 admis 查询缓存。在写入 k8s_agent_status / k8s_res_control 后调用，
+    保证 UI 改管控配置 / 新增服务后立即对 kubectl 部署生效（无需等 TTL 过期）。"""
+    with _admis_cache_lock:
+        count = len(_admis_cache)
+        _admis_cache.clear()
+    if count:
+        logger.info(f"admis 缓存已主动失效，清除 {count} 条")
 
 
 logger.remove()
@@ -20,12 +60,6 @@ logger.add(
 
 # 环境变量
 DEFAULT_AT = os.environ.get('DEFAULT_AT')
-CK_DATABASE = os.environ.get('CK_DATABASE')
-CK_HOST = os.environ.get('CK_HOST')
-CK_HTTP_PORT = os.environ.get('CK_HTTP_PORT')
-CK_PASSWORD = os.environ.get('CK_PASSWORD')
-CK_PORT = os.environ.get('CK_PORT')
-CK_USER = os.environ.get('CK_USER')
 MSG_TOKEN = os.environ.get('MSG_TOKEN')
 MSG_TYPE = os.environ.get('MSG_TYPE')
 PROM_K8S_TAG_KEY = os.environ.get('PROM_K8S_TAG_KEY')
@@ -35,46 +69,16 @@ PROM_TYPE = os.environ.get('PROM_TYPE')
 PROM_URL = os.environ.get('PROM_URL')
 UPDATE_IMAGE = os.environ.get('UPDATE_IMAGE')
 
-# Istio Route 数据库配置
-DB_HOST = os.environ.get('DB_HOST', 'localhost')
-DB_PORT = int(os.environ.get('DB_PORT', '3306'))
-DB_USER = os.environ.get('DB_USER', 'root')
-DB_PASSWORD = os.environ.get('DB_PASSWORD', '123456')
-DB_NAME = os.environ.get('DB_NAME', 'istio_route')
+# 外部 HTTP 调用的超时(连接, 读取)秒。requests 默认不超时,对端不响应时线程会一直卡住
+PROM_TIMEOUT = (5, 120)
+MSG_TIMEOUT = (5, 10)
 
-
-ckclient = Client(
-    host=CK_HOST,
-    port=CK_PORT,
-    user=CK_USER,
-    password=CK_PASSWORD,
-    database=CK_DATABASE,
-)
-
-
-def retry_on_exception(retries=3, delay=1, backoff=2):
-    def decorator_retry(func):
-        @wraps(func)
-        def wrapper(*args, **kwargs):
-            attempt = 0
-            while attempt < retries:
-                try:
-                    return func(*args, **kwargs)
-                except Exception as e:
-                    attempt += 1
-                    logger.warning(f"尝试第 {attempt} 次遇到错误: {e}")
-                    if attempt < retries:
-                        time.sleep(delay * (backoff ** (attempt - 1)))
-            raise Exception("达到最大重试次数，无数据可用")
-
-        return wrapper
-
-    return decorator_retry
-
-
-@retry_on_exception()
-def execute_query(query):
-    return ckclient.execute(query)
+# PostgreSQL 连接配置（统一 PG_ 前缀，替代原 CK_* / DB_*）
+PG_HOST = db.PG_HOST
+PG_PORT = db.PG_PORT
+PG_USER = db.PG_USER
+PG_PASSWORD = db.PG_PASSWORD
+PG_DATABASE = db.PG_DATABASE
 
 
 query_list = [
@@ -86,6 +90,8 @@ query_list = [
     "limit_mem_MB",
     "request_core",
     "request_mem_MB",
+    "heap_usage_percent",
+    "g1e_usage_percent",
 ]
 
 namespace_str_exclude = "loggie|kubedoor|kube-otel|cert-manager|kube-system|ops-monit"
@@ -108,18 +114,25 @@ def calculate_peak_duration_and_end_time(peak_hours):
     return duration_str, start_time_part, end_time_part
 
 
-def check_and_delete_day_data(date, env_value):
+def day_range(start_date, end_date):
+    """把前端传的日期 'YYYY-MM-DD' 转成查询区间 [开始日 00:00, 结束日次日 00:00)。
+
+    asyncpg 的 timestamptz 参数必须传 datetime,传字符串会直接报错。
+    naive datetime 按容器本地时区(TZ=Asia/Shanghai)解释,和入库时的口径一致。
+    """
+    start = datetime.strptime(start_date[:10], '%Y-%m-%d')
+    end = datetime.strptime(end_date[:10], '%Y-%m-%d') + timedelta(days=1)
+    return start, end
+
+
+async def check_and_delete_day_data(date, env_value):
     """检查是否有当天的数据，有则删除"""
-    query_sql = f"""select * from kubedoor.k8s_resources where date = '{date}' and env = '{env_value}'"""
-    delete_sql = f"""delete from kubedoor.k8s_resources where date = '{date}' and env = '{env_value}'"""
-    logger.info(f"query_sql==={query_sql}")
-    result = ckclient.execute(query_sql)
-    ckclient.disconnect()
+    result = await pg_fetch(
+        "SELECT 1 FROM k8s_resources WHERE date = $1 AND env = $2 LIMIT 1", date, env_value
+    )
     if result:
         logger.info(f"从表k8s_resources删除{env_value} {date}的数据")
-        logger.info(f"delete_sql==={delete_sql}")
-        ckclient.execute("SET allow_experimental_lightweight_delete = 1")
-        ckclient.execute(delete_sql)
+        await pg_execute("DELETE FROM k8s_resources WHERE date = $1 AND env = $2", date, env_value)
     return result
 
 
@@ -141,7 +154,7 @@ def fetch_prom_namespaces(env_value):
     # query = f'group by (namespace) (max_over_time(kube_namespace_created{{{PROM_K8S_TAG_KEY}="{env_value}"}}[1h]))'
     query = f'group by (namespace) (kube_namespace_created{{{PROM_K8S_TAG_KEY}="{env_value}"}})'
     try:
-        response = requests.get(get_prom_url(), params={'query': query})
+        response = requests.get(get_prom_url(), params={'query': query}, timeout=PROM_TIMEOUT)
         response.raise_for_status()  # 检查请求是否成功
         data = response.json()
         namespaces = []
@@ -159,7 +172,7 @@ def fetch_prom_services(env_value, namespace):
     """
     query = f'group by(service)(kube_service_info{{{PROM_K8S_TAG_KEY}="{env_value}",namespace="{namespace}"}})'
     try:
-        response = requests.get(get_prom_url(), params={'query': query})
+        response = requests.get(get_prom_url(), params={'query': query}, timeout=PROM_TIMEOUT)
         response.raise_for_status()  # 检查请求是否成功
         data = response.json()
         services = []
@@ -175,7 +188,7 @@ def fetch_prom_envs():
     # query = f'group by ({PROM_K8S_TAG_KEY}) (kube_state_metrics_build_info)'
     query = f'group by ({PROM_K8S_TAG_KEY}) (kube_node_info)'
     try:
-        response = requests.get(get_prom_url(), params={'query': query})
+        response = requests.get(get_prom_url(), params={'query': query}, timeout=PROM_TIMEOUT)
         response.raise_for_status()  # 检查请求是否成功
         data = response.json()
         envs = []
@@ -187,8 +200,55 @@ def fetch_prom_envs():
         raise Exception(f"Error fetching data from Prometheus: {e}")
 
 
+def _nullable_jvm_pct(value):
+    """Keep finite nonnegative percentages, including reported values above 100%."""
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return number if math.isfinite(number) and number >= 0 else None
+
+
+def _append_optional_jvm_percent(metric, env_value, end_time_full, duration, workload_dict):
+    """An optional JVM query cannot discard resource data or another JVM observation."""
+    values = {}
+    try:
+        query = (
+            query_dict[metric]
+            .replace("{env}", f'{PROM_K8S_TAG_KEY}="{env_value}",')
+            .replace("{env_key}", f"{PROM_K8S_TAG_KEY},")
+            .replace("{duration}", duration)
+        )
+        response = requests.request(
+            "GET", get_prom_url(),
+            params={"query": query, "time": end_time_full.timestamp(), "step": "15"},
+            timeout=PROM_TIMEOUT,
+        )
+        response.raise_for_status()
+        payload = response.json()
+        if not isinstance(payload, dict) or payload.get('status') != 'success':
+            raise ValueError(f'Prometheus {metric} query returned an error')
+        for series in payload['data']['result']:
+            try:
+                labels = series['metric']
+                key = f"{labels[PROM_K8S_TAG_KEY]}@{labels['namespace']}@{labels['owner_name']}"
+                values[key] = _nullable_jvm_pct(series['value'][1])
+            except (KeyError, IndexError, TypeError):
+                continue
+    except (requests.exceptions.RequestException, ValueError, KeyError, TypeError) as exc:
+        logger.warning(f"{env_value}: 高峰{metric}采集失败，本指标本轮记为NULL: {exc}")
+        values = {}
+    for key, row in workload_dict.items():
+        row.append(values.get(key))
+    return workload_dict
+
+
 def get_prom_data(promql, env_key, env_value, end_time_full, duration, workload_dict={}):
     """获取指标源数据"""
+    if promql in ('heap_usage_percent', 'g1e_usage_percent'):
+        return _append_optional_jvm_percent(promql, env_value, end_time_full, duration, workload_dict)
     url = get_prom_url()
     k8s_filter = f'{PROM_K8S_TAG_KEY}="{env_value}",'
     query = (
@@ -199,8 +259,7 @@ def get_prom_data(promql, env_key, env_value, end_time_full, duration, workload_
     )
     querystring = {"query": query, "time": end_time_full.timestamp(), "step": "15"}
     logger.info(querystring)
-    response = requests.request("GET", url, params=querystring).json()
-    print(json.dumps(response), flush=True)
+    response = requests.request("GET", url, params=querystring, timeout=PROM_TIMEOUT).json()
     if response.get("status") == "success":
         result = response["data"]["result"]
         if promql == "pod_num":
@@ -243,27 +302,46 @@ def merged_dict(env_key, env_value, duration_str, end_time_full):
 
     for v in workload_dict.values():
         logger.debug(v)
-        k8s_metrics_list.append(v + [-1, -1, -1])
+        # Preserve the original 16 columns, then append heap/G1 Eden percentages.
+        k8s_metrics_list.append(v[:-2] + [-1, -1, -1] + v[-2:])
 
     return k8s_metrics_list
 
 
-def metrics_to_ck(k8s_metrics_list):
-    """将指标数据存入ck"""
+async def metrics_to_pg(k8s_metrics_list):
+    """将指标数据存入 PostgreSQL（批量 COPY 写入）
+
+    k8s_metrics_list 每行 18 列，旧版16/17列数据缺失的JVM百分比补NULL：
+      date, env, namespace, deployment, pod_count, p95_pod_load, p95_pod_cpu_pct,
+      p95_pod_wss_mb, p95_pod_wss_pct, limit_pod_cpu_m, limit_pod_mem_mb,
+      request_pod_cpu_m, request_pod_mem_mb, p95_pod_qps, p95_pod_g1gc_qps, pod_jvm_max_mb,
+      p95_pod_heap_pct, p95_pod_g1e_pct
+    """
+    columns = [
+        'date', 'env', 'namespace', 'deployment', 'pod_count', 'p95_pod_load',
+        'p95_pod_cpu_pct', 'p95_pod_wss_mb', 'p95_pod_wss_pct', 'limit_pod_cpu_m',
+        'limit_pod_mem_mb', 'request_pod_cpu_m', 'request_pod_mem_mb', 'p95_pod_qps',
+        'p95_pod_g1gc_qps', 'pod_jvm_max_mb', 'p95_pod_heap_pct', 'p95_pod_g1e_pct',
+    ]
     batch_size = 10000
     for i in range(0, len(k8s_metrics_list), batch_size):
         begin = time.time()
-        batch_data = k8s_metrics_list[i : i + batch_size]
+        batch_data = []
+        for row in k8s_metrics_list[i : i + batch_size]:
+            record = list(row)
+            if len(record) in (16, 17):
+                record.extend([None] * (18 - len(record)))
+            for index in (16, 17):
+                record[index] = _nullable_jvm_pct(record[index])
+            batch_data.append(tuple(record))
         try:
-            ckclient.execute("INSERT INTO k8s_resources VALUES", batch_data)
+            await db.pg_copy_records('k8s_resources', batch_data, columns)
             logger.info(
-                f"🌊高峰期数据写入CK == count: 正在插入批次: {i//batch_size}",
-                "耗时：{:.2f}s".format(time.time() - begin),
+                f"🌊高峰期数据写入PG == 正在插入批次: {i//batch_size}，"
+                "耗时：{:.2f}s".format(time.time() - begin)
             )
-        except ServerException as e:
-            logger.exception("Failed to insert batch {}:// {}", i // batch_size, e)
-
-    ckclient.disconnect()
+        except Exception as e:
+            logger.exception("Failed to insert batch {}: {}", i // batch_size, e)
     return True
 
 
@@ -290,8 +368,7 @@ def get_node_deployments(node, env_value):
     )
     querystring = {"query": query, "step": "15"}
     logger.info(f"查询参数: {querystring}")
-    response = requests.request("GET", url, params=querystring).json()
-    print(json.dumps(response), flush=True)
+    response = requests.request("GET", url, params=querystring, timeout=PROM_TIMEOUT).json()
     if response.get("status") == "success":
         result = response["data"]["result"]
         logger.info(f"在节点 {node} 上找到 {len(result)} 个deployment")
@@ -312,106 +389,139 @@ def get_node_deployments(node, env_value):
         logger.error(f'查询节点 {node} 上的deployment列表失败')
 
 
-def ck_optimize(table_name):
-    result = ckclient.execute(f'OPTIMIZE TABLE {table_name}')
+async def agent_collect_info():
+    """从库中读取需要采集的 agent 信息"""
+    rows = await pg_fetch("SELECT env, peak_hours FROM k8s_agent_status WHERE collect = true")
+    return [[row[0], row[1]] for row in rows]
+
+
+async def init_agent_status(env):
+    """确保 env 在 k8s_agent_status 中有一行（幂等）"""
+    await pg_execute(
+        "INSERT INTO k8s_agent_status (env) VALUES ($1) ON CONFLICT (env) DO NOTHING", env
+    )
     return True
 
 
-def ck_alter(sql):
-    result = ckclient.execute(sql)
-    return True
-
-
-def ck_agent_collect_info():
-    """从ck中读取agent的信息"""
-    result = ckclient.execute('SELECT env, peak_hours FROM k8s_agent_status WHERE collect = 1')
-    formatted_result = [list(row) for row in result]
-    return formatted_result
-
-
-def ck_init_agent_status(env):
-    result = ckclient.execute(f"SELECT 1 FROM k8s_agent_status where env = '{env}'")
-    if not result:
-        ckclient.execute(f"INSERT INTO k8s_agent_status (env) VALUES ('{env}')")
-    return True
-
-
-def ck_get_k8s_names():
-    """从ck中获取所有K8S环境名称，按顺序排序"""
+async def get_k8s_names():
+    """从库中获取所有K8S环境名称，按顺序排序"""
     try:
-        result = ckclient.execute("SELECT env FROM k8s_agent_status ORDER BY env")
-        k8s_names = [row[0] for row in result]
-        return k8s_names
-    except ServerException as e:
+        rows = await pg_fetch("SELECT env FROM k8s_agent_status ORDER BY env")
+        return [row[0] for row in rows]
+    except Exception as e:
         logger.exception(e)
         return []
-    finally:
-        ckclient.disconnect()
 
 
-def ck_agent_info():
-    """从ck中读取agent的信息"""
+async def agent_info():
+    """从库中读取所有 agent 的信息"""
     agent_info = {}
     try:
-        rows = ckclient.execute(
-            "SELECT env, collect, peak_hours, admission, admission_namespace, nms_not_confirm, scheduler FROM k8s_agent_status"
+        rows = await pg_fetch(
+            "SELECT env, collect, peak_hours, admission, admission_namespace, "
+            "nms_not_confirm, scheduler FROM k8s_agent_status"
         )
-        if rows:
-            for row in rows:
-                env = row[0]
-                agent_info[env] = {
-                    "collect": row[1],
-                    "peak_hours": row[2],
-                    "admission": row[3],
-                    "admission_namespace": row[4],
-                    "nms_not_confirm": row[5],
-                    "scheduler": row[6],
-                }
-
-    except ServerException as e:
+        for row in rows:
+            agent_info[row[0]] = {
+                "collect": row[1],
+                "peak_hours": row[2],
+                "admission": row[3],
+                "admission_namespace": row[4],
+                "nms_not_confirm": row[5],
+                "scheduler": row[6],
+            }
+    except Exception as e:
         logger.exception(e)
-    ckclient.disconnect()
     return agent_info
 
 
-def get_deploy_admis(env, namespace, deployment):
-    """从ck中读取agent的信息"""
+async def get_deploy_admis_async(env, namespace, deployment, include_jvm=False):
+    """查询 admission 信息（agent webhook 热路径，经 WebSocket 调用）
+
+    热路径：一条 LEFT JOIN 合并原本的两次查询，
+    带查询级超时 + 60s 缓存兜底 + 全异常兜底，避免高并发下阻塞导致 webhook 30s 超时。
+    直接 await asyncpg，不经线程池 —— 以前走 _executor + 同步桥，和 Prometheus / IM 这些
+    慢调用共用 10 个线程，那些调用卡住时 admis 会排队，直到 agent 端 30s 超时。
+
+    返回契约（agent 端靠长度解包，务必保持）：
+      - 2 元素 [code, msg]  → 非管控放行(200) / 免确认(200) / 未找到(404) / 异常(503)
+      - 8 元素 [pod_count, pod_count_ai, pod_count_manual, request_cpu_m,
+                request_mem_mb, limit_cpu_m, limit_mem_mb, scheduler] → 命中管控服务
+      - 支持 JVM 的新版 agent 显式传 include_jvm=True 时，追加第 9 元素 JVM 字段字典
+    """
+    cache_key = (env, namespace, deployment, include_jvm)
+    now = time.time()
+    # 1) 查缓存（命中且未过期直接返回）
+    with _admis_cache_lock:
+        cached = _admis_cache.get(cache_key)
+        if cached is not None and now < cached[1]:
+            return cached[0]
+
     try:
-        result = ckclient.execute(
-            f"""SELECT scheduler,nms_not_confirm FROM k8s_agent_status where env = '{env}' and admission = 1 and admission_namespace like '%"{namespace}"%'"""
+        # 2) 合并查询：agent_status 决定命名空间是否管控（无行=非管控），
+        #    LEFT JOIN res_control 取服务管控值；ctrl_deploy 作哨兵区分“服务未命中”与“值为0”。
+        #    走 asyncpg 连接池，带 5s 查询超时早于 webhook 30s 返回。
+        #    admission_namespace 为 JSON 数组字符串，用 LIKE '%"ns"%' 判断包含。
+        query = (
+            "SELECT a.scheduler, a.nms_not_confirm, "
+            "c.pod_count, c.pod_count_ai, c.pod_count_manual, "
+            "c.request_cpu_m, c.request_mem_mb, c.limit_cpu_m, c.limit_mem_mb, "
+            "c.deployment AS ctrl_deploy, "
+            "c.jvm_xms_bytes, c.jvm_xmx_bytes, c.jvm_xss_bytes, c.jvm_max_metaspace_bytes "
+            "FROM k8s_agent_status AS a "
+            "LEFT JOIN k8s_res_control AS c "
+            "  ON c.env = $1 AND c.namespace = $2 AND c.deployment = $3 "
+            "WHERE a.env = $1 AND a.admission = true "
+            "  AND a.admission_namespace LIKE $4"
         )
-        if result:
-            query = (
-                f"SELECT pod_count, pod_count_ai, pod_count_manual, request_cpu_m, request_mem_mb, limit_cpu_m, limit_mem_mb "
-                f"FROM k8s_res_control "
-                f"WHERE env='{env}' AND namespace='{namespace}' "
-                f"AND deployment='{deployment}'"
-            )
-            deploy_res = ckclient.execute(query)
-            if deploy_res:
-                deploy_res_list = list(deploy_res[0])
-                deploy_res_list.append(result[0][0])  # scheduler
-                logger.info(f"🔊master(admis)返回:【{env}】【{namespace}】【{deployment}】{deploy_res_list}")
-                return deploy_res_list
-            else:
-                nms_not_confirm = result[0][1]
-                if nms_not_confirm:
-                    content = f'master(admis)返回: 新服务免确认已启用【{env}】【{namespace}】【{deployment}】允许部署/扩缩容,因为k8s_res_control表中找不到该服务,该服务不会被管控，也不会配置固定节点均衡模式（未开启则忽略）。'
-                    logger.warning(content)
-                    return [200, content]
-                else:
-                    content = f"master(admis)返回:【{env}】【{namespace}】【{deployment}】部署失败: k8s_res_control表中找不到该服务，且未开启新服务免确认，请先新增服务。"
-                    logger.warning(content)
-                    return [404, content]
+        like_ns = f'%"{namespace}"%'
+        rows = await pg_fetch(query, env, namespace, deployment, like_ns, timeout=5)
+
+        if not rows:
+            # agent_status 无匹配行 → 非管控命名空间
+            result = [200, '非管控命名空间，直接放行']
         else:
-            return [200, '非管控命名空间，直接放行']
-    except ServerException as e:
+            row = rows[0]
+            scheduler = row[0]
+            nms_not_confirm = row[1]
+            ctrl_deploy = row[9]
+            if ctrl_deploy == deployment:
+                # 命中管控服务：按 8 元素契约返回（顺序与 agent 解包严格对齐）
+                result = [
+                    row[2],  # pod_count
+                    row[3],  # pod_count_ai
+                    row[4],  # pod_count_manual
+                    row[5],  # request_cpu_m
+                    row[6],  # request_mem_mb
+                    row[7],  # limit_cpu_m
+                    row[8],  # limit_mem_mb
+                    scheduler,
+                ]
+                if include_jvm:
+                    result.append(dict(zip(JVM_FIELDS, row[10:14])))
+                logger.info(f"🔊master(admis)返回:【{env}】【{namespace}】【{deployment}】{result}")
+            elif nms_not_confirm:
+                content = f'master(admis)返回: 新服务免确认已启用【{env}】【{namespace}】【{deployment}】允许部署/扩缩容,因为k8s_res_control表中找不到该服务,该服务不会被管控，也不会配置固定节点均衡模式（未开启则忽略）。'
+                logger.warning(content)
+                result = [200, content]
+            else:
+                content = f"master(admis)返回:【{env}】【{namespace}】【{deployment}】部署失败: k8s_res_control表中找不到该服务，且未开启新服务免确认，请先新增服务。"
+                logger.warning(content)
+                result = [404, content]
+
+        # 3) 正常结果写缓存（异常分支不缓存，见下方 except）
+        with _admis_cache_lock:
+            _admis_cache[cache_key] = (result, now + ADMIS_CACHE_TTL)
+        return result
+    except Exception as e:
+        # 全异常兜底：返回 2 元素让 agent 秒级失败，而非干等 30s 超时。异常不写缓存。
         content = f"master(admis)返回:【{env}】【{namespace}】【{deployment}】查询数据库失败：{e}"
         logger.error(content)
         return [503, '查询数据库异常']
 
 
-def send_msg(content, msgToken=None):
+def _send_msg_sync(content, msgToken=None):
+    """同步发送消息（内部使用）"""
     response = ""
     token = msgToken if msgToken is not None else MSG_TOKEN
     if MSG_TYPE == "wecom":
@@ -425,12 +535,21 @@ def send_msg(content, msgToken=None):
     return f'【{MSG_TYPE}】{response}'
 
 
+def send_msg(content, msgToken=None):
+    """非阻塞发送消息"""
+    try:
+        loop = asyncio.get_running_loop()
+        loop.run_in_executor(_executor, _send_msg_sync, content, msgToken)
+    except RuntimeError:
+        _send_msg_sync(content, msgToken)
+
+
 def wecom(webhook, content, at=""):
     webhook = 'https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=' + webhook
     headers = {'Content-Type': 'application/json'}
     params = {'msgtype': 'markdown', 'markdown': {'content': f"{content}<@{at}>"}}
     data = bytes(json.dumps(params), 'utf-8')
-    response = requests.post(webhook, headers=headers, data=data)
+    response = requests.post(webhook, headers=headers, data=data, timeout=MSG_TIMEOUT)
     logger.info(f'【wecom】{response.json()}')
     return response.json()
 
@@ -444,7 +563,7 @@ def dingding(webhook, content, at=""):
         "at": {"atMobiles": [at]},
     }
     data = bytes(json.dumps(params), 'utf-8')
-    response = requests.post(webhook, headers=headers, data=data)
+    response = requests.post(webhook, headers=headers, data=data, timeout=MSG_TIMEOUT)
     logger.info(f'【dingding】{response.json()}')
     return response.json()
 
@@ -466,7 +585,7 @@ def feishu(webhook, content, at=""):
         },
     }
     data = json.dumps(params)
-    response = requests.post(webhook, headers=headers, data=data)
+    response = requests.post(webhook, headers=headers, data=data, timeout=MSG_TIMEOUT)
     logger.info(f'【feishu】{response.json()}')
     return response.json()
 
@@ -485,16 +604,16 @@ def slack(webhook, content, at=""):
     params = {"text": message_text}
 
     data = json.dumps(params)
-    response = requests.post(webhook_url, headers=headers, data=data)
+    response = requests.post(webhook_url, headers=headers, data=data, timeout=MSG_TIMEOUT)
     logger.info(f'【slack】{response.json()}')
     return response.json()
 
 
-def get_list_from_resources(env_value):
+async def get_list_from_resources(env_value):
     """获取资源表信息，取最近10天cpu数据最高的一天的数据"""
-    query = f"""
+    query = """
         select
-            `date`,
+            date,
             env,
             namespace,
             deployment,
@@ -506,33 +625,30 @@ def get_list_from_resources(env_value):
             limit_pod_cpu_m,
             limit_pod_mem_mb,
             p95_pod_load,
-            p95_pod_wss_mb
-        from kubedoor.k8s_resources
+            p95_pod_wss_mb,
+            p95_pod_heap_pct,
+            p95_pod_g1e_pct
+        from k8s_resources
         where date = (
-            SELECT `date`
-            FROM kubedoor.k8s_resources
-            WHERE `date` >= toDate(today() - 10) and env = '{env_value}'
-            GROUP BY `date`
+            SELECT date
+            FROM k8s_resources
+            WHERE date >= (CURRENT_DATE - 10) and env = $1
+            GROUP BY date
             order by SUM(pod_count * p95_pod_load) desc
             limit 1
-        ) and env = '{env_value}'
+        ) and env = $1
     """
-    result = ckclient.execute(query)
-    ckclient.disconnect()
+    result = await pg_fetch(query, env_value)
     logger.info("提取最近10天cpu最高的一天的数据：")
     for i in result:
-        logger.debug(i)
-    return result
+        logger.debug(tuple(i))
+    return [tuple(row) for row in result]
 
 
-def is_init_or_update(env_value):
+async def is_init_or_update(env_value):
     """判断管控表是初始化还是更新"""
-    query = f"""select * from kubedoor.k8s_res_control where env = '{env_value}'"""
-    result = ckclient.execute(query)
-    if not result:  # 初始化
-        return True
-    else:  # 更新
-        return False
+    result = await pg_fetchval("select 1 from k8s_res_control where env = $1 limit 1", env_value)
+    return result is None  # 无数据=初始化(True)，有数据=更新(False)
 
 
 def parse_insert_data(srv):
@@ -563,38 +679,50 @@ def parse_insert_data(srv):
         -1,
         -1,
         datetime(2000, 1, 1, 0, 0, 0),
+        _nullable_jvm_pct(srv[13]) if len(srv) > 13 else None,
+        _nullable_jvm_pct(srv[14]) if len(srv) > 14 else None,
     ]
     return tmp
 
 
-def init_control_data(metrics_list_ck):
+_RES_CONTROL_COLUMNS = [
+    'env', 'namespace', 'deployment', 'pod_count_init', 'pod_count', 'pod_count_manual',
+    'p95_pod_cpu_pct', 'p95_pod_mem_pct', 'request_cpu_m', 'request_mem_mb',
+    'limit_cpu_m', 'limit_mem_mb', 'update', 'pod_mem_saved_mb', 'pod_qps',
+    'pod_g1gc_qps', 'pod_count_ai', 'pod_qps_ai', 'pod_load_ai', 'pod_g1gc_qps_ai', 'update_ai',
+    'p95_pod_heap_pct',
+    'p95_pod_g1e_pct',
+]
+
+
+async def init_control_data(rows):
     '''初始化管控表'''
-    metrics_list = list()
-    for srv in metrics_list_ck:
+    metrics_list = []
+    for srv in rows:
         tmp = parse_insert_data(srv)
         logger.info(tmp)
-        metrics_list.append(tmp)
+        metrics_list.append(tuple(tmp))
     batch_size = 10000
     for i in range(0, len(metrics_list), batch_size):
         begin = time.time()
         batch_data = metrics_list[i : i + batch_size]
         try:
-            ckclient.execute("INSERT INTO k8s_res_control VALUES", batch_data, types_check=True)
+            await db.pg_copy_records('k8s_res_control', batch_data, _RES_CONTROL_COLUMNS)
             logger.info(
-                f"== count: 正在插入批次: {i//batch_size}",
-                "耗时：{:.2f}s".format(time.time() - begin),
+                f"== 正在插入批次: {i//batch_size}，"
+                "耗时：{:.2f}s".format(time.time() - begin)
             )
-        except ServerException as e:
+        except Exception as e:
             logger.exception("Failed to insert batch {}: {}", i // batch_size, e)
             return False
 
-    ckclient.disconnect()
+    invalidate_admis_cache()  # 管控表已刷新，主动失效 admis 缓存
     return True
 
 
-def update_control_data(metrics_list_ck):
+async def update_control_data(rows):
     """更新管控表"""
-    for i in metrics_list_ck:
+    for i in rows:
         (
             date,
             env,
@@ -609,29 +737,35 @@ def update_control_data(metrics_list_ck):
             limit_pod_mem_mb,
             p95_pod_load,
             p95_pod_wss_mb,
-        ) = i
-        date_str = date.strftime('%Y-%m-%d %H:%M:%S')
-        sql = f"select 1 from kubedoor.k8s_res_control where env = '{env}' and namespace = '{namespace}' and deployment = '{deployment}'"
-        data = ckclient.execute(sql)
-        if data:  # 更新
-            request_cpu_m = p95_pod_load * 1000
+        ) = i[:13]
+        p95_pod_heap_pct = _nullable_jvm_pct(i[13]) if len(i) > 13 else None
+        p95_pod_g1e_pct = _nullable_jvm_pct(i[14]) if len(i) > 14 else None
+        exists = await pg_fetchval(
+            "select 1 from k8s_res_control where env = $1 and namespace = $2 and deployment = $3 limit 1",
+            env, namespace, deployment,
+        )
+        if exists:  # 更新
+            request_cpu_m = int(p95_pod_load * 1000)
             try:
-                update_sql = f"""
-                    alter table kubedoor.k8s_res_control
-                    update
-                        `update` = '{date_str}',
-                        pod_count = {pod_count},
-                        p95_pod_cpu_pct = {p95_pod_cpu_pct},
-                        p95_pod_mem_pct = {p95_pod_wss_pct},
-                        request_cpu_m = {int(request_cpu_m)},
-                        request_mem_mb = {int(p95_pod_wss_mb)}
-                    where
-                        env = '{env}' and namespace = '{namespace}' and deployment = '{deployment}'
-                """
-                update_data = ckclient.execute(update_sql)
+                await pg_execute(
+                    """
+                    update k8s_res_control set
+                        "update" = $1,
+                        pod_count = $2,
+                        p95_pod_cpu_pct = $3,
+                        p95_pod_mem_pct = $4,
+                        request_cpu_m = $5,
+                        request_mem_mb = $6,
+                        p95_pod_heap_pct = $7,
+                        p95_pod_g1e_pct = $8
+                    where env = $9 and namespace = $10 and deployment = $11
+                    """,
+                    date, pod_count, p95_pod_cpu_pct, p95_pod_wss_pct,
+                    request_cpu_m, int(p95_pod_wss_mb), p95_pod_heap_pct, p95_pod_g1e_pct,
+                    env, namespace, deployment,
+                )
             except Exception as e:
-                logger.exception("Failed to execute {}: {}", update_sql, e)
-                ckclient.disconnect()
+                logger.exception("Failed to update k8s_res_control: {}", e)
                 return False
         else:  # 添加
             content = (
@@ -639,19 +773,17 @@ def update_control_data(metrics_list_ck):
             )
             logger.info(content)
             send_msg(content)
-            tmp = ""
             try:
                 tmp = parse_insert_data(i)
-                ckclient.execute("INSERT INTO k8s_res_control VALUES", [tuple(tmp)], types_check=True)
+                await db.pg_copy_records('k8s_res_control', [tuple(tmp)], _RES_CONTROL_COLUMNS)
             except Exception as e:
-                logger.exception("Failed to insert {}: {}", [tuple(tmp)], e)
-                ckclient.disconnect()
+                logger.exception("Failed to insert into k8s_res_control: {}", e)
                 return False
-    ckclient.disconnect()
+    invalidate_admis_cache()  # 管控表已刷新，主动失效 admis 缓存
     return True
 
 
-def get_deployment_from_control_data(deployment_list, num, type, env):
+async def get_deployment_from_control_data(deployment_list, num, type, env):
     """根据指定指标获取排名靠前的deployment"""
     logger.info(f"开始获取 {env} 环境中排名靠前的deployment，类型: {type}，数量限制: {num}")
     top_deployments = []
@@ -669,23 +801,19 @@ def get_deployment_from_control_data(deployment_list, num, type, env):
             f"[{index+1}/{len(deployment_list)}] 查询deployment: {namespace}/{deployment_name}，原始Pod名称: {pod}"
         )
 
-        # 构建查询语句
-        query = f"""
-            SELECT deployment, namespace, request_cpu_m, request_mem_mb 
-            FROM kubedoor.k8s_res_control 
-            WHERE env = '{env}' AND deployment = '{deployment_name}' AND namespace = '{namespace}'
-        """
-
         try:
-            # 执行查询
-            result = ckclient.execute(query)
-            if result and len(result) > 0:
-                # 结果转为字典
+            result = await pg_fetch(
+                "SELECT deployment, namespace, request_cpu_m, request_mem_mb "
+                "FROM k8s_res_control "
+                "WHERE env = $1 AND deployment = $2 AND namespace = $3",
+                env, deployment_name, namespace,
+            )
+            if result:
                 deployment_data = {
-                    'deployment': result[0][0],  # deployment
-                    'namespace': result[0][1],  # namespace
-                    'request_cpu_m': result[0][2],  # CPU
-                    'request_mem_mb': result[0][3],  # 内存
+                    'deployment': result[0][0],
+                    'namespace': result[0][1],
+                    'request_cpu_m': result[0][2],
+                    'request_mem_mb': result[0][3],
                 }
                 logger.info(
                     f"查询成功: {namespace}/{deployment_name}, CPU: {deployment_data['request_cpu_m']}m, 内存: {deployment_data['request_mem_mb']}MB"
@@ -715,7 +843,8 @@ def get_deployment_from_control_data(deployment_list, num, type, env):
     return top_deployments
 
 
-async def get_deployment_node(promql, k8s, namespace, deployment):
+def _get_deployment_node_sync(promql, k8s, namespace, deployment):
+    """同步查询节点信息"""
     query = (
         promql.get("promql")
         .replace("{env_key}", f"{PROM_K8S_TAG_KEY},")
@@ -724,11 +853,10 @@ async def get_deployment_node(promql, k8s, namespace, deployment):
         .replace("{deployment}", deployment)
     )
     logger.info(f"查询节点信息，query: {query}")
-    response = requests.get(get_prom_url(), params={'query': query})
+    response = requests.get(get_prom_url(), params={'query': query}, timeout=PROM_TIMEOUT)
     response.raise_for_status()
     data = response.json().get("data").get("result")
 
-    # 处理Prometheus响应数据，返回节点IP和对应值的字典
     node_dict = {}
     if data:
         for item in data:
@@ -736,11 +864,17 @@ async def get_deployment_node(promql, k8s, namespace, deployment):
             value = item.get("value", [])
             if node_ip and len(value) >= 2:
                 node_dict[node_ip] = value[1]
-
     return node_dict
 
 
-async def get_deployment_image(promql, k8s, namespace, deployment):
+async def get_deployment_node(promql, k8s, namespace, deployment):
+    """异步查询节点信息"""
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(_executor, _get_deployment_node_sync, promql, k8s, namespace, deployment)
+
+
+def _get_deployment_image_sync(promql, k8s, namespace, deployment):
+    """同步查询镜像信息"""
     query = (
         promql.get("promql")
         .replace("{env_key}", f"{PROM_K8S_TAG_KEY},")
@@ -749,7 +883,7 @@ async def get_deployment_image(promql, k8s, namespace, deployment):
         .replace("{deployment}", deployment)
     )
     logger.info(f"查询镜像信息，query: {query}")
-    response = requests.get(get_prom_url(), params={'query': query})
+    response = requests.get(get_prom_url(), params={'query': query}, timeout=PROM_TIMEOUT)
     response.raise_for_status()
     data = response.json().get("data").get("result")
 
@@ -766,26 +900,34 @@ async def get_deployment_image(promql, k8s, namespace, deployment):
     return k8s, valid_data[0].get('metric').get('image_spec', valid_data[0].get('metric').get('image'))
 
 
-async def get_node_res_rank(env_value, res_type):
+async def get_deployment_image(promql, k8s, namespace, deployment):
+    """异步查询镜像信息"""
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(_executor, _get_deployment_image_sync, promql, k8s, namespace, deployment)
+
+
+def _get_node_res_rank_sync(env_value, res_type):
+    """同步查询节点资源排名"""
     query = node_rank_query.get(res_type).replace("{env}", f'{PROM_K8S_TAG_KEY}="{env_value}",')
-    try:
-        logger.info(f'查询节点{res_type}排名，环境: {env_value}')
-        logger.info(query)
-        response = requests.get(get_prom_url(), params={'query': query})
-        logger.info(get_prom_url())
-        response.raise_for_status()
-        data = response.json().get("data").get("result")
-        res_list = [
-            {
-                'name': i.get('metric').get('instance', i.get('metric').get('node')),
-                'percent': round(float(i['value'][1]), 2),
-            }
-            for i in data
-            if 'value' in i and len(i['value']) > 1
-        ]
-        logger.debug(f'从prometheus查询节点{res_type}: {res_list}')
-        res_list.sort(key=lambda x: x['percent'])
-        logger.info(f'节点{res_type}从小到大排序{res_list}')
-        return res_list
-    except requests.exceptions.RequestException as e:
-        raise Exception(f"Error getting node cpu usage percent from Prometheus: {e}")
+    logger.info(f'查询节点{res_type}排名，环境: {env_value}')
+    logger.info(query)
+    response = requests.get(get_prom_url(), params={'query': query}, timeout=PROM_TIMEOUT)
+    response.raise_for_status()
+    data = response.json().get("data").get("result")
+    res_list = [
+        {
+            'name': i.get('metric').get('instance', i.get('metric').get('node')),
+            'percent': round(float(i['value'][1]), 2),
+        }
+        for i in data
+        if 'value' in i and len(i['value']) > 1
+    ]
+    res_list.sort(key=lambda x: x['percent'])
+    logger.info(f'节点{res_type}从小到大排序{res_list}')
+    return res_list
+
+
+async def get_node_res_rank(env_value, res_type):
+    """异步查询节点资源排名"""
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(_executor, _get_node_res_rank_sync, env_value, res_type)

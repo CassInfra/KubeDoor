@@ -155,7 +155,7 @@ export interface PromOverviewResponse {
   timestamp?: string;
 }
 
-export interface CkPodAlertItem {
+export interface PodAlertItem {
   env: string;
   namespace: string;
   alert_name: string;
@@ -165,17 +165,18 @@ export interface CkPodAlertItem {
   ratio_percent: number;
 }
 
-export interface CkEventItem {
+export interface EventTopItem {
   env: string;
   namespace: string;
   reason: string;
   name: string;
+  kind: string;
   message: string;
   count: number;
   ratio_percent: number;
 }
 
-export interface CkAlertDailyItem {
+export interface AlertDailyItem {
   day: string;
   day_label: string;
   daily_alert_count: number;
@@ -187,26 +188,26 @@ export const getPromOverview = (env?: string) => {
   });
 };
 
-export const getCkTopPodAlerts = (env?: string) => {
-  return http.request<ApiResponse<CkPodAlertItem[]>>(
+export const getTopPodAlerts = (env?: string) => {
+  return http.request<ApiResponse<PodAlertItem[]>>(
     "get",
-    "/api/ck_top10_pod_alerts",
+    "/api/stats/top10_pod_alerts",
     { params: env ? { env } : undefined }
   );
 };
 
-export const getCkTopEvents = (env?: string) => {
-  return http.request<ApiResponse<CkEventItem[]>>(
+export const getTopEvents = (env?: string) => {
+  return http.request<ApiResponse<EventTopItem[]>>(
     "get",
-    "/api/ck_top10_events",
+    "/api/stats/top10_events",
     { params: env ? { env } : undefined }
   );
 };
 
-export const getCkAlertDaily = (env?: string) => {
-  return http.request<ApiResponse<CkAlertDailyItem[]>>(
+export const getAlertDaily = (env?: string) => {
+  return http.request<ApiResponse<AlertDailyItem[]>>(
     "get",
-    "/api/ck_day10_alert_daily",
+    "/api/stats/alert_daily",
     { params: env ? { env } : undefined }
   );
 };

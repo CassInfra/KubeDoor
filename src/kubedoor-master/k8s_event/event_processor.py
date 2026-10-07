@@ -2,13 +2,13 @@
 # -*- coding: utf-8 -*-
 """
 K8S事件处理器模块
-负责处理从kubedoor-agent接收到的K8S事件数据，并存储到ClickHouse
+负责处理从kubedoor-agent接收到的K8S事件数据，并存储到 PostgreSQL
 """
 
 from typing import Dict, Any, Optional
 from datetime import datetime, timezone, timedelta
 from loguru import logger
-from .clickhouse_client import get_clickhouse_client
+from .pg_event_client import get_pg_event_client
 from .event_alert_processor import EventAlertProcessor
 
 
@@ -17,7 +17,7 @@ class K8SEventProcessor:
 
     def __init__(self):
         """初始化事件处理器"""
-        self.clickhouse_client = get_clickhouse_client()
+        self.pg_client = get_pg_event_client()
         self.alert_processor = EventAlertProcessor()
         logger.info("K8S事件处理器已初始化")
 
@@ -49,8 +49,8 @@ class K8SEventProcessor:
                 logger.warning("处理事件数据失败")
                 return False
 
-            # 存储到ClickHouse
-            self.clickhouse_client.upsert_event(processed_data)
+            # 存储到 PostgreSQL
+            self.pg_client.upsert_event(processed_data)
 
             # 处理告警规则匹配
             try:
@@ -74,7 +74,7 @@ class K8SEventProcessor:
 
     def _process_event_data(self, event_data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         """
-        处理和转换事件数据为ClickHouse格式
+        处理和转换事件数据为入库格式
 
         Args:
             event_data: 原始事件数据

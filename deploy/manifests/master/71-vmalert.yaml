@@ -1,0 +1,477 @@
+# vmalert:按内置规则计算告警,命中后推给 alertmanager。
+#
+# 规则分五个文件,内容沿用原 helm chart,只把集群标签 key 换成了配置项:
+#   itself.yaml  采集器自身存活
+#   jvm.yaml     JVM / Tomcat 指标(需要业务 Pod 打 prometheus.io/jvm 注解)
+#   k8s.yaml     Pod 状态、Pod 资源、Deployment、节点
+#   node.yaml    节点 CPU/内存/磁盘/网络(依赖 node-exporter)
+#   record.yaml  预计算规则,给看板降负载
+#
+# 想改阈值直接改这个 ConfigMap,vmalert 会自动重载(约 15s 一次)。
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: vmalert-config
+  namespace: __NAMESPACE__
+data:
+  itself.yaml: |-
+    groups:
+    - name: Itself
+      rules:
+      - alert: 监控器状态异常
+        expr: up == 0
+        for: 3m
+        labels:
+          severity: Critical
+        annotations:
+          description: "K8S：{{ $labels.__PROM_K8S_TAG_KEY__ }}\n- {{ $labels.job }}：{{ $labels.instance }}"
+
+  jvm.yaml: |-
+    groups:
+    - name: K8S_Pod_JVM
+      rules:
+      - alert: K8S_Pod_JVM整体内存使用率过高
+        expr: sum by(__PROM_K8S_TAG_KEY__,namespace,container,pod)(jvm_memory_used_bytes)*100/sum by(__PROM_K8S_TAG_KEY__,namespace,container,pod)(jvm_memory_max_bytes) >90
+        for: 3m
+        labels:
+          severity: Critical
+        annotations:
+          description: "K8S：{{ $labels.__PROM_K8S_TAG_KEY__ }}：{{ $labels.namespace }}：{{ $labels.pod }}\n- 当前：{{ $value | printf \"%.2f\" }}%"
+
+      - alert: K8S_Pod_触发FullGC_Allocation_Failure
+        expr: jvm_gc_pause_seconds_count{action="end of major GC", cause="Allocation Failure"} > 3
+        labels:
+          severity: Critical
+        annotations:
+          description: "K8S：{{ $labels.__PROM_K8S_TAG_KEY__ }}：{{ $labels.namespace }}：{{ $labels.pod }}\n- 累计：{{ $value | printf \"%.2f\" }}次"
+
+      - alert: K8S_Pod_堆内存使用率过高
+        expr: sum by(__PROM_K8S_TAG_KEY__,namespace,container,pod)(jvm_memory_used_bytes{area="heap"})*100/sum by(__PROM_K8S_TAG_KEY__,namespace,container,pod)(jvm_memory_max_bytes{area="heap"}) >91
+        for: 10m
+        labels:
+          severity: Critical
+        annotations:
+          description: "K8S：{{ $labels.__PROM_K8S_TAG_KEY__ }}：{{ $labels.namespace }}：{{ $labels.pod }}\n- 当前：{{ $value | printf \"%.2f\" }}%"
+
+      - alert: K8S_Pod_堆内存明细使用率过高
+        expr: jvm_memory_used_bytes{area="heap",id!="PS Survivor Space"}*100/jvm_memory_max_bytes{area="heap",id!="PS Survivor Space"} >91
+        for: 10m
+        labels:
+          severity: Critical
+        annotations:
+          description: "K8S：{{ $labels.__PROM_K8S_TAG_KEY__ }}：{{ $labels.namespace }}：{{ $labels.pod }}\n- {{ $labels.id }} 当前：{{ $value | printf \"%.2f\" }}%"
+
+      - alert: K8S_Pod_非堆内存明细使用率过高
+        expr: jvm_memory_used_bytes{area="nonheap"}*100/jvm_memory_max_bytes{area="nonheap"} >90
+        for: 3m
+        labels:
+          severity: Critical
+        annotations:
+          description: "K8S：{{ $labels.__PROM_K8S_TAG_KEY__ }}：{{ $labels.namespace }}：{{ $labels.pod }}\n- {{ $labels.id }}-当前：{{ $value | printf \"%.2f\" }}%"
+
+      - alert: K8S_Pod_非堆可申请内存不足5%
+        expr: jvm_memory_committed_bytes{area="nonheap"}*100/jvm_memory_max_bytes{area="nonheap"} > 95
+        for: 3m
+        labels:
+          severity: Critical
+        annotations:
+          description: "K8S：{{ $labels.__PROM_K8S_TAG_KEY__ }}：{{ $labels.namespace }}：{{ $labels.pod }}\n- {{ $labels.id }}-当前：{{ $value | printf \"%.2f\" }}%"
+
+      - alert: K8S_Pod_老年代GC在1小时内大于10次
+        expr: increase_prometheus(jvm_gc_pause_seconds_count{action="end of major GC"}[1h]) > 10
+        for: 2m
+        labels:
+          severity: Critical
+        annotations:
+          description: "K8S：{{ $labels.__PROM_K8S_TAG_KEY__ }}：{{ $labels.namespace }}：{{ $labels.pod }}\n- 当前：{{ $value | printf \"%.2f\" }}"
+
+      - alert: K8S_Pod_老年代GC在5分钟内耗时大于10秒
+        expr: increase_prometheus(jvm_gc_pause_seconds_sum{action="end of major GC"}[5m]) > 10
+        for: 2m
+        labels:
+          severity: Critical
+        annotations:
+          description: "K8S：{{ $labels.__PROM_K8S_TAG_KEY__ }}：{{ $labels.namespace }}：{{ $labels.pod }}\n- 当前：{{ $value | printf \"%.2f\" }}"
+
+      - alert: K8S_Pod_JVM-waiting线程大于150
+        expr: jvm_threads_states_threads{state="waiting"} > 150
+        for: 2m
+        labels:
+          severity: Critical
+        annotations:
+          description: "K8S：{{ $labels.__PROM_K8S_TAG_KEY__ }}：{{ $labels.namespace }}：{{ $labels.pod }}\n- 当前：{{ $value | printf \"%.2f\" }}"
+
+      - alert: K8S_Pod_JVM-blocked线程大于20
+        expr: jvm_threads_states_threads{state="blocked"} > 20
+        for: 2m
+        labels:
+          severity: Critical
+        annotations:
+          description: "K8S：{{ $labels.__PROM_K8S_TAG_KEY__ }}：{{ $labels.namespace }}：{{ $labels.pod }}\n- 当前：{{ $value | printf \"%.2f\" }}"
+
+      - alert: K8S_Pod_正在运行的线程数超过线程池80%
+        expr: sum (tomcat_threads_busy_threads{})by(__PROM_K8S_TAG_KEY__,namespace,container,pod) / sum (tomcat_threads_config_max_threads{})by(__PROM_K8S_TAG_KEY__,namespace,container,pod)*100 > 80
+        labels:
+          severity: Critical
+        annotations:
+          description: "K8S：{{ $labels.__PROM_K8S_TAG_KEY__ }}：{{ $labels.namespace }}：{{ $labels.pod }}\n- 当前：{{ $value | printf \"%.2f\" }}%"
+
+      - alert: K8S_Pod_每秒GC次数超过1
+        expr: irate(jvm_gc_pause_seconds_count{}[2m])>1
+        labels:
+          severity: Critical
+        annotations:
+          description: "K8S：{{ $labels.__PROM_K8S_TAG_KEY__ }}：{{ $labels.namespace }}：{{ $labels.pod }}\n- 当前：{{ $value | printf \"%.2f\" }}"
+
+      - alert: K8S_Pod_GCmax时间超过300ms
+        expr: jvm_gc_pause_seconds_max{} > 0.3
+        labels:
+          severity: Critical
+        annotations:
+          description: "K8S：{{ $labels.__PROM_K8S_TAG_KEY__ }}：{{ $labels.namespace }}：{{ $labels.pod }}\n- 当前：{{ $value | printf \"%.2f\" }}s"
+
+      - alert: K8S_Pod_老年代内存超过80%
+        expr: sum(jvm_memory_committed_bytes{id=~"G1 Old Gen"})by(__PROM_K8S_TAG_KEY__,namespace,container,pod) / sum(jvm_memory_max_bytes{id=~"G1 Old Gen"})by(__PROM_K8S_TAG_KEY__,namespace,container,pod)*100 > 80
+        labels:
+          severity: Critical
+        annotations:
+          description: "K8S：{{ $labels.__PROM_K8S_TAG_KEY__ }}：{{ $labels.namespace }}：{{ $labels.pod }}\n- 当前：{{ $value | printf \"%.2f\" }}%"
+
+  k8s.yaml: |-
+    groups:
+    - name: K8S_Pod_Status
+      rules:
+      - alert: K8S_Pod异常OOMKilled
+        expr: changes_prometheus(kube_pod_container_status_last_terminated_reason{reason="OOMKilled"}[10m]) > 0
+        labels:
+          send_resolved: false
+          inhibit: K8S_Pod_Status
+          severity: Critical
+        annotations:
+          description: "K8S：{{ $labels.__PROM_K8S_TAG_KEY__ }}：{{ $labels.namespace }}：{{ $labels.pod }}\n- 原因：{{ $labels.reason }}"
+
+      - alert: K8S_Pod异常Evicted
+        expr: changes_prometheus(kube_pod_container_status_last_terminated_reason{reason="Evicted"}[10m]) > 0
+        labels:
+          send_resolved: false
+          inhibit: K8S_Pod_Status
+          severity: Critical
+        annotations:
+          description: "K8S：{{ $labels.__PROM_K8S_TAG_KEY__ }}：{{ $labels.namespace }}：{{ $labels.pod }}\n- 原因：{{ $labels.reason }}"
+
+      - alert: K8S_Pod状态异常
+        expr: changes_prometheus(kube_pod_container_status_last_terminated_reason{reason!~"OOMKilled|Evicted|Completed"}[10m]) > 0
+        labels:
+          send_resolved: false
+          inhibit: K8S_Pod_Status
+          severity: Critical
+        annotations:
+          description: "K8S：{{ $labels.__PROM_K8S_TAG_KEY__ }}：{{ $labels.namespace }}：{{ $labels.pod }}\n- 原因：{{ $labels.reason }}"
+
+      - alert: K8S_Pod频繁重启
+        expr: kube_pod_container_status_restarts_total > 0 and changes_prometheus(kube_pod_container_status_restarts_total[15m]) >= 2
+        for: 1m
+        labels:
+          inhibit: K8S_Pod_Status
+          severity: Critical
+        annotations:
+          description: "K8S：{{ $labels.__PROM_K8S_TAG_KEY__ }}：{{ $labels.namespace }}：{{ $labels.pod }}\n- 重启：{{ $value | printf \"%.0f\" }}次"
+
+      - alert: K8S_Pod异常重启
+        expr: kube_pod_container_status_restarts_total > 0 and changes_prometheus(kube_pod_container_status_restarts_total[2m]) > 0
+        labels:
+          send_resolved: false
+          inhibit: K8S_Pod_Status
+          severity: Warning
+        annotations:
+          description: "K8S：{{ $labels.__PROM_K8S_TAG_KEY__ }}：{{ $labels.namespace }}：{{ $labels.pod }}\n- 重启：{{ $value | printf \"%.0f\" }}次"
+
+      - alert: K8S_Pod异常-waiting
+        expr: sum_over_time(kube_pod_container_status_waiting_reason{reason!~"ContainerCreating"}[5m]) >= 1
+        for: 5m
+        labels:
+          inhibit: K8S_Pod_Status
+          severity: Notice
+        annotations:
+          description: "K8S：{{ $labels.__PROM_K8S_TAG_KEY__ }}：{{ $labels.namespace }}：{{ $labels.pod }}\n- 原因：{{ $labels.reason }}"
+
+    - name: K8S_Pod_Resource
+      rules:
+      - alert: K8S_Pod_CPU负载通知
+        expr: max by(__PROM_K8S_TAG_KEY__, namespace, container, pod)(irate(container_cpu_usage_seconds_total{container !="",container!="POD"}[2m])) > 1.8 and sum(irate(container_cpu_usage_seconds_total{container !="",container!="POD"}[2m])) by (__PROM_K8S_TAG_KEY__, namespace, container, pod) / (sum(container_spec_cpu_quota{container!="",container!="POD"}/100000) by (__PROM_K8S_TAG_KEY__, namespace, container, pod)) * 100 != +Inf > 60
+        for: 3m
+        labels:
+          severity: Info
+        annotations:
+          description: "K8S：{{ $labels.__PROM_K8S_TAG_KEY__ }}：{{ $labels.namespace }}：{{ $labels.pod }}\n- 负载：{{ $value | printf \"%.2f\" }}"
+
+      - alert: K8S_Pod_CPU受限比例过高
+        expr: increase(container_cpu_cfs_throttled_periods_total{container!="",container!="POD"}[3m])/increase(container_cpu_cfs_periods_total{container!="",container!="POD"}[3m]) * 100 > 30
+        for: 3m
+        labels:
+          severity: Notice
+        annotations:
+          description: "K8S：{{ $labels.__PROM_K8S_TAG_KEY__ }}：{{ $labels.namespace }}：{{ $labels.pod }}\n- 受限%：{{ $value | printf \"%.2f\" }}%"
+
+      - alert: K8S_Pod_CPU使用率
+        expr: sum(irate(container_cpu_usage_seconds_total{container !="",container!="POD"}[2m])) by (__PROM_K8S_TAG_KEY__, namespace, container, pod) / (sum(container_spec_cpu_quota{container!="",container!="POD"}/100000) by (__PROM_K8S_TAG_KEY__, namespace, container, pod)) * 100 != +Inf > 75
+        for: 2m
+        labels:
+          severity: Warning
+        annotations:
+          description: "K8S：{{ $labels.__PROM_K8S_TAG_KEY__ }}：{{ $labels.namespace }}：{{ $labels.pod }}\n- CPU%：{{ $value | printf \"%.2f\" }}%"
+
+      - alert: K8S_Pod内存使用率_WSS
+        expr: sum (container_memory_working_set_bytes{container!="",container!="POD"}) by (__PROM_K8S_TAG_KEY__, namespace, container, pod)/ sum(container_spec_memory_limit_bytes{container!="",container!="POD"}) by (__PROM_K8S_TAG_KEY__, namespace, container, pod) * 100 != +Inf > 95
+        for: 2m
+        labels:
+          severity: Warning
+        annotations:
+          description: "K8S：{{ $labels.__PROM_K8S_TAG_KEY__ }}：{{ $labels.namespace }}：{{ $labels.pod }}\n- 内存%：{{ $value | printf \"%.2f\" }}%"
+
+      - alert: K8S_Pod内存使用率_RSS
+        expr: sum (container_memory_rss{container!="",container!="POD"}) by (__PROM_K8S_TAG_KEY__, namespace, container, pod)/ sum(container_spec_memory_limit_bytes{container!="",container!="POD"}) by (__PROM_K8S_TAG_KEY__, namespace, container, pod) * 100 != +Inf > 90
+        for: 2m
+        labels:
+          severity: Warning
+        annotations:
+          description: "K8S：{{ $labels.__PROM_K8S_TAG_KEY__ }}：{{ $labels.namespace }}：{{ $labels.pod }}\n- 内存%：{{ $value | printf \"%.2f\" }}%"
+
+      - alert: K8S_Pod流入带宽
+        expr: sum (irate(container_network_receive_bytes_total{image!="",name=~"^k8s_.*"}[3m])) by (__PROM_K8S_TAG_KEY__, namespace, container, pod) / 1024 / 1024 > 120
+        for: 5m
+        labels:
+          severity: Notice
+        annotations:
+          description: "K8S：{{ $labels.__PROM_K8S_TAG_KEY__ }}：{{ $labels.namespace }}：{{ $labels.pod }}\n- 流入带宽：{{ $value | printf \"%.2f\" }}MB/s"
+
+      - alert: K8S_Pod流出带宽
+        expr: sum (irate(container_network_transmit_bytes_total{image!="",name=~"^k8s_.*"}[3m])) by (__PROM_K8S_TAG_KEY__, namespace, container, pod) / 1024 / 1024 > 120
+        for: 5m
+        labels:
+          severity: Notice
+        annotations:
+          description: "K8S：{{ $labels.__PROM_K8S_TAG_KEY__ }}：{{ $labels.namespace }}：{{ $labels.pod }}\n- 流出带宽：{{ $value | printf \"%.2f\" }}MB/s"
+
+    - name: K8S_Deployment
+      rules:
+      - alert: K8S_部署集副本缺失
+        expr: kube_deployment_spec_replicas - kube_deployment_status_replicas_available > 0
+        for: 5m
+        labels:
+          severity: Critical
+        annotations:
+          description: "K8S：{{ $labels.__PROM_K8S_TAG_KEY__ }}：{{ $labels.namespace }}：{{ $labels.deployment }}\n- 副本数缺少：{{ $value }}"
+
+      - alert: K8S_部署集CPU使用率过高
+        expr: sum(irate(container_cpu_usage_seconds_total{container !="",container!="POD"}[2m])) by (__PROM_K8S_TAG_KEY__, namespace, container) / (sum(container_spec_cpu_quota{container !="",container!="POD"}/100000) by (__PROM_K8S_TAG_KEY__, namespace, container)) * 100 > 70
+        for: 2m
+        labels:
+          severity: Critical
+        annotations:
+          description: "K8S：{{ $labels.__PROM_K8S_TAG_KEY__ }}：{{ $labels.namespace }}：{{ $labels.container }}\n- CPU%：{{ $value | printf \"%.2f\" }}%"
+
+      - alert: K8S_部署集内存_WSS使用率过高
+        expr: sum (container_memory_working_set_bytes{container!="",container!="POD"}) by (__PROM_K8S_TAG_KEY__, namespace, container)/ sum(container_spec_memory_limit_bytes{container!="",container!="POD"}) by (__PROM_K8S_TAG_KEY__, namespace, container) * 100 != +Inf > 95
+        for: 2m
+        labels:
+          severity: Critical
+        annotations:
+          description: "K8S：{{ $labels.__PROM_K8S_TAG_KEY__ }}：{{ $labels.namespace }}：{{ $labels.container }}\n- 内存_WSS%：{{ $value | printf \"%.2f\" }}%"
+
+      - alert: K8S_部署集内存_RSS使用率过高
+        expr: sum (container_memory_rss{container!="",container!="POD"}) by (__PROM_K8S_TAG_KEY__, namespace, container)/ sum(container_spec_memory_limit_bytes{container!="",container!="POD"}) by (__PROM_K8S_TAG_KEY__, namespace, container) * 100 != +Inf > 90
+        for: 2m
+        labels:
+          severity: Critical
+        annotations:
+          description: "K8S：{{ $labels.__PROM_K8S_TAG_KEY__ }}：{{ $labels.namespace }}：{{ $labels.container }}\n- 内存_RSS%：{{ $value | printf \"%.2f\" }}%"
+
+    - name: K8S_Node
+      rules:
+      - alert: K8S_节点状态异常
+        expr: kube_node_status_condition{condition="Ready",status="true"} == 0
+        for: 1m
+        labels:
+          severity: Critical
+        annotations:
+          description: "K8S：{{ $labels.__PROM_K8S_TAG_KEY__ }}：{{ $labels.node }}\n- 状态异常"
+
+      - alert: K8S_节点资源异常
+        expr: kube_node_status_condition{status="true", condition!~"Ready|DiskPressure|MemoryPressure"} == 1
+        for: 5m
+        labels:
+          severity: Critical
+        annotations:
+          description: "K8S：{{ $labels.__PROM_K8S_TAG_KEY__ }}：{{ $labels.node }}\n- 原因：{{ $labels.condition }}"
+
+      - alert: K8S_节点内存压力
+        expr: kube_node_status_condition{condition="MemoryPressure",status="true"} == 1
+        for: 5m
+        labels:
+          severity: Warning
+        annotations:
+          description: "K8S：{{ $labels.__PROM_K8S_TAG_KEY__ }}：{{ $labels.node }}\n- 内存压力"
+
+      - alert: K8S_节点磁盘压力
+        expr: kube_node_status_condition{condition="DiskPressure",status="true"} == 1
+        for: 5m
+        labels:
+          severity: Warning
+        annotations:
+          description: "K8S：{{ $labels.__PROM_K8S_TAG_KEY__ }}：{{ $labels.node }}\n- 磁盘压力"
+
+  node.yaml: |-
+    groups:
+    - name: Node_Exporter
+      rules:
+      - alert: 内存使用率
+        expr: 100 - (node_memory_MemAvailable_bytes{} / node_memory_MemTotal_bytes{}) * 100 > 90
+        for: 2m
+        labels:
+          severity: Warning
+        annotations:
+          description: "K8S：{{ $labels.__PROM_K8S_TAG_KEY__ }}：{{ $labels.instance }}\n- 内存使用率{{ $value | printf \"%.2f\" }}%"
+
+      - alert: CPU使用率
+        expr: 100 - (avg by(__PROM_K8S_TAG_KEY__,instance) (irate(node_cpu_seconds_total{mode="idle"}[3m])) * 100) > 75
+        for: 2m
+        labels:
+          severity: Warning
+        annotations:
+          description: "K8S：{{ $labels.__PROM_K8S_TAG_KEY__ }}：{{ $labels.instance }}\n- CPU使用率{{ $value | printf \"%.2f\" }}%"
+
+      - alert: 系统负载
+        expr: node_load5{} / on (__PROM_K8S_TAG_KEY__,instance) sum(count(node_cpu_seconds_total{mode='system'}) by (__PROM_K8S_TAG_KEY__,cpu,instance)) by(__PROM_K8S_TAG_KEY__,instance) > 1.7
+        for: 5m
+        labels:
+          severity: Warning
+        annotations:
+          description: "K8S：{{ $labels.__PROM_K8S_TAG_KEY__ }}：{{ $labels.instance }}\n- 5分钟负载{{ $value | printf \"%.2f\" }}倍"
+
+      - alert: ECS主机重启
+        expr: node_time_seconds - node_boot_time_seconds < 600
+        for: 1m
+        labels:
+          severity: Warning
+        annotations:
+          description: "K8S：{{ $labels.__PROM_K8S_TAG_KEY__ }}：{{ $labels.instance }}\n- 主机重启"
+
+      - alert: 磁盘使用率
+        expr: (100 - (node_filesystem_avail_bytes{fstype=~"ext.?|xfs"} / node_filesystem_size_bytes{fstype=~"ext.?|xfs"} * 100) > 90 and node_filesystem_avail_bytes{fstype=~"ext.?|xfs"}/1024/1024/1024 < 50) or 100 - node_filesystem_avail_bytes{fstype=~"ext.?|xfs"} / node_filesystem_size_bytes{fstype=~"ext.?|xfs"} * 100 > 95
+        for: 5m
+        labels:
+          severity: Warning
+        annotations:
+          description: "K8S：{{ $labels.__PROM_K8S_TAG_KEY__ }}：{{ $labels.instance }}\n- {{ $labels.mountpoint }}：磁盘使用率{{ $value | printf \"%.2f\" }}%"
+
+      - alert: 磁盘读写容量
+        expr: (irate(node_disk_read_bytes_total{}[5m]) ) /1024 /1024  > 80 or (irate(node_disk_written_bytes_total{}[5m]) ) /1024 /1024 > 120
+        for: 5m
+        labels:
+          severity: Warning
+        annotations:
+          description: "K8S：{{ $labels.__PROM_K8S_TAG_KEY__ }}：{{ $labels.instance }}\n- {{ $labels.device }}：当前IO为{{ $value | printf \"%.2f\" }}MB/s"
+
+      - alert: 网络流入（下载）数据过多
+        expr: sum by(__PROM_K8S_TAG_KEY__,device,instance) (irate(node_network_receive_bytes_total{device!~'tap.*|veth.*|br.*|docker.*|virbr.*|lo.*|cni.*'}[5m])) / 1024 / 1024 > 120
+        for: 5m
+        labels:
+          severity: Notice
+        annotations:
+          description: "K8S：{{ $labels.__PROM_K8S_TAG_KEY__ }}：{{ $labels.instance }}\n- 流入数据为{{ $value | printf \"%.2f\" }}MB/s"
+
+      - alert: 网络流出（上传）数据过多
+        expr: sum by(__PROM_K8S_TAG_KEY__,device,instance) (irate(node_network_transmit_bytes_total{device!~'tap.*|veth.*|br.*|docker.*|virbr.*|lo.*|cni.*'}[5m])) / 1024 / 1024 > 120
+        for: 5m
+        labels:
+          severity: Notice
+        annotations:
+          description: "K8S：{{ $labels.__PROM_K8S_TAG_KEY__ }}：{{ $labels.instance }}\n- 流出数据为{{ $value | printf \"%.2f\" }}MB/s"
+
+  record.yaml: |-
+    groups:
+    - name: node_usage_record_rules
+      interval: 1m
+      rules:
+      - record: cpu:usage:rate1m
+        expr: (1 - avg(irate(node_cpu_seconds_total{mode="idle"}[3m])) by (__PROM_K8S_TAG_KEY__,instance,job)) * 100
+      - record: mem:usage:rate1m
+        expr: (1 - node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes) * 100
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vmalert
+  namespace: __NAMESPACE__
+  labels:
+    app: vmalert
+    app.kubernetes.io/part-of: kubedoor
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: vmalert
+  template:
+    metadata:
+      labels:
+        app: vmalert
+    spec:
+      containers:
+        - name: vmalert
+          image: '__IMAGE_VMALERT__'
+          imagePullPolicy: Always
+          args:
+            - '-datasource.url=__PROM_URL__'
+            - '-remoteWrite.url=__PROM_URL__'
+            - '-remoteRead.url=__PROM_URL__'
+            - '-notifier.url=http://alertmanager.__NAMESPACE__:9093'
+            - -rule=/etc/ruler/*.yaml
+            - -evaluationInterval=15s
+            - -httpListenAddr=0.0.0.0:8080
+          env:
+            - name: TZ
+              value: Asia/Shanghai
+          ports:
+            - name: http
+              containerPort: 8080
+          volumeMounts:
+            - name: ruler
+              mountPath: /etc/ruler/
+              readOnly: true
+          resources:
+            limits:
+              cpu: "2"
+              memory: 2Gi
+            requests:
+              cpu: 100m
+              memory: 256Mi
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 10
+            periodSeconds: 10
+      volumes:
+        - name: ruler
+          configMap:
+            name: vmalert-config
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: vmalert
+  namespace: __NAMESPACE__
+  labels:
+    app: vmalert
+spec:
+  # NodePort 端口随机分配,用于排查规则状态:
+  #   kubectl -n __NAMESPACE__ get svc vmalert
+  type: NodePort
+  ports:
+    - name: vmalert
+      port: 8080
+      targetPort: 8080
+  selector:
+    app: vmalert

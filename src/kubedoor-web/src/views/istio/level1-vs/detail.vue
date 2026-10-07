@@ -63,7 +63,7 @@
             class="cluster-item"
             :class="{ editing: isEditingClusters }"
           >
-            <div v-if="temp_isEditingClusters" class="cluster-actions">
+            <div v-if="isEditingClusters" class="cluster-actions">
               <el-button
                 type="danger"
                 size="small"
@@ -440,7 +440,10 @@
         <el-row :gutter="20">
           <el-col :span="10">
             <el-form-item label="路由名称" prop="name">
-              <el-input v-model="createRouteForm.name" placeholder="选填" />
+              <el-input
+                v-model.trim="createRouteForm.name"
+                placeholder="选填"
+              />
             </el-form-item>
           </el-col>
           <el-col :span="7">
@@ -457,7 +460,7 @@
           <el-col :span="7">
             <el-form-item label="超时时间" prop="timeout">
               <el-input
-                v-model="createRouteForm.timeout"
+                v-model.trim="createRouteForm.timeout"
                 placeholder="10s (选填)"
               />
             </el-form-item>
@@ -505,7 +508,7 @@
                   </el-col>
                   <el-col :span="15">
                     <el-input
-                      v-model="rule.uri.value"
+                      v-model.trim="rule.uri.value"
                       :disabled="!rule.uri.enabled"
                       placeholder="URI值"
                     />
@@ -534,7 +537,7 @@
                   </el-col>
                   <el-col :span="15">
                     <el-input
-                      v-model="rule.authority.value"
+                      v-model.trim="rule.authority.value"
                       :disabled="!rule.authority.enabled"
                       placeholder="Domain值"
                     />
@@ -560,7 +563,7 @@
                         <el-row :gutter="10">
                           <el-col :span="6">
                             <el-input
-                              v-model="header.key"
+                              v-model.trim="header.key"
                               placeholder="Header Key"
                             />
                           </el-col>
@@ -577,7 +580,7 @@
                           </el-col>
                           <el-col :span="8">
                             <el-input
-                              v-model="header.value"
+                              v-model.trim="header.value"
                               placeholder="Header Value"
                             />
                           </el-col>
@@ -633,7 +636,7 @@
                 </el-col>
                 <el-col :span="16">
                   <el-input
-                    v-model="createRouteForm.rewrite_rules.uri"
+                    v-model.trim="createRouteForm.rewrite_rules.uri"
                     :disabled="!createRouteForm.rewrite_rules.enabled"
                     placeholder="重写后的URI"
                   />
@@ -775,7 +778,7 @@
                             label="Subset"
                           />
                           <el-input
-                            v-model="detail.subset.value"
+                            v-model.trim="detail.subset.value"
                             :disabled="!detail.subset.enabled"
                             placeholder="subset值"
                             style="flex: 1"
@@ -822,7 +825,7 @@
                             style="margin-top: 1px"
                           />
                           <el-input
-                            v-model="detail.headers.value"
+                            v-model.trim="detail.headers.value"
                             :disabled="!detail.headers.enabled"
                             type="textarea"
                             :rows="1"
@@ -853,7 +856,7 @@
             <el-col :span="12">
               <el-form-item label="VS名称" prop="delegate_name">
                 <el-input
-                  v-model="createRouteForm.delegate_name"
+                  v-model.trim="createRouteForm.delegate_name"
                   placeholder="请输入下级VS的名称"
                 />
               </el-form-item>
@@ -861,7 +864,7 @@
             <el-col :span="12">
               <el-form-item label="命名空间" prop="delegate_namespace">
                 <el-input
-                  v-model="createRouteForm.delegate_namespace"
+                  v-model.trim="createRouteForm.delegate_namespace"
                   placeholder="请输入下级VS的命名空间"
                 />
               </el-form-item>
@@ -901,7 +904,7 @@
         <el-row :gutter="20">
           <el-col :span="10">
             <el-form-item label="路由名称" prop="name">
-              <el-input v-model="editRouteForm.name" placeholder="选填" />
+              <el-input v-model.trim="editRouteForm.name" placeholder="选填" />
             </el-form-item>
           </el-col>
           <el-col :span="7">
@@ -909,7 +912,6 @@
               <el-input-number
                 v-model="editRouteForm.priority"
                 :min="1"
-                :max="1000"
                 placeholder="选填"
                 style="width: 100%"
               />
@@ -918,8 +920,8 @@
           <el-col :span="7">
             <el-form-item label="超时时间" prop="timeout">
               <el-input
-                v-model="editRouteForm.timeout"
-                placeholder="10s (选填)"
+                v-model.trim="editRouteForm.timeout"
+                placeholder="7s (选填)"
               />
             </el-form-item>
           </el-col>
@@ -966,7 +968,7 @@
                   </el-col>
                   <el-col :span="15">
                     <el-input
-                      v-model="rule.uri.value"
+                      v-model.trim="rule.uri.value"
                       :disabled="!rule.uri.enabled"
                       placeholder="URI值"
                     />
@@ -995,7 +997,7 @@
                   </el-col>
                   <el-col :span="15">
                     <el-input
-                      v-model="rule.authority.value"
+                      v-model.trim="rule.authority.value"
                       :disabled="!rule.authority.enabled"
                       placeholder="Domain值"
                     />
@@ -1021,7 +1023,7 @@
                         <el-row :gutter="10">
                           <el-col :span="6">
                             <el-input
-                              v-model="header.key"
+                              v-model.trim="header.key"
                               placeholder="Header Key"
                             />
                           </el-col>
@@ -1038,7 +1040,7 @@
                           </el-col>
                           <el-col :span="8">
                             <el-input
-                              v-model="header.value"
+                              v-model.trim="header.value"
                               placeholder="Header Value"
                             />
                           </el-col>
@@ -1094,7 +1096,7 @@
                 </el-col>
                 <el-col :span="16">
                   <el-input
-                    v-model="editRouteForm.rewrite_rules.uri"
+                    v-model.trim="editRouteForm.rewrite_rules.uri"
                     :disabled="!editRouteForm.rewrite_rules.enabled"
                     placeholder="重写后的URI"
                   />
@@ -1236,7 +1238,7 @@
                             label="Subset"
                           />
                           <el-input
-                            v-model="detail.subset.value"
+                            v-model.trim="detail.subset.value"
                             :disabled="!detail.subset.enabled"
                             placeholder="subset值"
                             style="flex: 1"
@@ -1283,7 +1285,7 @@
                             style="margin-top: 1px"
                           />
                           <el-input
-                            v-model="detail.headers.value"
+                            v-model.trim="detail.headers.value"
                             :disabled="!detail.headers.enabled"
                             type="textarea"
                             :rows="1"
@@ -1314,7 +1316,7 @@
             <el-col :span="12">
               <el-form-item label="VS名称" prop="delegate_name">
                 <el-input
-                  v-model="editRouteForm.delegate_name"
+                  v-model.trim="editRouteForm.delegate_name"
                   placeholder="请输入下级VS的名称"
                 />
               </el-form-item>
@@ -1322,7 +1324,7 @@
             <el-col :span="12">
               <el-form-item label="命名空间" prop="delegate_namespace">
                 <el-input
-                  v-model="editRouteForm.delegate_namespace"
+                  v-model.trim="editRouteForm.delegate_namespace"
                   placeholder="请输入下级VS的命名空间"
                 />
               </el-form-item>
@@ -1706,6 +1708,80 @@ const editHostInputVisible = ref(false);
 const editHostInputValue = ref("");
 const editHostInputRef = ref();
 
+// Istio timeout 必须是 Go duration 格式（带单位后缀），纯数字（如 7）会被 Istio 拒绝导致下发无效
+const TIMEOUT_PATTERN = /^\d+(\.\d+)?(ns|us|µs|ms|s|m|h)$/;
+
+// 超时时间格式校验器（选填；填了则必须带单位后缀）
+const validateTimeoutRule = (_rule: any, value: string, callback: any) => {
+  const v = (value || "").trim();
+  if (!v) {
+    callback();
+    return;
+  }
+  if (!TIMEOUT_PATTERN.test(v)) {
+    callback(
+      new Error("超时时间必须带单位后缀，如 10s、1m、500ms，不能是纯数字")
+    );
+    return;
+  }
+  callback();
+};
+
+// 校验路由的业务规则：匹配规则至少一条有效、转发目标信息完整
+// 返回错误信息字符串；校验通过返回 null
+const validateRouteBusinessRules = (form: any): string | null => {
+  // 1. 匹配规则：至少要有一条有效条件（URI / Authority / Headers）
+  const hasValidMatch = (form.match_rules || []).some((rule: any) => {
+    const uriOk = rule.uri?.enabled && (rule.uri.value || "").trim();
+    const authOk =
+      rule.authority?.enabled && (rule.authority.value || "").trim();
+    const headerOk =
+      rule.headers?.enabled &&
+      (rule.headers.items || []).some(
+        (h: any) => (h.key || "").trim() && (h.value || "").trim()
+      );
+    return uriOk || authOk || headerOk;
+  });
+  if (!hasValidMatch) {
+    return "请至少填写一条有效的匹配规则（URI / Authority / Headers）";
+  }
+
+  // 2. 转发详情
+  if (form.forward_type === "route") {
+    const details = form.forward_detail || [];
+    let validCount = 0;
+    for (let i = 0; i < details.length; i++) {
+      const d = details[i];
+      const hasService = !!(d.service && String(d.service).trim());
+      const hasNamespace = !!(d.namespace && String(d.namespace).trim());
+      const hasPort = d.port !== null && d.port !== undefined && d.port !== "";
+      // 完全空的目标跳过（视为用户未填的多余行）
+      if (!hasService && !hasNamespace && !hasPort) continue;
+      // 部分填写视为不完整，明确报错而不是静默丢弃
+      if (!hasService || !hasNamespace || !hasPort) {
+        const missing: string[] = [];
+        if (!hasService) missing.push("服务名");
+        if (!hasNamespace) missing.push("命名空间");
+        if (!hasPort) missing.push("端口");
+        return `转发目标 ${i + 1} 信息不完整，缺少：${missing.join("、")}`;
+      }
+      validCount++;
+    }
+    if (validCount === 0) {
+      return "请至少完整填写一个转发目标（服务名、命名空间、端口）";
+    }
+  } else if (form.forward_type === "delegate") {
+    if (
+      !(form.delegate_name || "").trim() ||
+      !(form.delegate_namespace || "").trim()
+    ) {
+      return "委托模式下请填写下级VS的名称和命名空间";
+    }
+  }
+
+  return null;
+};
+
 // 编辑VirtualService表单数据
 const editVSForm = ref({
   id: "",
@@ -1740,7 +1816,8 @@ const editVSFormRules = {
   ],
   route_port: [{ required: true, message: "请输入端口号", trigger: "blur" }],
   df_forward_timeout: [
-    { required: true, message: "请输入默认超时", trigger: "blur" }
+    { required: true, message: "请输入默认超时", trigger: "blur" },
+    { validator: validateTimeoutRule, trigger: "blur" }
   ],
   delegate_name: [{ required: true, message: "请输入VS名称", trigger: "blur" }],
   delegate_namespace: [
@@ -1787,6 +1864,7 @@ const createRouteForm = ref({
 
 // 表单验证规则
 const createRouteFormRules = {
+  timeout: [{ validator: validateTimeoutRule, trigger: "blur" }],
   forward_type: [
     { required: true, message: "请选择转发类型", trigger: "change" }
   ],
@@ -1808,6 +1886,7 @@ const currentEditRouteIndex = ref(-1);
 const editRouteForm = ref({
   name: "",
   priority: null,
+  timeout: "",
   match_rules: [
     {
       uri: { enabled: false, type: "prefix", value: "" },
@@ -1822,7 +1901,6 @@ const editRouteForm = ref({
     enabled: false,
     uri: ""
   },
-  timeout: "",
   forward_type: "",
   forward_detail: [
     {
@@ -1843,6 +1921,7 @@ const editRouteForm = ref({
 
 // 编辑路由表单验证规则
 const editRouteFormRules = {
+  timeout: [{ validator: validateTimeoutRule, trigger: "blur" }],
   forward_type: [
     { required: true, message: "请选择转发类型", trigger: "change" }
   ],
@@ -2419,6 +2498,13 @@ const handleCreateRoute = async () => {
   try {
     const valid = await createRouteFormRef.value.validate();
     if (!valid) return;
+
+    // 业务规则校验：匹配规则/转发目标完整性，避免静默丢弃导致下发无效
+    const bizError = validateRouteBusinessRules(createRouteForm.value);
+    if (bizError) {
+      ElMessage.warning(bizError);
+      return;
+    }
 
     createRouteLoading.value = true;
 
@@ -3123,6 +3209,13 @@ const handleEditRoute = async () => {
   try {
     const valid = await editRouteFormRef.value.validate();
     if (!valid) return;
+
+    // 业务规则校验：匹配规则/转发目标完整性，避免静默丢弃导致改动不生效
+    const bizError = validateRouteBusinessRules(editRouteForm.value);
+    if (bizError) {
+      ElMessage.warning(bizError);
+      return;
+    }
 
     editRouteLoading.value = true;
 

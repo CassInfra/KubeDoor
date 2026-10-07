@@ -1,0 +1,63 @@
+# =============================================================================
+# KubeDoor 数据库 —— PostgreSQL 18(独立部署,不进 K8S)
+#
+# 用法:
+#   cd deploy/postgres
+#   cp .env.example .env && vi .env        # 至少改 PG_PASSWORD
+#   docker compose up -d
+#   docker compose logs -f postgres        # 看到 "database system is ready" 即可
+#
+# 说明:
+#   - 表结构由 kubedoor-master 启动时自动创建(见 src/kubedoor-master/db.sql),
+#     这里只负责把库、账号和内核参数准备好。不需要任何扩展。
+#   - 数据放在 docker 命名卷 kubedoor-pgdata 里。要换成宿主机目录,把下面的
+#     pgdata 换成绝对路径即可。
+#   - initdb/ 下的脚本只在数据目录为空(首次启动)时执行一次。
+# =============================================================================
+
+name: kubedoor-postgres
+
+services:
+  postgres:
+    # 默认用国内镜像仓库(官方 postgres:18-alpine 的同步,只有 amd64),
+    # 海外或内网私有仓库可在 .env 里用 PG_IMAGE 覆盖。
+    #
+    # 固定大版本,不要换成浮动的 alpine / latest 标签。18 起官方镜像的数据目录按大版本区分
+    # (/var/lib/postgresql/18/docker),等 19 发布后浮动标签会指向 19,新容器找不到
+    # 18 的数据,会初始化出一个空库。跨大版本升级要走 pg_upgrade 或导出导入。
+    image: ${PG_IMAGE:-registry.cn-shenzhen.aliyuncs.com/starsl/postgres:18-alpine}
+    container_name: kubedoor-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${PG_USER:-kubedoor}
+      POSTGRES_PASSWORD: ${PG_PASSWORD:?请先在 .env 中设置 PG_PASSWORD}
+      POSTGRES_DB: ${PG_DATABASE:-kubedoor}
+      # 远程访问用 scram-sha-256 认证(master/alarm 从 K8S 里连过来)
+      POSTGRES_HOST_AUTH_METHOD: scram-sha-256
+      TZ: ${TZ:-Asia/Shanghai}
+    ports:
+      - "${PG_BIND_ADDR:-0.0.0.0}:${PG_PORT:-5432}:5432"
+    volumes:
+      # 18 起官方镜像的卷挂载点是 /var/lib/postgresql,不再是老版本的 .../data
+      - pgdata:/var/lib/postgresql
+      - ./initdb:/docker-entrypoint-initdb.d:ro
+    # 并行查询要用共享内存,docker 默认的 64MB 偏小
+    shm_size: ${PG_SHM_SIZE:-1gb}
+    stop_grace_period: 1m
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - pg_isready -U "${PG_USER:-kubedoor}" -d "${PG_DATABASE:-kubedoor}" || exit 1
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 60s
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "5"
+
+volumes:
+  pgdata:
+    name: kubedoor-pgdata

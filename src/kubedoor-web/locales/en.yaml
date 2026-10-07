@@ -78,6 +78,7 @@ menus:
   alarm: Monitor Alarm
   alarmStatistics: Alarm Statistics
   alarmDetail: Alarm Detail
+  alarmSilence: Alarm Silence
   peakResources: Peak Resources
   resourceManagement: Resource Management
   resourceCollection: Resource Collection
@@ -158,10 +159,12 @@ resource:
     envPct: EnvPCT
     updateAi: UpdateAI
     p95PodQps: P95PodQPS
-    p95PodMemPct: P95PodMemPCT
+    p95PodMemPct: P80PodMemPCT
     p95PodQpsAi: P95PodQPSAI
-    p95PodCpuPct: P95PodCPUPCT
-    p95PodWssPct: P95PodWSSPCT
+    p95PodCpuPct: P80PodCPUPCT
+    p95PodWssPct: P80PodWSSPCT
+    p95PodHeapPct: P95podHeap%
+    p95PodG1EPct: P95podG1E%
     p95PodG1gcQps: P95PodG1GCQPS
     p95PodG1gcQpsAi: P95PodG1GCQPSAI
     p95PodLoad: P95PodLoad
@@ -184,6 +187,7 @@ resource:
     futureTime: Select a time in the future
     cron: Cron is required
     greaterThanZero: Must be greater than or equal -1
+    podCountManualNoFallback: Cannot be -1 for a service added manually or without peak data yet; enter a Pod count (0 = do not start Pods)
   message:
     createSuccess: Created successfully
     createFailed: Created failed

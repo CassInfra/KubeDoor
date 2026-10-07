@@ -56,7 +56,10 @@ interface SortState {
 }
 
 const pageSizeOptions = [50, 100, 200, 500, 1000];
-const defaultSort: SortState = { prop: "p95_pod_cpu_pct", order: "descending" };
+const defaultSort: { prop: string; order: Exclude<SortOrder, ""> } = {
+  prop: "p95_pod_cpu_pct",
+  order: "descending"
+};
 const pagination = reactive({
   currentPage: 1,
   pageSize: pageSizeOptions[0],
@@ -244,7 +247,7 @@ watch(
         <template #title>
           <div class="ml-[-17px]">
             <el-alert
-              :title="`标红字段数据为：最近10天最大资源使用日(${maxDay})高峰时段各资源P95数值(该值会应用到需求值)。(-1为未配置)`"
+              :title="`标红字段来自最近10天最大资源使用日(${maxDay})的高峰数据。CPU、内存采用P80，堆内存和G1 Eden Space使用率采用P95；CPU/内存用量用于计算需求值，堆内存和G1 Eden Space使用率仅展示。(-1为未配置，-为无JVM使用率数据)`"
               type="warning"
               show-icon
               :closable="false"

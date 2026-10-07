@@ -1,4 +1,5 @@
 from datetime import datetime
+import json
 import yaml
 
 from aiohttp import web
@@ -126,12 +127,13 @@ async def get_service_content(core_v1, request):
         if not all([namespace, service_name]):
             return web.json_response({"error": "缺少必要参数: namespace, service_name"}, status=400)
 
-        # 获取Service对象
-        service = await core_v1.read_namespaced_service(name=service_name, namespace=namespace)
-
-        # 使用async with确保ApiClient正确关闭
-        async with client.ApiClient() as api_client:
-            service_dict = api_client.sanitize_for_serialization(service)
+        # 获取Service对象：使用 _preload_content=False 获取原始 JSON 响应，
+        # 避免 kubernetes 强类型模型在反序列化时丢弃模型未定义的非标准字段
+        response = await core_v1.read_namespaced_service(
+            name=service_name, namespace=namespace, _preload_content=False
+        )
+        raw_data = await response.read()
+        service_dict = json.loads(raw_data)
 
         # 清理不需要的字段
         if 'metadata' in service_dict and 'managedFields' in service_dict['metadata']:

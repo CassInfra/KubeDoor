@@ -21,6 +21,8 @@ interface AlarmDetailParams {
   startTime?: string;
   namespace?: string;
   pod?: string;
+  /** "1" 只看已屏蔽，"0" 只看未屏蔽，不传则不过滤 */
+  silenced?: string;
   page: number;
   pageSize: number;
 }
@@ -34,65 +36,20 @@ interface AlarmDetailTotalParams {
   startTime?: string;
   namespace?: string;
   pod?: string;
+  silenced?: string;
 }
 
 export const getEnv = () => {
-  return http.request<ResultTable>("post", "/api/sql", {
-    params: {
-      add_http_cors_header: 1,
-      default_format: "JSONCompact"
-    },
-    data: "SELECT DISTINCT env from __KUBEDOORDB__.k8s_pod_alert_days order by env",
-    headers: {
-      "Content-Type": "text/plain;charset=UTF-8"
-    }
-  });
+  return http.request<ResultTable>("get", "/api/db/alert/envs");
 };
 
 export const getAlertName = () => {
-  return http.request<ResultTable>("post", "/api/sql", {
-    params: {
-      add_http_cors_header: 1,
-      default_format: "JSONCompact"
-    },
-    data: "SELECT DISTINCT alert_name from __KUBEDOORDB__.k8s_pod_alert_days order by alert_name",
-    headers: {
-      "Content-Type": "text/plain;charset=UTF-8"
-    }
-  });
+  return http.request<ResultTable>("get", "/api/db/alert/names");
 };
 
 export const getAlarmTotal = (env?: string, startTime?: string) => {
-  const conditions = [];
-  if (env) {
-    conditions.push(`env = '${env}'`);
-  }
-  if (startTime) {
-    conditions.push(`start_time >= '${startTime}'`);
-  }
-
-  const whereClause =
-    conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";
-
-  return http.request<ResultTable>("post", "/api/sql", {
-    params: {
-      add_http_cors_header: 1,
-      default_format: "JSONCompact"
-    },
-    data: `
-      SELECT 
-        alert_name,
-        COUNT(*) as total,
-        COUNT(CASE WHEN alert_status = 'firing' THEN 1 END) as firing_count,
-        COUNT(CASE WHEN alert_status = 'resolved' THEN 1 END) as resolved_count,
-        any(severity) as severity
-      FROM __KUBEDOORDB__.k8s_pod_alert_days 
-      ${whereClause} 
-      GROUP BY alert_name
-      ORDER BY LENGTH(severity) DESC, firing_count DESC`,
-    headers: {
-      "Content-Type": "text/plain;charset=UTF-8"
-    }
+  return http.request<ResultTable>("post", "/api/db/alert/total", {
+    data: { env, startTime }
   });
 };
 
@@ -105,55 +62,23 @@ export const getAlarmDetail = ({
   startTime,
   namespace,
   pod,
+  silenced,
   page,
   pageSize
 }: AlarmDetailParams) => {
-  const conditions = [];
-
-  if (alertName && alertName.length > 0) {
-    conditions.push(`alert_name IN ('${alertName.join("','")}')`);
-  }
-  if (env && env.length > 0) {
-    conditions.push(`env IN ('${env.join("','")}')`);
-  }
-  if (operate) {
-    conditions.push(`operate = '${operate}'`);
-  }
-  if (status && status.length > 0) {
-    conditions.push(`alert_status IN ('${status.join("','")}')`);
-  }
-  if (severity && severity.length > 0) {
-    conditions.push(`severity IN ('${severity.join("','")}')`);
-  }
-  if (startTime) {
-    conditions.push(`start_time >= '${startTime}'`);
-  }
-  if (namespace) {
-    conditions.push(`namespace = '${namespace}'`);
-  }
-  if (pod) {
-    conditions.push(`pod = '${pod}'`);
-  }
-
-  const whereClause =
-    conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";
-  const offset = (page - 1) * pageSize;
-
-  return http.request<ResultTable>("post", "/api/sql", {
-    params: {
-      add_http_cors_header: 1,
-      default_format: "JSONCompact"
-    },
-    data: `
-      SELECT 
-        *
-      FROM __KUBEDOORDB__.k8s_pod_alert_days 
-      ${whereClause} 
-      ORDER BY start_time DESC
-      LIMIT ${pageSize}
-      OFFSET ${offset}`,
-    headers: {
-      "Content-Type": "text/plain;charset=UTF-8"
+  return http.request<ResultTable>("post", "/api/db/alert/detail", {
+    data: {
+      alertName,
+      env,
+      operate,
+      status,
+      severity,
+      startTime,
+      namespace,
+      pod,
+      silenced,
+      page,
+      pageSize
     }
   });
 };
@@ -166,50 +91,20 @@ export const getAlarmDetailTotal = ({
   severity,
   startTime,
   namespace,
-  pod
+  pod,
+  silenced
 }: AlarmDetailTotalParams) => {
-  const conditions = [];
-
-  if (alertName && alertName.length > 0) {
-    conditions.push(`alert_name IN ('${alertName.join("','")}')`);
-  }
-  if (env && env.length > 0) {
-    conditions.push(`env IN ('${env.join("','")}')`);
-  }
-  if (operate) {
-    conditions.push(`operate = '${operate}'`);
-  }
-  if (status && status.length > 0) {
-    conditions.push(`alert_status IN ('${status.join("','")}')`);
-  }
-  if (severity && severity.length > 0) {
-    conditions.push(`severity IN ('${severity.join("','")}')`);
-  }
-  if (startTime) {
-    conditions.push(`start_time >= '${startTime}'`);
-  }
-  if (namespace) {
-    conditions.push(`namespace = '${namespace}'`);
-  }
-  if (pod) {
-    conditions.push(`pod = '${pod}'`);
-  }
-
-  const whereClause =
-    conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";
-
-  return http.request<ResultTable>("post", "/api/sql", {
-    params: {
-      add_http_cors_header: 1,
-      default_format: "JSONCompact"
-    },
-    data: `
-      SELECT 
-        COUNT(*) as total
-      FROM __KUBEDOORDB__.k8s_pod_alert_days 
-      ${whereClause}`,
-    headers: {
-      "Content-Type": "text/plain;charset=UTF-8"
+  return http.request<ResultTable>("post", "/api/db/alert/detail_total", {
+    data: {
+      alertName,
+      env,
+      operate,
+      status,
+      severity,
+      startTime,
+      namespace,
+      pod,
+      silenced
     }
   });
 };
@@ -282,17 +177,11 @@ interface UpdateOperateParams {
 
 // 修改operate状态
 export const updateOperate = (params: UpdateOperateParams) => {
-  return http.request<ResultTable>("post", "/api/sql", {
-    params: {
-      add_http_cors_header: 1,
-      default_format: "JSONCompact"
-    },
-    data: `ALTER TABLE __KUBEDOORDB__.k8s_pod_alert_days 
-           UPDATE operate = '${params.operate}'
-           WHERE start_time = '${params.start_time}'
-           AND fingerprint = '${params.fingerprint}'`,
-    headers: {
-      "Content-Type": "text/plain;charset=UTF-8"
+  return http.request<ResultTable>("post", "/api/db/alert/operate", {
+    data: {
+      operate: params.operate,
+      fingerprint: params.fingerprint,
+      start_time: params.start_time
     }
   });
 };
@@ -301,12 +190,32 @@ export interface EventMenuParams {
   k8s: string;
   start_time: string;
   end_time: string;
+  limit?: number;
   namespace?: string; // 可选参数
+  level?: string;
+  count?: number;
+  message?: string;
 }
+
+// K8S事件菜单返回的数据结构（各字段为可选字符串数组）
+export interface EventMenuData {
+  namespace?: string[];
+  kind?: string[];
+  name?: string[];
+  reason?: string[];
+  reportingComponent?: string[];
+  reportingInstance?: string[];
+}
+
+type EventMenuResult = {
+  success: boolean;
+  data?: EventMenuData;
+  count?: any;
+};
 
 // 获取K8S事件菜单
 export const getEventsMenu = (params: EventMenuParams) => {
-  return http.request<ResultTable>("get", "/api/events/menu", {
+  return http.request<EventMenuResult>("get", "/api/events/menu", {
     params
   });
 };

@@ -38,13 +38,15 @@ class ScaleService:
         scheduler = request.query.get("scheduler", "false")
         cci = request.query.get("cci", "false")
         error_list = []
+        deployment_list = request_info.get('deployment_list', [])
 
-        for index, deployment in enumerate(request_info.get('deployment_list', [])):
+        for index, deployment in enumerate(deployment_list):
             namespace = deployment.get("namespace")
             deployment_name = deployment.get("deployment_name")
             num = deployment.get("num")
             job_name = deployment.get("job_name")
             job_type = deployment.get("job_type")
+            local_max_num = deployment.get("local_max_num")
             logger.info(f"【{namespace}】【{deployment_name}】: {num}")
             nodes = await self.core_v1.list_node()
 
@@ -78,7 +80,7 @@ class ScaleService:
                             {"message": f"【{namespace}】【{deployment_name}】副本数不能超过节点总数"},
                             status=500,
                         )
-                    node_cpu_list = request_info[0].get("node_cpu_list")
+                    node_cpu_list = deployment.get("node_cpu_list")
                     logger.info(f"节点{res_type}情况: {node_cpu_list}")
                     logger.info(f"扩缩容策略：根据【节点{res_type}】情况，执行扩容，目标副本数: {num}")
 
@@ -112,7 +114,7 @@ class ScaleService:
                         logger.info(f"已有{labeled_nodes_count}个节点有标签，无需再打标签")
 
                 elif num < current_replicas and add_label == 'true':
-                    node_cpu_list = request_info[0].get("node_cpu_list")
+                    node_cpu_list = deployment.get("node_cpu_list")
                     logger.info(f"节点CPU情况: {node_cpu_list}")
                     logger.info(f"执行缩容，目标副本数: {num}")
                     del_label_count = current_replicas - num
@@ -160,6 +162,7 @@ class ScaleService:
                         temp,
                         del_scale_temp,
                         add_label,
+                        local_max_num,
                     )
                 else:
                     deployment_obj = await patch_deployment_replicas_with_retry(
@@ -174,7 +177,7 @@ class ScaleService:
                         add_label,
                     )
 
-                if interval and index != len(request_info) - 1:
+                if interval and index != len(deployment_list) - 1:
                     logger.info(f"暂停 {interval}s...")
                     await asyncio.sleep(int(interval))
 

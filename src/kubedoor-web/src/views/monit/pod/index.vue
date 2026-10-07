@@ -24,14 +24,37 @@
           </el-select>
         </el-form-item>
 
+        <el-form-item label="节点">
+          <el-select
+            v-model="searchForm.nodeName"
+            placeholder="全部节点"
+            class="!w-[180px]"
+            filterable
+            clearable
+            :disabled="!searchForm.env"
+            @change="handleNodeChange"
+          >
+            <el-option
+              v-for="item in nodeOptions"
+              :key="item"
+              :label="item"
+              :value="item"
+            />
+          </el-select>
+        </el-form-item>
+
         <el-form-item label="命名空间">
           <div class="namespace-select-wrapper">
             <el-select
-              v-model="searchForm.namespace"
-              placeholder="请选择命名空间"
-              class="!w-[180px]"
+              v-model="searchForm.namespaces"
+              placeholder="全部命名空间"
+              class="!w-[220px]"
               filterable
               clearable
+              multiple
+              collapse-tags
+              collapse-tags-tooltip
+              :max-collapse-tags="2"
               :disabled="!envOptions.length"
               @change="handleNamespaceChange"
             >
@@ -379,11 +402,22 @@
                     <el-dropdown-menu>
                       <el-dropdown-item
                         @click="
+                          handleEditPod(
+                            searchForm.env,
+                            podScope.row.namespace,
+                            podScope.row.name
+                          )
+                        "
+                        >编辑</el-dropdown-item
+                      >
+                      <el-dropdown-item
+                        @click="
                           handleViewLogs(
                             searchForm.env,
                             podScope.row.namespace,
                             podScope.row.name,
-                            extractDeploymentName(podScope.row.controlled_by)
+                            extractDeploymentName(podScope.row.controlled_by),
+                            podScope.row.containers
                           )
                         "
                         >日志</el-dropdown-item
@@ -541,122 +575,70 @@
       </template>
     </el-dialog>
 
+    <!-- Pod编辑对话框 -->
     <el-dialog
-      v-model="logDialogVisible"
-      width="99%"
-      top="0.5vh"
-      :style="{ 'padding-top': '7px' }"
+      v-model="editDialogVisible"
+      title="编辑Pod"
+      width="95%"
+      top="2.5vh"
       :close-on-click-modal="false"
-      @close="stopLogStream"
+      destroy-on-close
     >
-      <template #header>
-        <div class="log-dialog-header">
-          <div class="log-controls-header">
+      <div class="edit-container">
+        <div class="yaml-editor-container">
+          <div class="editor-header">
+            <span class="editor-title">Pod YAML配置</span>
             <el-button
-              v-if="!isLogConnected"
               type="primary"
-              size="small"
-              :loading="logConnecting"
-              @click="startLogStream"
+              :loading="editSaveLoading"
+              @click="handleEditSave"
             >
-              开始查看日志
+              提交
             </el-button>
-            <el-button v-else type="danger" size="small" @click="stopLogStream">
-              停止查看
-            </el-button>
-            <el-button size="small" @click="clearLogs">清空日志</el-button>
-            <el-button size="small" @click="scrollToBottom"
-              >滚动到底部</el-button
-            >
-            <div class="log-status">
-              <span
-                :class="{
-                  'status-connected': isLogConnected,
-                  'status-disconnected': !isLogConnected
-                }"
-              >
-                {{ isLogConnected ? "已连接" : "未连接" }}
-              </span>
-            </div>
-            <div class="log-search-container">
-              <el-input
-                v-model="searchKeyword"
-                placeholder="搜索日志内容"
-                size="small"
-                style="width: 200px; margin-right: 8px"
-                @keyup.enter="() => performSearch(true)"
-              >
-                <template #append>
-                  <el-button size="small" @click="() => performSearch(true)">
-                    搜索
-                  </el-button>
-                </template>
-              </el-input>
-              <el-button
-                size="small"
-                :type="isFilterMode ? 'primary' : 'default'"
-                :disabled="!searchKeyword.trim() || totalMatches === 0"
-                @click="toggleFilterMode"
-              >
-                {{ isFilterMode ? "取消筛选" : "筛选" }}
-              </el-button>
-              <span v-if="totalMatches > 0" class="search-info">
-                {{ currentMatchIndex + 1 }}/{{ totalMatches }}
-              </span>
-              <el-button
-                size="small"
-                :disabled="totalMatches === 0"
-                @click="goToPreviousMatch"
-              >
-                上一个
-              </el-button>
-              <el-button
-                size="small"
-                :disabled="totalMatches === 0"
-                @click="goToNextMatch"
-              >
-                下一个
-              </el-button>
-              <el-button size="small" type="warning" @click="getPreviousLogs">
-                重启前日志
-              </el-button>
-            </div>
           </div>
-          <span class="dialog-title"
-            >Pod日志: {{ currentPodInfo.env }}【{{
-              currentPodInfo.namespace
-            }}】{{ currentPodInfo.name }}</span
-          >
-        </div>
-      </template>
-      <div class="log-container">
-        <div
-          ref="logContentRef"
-          v-loading="logConnecting"
-          class="log-content"
-          element-loading-text="正在连接日志流..."
-          @scroll="handleScroll"
-        >
-          <div v-if="logMessages.length === 0" class="no-logs">
-            暂无日志数据
-          </div>
-          <div
-            v-for="(message, index) in filteredLogMessages"
-            :key="getLogKey(message, index)"
-            class="log-line"
-            :class="{
-              'log-error':
-                message.includes('ERROR') || message.includes('Exception'),
-              'log-warn': message.includes('WARN'),
-              'log-info': message.includes('INFO')
-            }"
-            v-html="
-              highlightSearchKeyword(message, getOriginalIndex(message, index))
-            "
-          />
+          <div ref="editYamlEditorRef" class="yaml-editor" />
         </div>
       </div>
     </el-dialog>
+
+    <!-- 编辑更新方式选择弹框 -->
+    <el-dialog
+      v-model="editUpdateMethodDialogVisible"
+      title="选择更新方式"
+      width="400px"
+      :close-on-click-modal="false"
+    >
+      <div class="update-method-container">
+        <el-radio-group v-model="selectedEditUpdateMethod">
+          <el-radio value="apply">Apply - 应用配置（推荐）</el-radio>
+          <el-radio value="replace">Replace - 替换配置</el-radio>
+        </el-radio-group>
+        <div class="method-description">
+          <p v-if="selectedEditUpdateMethod === 'apply'">
+            Apply方式会智能合并配置，保留现有的其他字段，适用于大部分场景。
+          </p>
+          <p v-if="selectedEditUpdateMethod === 'replace'">
+            Replace方式会完全替换现有配置，请确保YAML包含所有必要字段。
+          </p>
+        </div>
+      </div>
+      <template #footer>
+        <span class="dialog-footer">
+          <el-button @click="editUpdateMethodDialogVisible = false"
+            >取消</el-button
+          >
+          <el-button
+            type="primary"
+            :loading="editSaveLoading"
+            @click="confirmEditUpdate"
+          >
+            确认更新
+          </el-button>
+        </span>
+      </template>
+    </el-dialog>
+
+    <PodLogViewer ref="logViewerRef" />
 
     <el-dialog
       v-model="resultDialogVisible"
@@ -703,16 +685,14 @@ import {
 import { ElMessage, ElMessageBox } from "element-plus";
 import type { TableInstance } from "element-plus";
 import { Refresh } from "@element-plus/icons-vue";
-import { AnsiUp } from "ansi_up";
 import dayjs from "dayjs";
 import { getAgentNames } from "@/api/istio";
 import {
   getPromNamespace,
-  getPodPreviousLogs,
   showAddLabel,
-  getNodeResourceRank,
-  createPodLogStreamUrl
+  getNodeResourceRank
 } from "@/api/monit";
+import { getNodesList } from "@/api/node";
 import {
   getPodList,
   deletePodsBatch,
@@ -728,8 +708,9 @@ import {
   autoJfr,
   autoJvmMem
 } from "@/api/alarm";
-import { updateServiceContent } from "@/api/service";
+import { updateServiceContent, getServiceContent } from "@/api/service";
 import { useSearchStoreHook } from "@/store/modules/search";
+import PodLogViewer from "@/views/monit/components/PodLogViewer.vue";
 import * as monaco from "monaco-editor";
 import * as yaml from "js-yaml";
 import { YAMLException } from "js-yaml";
@@ -740,7 +721,8 @@ defineOptions({
 
 interface SearchForm {
   env: string;
-  namespace: string;
+  nodeName: string;
+  namespaces: string[];
   keyword: string;
 }
 
@@ -748,11 +730,13 @@ const searchStore = useSearchStoreHook();
 
 const searchForm = reactive<SearchForm>({
   env: searchStore.env || "",
-  namespace: searchStore.namespace || "",
+  nodeName: "",
+  namespaces: searchStore.namespace ? [searchStore.namespace] : [],
   keyword: ""
 });
 
 const envOptions = ref<string[]>([]);
+const nodeOptions = ref<string[]>([]);
 const nsOptions = ref<string[]>([]);
 const nsRefreshing = ref(false);
 const tableData = ref<PodItem[]>([]);
@@ -778,38 +762,21 @@ const selectedCreateUpdateMethod = ref<"create" | "apply" | "replace">(
   "create"
 );
 
-const logDialogVisible = ref(false);
-const logMessages = ref<string[]>([]);
-const isLogConnected = ref(false);
-const logConnecting = ref(false);
-const logSocket = ref<WebSocket | null>(null);
-const logContentRef = ref<HTMLElement | null>(null);
-const isUserScrolling = ref(false);
+// 编辑对话框相关
+const editDialogVisible = ref(false);
+const editSaveLoading = ref(false);
+const editYamlEditorRef = ref<HTMLElement | null>(null);
+let editYamlEditor: monaco.editor.IStandaloneCodeEditor | null = null;
+const editUpdateMethodDialogVisible = ref(false);
+const selectedEditUpdateMethod = ref<"apply" | "replace">("apply");
+const currentEditPod = ref<{
+  env: string;
+  namespace: string;
+  name: string;
+} | null>(null);
 
-const currentPodInfo = ref({
-  name: "",
-  env: "",
-  namespace: "",
-  deployment: "",
-  originalDeployment: "",
-  controlledBy: ""
-});
-
-const searchKeyword = ref("");
-const searchMatches = ref<number[]>([]);
-const currentMatchIndex = ref(-1);
-const totalMatches = ref(0);
-const isFilterMode = ref(false);
-
-const filteredLogMessages = computed(() => {
-  if (!isFilterMode.value || !searchKeyword.value.trim()) {
-    return logMessages.value;
-  }
-  const keywordLower = searchKeyword.value.toLowerCase();
-  return logMessages.value.filter(message =>
-    message.toLowerCase().includes(keywordLower)
-  );
-});
+// 日志查看：统一使用 PodLogViewer 组件
+const logViewerRef = ref<InstanceType<typeof PodLogViewer> | null>(null);
 
 const resultDialogVisible = ref(false);
 const resultMessage = ref("");
@@ -1041,8 +1008,8 @@ const sortedTableData = computed(() => {
     ? columnComparators[sortField.value]
     : (a: PodItem, b: PodItem) =>
         defaultComparator(
-          (a as Record<string, unknown>)[sortField.value],
-          (b as Record<string, unknown>)[sortField.value]
+          (a as unknown as Record<string, unknown>)[sortField.value],
+          (b as unknown as Record<string, unknown>)[sortField.value]
         );
 
   const direction = sortOrder.value === "ascending" ? 1 : -1;
@@ -1141,7 +1108,12 @@ const deriveSchedulerDeploymentName = (
   return segments.length >= 2 ? segments.slice(0, -1).join("-") : podName;
 };
 
-const refreshPods = async () => {
+const refreshPods = async (targetNamespace?: string) => {
+  // 如果指定了目标命名空间，且当前是"全部命名空间"模式，则切换到目标命名空间
+  if (targetNamespace && searchForm.namespaces.length === 0) {
+    searchForm.namespaces = [targetNamespace];
+    searchStore.setNamespace(targetNamespace);
+  }
   lastFetchedEnv.value = null;
   lastFetchedNamespace.value = null;
   await fetchPods();
@@ -1167,15 +1139,6 @@ const handleModifyPod = async (
   try {
     const derivedDeployment = deriveSchedulerDeploymentName(pod, controlledBy);
     const effectiveDeployment = derivedDeployment || deployment || "";
-
-    currentPodInfo.value = {
-      name: pod,
-      env: env,
-      namespace: namespace,
-      deployment: effectiveDeployment,
-      originalDeployment: deployment || "",
-      controlledBy: controlledBy || ""
-    };
 
     const scalePodRef = ref(false);
     const addLabelRef = ref(false);
@@ -1582,7 +1545,7 @@ const handleModifyPod = async (
     if (res.success) {
       ElMessage.success("操作成功");
       showResultDialog(res.message, "modify");
-      await refreshPods();
+      await refreshPods(namespace);
     } else {
       ElMessage.error("操作失败");
     }
@@ -1629,8 +1592,10 @@ const handleBatchDelete = async () => {
     const res = await deletePodsBatch(searchForm.env, payload);
     if (res.success) {
       ElMessage.success(res.message || "批量删除Pod成功");
+      // 取第一个被删除Pod的命名空间作为目标命名空间
+      const targetNs = podsToDelete.length > 0 ? podsToDelete[0].ns : undefined;
       clearTableSelection();
-      await refreshPods();
+      await refreshPods(targetNs);
     } else {
       ElMessage.error(res.message || "批量删除Pod失败");
     }
@@ -1656,7 +1621,7 @@ const handleDeletePod = async (env: string, namespace: string, pod: string) => {
     });
     if (res.success) {
       ElMessage.success("操作成功");
-      await refreshPods();
+      await refreshPods(namespace);
     } else {
       ElMessage.error("操作失败");
     }
@@ -1765,347 +1730,20 @@ const handleAutoJvmMem = async (
   }
 };
 
-const handleViewLogs = async (
+const handleViewLogs = (
   env: string,
   namespace: string,
   pod: string,
-  deployment: string
+  deployment: string,
+  containers?: PodContainerStatus[]
 ) => {
-  currentPodInfo.value = {
-    name: pod,
+  logViewerRef.value?.openForPod({
     env,
     namespace,
     deployment,
-    originalDeployment: deployment,
-    controlledBy: ""
-  };
-
-  logMessages.value = [];
-  searchMatches.value = [];
-  currentMatchIndex.value = -1;
-  totalMatches.value = 0;
-  searchKeyword.value = "";
-  isFilterMode.value = false;
-
-  logDialogVisible.value = true;
-  document.body.style.overflow = "hidden";
-};
-
-const ansiUp = new AnsiUp();
-ansiUp.escape_html = true;
-ansiUp.use_classes = false;
-
-const convertAnsiToHtml = (message: string) => {
-  return ansiUp.ansi_to_html(message);
-};
-
-const getLogKey = (message: string, index: number) => {
-  if (isFilterMode.value) {
-    return `${message.slice(0, 50)}-${index}`;
-  }
-  return index;
-};
-
-const getOriginalIndex = (message: string, filteredIndex: number) => {
-  if (!isFilterMode.value) {
-    return filteredIndex;
-  }
-  return logMessages.value.findIndex(item => item === message);
-};
-
-const getFilteredIndex = (originalIndex: number) => {
-  if (!isFilterMode.value) {
-    return originalIndex;
-  }
-  const targetMessage = logMessages.value[originalIndex];
-  return filteredLogMessages.value.findIndex(msg => msg === targetMessage);
-};
-
-const highlightSearchKeyword = (message: string, originalIndex: number) => {
-  let processedMessage = convertAnsiToHtml(message);
-
-  if (!searchKeyword.value.trim()) {
-    return processedMessage;
-  }
-
-  const keyword = searchKeyword.value;
-  const keywordRegex = new RegExp(
-    `(${keyword.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")})`,
-    "gi"
-  );
-
-  const currentMatch =
-    currentMatchIndex.value >= 0 &&
-    searchMatches.value[currentMatchIndex.value] === originalIndex;
-
-  const highlightClass = currentMatch
-    ? "search-highlight-current"
-    : "search-highlight";
-
-  if (!message.toLowerCase().includes(keyword.toLowerCase())) {
-    return processedMessage;
-  }
-
-  return processedMessage.replace(
-    keywordRegex,
-    `<span class="${highlightClass}">$1</span>`
-  );
-};
-
-const clearLogs = () => {
-  logMessages.value = [];
-  searchMatches.value = [];
-  currentMatchIndex.value = -1;
-  totalMatches.value = 0;
-};
-
-const startLogStream = () => {
-  if (!currentPodInfo.value.env || !currentPodInfo.value.namespace) {
-    ElMessage.warning("缺少Pod信息，无法建立日志连接");
-    return;
-  }
-
-  if (logSocket.value) {
-    logSocket.value.close();
-    logSocket.value = null;
-  }
-
-  logConnecting.value = true;
-  isLogConnected.value = false;
-  logMessages.value = [];
-
-  const wsUrl = createPodLogStreamUrl(
-    currentPodInfo.value.env,
-    currentPodInfo.value.namespace,
-    currentPodInfo.value.name
-  );
-
-  try {
-    logSocket.value = new WebSocket(wsUrl);
-  } catch (error) {
-    console.error("创建WebSocket失败:", error);
-    logConnecting.value = false;
-    ElMessage.error("日志连接失败");
-    return;
-  }
-
-  logSocket.value.onopen = () => {
-    logConnecting.value = false;
-    isLogConnected.value = true;
-    ElMessage.success("日志连接成功");
-  };
-
-  logSocket.value.onmessage = event => {
-    if (event.data && event.data.trim()) {
-      logMessages.value.push(event.data);
-    }
-
-    if (logMessages.value.length > 1500) {
-      logMessages.value = logMessages.value.slice(-1200);
-    }
-
-    nextTick(() => {
-      if (!isUserScrolling.value || isAtBottom()) {
-        scrollToBottom();
-      }
-    });
-  };
-
-  logSocket.value.onerror = error => {
-    console.error("WebSocket错误:", error);
-    logConnecting.value = false;
-    isLogConnected.value = false;
-    ElMessage.error("日志连接失败");
-  };
-
-  logSocket.value.onclose = () => {
-    logConnecting.value = false;
-    isLogConnected.value = false;
-  };
-};
-
-const stopLogStream = () => {
-  if (logSocket.value) {
-    logSocket.value.close();
-    logSocket.value = null;
-  }
-  isLogConnected.value = false;
-};
-
-const scrollToBottom = () => {
-  if (logContentRef.value) {
-    logContentRef.value.scrollTop = logContentRef.value.scrollHeight;
-    isUserScrolling.value = false;
-  }
-};
-
-const isAtBottom = () => {
-  if (!logContentRef.value) return false;
-  const { scrollTop, scrollHeight, clientHeight } = logContentRef.value;
-  return scrollTop + clientHeight >= scrollHeight - 10;
-};
-
-const handleScroll = () => {
-  if (!logContentRef.value) return;
-  isUserScrolling.value = !isAtBottom();
-};
-
-const scrollToMatch = (originalIndex: number) => {
-  if (!logContentRef.value || originalIndex < 0) return;
-
-  const domIndex = isFilterMode.value
-    ? getFilteredIndex(originalIndex)
-    : originalIndex;
-
-  if (domIndex < 0) return;
-
-  const logLines = logContentRef.value.querySelectorAll(".log-line");
-  const targetElement = logLines[domIndex] as HTMLElement | undefined;
-  if (!targetElement) return;
-
-  const containerHeight = logContentRef.value.clientHeight;
-  const elementTop = targetElement.offsetTop;
-  const elementHeight = targetElement.offsetHeight;
-  const scrollTop = elementTop - containerHeight / 2 + elementHeight / 2;
-
-  logContentRef.value.scrollTo({
-    top: Math.max(0, scrollTop),
-    behavior: "smooth"
+    pod,
+    containers
   });
-};
-
-const performSearch = (forceFirstMatch = false) => {
-  if (!searchKeyword.value.trim()) {
-    searchMatches.value = [];
-    currentMatchIndex.value = -1;
-    totalMatches.value = 0;
-    return;
-  }
-
-  const keyword = searchKeyword.value.toLowerCase();
-
-  let currentMatchContent = "";
-  if (currentMatchIndex.value >= 0 && searchMatches.value.length > 0) {
-    const currentLineIndex = searchMatches.value[currentMatchIndex.value];
-    if (currentLineIndex < logMessages.value.length) {
-      currentMatchContent = logMessages.value[currentLineIndex];
-    }
-  }
-
-  const matches: number[] = [];
-  logMessages.value.forEach((message, index) => {
-    if (message.toLowerCase().includes(keyword)) {
-      matches.push(index);
-    }
-  });
-
-  searchMatches.value = matches;
-  totalMatches.value = matches.length;
-
-  if (matches.length === 0) {
-    currentMatchIndex.value = -1;
-    return;
-  }
-
-  let newMatchIndex = 0;
-  if (forceFirstMatch) {
-    newMatchIndex = 0;
-  } else if (currentMatchContent) {
-    const sameContentIndex = matches.findIndex(
-      index => logMessages.value[index] === currentMatchContent
-    );
-    if (sameContentIndex >= 0) {
-      newMatchIndex = sameContentIndex;
-    } else {
-      const prevIndex =
-        searchMatches.value[currentMatchIndex.value] ?? matches[0];
-      let closestIdx = 0;
-      let minDistance = Math.abs(matches[0] - prevIndex);
-      for (let i = 1; i < matches.length; i++) {
-        const distance = Math.abs(matches[i] - prevIndex);
-        if (distance < minDistance) {
-          minDistance = distance;
-          closestIdx = i;
-        }
-      }
-      newMatchIndex = closestIdx;
-    }
-  }
-
-  currentMatchIndex.value = newMatchIndex;
-  scrollToMatch(matches[newMatchIndex]);
-};
-
-const goToPreviousMatch = () => {
-  if (searchMatches.value.length === 0) return;
-  currentMatchIndex.value =
-    (currentMatchIndex.value - 1 + searchMatches.value.length) %
-    searchMatches.value.length;
-  scrollToMatch(searchMatches.value[currentMatchIndex.value]);
-};
-
-const goToNextMatch = () => {
-  if (searchMatches.value.length === 0) return;
-  currentMatchIndex.value =
-    (currentMatchIndex.value + 1) % searchMatches.value.length;
-  scrollToMatch(searchMatches.value[currentMatchIndex.value]);
-};
-
-const toggleFilterMode = () => {
-  if (!searchKeyword.value.trim()) return;
-  isFilterMode.value = !isFilterMode.value;
-  performSearch(true);
-};
-
-const getPreviousLogs = async () => {
-  if (
-    !currentPodInfo.value.name ||
-    !currentPodInfo.value.env ||
-    !currentPodInfo.value.namespace
-  ) {
-    ElMessage.warning("缺少Pod信息，无法获取重启前日志");
-    return;
-  }
-
-  try {
-    stopLogStream();
-    clearLogs();
-    logConnecting.value = true;
-
-    const data = await getPodPreviousLogs(
-      currentPodInfo.value.env,
-      currentPodInfo.value.namespace,
-      currentPodInfo.value.name,
-      400
-    );
-
-    if (data.success && data.message) {
-      logMessages.value = data.message
-        .split("\n")
-        .filter(line => line.trim() !== "");
-      ElMessage.success("重启前日志获取成功");
-      nextTick(() => scrollToBottom());
-    } else {
-      ElMessage.warning(data.message || "获取重启前日志失败");
-    }
-  } catch (error: any) {
-    console.error("获取重启前日志失败:", error);
-    ElMessage.error(`获取重启前日志失败: ${error?.message || error}`);
-  } finally {
-    logConnecting.value = false;
-  }
-};
-
-const closeLogDialog = () => {
-  stopLogStream();
-  clearLogs();
-  searchKeyword.value = "";
-  isFilterMode.value = false;
-  const container = logContentRef.value;
-  if (container) {
-    container.removeEventListener("scroll", handleScroll);
-  }
-  document.body.style.overflow = "";
 };
 
 const getStatusTagType = (status: string) => {
@@ -2218,25 +1856,141 @@ const confirmCreateUpdate = async () => {
   }
 };
 
+// 初始化编辑YAML编辑器
+const initEditYamlEditor = async () => {
+  if (!editYamlEditorRef.value) return;
+  if (editYamlEditor) {
+    editYamlEditor.dispose();
+  }
+  editYamlEditor = monaco.editor.create(editYamlEditorRef.value, {
+    value: "",
+    language: "yaml",
+    theme: "vs-dark",
+    automaticLayout: true,
+    minimap: { enabled: false },
+    scrollBeyondLastLine: false,
+    wordWrap: "on",
+    fontSize: 14,
+    lineNumbers: "on",
+    folding: true,
+    selectOnLineNumbers: true,
+    roundedSelection: false,
+    readOnly: false,
+    cursorStyle: "line"
+  });
+};
+
+// 处理编辑Pod
+const handleEditPod = async (env: string, namespace: string, name: string) => {
+  if (!env || !namespace || !name) {
+    ElMessage.error("缺少编辑Pod所需信息");
+    return;
+  }
+  currentEditPod.value = { env, namespace, name };
+  editDialogVisible.value = true;
+
+  await nextTick();
+  await initEditYamlEditor();
+
+  try {
+    const res = await getServiceContent(env, namespace, name, "pod");
+    if (res.success && res.data) {
+      if (editYamlEditor) {
+        editYamlEditor.setValue(res.data);
+      }
+    }
+  } catch (error) {
+    console.error("获取Pod内容失败:", error);
+    ElMessage.error("获取Pod内容失败");
+  }
+};
+
+// 处理编辑保存 - 显示更新方式选择弹框
+const handleEditSave = async () => {
+  if (!editYamlEditor || !currentEditPod.value) {
+    ElMessage.error("编辑器未初始化或未选择Pod");
+    return;
+  }
+
+  const yamlContent = editYamlEditor.getValue();
+  if (!yamlContent.trim()) {
+    ElMessage.error("YAML内容不能为空");
+    return;
+  }
+
+  try {
+    yaml.load(yamlContent);
+    selectedEditUpdateMethod.value = "apply";
+    editUpdateMethodDialogVisible.value = true;
+  } catch (error) {
+    console.error("YAML格式验证失败:", error);
+    if (error instanceof YAMLException) {
+      ElMessage.error(`YAML格式错误: ${error.message}`);
+    } else {
+      ElMessage.error("YAML格式验证失败");
+    }
+  }
+};
+
+// 确认编辑更新
+const confirmEditUpdate = async () => {
+  if (!editYamlEditor || !currentEditPod.value) {
+    ElMessage.error("编辑器未初始化或未选择Pod");
+    return;
+  }
+
+  const yamlContent = editYamlEditor.getValue();
+
+  try {
+    editSaveLoading.value = true;
+    const res = await updateServiceContent(
+      currentEditPod.value.env,
+      selectedEditUpdateMethod.value,
+      yamlContent
+    );
+
+    if (res.success) {
+      ElMessage.success(`Pod ${selectedEditUpdateMethod.value} 更新成功`);
+      editUpdateMethodDialogVisible.value = false;
+      editDialogVisible.value = false;
+      await fetchPods();
+    } else {
+      ElMessage.error(
+        res.message || `Pod ${selectedEditUpdateMethod.value} 更新失败`
+      );
+    }
+  } catch (error) {
+    console.error("更新Pod失败:", error);
+    ElMessage.error("更新Pod失败");
+  } finally {
+    editSaveLoading.value = false;
+  }
+};
+
 const handleEnvChange = async (value: string) => {
   searchForm.env = value;
   searchStore.setEnv(value || "");
-  searchForm.namespace = "";
-  searchStore.setNamespace("");
-  searchForm.keyword = "";
-  appliedKeyword.value = "";
+  searchForm.nodeName = "";
   tableData.value = [];
   lastFetchedEnv.value = null;
   lastFetchedNamespace.value = null;
   resetPagination();
   clearSortState();
   clearTableSelection();
-  await fetchNamespaceOptions(value);
+  await Promise.all([fetchNodeOptions(value), fetchNamespaceOptions(value)]);
 };
 
-const handleNamespaceChange = (value: string) => {
-  searchForm.namespace = value || "";
-  searchStore.setNamespace(searchForm.namespace);
+const handleNodeChange = () => {
+  tableData.value = [];
+  resetPagination();
+  clearSortState();
+  clearTableSelection();
+};
+
+const handleNamespaceChange = (value: string[]) => {
+  searchForm.namespaces = value || [];
+  // 存储第一个选中的命名空间到 store（兼容其他页面）
+  searchStore.setNamespace(value.length > 0 ? value[0] : "");
   tableData.value = [];
   lastFetchedNamespace.value = null;
   resetPagination();
@@ -2265,10 +2019,10 @@ const handleNamespaceRefresh = async () => {
 const handleQuery = async () => {
   appliedKeyword.value = searchForm.keyword.trim();
   resetPagination();
-  const normalizedNamespace = searchForm.namespace || "";
+  const normalizedNamespaces = searchForm.namespaces.join(",");
   const shouldFetch =
     lastFetchedEnv.value !== searchForm.env ||
-    lastFetchedNamespace.value !== normalizedNamespace ||
+    lastFetchedNamespace.value !== normalizedNamespaces ||
     tableData.value.length === 0;
 
   if (shouldFetch) {
@@ -2281,6 +2035,21 @@ const handleRefresh = async () => {
   await fetchPods();
 };
 
+const fetchNodeOptions = async (env: string) => {
+  if (!env) {
+    nodeOptions.value = [];
+    searchForm.nodeName = "";
+    return;
+  }
+  try {
+    const res = await getNodesList(env, true);
+    nodeOptions.value = res.data || [];
+  } catch (error) {
+    console.error("获取节点列表失败:", error);
+    nodeOptions.value = [];
+  }
+};
+
 const fetchEnvOptions = async () => {
   try {
     const res = await getAgentNames();
@@ -2289,8 +2058,9 @@ const fetchEnvOptions = async () => {
     if (!options.length) {
       searchForm.env = "";
       searchStore.setEnv("");
+      nodeOptions.value = [];
       nsOptions.value = [];
-      searchForm.namespace = "";
+      searchForm.namespaces = [];
       searchStore.setNamespace("");
       return;
     }
@@ -2300,7 +2070,10 @@ const fetchEnvOptions = async () => {
       searchStore.setEnv(searchForm.env);
     }
 
-    await fetchNamespaceOptions(searchForm.env);
+    await Promise.all([
+      fetchNodeOptions(searchForm.env),
+      fetchNamespaceOptions(searchForm.env)
+    ]);
   } catch (error) {
     console.error("获取K8S环境列表失败:", error);
     ElMessage.error("获取K8S环境列表失败");
@@ -2313,7 +2086,7 @@ const fetchNamespaceOptions = async (
 ): Promise<boolean> => {
   if (!env) {
     nsOptions.value = [];
-    searchForm.namespace = "";
+    searchForm.namespaces = [];
     searchStore.setNamespace("");
     return false;
   }
@@ -2323,26 +2096,34 @@ const fetchNamespaceOptions = async (
     nsOptions.value = options;
 
     if (!options.length) {
-      searchForm.namespace = "";
+      searchForm.namespaces = [];
       searchStore.setNamespace("");
       return true;
     }
 
-    if (!options.includes(searchForm.namespace)) {
-      if (searchStore.namespace && options.includes(searchStore.namespace)) {
-        searchForm.namespace = searchStore.namespace;
-      } else {
-        searchForm.namespace = options[0];
-      }
+    // 过滤掉不存在的命名空间
+    const validNamespaces = searchForm.namespaces.filter(ns =>
+      options.includes(ns)
+    );
+    if (
+      validNamespaces.length === 0 &&
+      searchStore.namespace &&
+      options.includes(searchStore.namespace)
+    ) {
+      searchForm.namespaces = [searchStore.namespace];
+    } else {
+      searchForm.namespaces = validNamespaces;
     }
 
-    searchStore.setNamespace(searchForm.namespace || "");
+    searchStore.setNamespace(
+      searchForm.namespaces.length > 0 ? searchForm.namespaces[0] : ""
+    );
     return true;
   } catch (error) {
     console.error("获取命名空间列表失败:", error);
     ElMessage.error("获取命名空间列表失败");
     nsOptions.value = [];
-    searchForm.namespace = "";
+    searchForm.namespaces = [];
     searchStore.setNamespace("");
     return false;
   }
@@ -2357,11 +2138,12 @@ const fetchPods = async () => {
   try {
     const res = await getPodList(
       searchForm.env,
-      searchForm.namespace || undefined
+      searchForm.namespaces.length > 0 ? searchForm.namespaces : undefined,
+      searchForm.nodeName || undefined
     );
     tableData.value = res.data || [];
     lastFetchedEnv.value = searchForm.env;
-    lastFetchedNamespace.value = searchForm.namespace || "";
+    lastFetchedNamespace.value = searchForm.namespaces.join(",");
     clearTableSelection();
   } catch (error) {
     console.error("获取Pod列表失败:", error);
@@ -2386,30 +2168,16 @@ watch(createDialogVisible, visible => {
   }
 });
 
-watch(logDialogVisible, visible => {
-  if (visible) {
-    nextTick(() => {
-      if (logContentRef.value) {
-        logContentRef.value.addEventListener("scroll", handleScroll);
-      }
-    });
-  } else {
-    closeLogDialog();
+watch(editDialogVisible, visible => {
+  if (!visible && editYamlEditor) {
+    editYamlEditor.dispose();
+    editYamlEditor = null;
   }
-});
-
-watch(
-  logMessages,
-  () => {
-    if (searchKeyword.value.trim()) {
-      performSearch();
-    }
-  },
-  { deep: true }
-);
-
-onBeforeUnmount(() => {
-  closeLogDialog();
+  if (!visible) {
+    editSaveLoading.value = false;
+    editUpdateMethodDialogVisible.value = false;
+    currentEditPod.value = null;
+  }
 });
 </script>
 
@@ -2567,127 +2335,6 @@ onBeforeUnmount(() => {
   font-size: 14px;
   line-height: 1.5;
   color: #606266;
-}
-
-.log-container {
-  display: flex;
-  flex-direction: column;
-  height: 92vh;
-}
-
-.log-dialog-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  width: 100%;
-  min-height: 28px;
-  padding: 4px 0;
-  margin: 0;
-}
-
-.dialog-title {
-  font-size: 12px;
-  font-weight: 600;
-  color: #303133;
-}
-
-.log-controls-header {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 4px;
-  align-items: center;
-}
-
-.log-controls-header .el-button {
-  height: 24px !important;
-  padding: 4px 8px !important;
-  font-size: 11px !important;
-}
-
-.log-status {
-  display: flex;
-  gap: 6px;
-  align-items: center;
-  margin-left: 12px;
-}
-
-.status-connected {
-  font-weight: 600;
-  color: #67c23a;
-}
-
-.status-disconnected {
-  font-weight: 600;
-  color: #f56c6c;
-}
-
-.log-search-container {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-  align-items: center;
-}
-
-.search-info {
-  font-size: 12px;
-  color: #909399;
-}
-
-.log-content {
-  flex: 1;
-  padding: 16px;
-  overflow-y: auto;
-  font-family: Consolas, Monaco, "Courier New", monospace;
-  font-size: 13px;
-  line-height: 1.4;
-  color: #d4d4d4;
-  word-break: break-all;
-  white-space: pre-wrap;
-  background-color: #1e1e1e;
-  border-radius: 4px;
-}
-
-.no-logs {
-  padding: 40px 0;
-  font-size: 14px;
-  color: #909399;
-  text-align: center;
-}
-
-.log-line {
-  padding: 2px 4px;
-  margin-bottom: 2px;
-}
-
-.log-error {
-  color: #f56c6c;
-  background-color: rgb(245 108 108 / 10%);
-  border-radius: 2px;
-}
-
-.log-warn {
-  color: #e6a23c;
-  background-color: rgb(230 162 60 / 10%);
-  border-radius: 2px;
-}
-
-.log-info {
-  color: #409eff;
-}
-
-.search-highlight {
-  padding: 0 2px;
-  color: #fff;
-  background: rgb(247 186 29 / 40%);
-  border-radius: 2px;
-}
-
-.search-highlight-current {
-  padding: 0 2px;
-  color: #fff;
-  background: rgb(64 158 255 / 60%);
-  border-radius: 2px;
-  box-shadow: 0 0 0 1px rgb(64 158 255 / 80%);
 }
 
 .result-content {

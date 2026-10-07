@@ -1,28 +1,48 @@
 import { http } from "@/utils/http";
+import { getCached, setCache } from "@/utils/cache";
 
 type ResultTable = {
   success: boolean;
   data?: Array<any>;
   meta?: Array<any>;
   pods?: Array<any>;
+  message?: string;
   count: any;
 };
 
 /**
- * 获取K8S环境列表
+ * 获取K8S环境列表（缓存5分钟）
  */
-export const getPromEnv = () => {
-  return http.request<ResultTable>("get", "/api/prom_env");
+export const getPromEnv = async () => {
+  const cacheKey = "prom_env";
+  const cached = getCached<ResultTable>(cacheKey);
+  if (cached) return cached;
+
+  const result = await http.request<ResultTable>("get", "/api/prom_env");
+  if (result.success) setCache(cacheKey, result);
+  return result;
 };
 
 /**
- * 获取命名空间列表
+ * 获取命名空间列表（缓存5分钟，flush=true时跳过缓存）
  * @param env K8S环境
  */
-export const getPromNamespace = (env: string, flush?: boolean) => {
-  return http.request<ResultTable>("get", "/api/agent/namespaces", {
-    params: { env, flush }
-  });
+export const getPromNamespace = async (env: string, flush?: boolean) => {
+  const cacheKey = `namespaces_${env}`;
+  if (!flush) {
+    const cached = getCached<ResultTable>(cacheKey);
+    if (cached) return cached;
+  }
+
+  const result = await http.request<ResultTable>(
+    "get",
+    "/api/agent/namespaces",
+    {
+      params: { env, flush }
+    }
+  );
+  if (result.success) setCache(cacheKey, result);
+  return result;
 };
 
 /**
@@ -56,40 +76,29 @@ export const getPromQueryData = (env: string, ns?: string) => {
  * @param env K8S环境
  * @param namespace 命名空间
  * @param deployment 部署名称
+ * @param options.silent 后台刷新:不显示进度条、出错不弹提示
  */
 export const getPodData = (
   env: string,
   namespace: string,
-  deployment: string
+  deployment: string,
+  options?: { silent?: boolean }
 ) => {
-  return http.request<ResultTable>("get", "/api/get_dpm_pods", {
-    params: { env, namespace, deployment }
-  });
+  return http.request<ResultTable>(
+    "get",
+    "/api/get_dpm_pods",
+    { params: { env, namespace, deployment } },
+    { silent: options?.silent }
+  );
 };
 
 export const updatePodCount = (data?: any) => {
-  return http.request<any>("post", "/api/sql", {
-    params: {
-      add_http_cors_header: 1,
-      default_format: "JSONCompact"
-    },
-    data: `ALTER TABLE __KUBEDOORDB__.k8s_res_control UPDATE pod_count_manual=${data.pod_count_manual} WHERE env = '${data.env}' AND namespace='${data.namespace}' AND deployment='${data.deployment_name}' `,
-    headers: {
-      "Content-Type": "text/plain;charset=UTF-8"
-    }
-  });
+  return http.request<any>("post", "/api/db/res/pod_count", { data });
 };
 // 获取是否显示"已开启固定节点均衡模式"
 export const showAddLabel = (env: string, namespace: string) => {
-  return http.request<any>("post", "/api/sql", {
-    params: {
-      add_http_cors_header: 1,
-      default_format: "JSONCompact"
-    },
-    data: `SELECT 1 FROM __KUBEDOORDB__.k8s_agent_status where env = '${env}' and admission = 1 and scheduler = 1 and admission_namespace like '%"${namespace}"%' `,
-    headers: {
-      "Content-Type": "text/plain;charset=UTF-8"
-    }
+  return http.request<any>("get", "/api/db/agent/show_add_label", {
+    params: { env, namespace }
   });
 };
 
@@ -112,20 +121,61 @@ export const getPodPreviousLogs = (
 };
 
 /**
+ * 下载Pod完整日志（返回gzip压缩文件，超时5分钟）
+ * @param env K8S环境
+ * @param namespace 命名空间
+ * @param podName Pod名称
+ * @param container 容器名称（可选）
+ */
+export const downloadPodLogs = (
+  env: string,
+  namespace: string,
+  podName: string,
+  container?: string
+) => {
+  const params: Record<string, any> = { env, ns: namespace, pod: podName };
+  if (container) {
+    params.container = container;
+  }
+  return http.request<Blob>("get", "/api/pod/download_logs", {
+    params,
+    timeout: 300000,
+    responseType: "blob"
+  });
+};
+
+/**
  * 创建Pod日志流WebSocket连接URL
  * @param env K8S环境
  * @param namespace 命名空间
  * @param podName Pod名称
+ * @param container 容器名称（可选）
  * @returns WebSocket连接URL
  */
 export const createPodLogStreamUrl = (
   env: string,
   namespace: string,
-  podName: string
+  podName: string,
+  container?: string
 ) => {
   const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
   const host = window.location.host;
-  return `${protocol}//${host}/ws/pod-logs?env=${env}&namespace=${namespace}&pod_name=${podName}`;
+  let url = `${protocol}//${host}/ws/pod-logs?env=${env}&namespace=${namespace}&pod_name=${podName}`;
+  if (container) {
+    url += `&container=${container}`;
+  }
+  return url;
+};
+
+/**
+ * Deployment/Pod 实时状态推送的 WebSocket 地址
+ * @param env K8S环境
+ * @param namespace 命名空间,空表示全部
+ */
+export const createWorkloadStreamUrl = (env: string, namespace: string) => {
+  const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+  const query = `env=${encodeURIComponent(env)}&namespace=${encodeURIComponent(namespace)}`;
+  return `${protocol}//${window.location.host}/ws/workload-status?${query}`;
 };
 
 /**
@@ -164,4 +214,24 @@ export const getNodeResourceRank = (
   return http.request<ResultTable>("get", "/api/prom_node_rank", {
     params
   });
+};
+
+/**
+ * 获取CCI ScheduleProfile信息
+ * @param env K8S环境
+ * @param namespace 命名空间
+ * @param deployment 微服务名称
+ */
+export const getCciScheduleProfile = (
+  env: string,
+  namespace: string,
+  deployment: string
+) => {
+  return http.request<{ exists: boolean; maxNum: number }>(
+    "get",
+    "/api/cci/schedule-profile",
+    {
+      params: { env, namespace, deployment }
+    }
+  );
 };

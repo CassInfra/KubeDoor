@@ -1,0 +1,10 @@
+httpx==0.28.1
+fastmcp==4.0.11
+deepagents==0.7.21
+langchain-openai==1.6.7
+langchain-deepseek==1.1.1
+langgraph-checkpoint-postgres==3.1.2
+psycopg[binary,pool]==3.3.6
+asyncpg==0.31.0
+cryptography==50.0.2
+uvicorn==0.54.0

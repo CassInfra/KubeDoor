@@ -1,0 +1,133 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: kubedoor-master
+  namespace: __NAMESPACE__
+  labels:
+    app: kubedoor-master
+    app.kubernetes.io/part-of: kubedoor
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: kubedoor-master
+  strategy:
+    # master 持有 agent 的 WebSocket 长连接,滚动更新期间不并存两个实例,
+    # 避免 agent 在新旧实例之间反复重连
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app: kubedoor-master
+    spec:
+      containers:
+        - name: kubedoor-master
+          image: '__IMAGE_REPO__/kubedoor-master:__TAG_MASTER__'
+          imagePullPolicy: Always
+          envFrom:
+            - configMapRef:
+                name: kubedoor-config
+          env:
+            - name: TZ
+              value: Asia/Shanghai
+            - name: AI_INTERNAL_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: kubedoor-ai-security
+                  key: AI_INTERNAL_TOKEN
+          ports:
+            - name: http
+              containerPort: 80
+          volumeMounts:
+            - name: kubedoor-master-file-cfg
+              mountPath: /k8s_event/rules
+          resources:
+            limits:
+              cpu: "2"
+              memory: 2Gi
+            requests:
+              cpu: 100m
+              memory: 256Mi
+          livenessProbe:
+            tcpSocket:
+              port: 80
+            # 启动时要建连接池 + 建表,给足 60s 再开始探活
+            initialDelaySeconds: 60
+            timeoutSeconds: 3
+            periodSeconds: 10
+            failureThreshold: 3
+          readinessProbe:
+            tcpSocket:
+              port: 80
+            initialDelaySeconds: 10
+            timeoutSeconds: 3
+            periodSeconds: 10
+            failureThreshold: 3
+      restartPolicy: Always
+      volumes:
+        - name: kubedoor-master-file-cfg
+          configMap:
+            name: kubedoor-master-file-cfg
+            items:
+              - key: alert_rules.json
+                path: alert_rules.json
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: kubedoor-master
+  namespace: __NAMESPACE__
+  labels:
+    app: kubedoor-master
+spec:
+  type: ClusterIP
+  ports:
+    - name: http
+      protocol: TCP
+      port: 80
+      targetPort: 80
+  selector:
+    app: kubedoor-master
+
+---
+# 每天北京时间 01:00 触发一次高峰期资源数据采集,结果写入 PostgreSQL 的 k8s_resources
+# timeZone 需要 K8S 1.25+;install.sh 检测到更老的集群会去掉 BEGIN/END-CRON-TZ 之间这一行,
+# 此时按 CronJob 控制器的时区执行
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: kubedoor-collect
+  namespace: __NAMESPACE__
+  labels:
+    app.kubernetes.io/part-of: kubedoor
+spec:
+  schedule: "0 1 * * *"
+  # BEGIN-CRON-TZ
+  timeZone: Asia/Shanghai
+  # END-CRON-TZ
+  concurrencyPolicy: Forbid
+  suspend: false
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 2
+      template:
+        spec:
+          restartPolicy: Never
+          containers:
+            - name: kubedoor-collect
+              image: '__IMAGE_BUSYBOX_CURL__'
+              imagePullPolicy: Always
+              command:
+                - /bin/sh
+                - -c
+                - curl -sf --max-time 1800 'http://kubedoor-master.__NAMESPACE__/api/cron_peak_data'
+              resources:
+                limits:
+                  cpu: 200m
+                  memory: 128Mi
+                requests:
+                  cpu: 10m
+                  memory: 16Mi

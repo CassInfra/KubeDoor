@@ -1,0 +1,94 @@
+# AI/Skills 运行时与外部 MCP 共用此服务和工具网关。
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: kubedoor-ai
+  namespace: __NAMESPACE__
+  labels:
+    app: kubedoor-ai
+    app.kubernetes.io/part-of: kubedoor
+spec:
+  replicas: 1
+  # 单实例恢复同一数据库的会话状态，更新时先停止旧 Pod。
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: kubedoor-ai
+  template:
+    metadata:
+      labels:
+        app: kubedoor-ai
+    spec:
+      containers:
+        - name: kubedoor-ai
+          image: '__IMAGE_REPO__/kubedoor-ai:__TAG_AI__'
+          imagePullPolicy: Always
+          envFrom:
+            - configMapRef:
+                name: kubedoor-config
+          env:
+            - name: AI_INTERNAL_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: kubedoor-ai-security
+                  key: AI_INTERNAL_TOKEN
+            - name: AI_ENCRYPTION_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: kubedoor-ai-security
+                  key: AI_ENCRYPTION_KEY
+            - name: TZ
+              value: Asia/Shanghai
+            - name: MASTER_URL
+              value: 'http://kubedoor-master.__NAMESPACE__'
+            - name: ENABLE_MCP
+              value: '__ENABLE_MCP__'
+            - name: KUBEDOOR_EXTURL
+              value: '__KUBEDOOR_EXTURL__'
+          ports:
+            - name: http
+              containerPort: 8000
+          resources:
+            limits:
+              cpu: "2"
+              memory: 2Gi
+            requests:
+              cpu: 10m
+              memory: 256Mi
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 15
+            timeoutSeconds: 2
+            periodSeconds: 10
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 5
+            timeoutSeconds: 2
+            periodSeconds: 10
+            failureThreshold: 3
+      restartPolicy: Always
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: kubedoor-ai
+  namespace: __NAMESPACE__
+  labels:
+    app: kubedoor-ai
+spec:
+  # AI 与外部 MCP 通过 kubedoor-web 统一认证访问，无需单独对外暴露
+  type: ClusterIP
+  ports:
+    - name: http
+      protocol: TCP
+      port: 8000
+      targetPort: 8000
+  selector:
+    app: kubedoor-ai

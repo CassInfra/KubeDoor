@@ -10,8 +10,10 @@ import uvicorn
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 import asyncio
 from datetime import datetime, timedelta
+import gzip
+import json
 from fastapi import FastAPI, BackgroundTasks, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel
 from typing import List
 
@@ -193,14 +195,16 @@ async def scale_deployment_via_api(
     """
     try:
         # 构造请求数据，格式与kubedoor-agent.py中scale函数期望的格式一致
-        request_data = [
-            {
-                "namespace": ns,
-                "deployment_name": deployment_name,
-                "num": new_replicas,
-                "node_cpu_list": body_data,
-            }
-        ]
+        request_data = {
+            "deployment_list": [
+                {
+                    "namespace": ns,
+                    "deployment_name": deployment_name,
+                    "num": new_replicas,
+                    "node_cpu_list": body_data,
+                }
+            ]
+        }
 
         # 调用kubedoor-agent的scale接口
         # kubedoor-agent运行在443端口（HTTPS）
@@ -807,6 +811,60 @@ async def get_pod_logs(env: str, ns: str, pod: str, lines: int = 100):
     except ApiException as e:
         logger.exception(f"获取Pod日志时出现异常: {e}")
         return JSONResponse(status_code=500, content={"message": f"获取Pod日志失败: {str(e)}"})
+
+
+@app.get("/api/pod/download_logs")
+async def download_pod_logs(env: str, ns: str, pod: str, container: str = None):
+    """
+    下载Pod完整日志（gzip压缩文件，超时5分钟）
+    参数:
+    - env: 环境
+    - ns: 命名空间
+    - pod: Pod名称
+    - container: 容器名称（可选）
+    """
+    try:
+        async with K8sClientManager() as k8s_manager:
+            v1 = k8s_manager.core_v1
+
+            # 检查pod是否存在
+            try:
+                await v1.read_namespaced_pod(name=pod, namespace=ns, _request_timeout=30)
+            except Exception as e:
+                error_msg = f"在命名空间 [{ns}] 中未找到pod [{pod}]"
+                logger.error(error_msg)
+                return JSONResponse(status_code=500, content={"message": error_msg, "success": False})
+
+            # 获取pod全部日志（不限制行数，超时5分钟）
+            logs = await v1.read_namespaced_pod_log(
+                name=pod,
+                namespace=ns,
+                container=container if container else None,
+                _request_timeout=300
+            )
+
+            # gzip压缩日志内容
+            compressed = gzip.compress(logs.encode("utf-8"))
+
+            # 生成文件名
+            from datetime import datetime
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            container_suffix = f"_{container}" if container else ""
+            filename = f"{pod}{container_suffix}_{timestamp}.log.gz"
+
+            return Response(
+                content=compressed,
+                media_type="application/gzip",
+                headers={
+                    "Content-Disposition": f'attachment; filename="{filename}"'
+                }
+            )
+    except ApiException as e:
+        logger.exception(f"下载Pod日志时出现异常: {e}")
+        return JSONResponse(status_code=500, content={"message": f"下载Pod日志失败: {str(e)}", "success": False})
+    except Exception as e:
+        logger.exception(f"下载Pod日志时出现未知异常: {e}")
+        return JSONResponse(status_code=500, content={"message": f"下载Pod日志失败: {str(e)}", "success": False})
 
 
 @app.get("/api/pod/get_previous_logs")

@@ -1,16 +1,30 @@
-FROM registry.cn-shenzhen.aliyuncs.com/starsl/python:3.11-alpine
+FROM registry.cn-shenzhen.aliyuncs.com/starsl/python:3.14-alpine
+ARG TARGETARCH
+ARG KUBECTL_VERSION=v1.37.1
+ARG KUBECTL_SHA256
+ARG ISTIO_VERSION=1.31.1
+ARG YQ_VERSION=v4.54.1
+ARG PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple/
+ENV PIP_INDEX_URL=${PIP_INDEX_URL} \
+    PIP_EXTRA_INDEX_URL="" \
+    PIP_CONFIG_FILE=/dev/null \
+    PIP_DISABLE_PIP_VERSION_CHECK=1
 
 # 设置工作目录
 WORKDIR /app
 
-COPY requirements.txt .
+COPY src/kubedoor-agent/requirements.txt .
 
-RUN pip install --no-cache-dir -r requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple/
+RUN pip install --no-cache-dir -r requirements.txt
 
 # 安装 runit 和其他必要工具
-RUN sed -i 's/dl-cdn.alpinelinux.org/repo.huaweicloud.com/g' /etc/apk/repositories && apk add --no-cache runit bash
+RUN sed -i 's/dl-cdn.alpinelinux.org/repo.huaweicloud.com/g' /etc/apk/repositories && apk add --no-cache runit bash curl jq bind-tools openssl ripgrep ca-certificates coreutils
+COPY deploy/tools/install-ai-tools.sh /tmp/install-ai-tools.sh
+RUN sh /tmp/install-ai-tools.sh && rm /tmp/install-ai-tools.sh
+COPY src/kubedoor-tools /opt/kubedoor-tools
+RUN pip install --no-cache-dir /opt/kubedoor-tools
 
-ADD . /app/
+COPY src/kubedoor-agent /app/
 
 # 创建服务目录
 RUN mkdir -p /etc/service/kubedoor-agent /etc/service/pod-mgr

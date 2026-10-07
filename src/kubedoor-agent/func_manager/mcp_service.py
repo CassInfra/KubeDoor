@@ -1,5 +1,8 @@
+import asyncio
 import json
-from datetime import timedelta, timezone
+import time
+from collections import Counter
+from datetime import datetime
 
 from aiohttp import web
 from kubernetes_asyncio.client import AppsV1Api, CoreV1Api, CustomObjectsApi
@@ -7,13 +10,61 @@ from kubernetes_asyncio.client.rest import ApiException
 from loguru import logger
 
 import utils
+from func_manager import workload_status
+from k8s_client_manager import list_all_raw
+from res_manager.pod_manager import _list_pod_metrics
+
+METRICS_TTL = 10
+METRICS_TIMEOUT = 3
+EVENT_LOOKUP_LIMIT = 20
+EVENT_LOOKUP_CONCURRENCY = 5
+
+
+def _isoformat(value):
+    """K8S 的 RFC3339 时间 → datetime.isoformat()(如 2026-10-05T12:00:00+00:00,和原来模型对象的输出一致)"""
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00")).isoformat()
+    except (TypeError, ValueError):
+        return value
+
+
+def _render_events(events):
+    """原始 JSON 的事件列表 → 接口响应(JSON 文本)。纯 CPU 计算,调用方放到线程里执行"""
+    event_list = []
+    for event in events:
+        meta = event.get("metadata") or {}
+        involved = event.get("involvedObject") or {}
+        source = event.get("source")
+        event_list.append(
+            {
+                "name": meta.get("name"),
+                "namespace": meta.get("namespace"),
+                "type": event.get("type"),
+                "reason": event.get("reason"),
+                "message": event.get("message"),
+                "involved_object": {
+                    "kind": involved.get("kind"),
+                    "name": involved.get("name"),
+                    "namespace": involved.get("namespace"),
+                },
+                "count": event.get("count"),
+                "first_timestamp": _isoformat(event.get("firstTimestamp")),
+                "last_timestamp": _isoformat(event.get("lastTimestamp")),
+                "source": {"component": source.get("component"), "host": source.get("host")} if source is not None else None,
+            }
+        )
+    return json.dumps({"events": event_list, "success": True})
 
 
 class MCPService:
-    def __init__(self, core_v1_api: CoreV1Api, custom_api: CustomObjectsApi, apps_v1_api: AppsV1Api):
+    def __init__(self, core_v1_api: CoreV1Api, custom_api: CustomObjectsApi, apps_v1_api: AppsV1Api, workload_cache=None):
         self.core_v1 = core_v1_api
         self.custom_api = custom_api
         self.apps_v1 = apps_v1_api
+        self.workload_cache = workload_cache
+        self._metrics_cache = {}  # namespace -> (过期时间, {"ns/name": {"cpu_m", "memory_mb"}})
 
     async def get_namespace_events(self, request):
         """获取指定命名空间的事件，如果不指定namespace则获取所有命名空间的事件"""
@@ -27,33 +78,12 @@ class MCPService:
             else:
                 logger.info("获取所有命名空间的事件")
 
-            events = await self.core_v1.list_event_for_all_namespaces(field_selector=field_selector, _request_timeout=30)
-
-            event_list = []
-            for event in events.items:
-                event_list.append(
-                    {
-                        "name": event.metadata.name,
-                        "namespace": event.metadata.namespace,
-                        "type": event.type,
-                        "reason": event.reason,
-                        "message": event.message,
-                        "involved_object": {
-                            "kind": event.involved_object.kind,
-                            "name": event.involved_object.name,
-                            "namespace": event.involved_object.namespace,
-                        },
-                        "count": event.count,
-                        "first_timestamp": (event.first_timestamp.isoformat() if event.first_timestamp else None),
-                        "last_timestamp": (event.last_timestamp.isoformat() if event.last_timestamp else None),
-                        "source": (
-                            {"component": event.source.component, "host": event.source.host} if event.source else None
-                        ),
-                    }
-                )
-
-            logger.info(f"获取事件成功，共 {len(event_list)} 条")
-            return web.json_response({"events": event_list, "success": True})
+            events = await list_all_raw(
+                self.core_v1.list_event_for_all_namespaces, field_selector=field_selector, _request_timeout=30
+            )
+            body = await asyncio.to_thread(_render_events, events)
+            logger.info(f"获取事件成功，共 {len(events)} 条")
+            return web.Response(text=body, content_type="application/json")
         except ApiException as exc:
             error_message = f"获取事件失败: {exc}"
             logger.error(error_message)
@@ -69,7 +99,9 @@ class MCPService:
             logger.info("开始获取K8S节点信息...")
 
             nodes = await self.core_v1.list_node()
-            pods = await self.core_v1.list_pod_for_all_namespaces()
+            # 只数每个节点上的 Pod 数,用原始 JSON,不反序列化全集群的 Pod 模型对象
+            pods = await list_all_raw(self.core_v1.list_pod_for_all_namespaces)
+            pods_per_node = Counter((pod.get("spec") or {}).get("nodeName") for pod in pods)
 
             node_list = []
 
@@ -108,10 +140,7 @@ class MCPService:
                     except (ValueError, AttributeError):
                         max_pods = 0
 
-                current_pods = 0
-                for pod in pods.items:
-                    if pod.spec.node_name == node_name:
-                        current_pods += 1
+                current_pods = pods_per_node[node_name]
 
                 metrics = await self._get_node_metrics(node_name)
                 current_cpu = metrics["cpu"]
@@ -147,128 +176,31 @@ class MCPService:
             return web.json_response({"message": error_message, "success": False}, status=500)
 
     async def get_deployment_pods(self, request):
-        """获取指定命名空间和Deployment下的所有Pod信息（包括被隔离的Pod）"""
+        """获取指定命名空间和Deployment下的所有Pod信息（包括被隔离的Pod）
+
+        缓存已同步时直接读 WorkloadCache(不调 K8S API),否则直查 API 兜底;两条路径都用
+        workload_status 压成同样的结构。CPU/内存一次查整个 namespace 的 metrics。
+        """
         namespace = request.query.get("namespace")
         deployment_name = request.query.get("deployment")
+        if not namespace or not deployment_name:
+            return web.json_response({"message": "缺少 namespace 或 deployment 参数", "success": False}, status=400)
 
         try:
-            deployment = await self.apps_v1.read_namespaced_deployment(deployment_name, namespace)
-            selector = deployment.spec.selector.match_labels
-            selector_str = ",".join([f"{k}={v}" for k, v in selector.items()])
+            cache = self.workload_cache
+            if cache is not None and cache.synced:
+                if cache.get_deployment(namespace, deployment_name) is None:
+                    message = f'deployments.apps "{deployment_name}" not found'
+                    return web.json_response({"message": message, "success": False}, status=404)
+                records = cache.pods_of(namespace, deployment_name)
+            else:
+                records = await self._deployment_pods_from_api(namespace, deployment_name)
 
-            pods_by_label = await self.core_v1.list_namespaced_pod(namespace=namespace, label_selector=selector_str)
-            lenmline = pods_by_label.items[0].metadata.name.count("-")
-
-            all_pods = await self.core_v1.list_namespaced_pod(namespace=namespace)
-            pods_by_match = []
-            for pod in all_pods.items:
-                owner_refs = pod.metadata.owner_references or []
-                if (
-                    not owner_refs
-                    and pod.metadata.name.startswith(deployment_name + '-')
-                    and pod.metadata.name.count("-") == lenmline
-                ):
-                    pods_by_match.append(pod)
-
-            all_related_pods = {
-                pod.metadata.name: pod
-                for pod in pods_by_label.items
-                if pod.metadata.name.startswith(deployment_name + '-') and pod.metadata.name.count("-") == lenmline
-            }
-            for pod in pods_by_match:
-                all_related_pods[pod.metadata.name] = pod
-
-            pod_list = []
-            for pod in all_related_pods.values():
-                metrics = await self._get_pod_metrics(namespace, pod.metadata.name)
-
-                created_at = None
-                if pod.metadata.creation_timestamp:
-                    utc_time = pod.metadata.creation_timestamp.replace(tzinfo=timezone.utc)
-                    beijing_time = utc_time.astimezone(timezone(timedelta(hours=8)))
-                    created_at = beijing_time.strftime("%Y-%m-%d %H:%M:%S")
-
-                cpu = round(metrics["cpu"])
-                memory = round(metrics["memory"])
-
-                pod_status_reason = ""
-
-                if pod.status.phase != "Running":
-                    if pod.status.conditions:
-                        for cond in pod.status.conditions:
-                            if cond.type == "PodScheduled" and cond.status != "True":
-                                pod_status_reason = cond.message or cond.reason or ""
-                                break
-                    if not pod_status_reason and pod.status.reason:
-                        pod_status_reason = pod.status.reason
-
-                    if not pod_status_reason and pod.status.container_statuses:
-                        for cs in pod.status.container_statuses:
-                            if cs.state and (cs.state.waiting or cs.state.terminated):
-                                if cs.state.waiting:
-                                    container_reason = cs.state.waiting.reason or ""
-                                    container_message = cs.state.waiting.message or ""
-                                    pod_status_reason = (
-                                        f"{container_reason}: {container_message}"
-                                        if container_message
-                                        else container_reason
-                                    )
-                                elif cs.state.terminated:
-                                    container_reason = cs.state.terminated.reason or ""
-                                    container_message = cs.state.terminated.message or ""
-                                    exit_code = cs.state.terminated.exit_code
-                                    pod_status_reason = (
-                                        f"{container_reason} (exit: {exit_code}): {container_message}"
-                                        if container_message
-                                        else f"{container_reason} (exit: {exit_code})"
-                                    )
-                                break
-
-                    if not pod_status_reason:
-                        event_reason, event_message = await self._get_pod_events(namespace, pod.metadata.name)
-                        if event_message:
-                            pod_status_reason = f"{event_reason}: {event_message}" if event_reason else event_message
-
-                last_status = ""
-                restart_count = (
-                    sum(container_status.restart_count for container_status in pod.status.container_statuses)
-                    if pod.status.container_statuses
-                    else 0
-                )
-                if restart_count > 0 and pod.status.container_statuses:
-                    for cs in pod.status.container_statuses:
-                        if cs.last_state and (cs.last_state.terminated or cs.last_state.waiting):
-                            if cs.last_state.terminated:
-                                last_status = f"Terminated: {cs.last_state.terminated.reason or ''} ({cs.last_state.terminated.exit_code})"
-                            elif cs.last_state.waiting:
-                                last_status = f"Waiting: {cs.last_state.waiting.reason or ''}"
-                            break
-
-                main_container_image = ""
-                if pod.spec.containers and len(pod.spec.containers) > 0:
-                    main_container_image = pod.spec.containers[0].image
-
-                pod_info = {
-                    "name": pod.metadata.name,
-                    "status": pod.status.phase,
-                    "ready": (
-                        all(container_status.ready for container_status in pod.status.container_statuses)
-                        if pod.status.container_statuses
-                        else False
-                    ),
-                    "pod_ip": pod.status.pod_ip,
-                    "cpu": f"{cpu}m",
-                    "memory": f"{memory}MB",
-                    "created_at": created_at,
-                    "app_label": pod.metadata.labels.get("app", "无"),
-                    "image": main_container_image,
-                    "node_name": pod.spec.node_name,
-                    "restart_count": restart_count,
-                    "restart_reason": last_status,
-                    "exception_reason": pod_status_reason,
-                }
-                pod_list.append(pod_info)
-
+            metrics = await self._namespace_pod_metrics(namespace)
+            pod_list = [
+                workload_status.pod_view(rec, metrics.get(f"{namespace}/{rec['name']}")) for rec in records
+            ]
+            await self._fill_event_reasons(namespace, records, pod_list)
             return web.json_response({"success": True, "pods": pod_list})
         except ApiException as exc:
             error_message = (
@@ -280,6 +212,57 @@ class MCPService:
             error_message = f"获取Pod信息时发生未知错误: {str(exc)}"
             logger.exception(error_message)
             return web.json_response({"message": error_message, "success": False}, status=500)
+
+    async def _deployment_pods_from_api(self, namespace, deployment_name):
+        """缓存未同步时的兜底:直查 API,用原始 JSON 走和缓存一样的归属判断"""
+        # deployment 不存在时抛 404,沿用原来的错误信息
+        await self.apps_v1.read_namespaced_deployment(deployment_name, namespace)
+        resp = await self.core_v1.list_namespaced_pod(namespace=namespace, _preload_content=False, _request_timeout=30)
+        try:
+            body = await resp.read()
+            if resp.status != 200:
+                raise ApiException(status=resp.status, reason=body[:300].decode("utf-8", "replace"))
+        finally:
+            resp.release()
+        pods = [workload_status.slim_pod(obj) for obj in json.loads(body).get("items") or []]
+        return sorted((p for p in pods if p["deployment"] == deployment_name), key=lambda p: p["name"])
+
+    async def _namespace_pod_metrics(self, namespace):
+        """一次取整个 namespace 的 pod 指标,缓存 METRICS_TTL 秒(metrics-server 本身 15s 左右才更新一次)"""
+        now = time.monotonic()
+        cached = self._metrics_cache.get(namespace)
+        if cached and cached[0] > now:
+            return cached[1]
+        try:
+            metrics = await asyncio.wait_for(_list_pod_metrics([namespace], self.custom_api), METRICS_TIMEOUT)
+        except asyncio.TimeoutError:
+            logger.warning(f"获取命名空间 {namespace} 的 Pod 指标超时")
+            metrics = {}
+        if metrics:
+            self._metrics_cache[namespace] = (now + METRICS_TTL, metrics)
+        return metrics
+
+    async def _fill_event_reasons(self, namespace, records, pod_list):
+        """非 Running 又看不出原因的 pod,用最近一条事件补异常原因(并发、限量)"""
+        targets = [
+            (rec, view)
+            for rec, view in zip(records, pod_list)
+            if rec["phase"] != "Running" and not rec["exception_reason"]
+        ][:EVENT_LOOKUP_LIMIT]
+        if not targets:
+            return
+        semaphore = asyncio.Semaphore(EVENT_LOOKUP_CONCURRENCY)
+
+        async def fill(rec, view):
+            async with semaphore:
+                try:
+                    reason, message = await asyncio.wait_for(self._get_pod_events(namespace, rec["name"]), 5)
+                except asyncio.TimeoutError:
+                    return
+            if message:
+                view["exception_reason"] = f"{reason}: {message}" if reason else message
+
+        await asyncio.gather(*(fill(rec, view) for rec, view in targets))
 
     async def _get_node_metrics(self, node_name):
         """获取节点的资源使用情况"""
@@ -311,38 +294,6 @@ class MCPService:
             }
         except Exception as exc:
             logger.error(f"获取节点 {node_name} 资源使用情况失败: {exc}")
-            return {"cpu": 0, "memory": 0}
-
-    async def _get_pod_metrics(self, namespace, pod_name):
-        """获取指定Pod的CPU和内存使用情况"""
-        try:
-            metrics = await self.custom_api.get_namespaced_custom_object(
-                group="metrics.k8s.io",
-                version="v1beta1",
-                namespace=namespace,
-                plural="pods",
-                name=pod_name,
-            )
-
-            cpu_usage = 0
-            memory_usage = 0
-
-            for container in metrics.get("containers", []):
-                cpu = container.get("usage", {}).get("cpu", "0")
-                memory = container.get("usage", {}).get("memory", "0")
-
-                cpu = utils.parse_cpu(cpu)
-                memory = utils.parse_memory(memory)
-
-                cpu_usage += cpu
-                memory_usage += memory
-
-            return {
-                "cpu": round(cpu_usage, 2),
-                "memory": round(memory_usage, 2),
-            }
-        except Exception as exc:
-            logger.error(f"获取Pod {pod_name} 资源使用情况失败: {exc}")
             return {"cpu": 0, "memory": 0}
 
     async def _get_pod_events(self, namespace, pod_name):

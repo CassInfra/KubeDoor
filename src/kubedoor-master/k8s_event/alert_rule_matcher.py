@@ -17,7 +17,9 @@ class AlertRuleMatcher:
         """初始化规则匹配器
 
         Args:
-            rules_file: 规则文件路径，默认为当前目录下的rules/alert_rules.json
+            rules_file: 规则文件路径，默认 k8s_event/rules/alert_rules.json（工作目录为 /）。
+                镜像内不自带规则文件，由 ConfigMap kubedoor-master-file-cfg 挂载
+                （源文件 deploy/manifests/master/alert_rules.json）。
         """
         if rules_file is None:
             rules_file = "k8s_event/rules/alert_rules.json"
@@ -38,7 +40,7 @@ class AlertRuleMatcher:
             logger.info(f"加载了 {len(self.rules)} 条告警规则")
 
         except Exception as e:
-            logger.error(f"加载告警规则失败: {e}")
+            logger.error(f"加载告警规则失败(规则文件需由 ConfigMap kubedoor-master-file-cfg 挂载到 {self.rules_file}): {e}")
             self.rules = []
             self.global_config = {}
 

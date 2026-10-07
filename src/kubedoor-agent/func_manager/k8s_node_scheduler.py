@@ -6,6 +6,7 @@ K8S节点调度管理模块
 """
 
 import asyncio
+import inspect
 import json
 from datetime import datetime, timedelta
 from typing import List, Dict, Any
@@ -298,7 +299,7 @@ class K8sNodeScheduler:
                     if error_count > 0 and error_callback:
                         error_message = f"取消禁止调度操作部分失败 - 成功: {success_count}, 失败: {error_count}。失败详情: {'; '.join(failed_nodes)}"
                         try:
-                            if asyncio.iscoroutinefunction(error_callback):
+                            if inspect.iscoroutinefunction(error_callback):
                                 await error_callback(error_message)
                             else:
                                 error_callback(error_message)
@@ -315,7 +316,7 @@ class K8sNodeScheduler:
             if error_callback:
                 error_message = f"延迟取消禁止调度操作完全失败: {str(e)}"
                 try:
-                    if asyncio.iscoroutinefunction(error_callback):
+                    if inspect.iscoroutinefunction(error_callback):
                         await error_callback(error_message)
                     else:
                         error_callback(error_message)

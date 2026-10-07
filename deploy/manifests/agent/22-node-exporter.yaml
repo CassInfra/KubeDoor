@@ -1,0 +1,72 @@
+# node-exporter:节点级 CPU/内存/磁盘/网络指标,以 DaemonSet 跑在每个节点上。
+# 节点上已经有 node-exporter(监听 9100)时把 ENABLE_NODE_EXPORTER 设为 false,
+# vmagent 仍会按 :9100 去抓已有的那个。
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: node-exporter
+  namespace: __NAMESPACE__
+  labels:
+    app: node-exporter
+spec:
+  selector:
+    matchLabels:
+        app: node-exporter
+  template:
+    metadata:
+      labels:
+        app: node-exporter
+    spec:
+      hostPID: true
+      hostIPC: true
+      hostNetwork: true
+      containers:
+      - name: node-exporter
+        image: '__IMAGE_NODE_EXPORTER__'
+        imagePullPolicy: Always
+        ports:
+        - containerPort: 9100
+        resources:
+          requests:
+            cpu: 50m
+            memory: 20Mi
+          limits:
+            cpu: 500m
+            memory: 400Mi
+        securityContext:
+          privileged: true
+        args:
+        - --path.procfs=/host/proc
+        - --path.sysfs=/host/sys
+        - --path.rootfs=/host/root
+        - --no-collector.wifi
+        - --no-collector.hwmon
+        # - --collector.filesystem.ignored-mount-points=^/(dev|proc|sys|var/lib/docker/.+)($|/)
+        - --collector.filesystem.ignored-mount-points=^/(dev|proc|sys)($|/)
+        - --collector.filesystem.ignored-fs-types=^(tmpfs|autofs|binfmt_misc|cgroup|configfs|debugfs|devpts|devtmpfs|fusectl|hugetlbfs|mqueue|overlay|proc|procfs|pstore|rpc_pipefs|securityfs|sysfs|tracefs)$
+        volumeMounts:
+        - mountPath: /host/proc
+          name: proc
+          readOnly: false
+        - mountPath: /host/sys
+          name: sys
+          readOnly: false
+        - mountPath: /host/root
+          mountPropagation: HostToContainer
+          name: root
+          readOnly: true
+
+      securityContext:
+        runAsUser: 0
+      tolerations:
+      - operator: Exists
+      volumes:
+      - hostPath:
+          path: /proc
+        name: proc
+      - hostPath:
+          path: /sys
+        name: sys
+      - hostPath:
+          path: /
+        name: root

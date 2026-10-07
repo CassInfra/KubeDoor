@@ -7,13 +7,49 @@ Istio VirtualService 路由管理函数库
 """
 
 import json
+import re
 from typing import Dict, Any, Optional, List
 import os
 from datetime import datetime
-import mysql.connector
-from pydantic import BaseModel, Field
+import psycopg
+from psycopg.rows import dict_row
+from pydantic import BaseModel, Field, field_validator, ValidationError
 from aiohttp import web
 from loguru import logger
+
+
+# Istio/K8S 的 timeout 使用 Go duration 格式，必须带单位后缀（如 10s、1m、500ms、1.5s）
+# 纯数字（如 "7"）会被 Istio 校验拒绝，导致下发无效，因此在入库前拦截
+DURATION_PATTERN = re.compile(r'^\d+(\.\d+)?(ns|us|µs|ms|s|m|h)$')
+
+
+def validate_timeout(value: Optional[str]) -> Optional[str]:
+    """校验并规范化 timeout 字段。
+
+    - 去除首尾空格
+    - 空字符串视为未设置（返回 None）
+    - 必须符合 Go duration 格式（带单位后缀），否则抛出 ValueError
+    """
+    if value is None:
+        return None
+    value = value.strip()
+    if value == "":
+        return None
+    if not DURATION_PATTERN.match(value):
+        raise ValueError(f"timeout格式错误：'{value}' 必须带时间单位后缀（如 10s、1m、500ms），不能是纯数字")
+    return value
+
+
+def format_validation_error(exc: ValidationError) -> str:
+    """将 pydantic 的 ValidationError 转成简洁可读的中文提示"""
+    msgs = []
+    for err in exc.errors():
+        loc = ".".join(str(x) for x in err.get('loc', ())) or "参数"
+        msg = err.get('msg', '校验失败')
+        # 去掉 pydantic 自动附加的 "Value error, " 前缀
+        msg = msg.replace("Value error, ", "")
+        msgs.append(f"{loc}: {msg}")
+    return "；".join(msgs)
 
 
 def datetime_serializer(obj):
@@ -41,26 +77,15 @@ try:
     # 尝试加载.env文件
     env_path = os.path.join(os.path.dirname(__file__), '.env')
     load_dotenv(env_path)
-
-    DB_HOST = os.environ.get('DB_HOST')
-    DB_PORT = os.environ.get('DB_PORT')
-    DB_USER = os.environ.get('DB_USER')
-    DB_PASSWORD = os.environ.get('DB_PASSWORD')
-    DB_NAME = os.environ.get('DB_NAME')
-
-    # 如果.env文件中没有配置或配置为空，则从utils模块读取
-    if not all([DB_HOST, DB_PORT, DB_USER, DB_PASSWORD, DB_NAME]):
-        raise ImportError("Environment variables not found in .env")
-
 except (ImportError, FileNotFoundError):
-    # 如果.env读取失败，从utils模块导入
-    from utils import DB_HOST, DB_PORT, DB_USER, DB_PASSWORD, DB_NAME
+    pass
 
-db_host = DB_HOST
-db_port = int(DB_PORT or '3306')
-db_user = DB_USER
-db_password = DB_PASSWORD
-db_name = DB_NAME
+# PostgreSQL 连接配置：优先从环境变量读取（PG_*），端口默认 5432，库名默认 kubedoor
+db_host = os.environ.get('PG_HOST', 'localhost')
+db_port = int(os.environ.get('PG_PORT') or '5432')
+db_user = os.environ.get('PG_USER', 'postgres')
+db_password = os.environ.get('PG_PASSWORD', '')
+db_name = os.environ.get('PG_DATABASE', 'kubedoor')
 
 
 # ==================== Pydantic模型定义 ====================
@@ -80,6 +105,11 @@ class VSCreateRequest(BaseModel):
     df_forward_timeout: Optional[str] = Field(default=None, description="默认路由超时")
     k8s_clusters: List[str] = Field(..., description="关联的K8S集群列表")
 
+    @field_validator('df_forward_timeout')
+    @classmethod
+    def _validate_df_forward_timeout(cls, v):
+        return validate_timeout(v)
+
 
 class VSUpdateRequest(BaseModel):
     """更新VirtualService请求模型"""
@@ -92,6 +122,11 @@ class VSUpdateRequest(BaseModel):
     df_forward_type: Optional[str] = Field(default=None, description="默认路由类型: route或delegate")
     df_forward_detail: Optional[Dict[str, Any] | List[Dict[str, Any]]] = Field(default=None, description="默认路由详情")
     df_forward_timeout: Optional[str] = Field(default=None, description="默认路由超时")
+
+    @field_validator('df_forward_timeout')
+    @classmethod
+    def _validate_df_forward_timeout(cls, v):
+        return validate_timeout(v)
 
 
 class VSResponse(BaseModel):
@@ -122,6 +157,25 @@ class HTTPRouteCreateRequest(BaseModel):
     timeout: Optional[str] = Field(default=None, description="超时设置")
     priority: Optional[int] = Field(default=None, description="优先级，不传则自动追加到最后")
 
+    @field_validator('timeout')
+    @classmethod
+    def _validate_timeout(cls, v):
+        return validate_timeout(v)
+
+    @field_validator('match_rules')
+    @classmethod
+    def _validate_match_rules(cls, v):
+        if not v:
+            raise ValueError("匹配规则不能为空：请至少填写一条有效的匹配规则（URI/Authority/Headers）")
+        return v
+
+    @field_validator('forward_detail')
+    @classmethod
+    def _validate_forward_detail(cls, v):
+        if not v:
+            raise ValueError("转发详情不能为空：请完整填写服务名、命名空间和端口，或委托的VS名称和命名空间")
+        return v
+
 
 class HTTPRouteUpdateRequest(BaseModel):
     """更新HTTP路由请求模型"""
@@ -133,6 +187,25 @@ class HTTPRouteUpdateRequest(BaseModel):
     forward_detail: Dict[str, Any] | List[Dict[str, Any]] = Field(..., description="转发详情")
     timeout: Optional[str] = Field(default=None, description="超时设置")
     priority: Optional[int] = Field(default=None, description="优先级，不传则自动追加到最后")
+
+    @field_validator('timeout')
+    @classmethod
+    def _validate_timeout(cls, v):
+        return validate_timeout(v)
+
+    @field_validator('match_rules')
+    @classmethod
+    def _validate_match_rules(cls, v):
+        if not v:
+            raise ValueError("匹配规则不能为空：请至少填写一条有效的匹配规则（URI/Authority/Headers）")
+        return v
+
+    @field_validator('forward_detail')
+    @classmethod
+    def _validate_forward_detail(cls, v):
+        if not v:
+            raise ValueError("转发详情不能为空：请完整填写服务名、命名空间和端口，或委托的VS名称和命名空间")
+        return v
 
 
 class HTTPRouteResponse(BaseModel):
@@ -160,54 +233,35 @@ class MessageResponse(BaseModel):
 
 
 async def connect_database():
-    """连接数据库"""
-    try:
-        connection = mysql.connector.connect(
-            host=db_host,
-            port=db_port,
-            user=db_user,
-            password=db_password,
-            database=db_name,
-            charset='utf8mb4',
-            autocommit=False,
-        )
-        return connection
-    except mysql.connector.Error as e:
-        if e.errno == mysql.connector.errorcode.ER_BAD_DB_ERROR:
-            # 数据库不存在，先创建数据库
-            temp_conn = mysql.connector.connect(
-                host=db_host, port=db_port, user=db_user, password=db_password, charset='utf8mb4'
-            )
-            cursor = temp_conn.cursor()
-            cursor.execute(f"CREATE DATABASE IF NOT EXISTS {db_name} CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci")
-            temp_conn.commit()
-            cursor.close()
-            temp_conn.close()
+    """连接数据库
 
-            # 重新连接到新创建的数据库
-            connection = mysql.connector.connect(
-                host=db_host,
-                port=db_port,
-                user=db_user,
-                password=db_password,
-                database=db_name,
-                charset='utf8mb4',
-                autocommit=False,
-            )
-            return connection
-        else:
-            raise e
+    直接连接到 PostgreSQL；数据库需由部署方预先创建（不再自动建库）。
+    连接默认 row_factory=dict_row，游标默认返回 dict 行。
+    注意这里是同步连接，会阻塞主 loop：connect_timeout 保证库连不上时最多卡 5 秒，
+    不设的话要等系统 TCP 超时（约 2 分钟），期间整个 master 无响应。
+    """
+    connection = psycopg.connect(
+        host=db_host,
+        port=db_port,
+        user=db_user,
+        password=db_password,
+        dbname=db_name,
+        autocommit=False,
+        row_factory=dict_row,
+        connect_timeout=5,
+    )
+    return connection
 
 
 async def close_database(connection):
     """关闭数据库连接"""
-    if connection and connection.is_connected():
+    if connection and not connection.closed:
         connection.close()
 
 
 async def reorder_route_priorities(vs_global_id: int, connection):
     """重新整理路由规则的优先级，确保连续性"""
-    cursor = connection.cursor(dictionary=True)
+    cursor = connection.cursor(row_factory=dict_row)
 
     # 获取所有路由规则，按当前优先级排序
     cursor.execute(
@@ -244,7 +298,7 @@ async def insert_route_with_priority(
         priority: 优先级（可选，不传则自动追加到最后）
         connection: 数据库连接
     """
-    cursor = connection.cursor(dictionary=True)
+    cursor = connection.cursor(row_factory=dict_row)
 
     # 如果没有传入priority，自动追加到最后
     if priority is None:
@@ -264,9 +318,10 @@ async def insert_route_with_priority(
     # 插入新路由规则
     cursor.execute(
         """
-    INSERT INTO vs_http_routes 
+    INSERT INTO vs_http_routes
     (vs_global_id, name, priority, match_rules, rewrite_rules, forward_type, forward_detail, timeout)
     VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+    RETURNING id
     """,
         (
             vs_global_id,
@@ -280,14 +335,15 @@ async def insert_route_with_priority(
         ),
     )
 
+    new_id = cursor.fetchone()['id']
     connection.commit()
     print(f"已插入新的路由规则，优先级: {priority}")
-    return cursor.lastrowid
+    return new_id
 
 
 async def get_routes_by_priority(vs_global_id: int, connection):
     """获取路由规则列表，按优先级排序"""
-    cursor = connection.cursor(dictionary=True)
+    cursor = connection.cursor(row_factory=dict_row)
 
     # 获取路由规则，按优先级排序
     cursor.execute(
@@ -306,7 +362,7 @@ async def get_routes_by_priority(vs_global_id: int, connection):
 
 async def generate_virtualservice_json(vs_id: int, connection) -> Optional[Dict[str, Any]]:
     """根据vs_id生成VirtualService JSON配置"""
-    cursor = connection.cursor(dictionary=True)
+    cursor = connection.cursor(row_factory=dict_row)
 
     # 获取全局配置
     cursor.execute(
@@ -417,9 +473,8 @@ async def sync_vs_from_k8s(cluster_name: str, vs_data_list: List[Dict[str, Any]]
     processed_count = 0
 
     try:
-        # 开启事务
-        connection.start_transaction()
-        cursor = connection.cursor(dictionary=True)
+        # autocommit=False 下事务在首个语句执行时隐式开启
+        cursor = connection.cursor(row_factory=dict_row)
 
         # ========== 清理现有数据逻辑 ==========
         logger.info(f"开始清理集群 '{cluster_name}' 的现有数据")
@@ -494,11 +549,12 @@ async def sync_vs_from_k8s(cluster_name: str, vs_data_list: List[Dict[str, Any]]
                     """
                     INSERT INTO vs_global (name, namespace, gateways, hosts, protocol)
                     VALUES (%s, %s, %s, %s, %s)
+                    RETURNING id
                     """,
                     (vs_name, vs_namespace, gateways, hosts, 'http'),
                 )
 
-                vs_global_id = cursor.lastrowid
+                vs_global_id = cursor.fetchone()['id']
                 logger.info(f"创建VirtualService '{vs_name}' (ID: {vs_global_id})")
 
                 # 3. 写入k8s_cluster表
@@ -598,7 +654,7 @@ async def sync_vs_from_k8s(cluster_name: str, vs_data_list: List[Dict[str, Any]]
             "cluster_name": cluster_name,
         }
 
-    except mysql.connector.Error as e:
+    except psycopg.Error as e:
         # 数据库错误，回滚事务
         if connection:
             connection.rollback()
@@ -622,7 +678,7 @@ async def sync_vs_from_k8s(cluster_name: str, vs_data_list: List[Dict[str, Any]]
 # ==================== VS级别操作函数 ====================
 async def get_vs_list_by_k8s_cluster(k8s_name: str, connection, namespace: str = None):
     """根据K8S集群名称获取关联的VirtualService列表"""
-    cursor = connection.cursor(dictionary=True)
+    cursor = connection.cursor(row_factory=dict_row)
 
     if namespace:
         # 如果提供了namespace参数，添加namespace过滤条件
@@ -698,9 +754,10 @@ async def create_vs(vs_request: VSCreateRequest, connection):
 
     # 插入新的VS
     cursor.execute(
-        """INSERT INTO vs_global 
-           (name, namespace, hosts, gateways, protocol, df_forward_type, df_forward_detail, df_forward_timeout, created_at, updated_at) 
-           VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
+        """INSERT INTO vs_global
+           (name, namespace, hosts, gateways, protocol, df_forward_type, df_forward_detail, df_forward_timeout, created_at, updated_at)
+           VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+           RETURNING id""",
         (
             vs_request.name,
             vs_request.namespace,
@@ -715,27 +772,28 @@ async def create_vs(vs_request: VSCreateRequest, connection):
         ),
     )
 
+    new_id = cursor.fetchone()['id']
     connection.commit()
-    return cursor.lastrowid
+    return new_id
 
 
 async def get_vs_by_name(vs_name: str, namespace: str, connection):
     """根据名称获取VirtualService详情"""
-    cursor = connection.cursor(dictionary=True)
+    cursor = connection.cursor(row_factory=dict_row)
     cursor.execute("SELECT * FROM vs_global WHERE name = %s AND namespace = %s", (vs_name, namespace))
     return cursor.fetchone()
 
 
 async def get_vs_by_id(vs_id: int, connection):
     """根据ID获取VirtualService详情"""
-    cursor = connection.cursor(dictionary=True)
+    cursor = connection.cursor(row_factory=dict_row)
     cursor.execute("SELECT * FROM vs_global WHERE id = %s", (vs_id,))
     return cursor.fetchone()
 
 
 async def get_k8s_clusters_by_vs(vs_id: int, connection):
     """根据VirtualService ID获取关联的所有K8S集群"""
-    cursor = connection.cursor(dictionary=True)
+    cursor = connection.cursor(row_factory=dict_row)
     cursor.execute(
         """
         SELECT 
@@ -762,8 +820,8 @@ async def add_k8s_cluster_relations(vs_id: int, k8s_clusters: List[str], connect
             """
             INSERT INTO k8s_cluster (k8s_name, vs_id)
             VALUES (%s, %s)
-            ON DUPLICATE KEY UPDATE
-                updated_at = CURRENT_TIMESTAMP
+            ON CONFLICT (k8s_name, vs_id) DO UPDATE SET
+                updated_at = now()
             """,
             (k8s_name, vs_id),
         )
@@ -840,7 +898,7 @@ async def delete_vs(vs_name: str, namespace: str, connection):
     if not vs_record:
         raise ValueError("VirtualService不存在")
 
-    vs_global_id = vs_record[0]
+    vs_global_id = vs_record['id']
 
     # 删除相关的HTTP路由
     cursor.execute("DELETE FROM vs_http_routes WHERE vs_global_id = %s", (vs_global_id,))
@@ -891,14 +949,14 @@ async def create_route(vs_global_id: int, route_request: HTTPRouteCreateRequest,
 
 async def get_route_by_id(route_id: int, connection):
     """根据ID获取HTTP路由详情"""
-    cursor = connection.cursor(dictionary=True)
+    cursor = connection.cursor(row_factory=dict_row)
     cursor.execute("SELECT * FROM vs_http_routes WHERE id = %s", (route_id,))
     return cursor.fetchone()
 
 
 async def update_route(route_id: int, vs_id: int, route_request: HTTPRouteUpdateRequest, connection):
     """更新HTTP路由"""
-    cursor = connection.cursor(dictionary=True)
+    cursor = connection.cursor(row_factory=dict_row)
 
     vs_global_id = vs_id
     priority = route_request.priority
@@ -951,7 +1009,7 @@ async def delete_route(route_id: int, connection):
     if not result:
         raise ValueError("HTTP路由不存在")
 
-    vs_global_id = result[0]
+    vs_global_id = result['vs_global_id']
 
     # 删除HTTP路由
     cursor.execute("DELETE FROM vs_http_routes WHERE id = %s", (route_id,))
@@ -972,7 +1030,7 @@ async def update_route_priority(route_id: int, new_priority: int, connection):
     if not result:
         raise ValueError("HTTP路由不存在")
 
-    vs_global_id, current_priority = result
+    vs_global_id, current_priority = result['vs_global_id'], result['priority']
 
     if current_priority == new_priority:
         return  # 优先级没有变化
@@ -1080,6 +1138,10 @@ async def create_vs_handler(request):
 
         await close_database(connection)
         return safe_json_response({"success": True, "message": "VirtualService创建成功", "id": vs_id})
+    except ValidationError as e:
+        err_msg = format_validation_error(e)
+        logger.error(f"create_vs_handler 参数校验失败: {err_msg}")
+        return safe_json_response({"error": err_msg}, status=400)
     except Exception as e:
         logger.error(f"create_vs_handler 异常: {e}")
         return safe_json_response({"error": str(e)}, status=500)
@@ -1116,6 +1178,10 @@ async def update_vs_handler(request):
 
         logger.info(f"VS更新成功，vs_id: {vs_id}")
         return safe_json_response({"success": True, "message": "VirtualService更新成功"})
+    except ValidationError as e:
+        err_msg = format_validation_error(e)
+        logger.error(f"update_vs_handler 参数校验失败: {err_msg}")
+        return safe_json_response({"error": err_msg}, status=400)
     except Exception as e:
         logger.error(f"update_vs_handler 异常: {e}")
         return safe_json_response({"error": str(e)}, status=500)
@@ -1233,6 +1299,10 @@ async def create_route_handler(request):
 
         logger.info(f"路由规则创建成功，route_id: {route_id}")
         return safe_json_response({"success": True, "message": "HTTP路由规则创建成功", "id": route_id})
+    except ValidationError as e:
+        err_msg = format_validation_error(e)
+        logger.error(f"create_route_handler 参数校验失败: {err_msg}")
+        return safe_json_response({"error": err_msg}, status=400)
     except Exception as e:
         logger.error(f"create_route_handler 异常: {e}")
         return safe_json_response({"error": str(e)}, status=500)
@@ -1275,6 +1345,10 @@ async def update_route_handler(request):
 
         logger.info(f"路由更新成功，route_id: {route_id}")
         return safe_json_response({"success": True, "message": "HTTP路由更新成功"})
+    except ValidationError as e:
+        err_msg = format_validation_error(e)
+        logger.error(f"update_route_handler 参数校验失败: {err_msg}")
+        return safe_json_response({"error": err_msg}, status=400)
     except Exception as e:
         logger.error(f"update_route_handler 异常: {e}")
         return safe_json_response({"error": str(e)}, status=500)

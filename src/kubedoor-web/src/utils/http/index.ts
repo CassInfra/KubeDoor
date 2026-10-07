@@ -16,10 +16,16 @@ import { useUserStoreHook } from "@/store/modules/user";
 import { message } from "../message";
 import { transformI18n } from "@/plugins/i18n";
 
+// 超时配置
+export const TIMEOUT = {
+  default: 10000,
+  long: 120000 // 长时间操作如日志流、文件上传
+};
+
 // 相关配置请参考：www.axios-js.com/zh-cn/docs/#axios-request-config-1
 const defaultConfig: AxiosRequestConfig = {
   // 请求超时时间
-  timeout: 10000,
+  timeout: TIMEOUT.default,
   headers: {
     Accept: "application/json, text/plain, */*",
     "Content-Type": "application/json",
@@ -63,8 +69,10 @@ class PureHttp {
   private httpInterceptorsRequest(): void {
     PureHttp.axiosInstance.interceptors.request.use(
       async (config: PureHttpRequestConfig): Promise<any> => {
-        // 开启进度条动画
-        NProgress.start();
+        // 开启进度条动画(后台静默请求不显示)
+        if (!config.silent) {
+          NProgress.start();
+        }
         // 优先判断post/get等方法是否传入回调，否则执行初始化设置等回调
         if (typeof config.beforeRequestCallback === "function") {
           config.beforeRequestCallback(config);
@@ -137,6 +145,11 @@ class PureHttp {
         return response.data;
       },
       (error: PureHttpError) => {
+        // 后台静默请求出错不打扰用户,交给调用方处理
+        if ((error.config as PureHttpRequestConfig)?.silent) {
+          error.isCancelRequest = Axios.isCancel(error);
+          return Promise.reject(error);
+        }
         console.log(error.response);
         switch (error.response.status) {
           case 404:

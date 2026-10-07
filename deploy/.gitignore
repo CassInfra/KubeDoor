@@ -1,0 +1,8 @@
+# 安装脚本渲染出的临时产物
+.rendertest/
+.rt*/
+tools/__pycache__/
+# 用户自己的配置(含密码),不要提交
+postgres/.env
+# 从 kubedoor.conf.example 复制出来的真实配置
+/kubedoor.conf

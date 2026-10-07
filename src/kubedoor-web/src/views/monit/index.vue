@@ -86,6 +86,19 @@
           >
             刷新
           </el-button>
+          <el-tooltip
+            v-if="liveStateInfo"
+            :content="liveStateInfo.tip"
+            placement="bottom"
+          >
+            <el-tag
+              :type="liveStateInfo.type"
+              effect="plain"
+              class="live-state-tag"
+            >
+              {{ liveStateInfo.label }}
+            </el-tag>
+          </el-tooltip>
         </el-form-item>
         <!-- 新建按钮放置在表单最右侧 -->
         <el-form-item class="right-auto">
@@ -152,124 +165,8 @@
       </template>
     </el-dialog>
 
-    <!-- Pod日志查看弹窗 -->
-    <el-dialog
-      v-model="logDialogVisible"
-      width="99%"
-      top="0.5vh"
-      :style="{ 'padding-top': '7px' }"
-      :close-on-click-modal="false"
-      @close="stopLogStream"
-    >
-      <template #header>
-        <div class="log-dialog-header">
-          <div class="log-controls-header">
-            <el-button
-              v-if="!isLogConnected"
-              type="primary"
-              size="small"
-              :loading="logConnecting"
-              @click="startLogStream"
-            >
-              开始查看日志
-            </el-button>
-            <el-button v-else type="danger" size="small" @click="stopLogStream">
-              停止查看
-            </el-button>
-            <el-button size="small" @click="clearLogs">清空日志</el-button>
-            <el-button size="small" @click="scrollToBottom"
-              >滚动到底部</el-button
-            >
-            <div class="log-status">
-              <span
-                :class="{
-                  'status-connected': isLogConnected,
-                  'status-disconnected': !isLogConnected
-                }"
-              >
-                {{ isLogConnected ? "已连接" : "未连接" }}
-              </span>
-            </div>
-            <!-- 日志搜索功能 -->
-            <div class="log-search-container">
-              <el-input
-                v-model="searchKeyword"
-                placeholder="搜索日志内容"
-                size="small"
-                style="width: 200px; margin-right: 8px"
-                @keyup.enter="() => performSearch(true)"
-              >
-                <template #append>
-                  <el-button size="small" @click="() => performSearch(true)">
-                    搜索
-                  </el-button>
-                </template>
-              </el-input>
-              <el-button
-                size="small"
-                :type="isFilterMode ? 'primary' : 'default'"
-                :disabled="!searchKeyword.trim() || totalMatches === 0"
-                @click="toggleFilterMode"
-              >
-                {{ isFilterMode ? "取消筛选" : "筛选" }}
-              </el-button>
-              <span v-if="totalMatches > 0" class="search-info">
-                {{ currentMatchIndex + 1 }}/{{ totalMatches }}
-              </span>
-              <el-button
-                size="small"
-                :disabled="totalMatches === 0"
-                @click="goToPreviousMatch"
-              >
-                上一个
-              </el-button>
-              <el-button
-                size="small"
-                :disabled="totalMatches === 0"
-                @click="goToNextMatch"
-              >
-                下一个
-              </el-button>
-              <el-button size="small" type="warning" @click="getPreviousLogs">
-                重启前日志
-              </el-button>
-            </div>
-          </div>
-          <span class="dialog-title"
-            >Pod日志: {{ currentPodInfo.env }}【{{
-              currentPodInfo.namespace
-            }}】{{ currentPodInfo.name }}</span
-          >
-        </div>
-      </template>
-      <div class="log-container">
-        <div
-          ref="logContentRef"
-          v-loading="logConnecting"
-          class="log-content"
-          element-loading-text="正在连接日志流..."
-          @scroll="handleScroll"
-        >
-          <div v-if="logMessages.length === 0" class="no-logs">
-            暂无日志数据
-          </div>
-          <div
-            v-for="(message, index) in filteredLogMessages"
-            :key="getLogKey(message, index)"
-            class="log-line"
-            :class="{
-              'log-error':
-                message.includes('ERROR') || message.includes('Exception'),
-              'log-warn': message.includes('WARN'),
-              'log-info': message.includes('INFO')
-            }"
-            v-html="
-              highlightSearchKeyword(message, getOriginalIndex(message, index))
-            "
-          />
-        </div>
-      </div>
-    </el-dialog>
+    <!-- Pod / Deployment 日志查看：统一组件 -->
+    <PodLogViewer ref="logViewerRef" />
 
     <!-- 新建资源全屏YAML编辑弹窗（效果同 Service 编辑弹窗） -->
     <!-- 编辑Deployment -->
@@ -432,7 +329,7 @@
           <el-table-column
             prop="podCount"
             label="Pod"
-            min-width="70"
+            min-width="110"
             align="center"
             sortable="custom"
           >
@@ -440,7 +337,45 @@
               <span style="color: #409eff">Pod</span>
             </template>
             <template #default="scope">
-              <span style="font-weight: bold; color: #409eff">{{
+              <!-- 实时数据:就绪/期望;没有实时数据(agent 旧版本、连不上)时退回 Prometheus 的期望副本数 -->
+              <el-tooltip
+                v-if="scope.row.live"
+                placement="top"
+                :show-after="300"
+              >
+                <template #content>
+                  <div>
+                    期望 {{ scope.row.live.desired }} · 就绪
+                    {{ scope.row.live.ready }} · 已更新
+                    {{ scope.row.live.updated }} · 可用
+                    {{ scope.row.live.available }}
+                  </div>
+                  <div
+                    v-if="scope.row.live.terminating || scope.row.live.isolated"
+                  >
+                    终止中 {{ scope.row.live.terminating }} · 已隔离
+                    {{ scope.row.live.isolated }}
+                  </div>
+                  <div v-if="scope.row.live.message">
+                    {{ scope.row.live.message }}
+                  </div>
+                </template>
+                <span class="pod-live">
+                  <span :class="['pod-live-count', liveLevel(scope.row.live)]">
+                    {{ scope.row.live.ready }}/{{ scope.row.live.desired }}
+                  </span>
+                  <el-tag
+                    v-if="liveTag(scope.row.live)"
+                    :type="liveTag(scope.row.live).type"
+                    size="small"
+                    effect="plain"
+                    class="pod-live-tag"
+                  >
+                    {{ liveTag(scope.row.live).text }}
+                  </el-tag>
+                </span>
+              </el-tooltip>
+              <span v-else style="font-weight: bold; color: #409eff">{{
                 scope.row.podCount
               }}</span>
             </template>
@@ -468,6 +403,7 @@
                 <el-table
                   v-if="scope.row.pods && scope.row.pods.length > 0"
                   :data="scope.row.pods"
+                  row-key="name"
                   border
                   style="width: 100%"
                 >
@@ -500,13 +436,7 @@
                     align="center"
                   >
                     <template #default="podScope">
-                      <el-tag
-                        :type="
-                          podScope.row.status === 'Running'
-                            ? 'success'
-                            : 'danger'
-                        "
-                      >
+                      <el-tag :type="podStatusType(podScope.row)">
                         {{ podScope.row.status }}
                       </el-tag>
                     </template>
@@ -538,6 +468,7 @@
                     min-width="80"
                     align="center"
                     sortable
+                    :sort-method="sortPodCpu"
                   />
                   <el-table-column
                     prop="memory"
@@ -545,6 +476,7 @@
                     min-width="80"
                     align="center"
                     sortable
+                    :sort-method="sortPodMemory"
                   />
                   <el-table-column
                     prop="created_at"
@@ -648,7 +580,8 @@
                                   scope.row.env,
                                   scope.row.namespace,
                                   podScope.row.name,
-                                  scope.row.deployment
+                                  scope.row.deployment,
+                                  podScope.row.containers
                                 )
                               "
                               >日志</el-dropdown-item
@@ -850,6 +783,9 @@
                     <el-dropdown-item @click="openUpdateDialog(scope.row)"
                       >更新</el-dropdown-item
                     >
+                    <el-dropdown-item @click="handleViewDeployLogs(scope.row)"
+                      >日志</el-dropdown-item
+                    >
                   </el-dropdown-menu>
                 </template>
               </el-dropdown>
@@ -931,15 +867,18 @@ import {
   getPromQueryData,
   getPodData,
   showAddLabel,
-  getPodPreviousLogs,
-  createPodLogStreamUrl,
   getImageTags,
   getNodeResourceRank
 } from "@/api/monit";
 import { getAgentNames } from "@/api/istio";
 import { useResource } from "./utils/hook";
+import {
+  useWorkloadStream,
+  type DeploymentLive,
+  type PodsPush
+} from "./utils/useWorkloadStream";
 import { useSearchStoreHook } from "@/store/modules/search";
-import { AnsiUp } from "ansi_up";
+import PodLogViewer from "@/views/monit/components/PodLogViewer.vue";
 import * as monaco from "monaco-editor";
 import * as yaml from "js-yaml";
 import {
@@ -1113,6 +1052,198 @@ const handleSortChange = ({
 // 展开行相关
 const expandedRowKeys = ref<string[]>([]);
 
+// ---------- Deployment/Pod 实时状态(agent watch K8S → master → WebSocket 推送) ----------
+// 最新的实时状态(非响应式,按 "namespace/deployment"),表格重新加载后直接套用
+const liveByKey = new Map<string, DeploymentLive>();
+// 已展开行滚动结束后补拉一次明细(补上新 pod 的 CPU/内存)的定时器
+const settleTimers = new Map<string, number>();
+// metrics-server 一般要 15~60 秒才有新 pod 的数据
+const SETTLE_REFRESH_DELAY = 30000;
+
+const liveKey = (namespace: string, deployment: string) =>
+  `${namespace}/${deployment}`;
+
+const rowsByKey = computed(() => {
+  const map = new Map<string, any>();
+  for (const row of tableData.value) {
+    map.set(liveKey(row.namespace, row.deployment), row);
+  }
+  return map;
+});
+
+const isRolling = (live?: DeploymentLive | null) =>
+  !!live && (live.state === "progressing" || live.state === "observing");
+
+const liveLevel = (live: DeploymentLive) => {
+  if (live.state === "failed") return "is-danger";
+  if (live.state !== "complete" || live.ready < live.desired) {
+    return "is-warning";
+  }
+  return "is-success";
+};
+
+const liveTag = (live: DeploymentLive) => {
+  if (isRolling(live)) return { type: "warning" as const, text: "更新中" };
+  if (live.state === "paused") return { type: "info" as const, text: "已暂停" };
+  if (live.state === "failed") return { type: "danger" as const, text: "超时" };
+  return null;
+};
+
+const clearSettleTimer = (key: string) => {
+  const timer = settleTimers.get(key);
+  if (timer !== undefined) {
+    window.clearTimeout(timer);
+    settleTimers.delete(key);
+  }
+};
+
+const clearAllSettleTimers = () => {
+  settleTimers.forEach(timer => window.clearTimeout(timer));
+  settleTimers.clear();
+};
+
+// 推送来的 pod 按名字合并:复用已有对象(展开行里打开的下拉菜单不会闪),
+// 推送不带 cpu/memory,保留上次拿到的值;HTTP 拉到的带指标,直接覆盖
+const mergePods = (row: any, items: any[]) => {
+  const previous = new Map<string, any>(
+    (row.pods || []).map((pod: any) => [pod.name, pod])
+  );
+  row.pods = items.map(item => {
+    const pod = previous.get(item.name);
+    if (!pod) return { cpu: "-", memory: "-", ...item };
+    Object.assign(pod, item);
+    return pod;
+  });
+};
+
+const refreshPodsSilently = async (key: string) => {
+  const row = rowsByKey.value.get(key);
+  if (!row || !expandedRowKeys.value.includes(row.id)) return;
+  try {
+    const res = await getPodData(row.env, row.namespace, row.deployment, {
+      silent: true
+    });
+    if (Array.isArray(res.pods) && expandedRowKeys.value.includes(row.id)) {
+      mergePods(row, res.pods);
+    }
+  } catch (error) {
+    console.warn("后台刷新Pod数据失败:", error);
+  }
+};
+
+const applyLive = (row: any, live?: DeploymentLive) => {
+  const key = liveKey(row.namespace, row.deployment);
+  const wasRolling = isRolling(row.live);
+  row.live = live || null;
+  row.podCount = live ? live.desired : row.promPodCount;
+  if (isRolling(live)) {
+    clearSettleTimer(key);
+  } else if (wasRolling && live && expandedRowKeys.value.includes(row.id)) {
+    clearSettleTimer(key);
+    settleTimers.set(
+      key,
+      window.setTimeout(() => {
+        settleTimers.delete(key);
+        refreshPodsSilently(key);
+      }, SETTLE_REFRESH_DELAY)
+    );
+  }
+};
+
+const workloadStream = useWorkloadStream({
+  onDeployments(rows, removed, full) {
+    if (full) liveByKey.clear();
+    rows.forEach(live =>
+      liveByKey.set(liveKey(live.namespace, live.deployment), live)
+    );
+    removed.forEach(([ns, dep]) => liveByKey.delete(liveKey(ns, dep)));
+    if (full) {
+      rowsByKey.value.forEach((row, key) => applyLive(row, liveByKey.get(key)));
+      return;
+    }
+    rows.forEach(live => {
+      const row = rowsByKey.value.get(liveKey(live.namespace, live.deployment));
+      if (row) applyLive(row, live);
+    });
+    removed.forEach(([ns, dep]) => {
+      const row = rowsByKey.value.get(liveKey(ns, dep));
+      if (row) applyLive(row, undefined);
+    });
+  },
+  onPods(push: PodsPush) {
+    const row = rowsByKey.value.get(liveKey(push.namespace, push.deployment));
+    if (row && expandedRowKeys.value.includes(row.id)) {
+      mergePods(row, push.items);
+    }
+  }
+});
+
+const liveStateInfo = computed(() => {
+  switch (workloadStream.state.value) {
+    case "live":
+      return {
+        type: "success" as const,
+        label: "实时",
+        tip: "Pod 数和已展开的明细由 K8S 实时推送"
+      };
+    case "connecting":
+    case "syncing":
+      return {
+        type: "info" as const,
+        label: "连接中",
+        tip: "正在连接实时状态推送"
+      };
+    case "agent_offline":
+      return {
+        type: "warning" as const,
+        label: "agent 离线",
+        tip: "该集群的 agent 未连接,恢复后自动继续推送"
+      };
+    case "unavailable":
+      return {
+        type: "info" as const,
+        label: "实时不可用",
+        tip: "master/agent 版本过旧或连接失败,Pod 列显示 Prometheus 采集的期望副本数"
+      };
+    default:
+      return null;
+  }
+});
+
+// 切换集群/命名空间时断开推送,丢掉上一个集群的实时数据
+const resetLive = () => {
+  workloadStream.close();
+  liveByKey.clear();
+  clearAllSettleTimers();
+};
+
+const podStatusType = (pod: any) => {
+  const status: string = pod.status || "";
+  if (status === "Running") return pod.ready ? "success" : "warning";
+  if (status === "Terminating" || status === "Completed") return "info";
+  if (
+    [
+      "Pending",
+      "ContainerCreating",
+      "PodInitializing",
+      "SchedulingGated"
+    ].includes(status) ||
+    /^Init:\d+\/\d+$/.test(status)
+  ) {
+    return "warning";
+  }
+  return "danger";
+};
+
+// CPU/内存列按数值排序("-" 表示暂无指标,排在最后)
+const metricValue = (value: unknown) => {
+  const num = parseFloat(String(value));
+  return Number.isNaN(num) ? -1 : num;
+};
+const sortPodCpu = (a: any, b: any) => metricValue(a.cpu) - metricValue(b.cpu);
+const sortPodMemory = (a: any, b: any) =>
+  metricValue(a.memory) - metricValue(b.memory);
+
 // 处理Pod详情
 const handlePodDetail = async (
   row: any,
@@ -1128,6 +1259,8 @@ const handlePodDetail = async (
   // 如果已经加载过Pod数据且是用户点击，则执行折叠
   if (isExpanded && !forceReload) {
     expandedRowKeys.value = expandedRowKeys.value.filter(id => id !== rowId);
+    workloadStream.unwatchPods(row.namespace, row.deployment);
+    clearSettleTimer(liveKey(row.namespace, row.deployment));
     return;
   }
 
@@ -1136,12 +1269,15 @@ const handlePodDetail = async (
 
   try {
     const res = await getPodData(row.env, row.namespace, row.deployment);
-    const pods = Array.isArray(res.pods) ? res.pods : [];
-    row.pods = pods;
-    row.podCount = pods.length;
+    if (res.success === false && res.message) {
+      ElMessage.error(res.message);
+    }
+    mergePods(row, Array.isArray(res.pods) ? res.pods : []);
     if (!isExpanded) {
       expandedRowKeys.value.push(rowId);
     }
+    // 拿到明细后再订阅,之后 pod 的变化由推送更新
+    workloadStream.watchPods(row.namespace, row.deployment);
   } catch (error) {
     console.error("获取Pod数据失败:", error);
     ElMessage.error("获取Pod数据失败");
@@ -1382,16 +1518,13 @@ const getEnvOptions = async (): Promise<void> => {
   }
 };
 
-// 处理环境变化
+// 处理环境变化:命名空间和关键字保留,新集群没有该命名空间时由 getNsOptions 回退
 const handleEnvChange = async (val: string) => {
   searchForm.env = val;
-  searchForm.ns = "";
-  searchForm.keyword = "";
   searchStore.setEnv(val);
-  searchStore.setNamespace("");
-  appliedKeyword.value = "";
   tableData.value = [];
   expandedRowKeys.value = [];
+  resetLive();
   lastFetchedEnv.value = null;
   lastFetchedNamespace.value = null;
   resetPagination();
@@ -1408,6 +1541,7 @@ const handleNamespaceChange = (val: string) => {
   searchStore.setNamespace(searchForm.ns);
   tableData.value = [];
   expandedRowKeys.value = [];
+  resetLive();
   lastFetchedNamespace.value = null;
   resetPagination();
   restoreDefaultSortState();
@@ -1475,6 +1609,16 @@ const getNsOptions = async (env: string, flush = false): Promise<void> => {
 
 const fetchDeploymentData = async () => {
   loading.value = true;
+  const previousExpandedKeys = [...expandedRowKeys.value];
+  const currentEnv = searchForm.env;
+  const currentNamespace = searchForm.ns || "";
+  if (
+    lastFetchedEnv.value !== currentEnv ||
+    lastFetchedNamespace.value !== currentNamespace
+  ) {
+    // 换了集群/命名空间:上一个的实时数据不能再用
+    resetLive();
+  }
   try {
     const res = await getPromQueryData(searchForm.env, searchForm.ns);
     if (res.data) {
@@ -1482,13 +1626,18 @@ const fetchDeploymentData = async () => {
         const env = item[0] || "-";
         const namespace = item[1] || "-";
         const deployment = item[2] || "-";
+        const promPodCount = item[3] || 0;
+        const live = liveByKey.get(liveKey(namespace, deployment)) || null;
 
         return {
           id: `${env}-${namespace}-${deployment}`,
           env,
           namespace,
           deployment,
-          podCount: item[3] || 0,
+          // 排序用:有实时数据时是实时的期望副本数,否则是 Prometheus 的
+          podCount: live ? live.desired : promPodCount,
+          promPodCount,
+          live,
           avgCpu: item[4] ? Math.round(item[4]) : 0,
           maxCpu: item[5] ? Math.round(item[5]) : 0,
           requestCpu: item[6] ? Math.round(item[6]) : 0,
@@ -1501,6 +1650,22 @@ const fetchDeploymentData = async () => {
           podsLoading: false
         };
       });
+      // Pod 数 / 明细的实时推送(相同集群+命名空间不会重连)
+      workloadStream.connect(currentEnv, currentNamespace);
+      // 重新加载之前展开行的Pod数据
+      if (previousExpandedKeys.length > 0) {
+        expandedRowKeys.value = [];
+        for (const row of tableData.value) {
+          if (previousExpandedKeys.includes(row.id)) {
+            await handlePodDetail(row, { forceReload: true });
+          }
+        }
+      }
+      workloadStream.retainPods(
+        tableData.value
+          .filter(row => expandedRowKeys.value.includes(row.id))
+          .map(row => [row.namespace, row.deployment] as [string, string])
+      );
     } else {
       tableData.value = [];
     }
@@ -1556,79 +1721,17 @@ const resultDialogVisible = ref(false);
 const resultMessage = ref("");
 const currentOperation = ref(""); // 当前操作类型
 
-// 日志查看相关
-const logDialogVisible = ref(false);
-const logMessages = ref<string[]>([]);
-const isLogConnected = ref(false);
-const logConnecting = ref(false);
-const logSocket = ref<WebSocket | null>(null);
-const logContentRef = ref<HTMLElement | null>(null);
-const isUserScrolling = ref(false); // 用户是否在手动滚动
+// 日志查看：统一使用 PodLogViewer 组件
+const logViewerRef = ref<InstanceType<typeof PodLogViewer> | null>(null);
+
+// Pod 操作（扩缩容/节点均衡等）共享的当前 Pod 信息
 const currentPodInfo = ref({
   name: "",
   env: "",
   namespace: "",
-  deployment: ""
+  deployment: "",
+  containers: [] as string[]
 });
-
-// 日志搜索相关
-const searchKeyword = ref("");
-const searchMatches = ref<number[]>([]);
-const currentMatchIndex = ref(-1);
-const totalMatches = ref(0);
-const isFilterMode = ref(false); // 筛选模式状态
-
-// 筛选后的日志消息
-const filteredLogMessages = computed(() => {
-  if (!isFilterMode.value || !searchKeyword.value.trim()) {
-    return logMessages.value;
-  }
-
-  const keyword = searchKeyword.value.toLowerCase();
-  return logMessages.value.filter(message =>
-    message.toLowerCase().includes(keyword)
-  );
-});
-
-// 获取日志的唯一key
-const getLogKey = (message: string, index: number) => {
-  if (isFilterMode.value) {
-    // 筛选模式下，使用消息内容的hash作为key
-    return `${message.slice(0, 50)}-${index}`;
-  }
-  return index;
-};
-
-// 获取原始索引（用于高亮显示）
-const getOriginalIndex = (message: string, filteredIndex: number) => {
-  if (!isFilterMode.value) {
-    return filteredIndex;
-  }
-
-  // 在筛选模式下，找到该消息在原始数组中的索引
-  return logMessages.value.findIndex(msg => msg === message);
-};
-
-// 获取筛选后的索引（用于DOM定位）
-const getFilteredIndex = (originalIndex: number) => {
-  if (!isFilterMode.value) {
-    return originalIndex;
-  }
-
-  // 在筛选模式下，找到原始索引对应的消息在筛选数组中的位置
-  const targetMessage = logMessages.value[originalIndex];
-  return filteredLogMessages.value.findIndex(msg => msg === targetMessage);
-};
-
-// 切换筛选模式
-const toggleFilterMode = () => {
-  isFilterMode.value = !isFilterMode.value;
-
-  // 如果开启筛选模式，重新执行搜索以更新匹配项
-  if (isFilterMode.value && searchKeyword.value.trim()) {
-    performSearch(true);
-  }
-};
 
 // 新建对话框相关
 const createDialogVisible = ref(false);
@@ -1802,7 +1905,8 @@ const handleModifyPod = async (
       name: pod,
       env: env,
       namespace: namespace,
-      deployment: deployment
+      deployment: deployment,
+      containers: []
     };
 
     const scalePodRef = ref(false);
@@ -2410,393 +2514,55 @@ const handleAutoJvmMem = async (
   }
 };
 
-// 日志查看相关函数
+// 日志查看：统一走 PodLogViewer 组件
+// 单 Pod 入口（展开行内的 Pod 操作）
 const handleViewLogs = (
   env: string,
   namespace: string,
   pod: string,
-  deployment: string
+  deployment: string,
+  containers?: Array<string | { name: string; is_init?: boolean }>
 ) => {
-  currentPodInfo.value = {
-    name: pod,
-    env: env,
-    namespace: namespace,
-    deployment: deployment
-  };
-  logMessages.value = [];
-  logDialogVisible.value = true;
-  // 禁用body滚动，防止最外层滚动条滚动
-  document.body.style.overflow = "hidden";
-};
-
-const startLogStream = () => {
-  if (logSocket.value) {
-    logSocket.value.close();
-  }
-
-  logConnecting.value = true;
-  logMessages.value = [];
-
-  // 使用API函数构建WebSocket URL
-  const wsUrl = createPodLogStreamUrl(
-    currentPodInfo.value.env,
-    currentPodInfo.value.namespace,
-    currentPodInfo.value.name
-  );
-
-  logSocket.value = new WebSocket(wsUrl);
-
-  logSocket.value.onopen = () => {
-    logConnecting.value = false;
-    isLogConnected.value = true;
-    ElMessage.success("日志连接成功");
-  };
-
-  logSocket.value.onmessage = event => {
-    // 直接处理纯文本日志消息
-    if (event.data && event.data.trim()) {
-      logMessages.value.push(event.data);
-    }
-
-    // 限制日志条数，避免内存溢出
-    if (logMessages.value.length > 1000) {
-      logMessages.value = logMessages.value.slice(-800);
-    }
-
-    // 只有当用户没有手动滚动或已经在底部时才自动滚动
-    nextTick(() => {
-      if (!isUserScrolling.value || isAtBottom()) {
-        scrollToBottom();
-      }
-    });
-  };
-
-  logSocket.value.onerror = error => {
-    console.error("WebSocket错误:", error);
-    logConnecting.value = false;
-    isLogConnected.value = false;
-    ElMessage.error("日志连接失败");
-  };
-
-  logSocket.value.onclose = () => {
-    logConnecting.value = false;
-    isLogConnected.value = false;
-  };
-};
-
-const stopLogStream = () => {
-  if (logSocket.value) {
-    logSocket.value.close();
-    logSocket.value = null;
-  }
-  isLogConnected.value = false;
-};
-
-const clearLogs = () => {
-  logMessages.value = [];
-};
-
-const scrollToBottom = () => {
-  if (logContentRef.value) {
-    logContentRef.value.scrollTop = logContentRef.value.scrollHeight;
-    isUserScrolling.value = false; // 手动点击滚动到底部时重置状态
-  }
-};
-
-// 检查是否在底部
-const isAtBottom = () => {
-  if (!logContentRef.value) return false;
-  const { scrollTop, scrollHeight, clientHeight } = logContentRef.value;
-  return scrollTop + clientHeight >= scrollHeight - 10; // 10px 容差
-};
-
-// 监听滚动事件
-const handleScroll = () => {
-  if (!logContentRef.value) return;
-
-  // 如果用户向上滚动，标记为手动滚动状态
-  if (!isAtBottom()) {
-    isUserScrolling.value = true;
-  } else {
-    // 如果滚动到底部，重置手动滚动状态
-    isUserScrolling.value = false;
-  }
-};
-
-// 日志搜索相关方法
-const performSearch = (forceFirstMatch = false) => {
-  if (!searchKeyword.value.trim()) {
-    searchMatches.value = [];
-    currentMatchIndex.value = -1;
-    totalMatches.value = 0;
-    return;
-  }
-
-  // 记住当前匹配的日志内容，用于在重新搜索后保持位置
-  let currentMatchContent = "";
-  if (currentMatchIndex.value >= 0 && searchMatches.value.length > 0) {
-    const currentLineIndex = searchMatches.value[currentMatchIndex.value];
-    const targetMessages = isFilterMode.value
-      ? filteredLogMessages.value
-      : logMessages.value;
-    if (currentLineIndex < targetMessages.length) {
-      currentMatchContent = targetMessages[currentLineIndex];
-    }
-  }
-
-  const matches: number[] = [];
-  const keyword = searchKeyword.value.toLowerCase();
-  const targetMessages = isFilterMode.value
-    ? filteredLogMessages.value
-    : logMessages.value;
-
-  targetMessages.forEach((message, index) => {
-    if (message.toLowerCase().includes(keyword)) {
-      matches.push(index);
-    }
+  logViewerRef.value?.openForPod({
+    env,
+    namespace,
+    deployment,
+    pod,
+    containers
   });
-
-  searchMatches.value = matches;
-  totalMatches.value = matches.length;
-
-  // 尝试保持当前匹配位置
-  let newMatchIndex = 0;
-  if (matches.length > 0) {
-    if (forceFirstMatch) {
-      // 强制定位到第一个匹配项
-      newMatchIndex = 0;
-    } else if (currentMatchContent) {
-      // 尝试找到相同内容的匹配项
-      const sameContentIndex = matches.findIndex(
-        matchIndex => targetMessages[matchIndex] === currentMatchContent
-      );
-
-      if (sameContentIndex >= 0) {
-        // 找到相同内容，保持在该位置
-        newMatchIndex = sameContentIndex;
-      } else {
-        // 找不到相同内容，尝试找到最接近的位置
-        const oldLineIndex = searchMatches.value[currentMatchIndex.value] || 0;
-        let closestIndex = 0;
-        let minDistance = Math.abs(matches[0] - oldLineIndex);
-
-        for (let i = 1; i < matches.length; i++) {
-          const distance = Math.abs(matches[i] - oldLineIndex);
-          if (distance < minDistance) {
-            minDistance = distance;
-            closestIndex = i;
-          }
-        }
-        newMatchIndex = closestIndex;
-      }
-    }
-
-    currentMatchIndex.value = newMatchIndex;
-    // 如果强制定位到第一个匹配项，或者是首次搜索，或者没有找到相同内容时才自动滚动
-    if (forceFirstMatch || !currentMatchContent) {
-      scrollToMatch(matches[newMatchIndex]);
-    }
-  } else {
-    currentMatchIndex.value = -1;
-  }
 };
 
-// 初始化ANSI转HTML转换器
-const ansiUp = new AnsiUp();
-// 配置为适合深色背景
-ansiUp.escape_html = true;
-ansiUp.use_classes = false;
-
-// ANSI颜色代码转换为HTML样式
-const convertAnsiToHtml = (message: string) => {
-  return ansiUp.ansi_to_html(message);
-};
-
-const highlightSearchKeyword = (message: string, index: number) => {
-  // 首先转换ANSI颜色代码
-  let processedMessage = convertAnsiToHtml(message);
-
-  if (!searchKeyword.value.trim()) {
-    return processedMessage;
-  }
-
-  const keyword = searchKeyword.value;
-  // 在筛选模式下，传入的index是原始索引，需要转换为筛选后索引再比较
-  // 在搜索模式下，传入的index就是原始索引，直接比较
-  let isCurrentMatch = false;
-  if (isFilterMode.value) {
-    // 筛选模式：将原始索引转换为筛选后索引再比较
-    const filteredIndex = getFilteredIndex(index);
-    isCurrentMatch =
-      searchMatches.value[currentMatchIndex.value] === filteredIndex;
-  } else {
-    // 搜索模式：直接比较原始索引
-    isCurrentMatch = searchMatches.value[currentMatchIndex.value] === index;
-  }
-
-  // 检查原始消息内容是否包含关键字（不区分大小写）
-  if (!message.toLowerCase().includes(keyword.toLowerCase())) {
-    return processedMessage;
-  }
-
-  const regex = new RegExp(
-    `(${keyword.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")})`,
-    "gi"
-  );
-  const highlightClass = isCurrentMatch
-    ? "search-highlight-current"
-    : "search-highlight";
-
-  return processedMessage.replace(
-    regex,
-    `<span class="${highlightClass}">$1</span>`
-  );
-};
-
-const goToPreviousMatch = () => {
-  if (searchMatches.value.length === 0) return;
-
-  currentMatchIndex.value =
-    currentMatchIndex.value > 0
-      ? currentMatchIndex.value - 1
-      : searchMatches.value.length - 1;
-
-  scrollToMatch(searchMatches.value[currentMatchIndex.value]);
-};
-
-const goToNextMatch = () => {
-  if (searchMatches.value.length === 0) return;
-
-  currentMatchIndex.value =
-    currentMatchIndex.value < searchMatches.value.length - 1
-      ? currentMatchIndex.value + 1
-      : 0;
-
-  scrollToMatch(searchMatches.value[currentMatchIndex.value]);
-};
-
-// 获取重启前日志
-const getPreviousLogs = async () => {
-  if (
-    !currentPodInfo.value.name ||
-    !currentPodInfo.value.env ||
-    !currentPodInfo.value.namespace
-  ) {
-    ElMessage.warning("缺少Pod信息，无法获取重启前日志");
-    return;
-  }
-
+// Deployment 级日志入口：查看该 Deployment 下所有 Pod 的日志
+const handleViewDeployLogs = async (row: any) => {
   try {
-    // 停止实时日志流
-    stopLogStream();
-
-    // 清空当前日志
-    clearLogs();
-
-    // 显示加载状态
-    logConnecting.value = true;
-
-    // 调用重启前日志API
-    const data = await getPodPreviousLogs(
-      currentPodInfo.value.env,
-      currentPodInfo.value.namespace,
-      currentPodInfo.value.name,
-      400
-    );
-
-    if (data.success && data.message) {
-      // 将日志内容按行分割并添加到日志消息中
-      const logLines = data.message
-        .split("\n")
-        .filter(line => line.trim() !== "");
-      logMessages.value = logLines;
-
-      ElMessage.success("重启前日志获取成功");
-
-      // 滚动到底部
-      nextTick(() => {
-        scrollToBottom();
-      });
-    } else {
-      ElMessage.warning(data.message || "获取重启前日志失败");
-    }
-  } catch (error) {
-    console.error("获取重启前日志失败:", error);
-    ElMessage.error(`获取重启前日志失败: ${error.message}`);
-  } finally {
-    logConnecting.value = false;
-  }
-};
-
-const scrollToMatch = (lineIndex: number) => {
-  if (!logContentRef.value) return;
-
-  // 在筛选模式下，lineIndex已经是筛选后的索引，直接使用
-  // 在搜索模式下，lineIndex是原始索引，也直接使用
-  const logLines = logContentRef.value.querySelectorAll(".log-line");
-
-  if (logLines[lineIndex]) {
-    // 计算目标元素的位置
-    const targetElement = logLines[lineIndex] as HTMLElement;
-    const containerHeight = logContentRef.value.clientHeight;
-    const elementTop = targetElement.offsetTop;
-    const elementHeight = targetElement.offsetHeight;
-
-    // 计算滚动位置，使目标元素在容器中央显示
-    const scrollTop = elementTop - containerHeight / 2 + elementHeight / 2;
-
-    // 使用容器的scrollTop进行滚动，避免影响外层页面
-    logContentRef.value.scrollTo({
-      top: Math.max(0, scrollTop),
-      behavior: "smooth"
+    const res = await getPodData(row.env, row.namespace, row.deployment);
+    const pods = Array.isArray(res.pods) ? res.pods : [];
+    logViewerRef.value?.openForDeployment({
+      env: row.env,
+      namespace: row.namespace,
+      deployment: row.deployment,
+      pods: pods.map((p: any) => ({
+        name: p.name,
+        containers: Array.isArray(p.containers) ? p.containers : []
+      }))
     });
+  } catch (error) {
+    console.error("获取Pod列表失败:", error);
+    ElMessage.error("获取Pod列表失败");
   }
 };
 
-const closeLogDialog = () => {
-  stopLogStream();
-  logDialogVisible.value = false;
-  logMessages.value = [];
-  isUserScrolling.value = false; // 重置滚动状态
-  // 重置搜索状态
-  searchKeyword.value = "";
-  searchMatches.value = [];
-  currentMatchIndex.value = -1;
-  totalMatches.value = 0;
-  isFilterMode.value = false; // 重置筛选模式
-  // 恢复body滚动
-  document.body.style.overflow = "";
-};
-
-// 监听日志容器的滚动事件
-watch(
-  logContentRef,
-  newRef => {
-    if (newRef) {
-      newRef.addEventListener("scroll", handleScroll);
-    }
-  },
-  { immediate: true }
-);
-
-// 监听日志消息变化，自动重新搜索
-watch(
-  logMessages,
-  () => {
-    if (searchKeyword.value.trim()) {
-      performSearch();
-    }
-  },
-  { deep: true }
-);
-
-// 清理事件监听器
+// 清理 Monaco Editor 实例
 onBeforeUnmount(() => {
-  if (logContentRef.value) {
-    logContentRef.value.removeEventListener("scroll", handleScroll);
+  clearAllSettleTimers();
+  if (yamlEditor) {
+    yamlEditor.dispose();
+    yamlEditor = null;
   }
-  // 确保在组件卸载时恢复body滚动
-  document.body.style.overflow = "";
+  if (createYamlEditor) {
+    createYamlEditor.dispose();
+    createYamlEditor = null;
+  }
 });
 
 // 页面加载时获取环境列表
@@ -2927,178 +2693,52 @@ onMounted(async () => {
   text-align: center;
 }
 
-.log-container {
-  display: flex;
-  flex-direction: column;
-  height: 92vh;
-}
-
-.log-dialog-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  width: 100%;
-
-  /* 与外层标题栏保持一致 */
-  min-height: 28px;
-  padding: 4px 0;
-
-  /* 与外层标题栏高度一致 */
-  margin: 0;
-}
-
-.dialog-title {
-  font-size: 12px;
-
-  /* 进一步减小字体 */
-  font-weight: 600;
-  color: #303133;
-}
-
-.log-controls-header {
-  display: flex;
-  gap: 4px;
-  align-items: center;
-
-  /* 进一步减少按钮间距 */
-}
-
-.log-controls-header .el-button {
-  /* 减小按钮字体 */
-  height: 24px !important;
-  padding: 4px 8px !important;
-
-  /* 减小按钮内边距 */
-  font-size: 11px !important;
-
-  /* 减小按钮高度 */
-}
-
-.log-status {
-  margin-left: 12px;
-}
-
-.status-connected {
-  font-weight: bold;
-  color: #67c23a;
-}
-
-.status-disconnected {
-  font-weight: bold;
-  color: #f56c6c;
-}
-
-.log-content {
-  flex: 1;
-  padding: 16px;
-  overflow-y: auto;
-  font-family: Consolas, Monaco, "Courier New", monospace;
-  font-size: 13px;
-  line-height: 1.4;
-  color: #d4d4d4;
-  word-break: break-all;
-  white-space: pre-wrap;
-  background-color: #1e1e1e;
-  border-radius: 4px;
-}
-
-.no-logs {
-  padding: 40px 0;
-  font-size: 14px;
-  color: #909399;
-  text-align: center;
-}
-
-.log-line {
-  padding: 2px 0;
-  margin-bottom: 2px;
-}
-
-.log-error {
-  padding: 2px 4px;
-  color: #f56c6c;
-  background-color: rgb(245 108 108 / 10%);
-  border-radius: 2px;
-}
-
-.log-warn {
-  padding: 2px 4px;
-  color: #e6a23c;
-  background-color: rgb(230 162 60 / 10%);
-  border-radius: 2px;
-}
-
-.log-info {
-  color: #409eff;
-}
-
-/* 日志搜索相关样式 */
-.log-search-container {
-  display: flex;
-  gap: 8px;
-  align-items: center;
-  margin-left: 16px;
-}
-
-.log-search-container .el-button {
-  height: 24px !important;
-  padding: 4px 8px !important;
-  font-size: 11px !important;
-}
-
-.search-info {
-  font-size: 12px;
-  color: #606266;
-  white-space: nowrap;
-}
-
 .table-pagination {
   display: flex;
   justify-content: flex-end;
   margin-top: 12px;
 }
+
+/* Pod 列的实时状态:就绪/期望 + 更新中等标签 */
+.pod-live {
+  display: inline-flex;
+  gap: 4px;
+  align-items: center;
+  cursor: default;
+}
+
+.pod-live-count {
+  font-weight: bold;
+}
+
+.pod-live-count.is-success {
+  color: var(--el-color-success);
+}
+
+.pod-live-count.is-warning {
+  color: var(--el-color-warning);
+}
+
+.pod-live-count.is-danger {
+  color: var(--el-color-danger);
+}
+
+.pod-live-tag {
+  padding: 0 4px;
+}
+
+.live-state-tag {
+  margin-left: 12px;
+  cursor: default;
+}
 </style>
 
 <style>
-@keyframes pulse {
-  0% {
-    box-shadow: 0 0 4px rgb(255 102 0 / 80%);
-  }
-
-  50% {
-    box-shadow: 0 0 8px rgb(255 102 0 / 100%);
-  }
-
-  100% {
-    box-shadow: 0 0 4px rgb(255 102 0 / 80%);
-  }
-}
-
 .hide-expand .el-table__expand-icon {
   display: none;
 }
 
-/* 搜索高亮样式 - 针对黑色背景优化，必须在非scoped样式中定义 */
-.search-highlight {
-  padding: 1px 3px;
-  font-weight: bold;
-  color: #000 !important;
-  background-color: #ff0 !important;
-  border-radius: 3px;
-  box-shadow: 0 0 2px rgb(255 255 0 / 50%);
-}
-
-.search-highlight-current {
-  padding: 1px 3px;
-  font-weight: bold;
-  color: #fff !important;
-  background-color: #f60 !important;
-  border-radius: 3px;
-  box-shadow: 0 0 4px rgb(255 102 0 / 80%);
-  animation: pulse 1s infinite;
-}
-
-/* 优化日志弹窗的标题栏样式 */
+/* 优化弹窗的标题栏样式 */
 .el-dialog__header {
   /* 稍微增加高度确保垂直居中 */
   position: relative !important;

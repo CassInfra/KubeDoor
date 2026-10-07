@@ -81,6 +81,9 @@ export function useResource() {
           let res;
           params.map(item => {
             item.num = scaleData.podCount;
+            if (scaleData.cci) {
+              item.local_max_num = scaleData.cciLocalMaxNum;
+            }
             return item;
           });
 
@@ -99,7 +102,8 @@ export function useResource() {
                 params.length > 1 ? scaleData.tempData.interval : undefined,
                 scaleData.temp,
                 scaleData.strategy,
-                scaleData.scheduler
+                scaleData.scheduler,
+                scaleData.cci
               );
             } else {
               let tempData = {
@@ -121,7 +125,8 @@ export function useResource() {
                 tempData,
                 scaleData.temp,
                 scaleData.strategy,
-                scaleData.scheduler
+                scaleData.scheduler,
+                scaleData.cci
               );
             }
 
@@ -206,7 +211,10 @@ export function useResource() {
             } else {
               let tempData = {
                 type: "restart",
-                service: requestData,
+                service: {
+                  deployment_list: requestData,
+                  node_scheduler: scaleData.selectedNodes || []
+                },
                 time: "",
                 cron: ""
               };

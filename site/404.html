@@ -1,0 +1,67 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>页面未找到 · 花折 KubeDoor</title>
+<meta name="robots" content="noindex">
+<meta name="theme-color" content="#05070f">
+<meta name="color-scheme" content="dark">
+<link rel="icon" type="image/png" href="/KubeDoor/assets/img/favicon.png">
+<style>
+  *, *::before, *::after { box-sizing: border-box; }
+  html, body { height: 100%; }
+  body {
+    margin: 0; display: grid; place-items: center; padding: 32px 20px;
+    font-family: "PingFang SC", "Microsoft YaHei", "Noto Sans SC", system-ui, sans-serif;
+    color: #e9eef8; line-height: 1.7; text-align: center; -webkit-font-smoothing: antialiased;
+    background:
+      radial-gradient(900px 560px at 85% -10%, rgba(59, 130, 246, 0.2), transparent 62%),
+      radial-gradient(800px 520px at -10% 110%, rgba(139, 92, 246, 0.16), transparent 62%),
+      linear-gradient(180deg, #05070f 0%, #0a1024 100%);
+  }
+  body::before {
+    content: ""; position: fixed; inset: 0; z-index: -1; pointer-events: none;
+    background-image: linear-gradient(rgba(148, 163, 196, 0.07) 1px, transparent 1px), linear-gradient(90deg, rgba(148, 163, 196, 0.07) 1px, transparent 1px);
+    background-size: 56px 56px;
+    -webkit-mask-image: radial-gradient(ellipse 60% 55% at 50% 45%, #000 20%, transparent 75%);
+    mask-image: radial-gradient(ellipse 60% 55% at 50% 45%, #000 20%, transparent 75%);
+  }
+  main { max-width: 560px; }
+  .brand { display: inline-flex; align-items: center; gap: 10px; font-weight: 700; font-size: 17px; color: #e9eef8; text-decoration: none; }
+  .brand img { width: 34px; height: 34px; filter: drop-shadow(0 0 10px rgba(56, 189, 248, 0.4)); }
+  .brand b { background: linear-gradient(90deg, #67e8f9, #60a5fa 45%, #a78bfa); -webkit-background-clip: text; background-clip: text; color: transparent; }
+  .code { margin: 36px 0 0; font-family: "JetBrains Mono", "Cascadia Code", Consolas, monospace; font-size: clamp(88px, 22vw, 150px); font-weight: 800; line-height: 1; letter-spacing: -0.04em;
+    background: linear-gradient(90deg, #67e8f9, #60a5fa 45%, #a78bfa); -webkit-background-clip: text; background-clip: text; color: transparent; filter: drop-shadow(0 0 30px rgba(59, 130, 246, 0.35)); }
+  h1 { margin: 18px 0 0; font-size: 28px; font-weight: 800; }
+  p { margin: 12px 0 0; color: #b6c1d6; font-size: 16px; }
+  .actions { display: flex; flex-wrap: wrap; justify-content: center; gap: 12px; margin-top: 30px; }
+  .btn { display: inline-flex; align-items: center; justify-content: center; height: 48px; padding: 0 22px; border-radius: 14px; font-weight: 700; font-size: 15px; text-decoration: none; transition: transform 0.2s, box-shadow 0.2s, border-color 0.2s; }
+  .btn-primary { color: #050a18; background: linear-gradient(90deg, #22d3ee, #60a5fa 52%, #a78bfa); box-shadow: 0 14px 34px -14px rgba(59, 130, 246, 0.8); }
+  .btn-ghost { color: #e9eef8; background: rgba(255, 255, 255, 0.045); border: 1px solid rgba(148, 163, 196, 0.26); }
+  .btn:hover { transform: translateY(-2px); }
+  .btn:focus-visible, .brand:focus-visible { outline: 2px solid #67e8f9; outline-offset: 3px; border-radius: 14px; }
+  .poem { margin-top: 40px; font-family: "Kaiti SC", "STKaiti", "KaiTi", serif; letter-spacing: 0.22em; color: #8f9cb6; font-size: 15px; }
+  @media (prefers-reduced-motion: reduce) { .btn { transition: none; } }
+</style>
+</head>
+<body>
+<main>
+  <a class="brand" href="/KubeDoor/" data-local="index.html"><img src="/KubeDoor/assets/img/logo.png" data-local-src="assets/img/logo.png" width="34" height="34" alt="" onerror="this.style.display='none'"><span>花折 <b>KubeDoor</b></span></a>
+  <p class="code" aria-hidden="true">404</p>
+  <h1>页面走丢了</h1>
+  <p>你访问的页面不存在或已被移动。回到首页看看 KubeDoor 能做什么，或直接前往 GitHub 仓库。</p>
+  <div class="actions">
+    <a class="btn btn-primary" href="/KubeDoor/" data-local="index.html">返回首页</a>
+    <a class="btn btn-ghost" href="https://github.com/CassInfra/KubeDoor" rel="noopener">GitHub 仓库</a>
+  </div>
+  <p class="poem">花开堪折直须折，莫待无花空折枝</p>
+</main>
+<script>
+  if (location.protocol === 'file:') {
+    Array.prototype.forEach.call(document.querySelectorAll('[data-local]'), function (a) { a.setAttribute('href', a.getAttribute('data-local')); });
+    Array.prototype.forEach.call(document.querySelectorAll('[data-local-src]'), function (img) { img.style.display = ''; img.src = img.getAttribute('data-local-src'); });
+  }
+</script>
+</body>
+</html>

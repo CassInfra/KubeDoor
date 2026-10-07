@@ -3,7 +3,7 @@
     <!-- 警告提示 -->
     <div style="max-width: 600px; margin: 0 auto">
       <el-alert
-        title="内部试用阶段，使用MySQL数据源，如需使用联系作者。"
+        title="内部试用阶段，使用PostgreSQL数据源，如需使用联系作者。"
         type="warning"
         center
         show-icon

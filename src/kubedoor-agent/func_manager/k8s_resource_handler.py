@@ -778,14 +778,19 @@ class K8sResourceManager:
             api_instance, resource_name = self.get_api_instance(api_version, kind)
             is_namespaced = self.is_namespaced(kind)
 
-            # 读取资源
-            resource_obj = await self._read_resource(
-                api_instance, resource_name, name, namespace or 'default', is_namespaced
-            )
+            # 读取资源：使用 _preload_content=False 获取原始 JSON 响应，
+            # 避免 kubernetes 强类型模型（如 V1HTTPIngressPath）在反序列化时丢弃
+            # 模型未定义的非标准字段（例如华为云 CCE Ingress path 下的 property/url-match-mode）
+            method_name = f"read_namespaced_{resource_name}" if is_namespaced else f"read_{resource_name}"
+            read_method = getattr(api_instance, method_name)
 
-            # 使用async with确保ApiClient正确关闭，与service_manager.py保持一致
-            async with client.ApiClient() as api_client:
-                resource_dict = api_client.sanitize_for_serialization(resource_obj)
+            read_kwargs = {'name': name, '_preload_content': False}
+            if is_namespaced:
+                read_kwargs['namespace'] = namespace or 'default'
+
+            response = await read_method(**read_kwargs)
+            raw_data = await response.read()
+            resource_dict = json.loads(raw_data)
 
             # 清理不需要的字段
             cleaned_dict = self._clean_resource_for_display(resource_dict)

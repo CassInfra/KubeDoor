@@ -7,6 +7,7 @@ from kubernetes_asyncio import client
 from kubernetes_asyncio.client.exceptions import ApiException
 from loguru import logger
 
+from k8s_client_manager import list_all_raw
 from utils import parse_cpu, parse_memory, parse_storage_to_gib, bytes_to_gib, parse_pods
 
 
@@ -75,13 +76,14 @@ async def _get_node_metrics(custom_api, node_name: str) -> Dict[str, Any]:
 
 async def _get_node_pod_count(core_v1, node_name: str) -> int:
     """
-    获取节点上当前运行的Pod数量
+    获取节点上当前运行的Pod数量(只数个数,用原始 JSON,不反序列化成模型对象)
     """
     try:
-        pods = await core_v1.list_pod_for_all_namespaces(
-            field_selector=f"spec.nodeName={node_name},status.phase!=Failed,status.phase!=Succeeded"
+        pods = await list_all_raw(
+            core_v1.list_pod_for_all_namespaces,
+            field_selector=f"spec.nodeName={node_name},status.phase!=Failed,status.phase!=Succeeded",
         )
-        return len(pods.items)
+        return len(pods)
     except Exception as e:
         logger.warning(f"无法获取节点 {node_name} 的Pod数量: {e}")
         return 0
@@ -159,15 +161,22 @@ async def get_nodes_list(core_v1, custom_api, request):
     - env: 集群名称
     - core_v1: Kubernetes CoreV1Api客户端
     - custom_api: Kubernetes CustomObjectsApi客户端
-    返回：节点详细信息列表
+    - simple: 可选，设置为 true 时只返回节点名称列表
+    返回：节点详细信息列表或节点名称列表
     """
     try:
         env = request.query.get('env')
+        simple = request.query.get('simple', '').lower() == 'true'
 
         if not env:
             return web.json_response({"success": False, "data": {"error": "缺少必要参数: env"}}, status=400)
 
         nodes = await core_v1.list_node()
+
+        # 简单模式：只返回节点名称列表
+        if simple:
+            node_names = [node.metadata.name for node in nodes.items]
+            return web.json_response({"success": True, "data": node_names})
 
         async with ClientSession() as session:
             tasks = [_get_node_details(node, core_v1, custom_api, session, env) for node in nodes.items]

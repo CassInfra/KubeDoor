@@ -1,8 +1,13 @@
 import os
 import sys
 import json
+import asyncio
+from concurrent.futures import ThreadPoolExecutor
 import requests
 from loguru import logger
+
+# 用于异步执行同步HTTP请求的线程池（发送通知消息用）
+_executor = ThreadPoolExecutor(max_workers=5)
 
 
 NODE_LABLE_VALUE = "kubedoor-scheduler"
@@ -34,7 +39,8 @@ def get_version():
         return "unknown"
 
 
-def send_msg(content):
+def _send_msg_sync(content):
+    """同步发送消息（内部使用）"""
     response = ""
     if MSG_TYPE == "wecom":
         response = wecom(MSG_TOKEN, content)
@@ -50,6 +56,17 @@ def send_msg(content):
 
     logger.info(f'【{MSG_TYPE}】{response}')
     return f'【{MSG_TYPE}】{response}'
+
+
+def send_msg(content):
+    """非阻塞发送消息，在后台线程执行，不阻塞事件循环"""
+    try:
+        loop = asyncio.get_running_loop()
+        # 在线程池中执行，不阻塞事件循环
+        loop.run_in_executor(_executor, _send_msg_sync, content)
+    except RuntimeError:
+        # 没有运行中的事件循环，直接同步执行
+        _send_msg_sync(content)
 
 
 def wecom(webhook, content, at=""):

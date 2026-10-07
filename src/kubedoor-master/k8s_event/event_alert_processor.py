@@ -10,7 +10,7 @@ from typing import Dict, List, Any, Optional
 from datetime import datetime
 from loguru import logger
 from .alert_rule_matcher import AlertRuleMatcher
-from .clickhouse_client import get_clickhouse_client
+from .pg_event_client import get_pg_event_client
 from utils import send_msg, ALERT_DEDUP_WINDOW
 
 
@@ -69,14 +69,10 @@ class EventAlertProcessor:
                 event_uid = event.get('eventUid')
                 # 更新数据库中对应eventUid的level字段为"已告警"
                 try:
-                    clickhouse_client = get_clickhouse_client()
-                    # 使用ALTER UPDATE语句更新level字段
-                    update_sql = """
-                    ALTER TABLE k8s_events 
-                    UPDATE level = '已告警' 
-                    WHERE eventUid = %s
-                    """
-                    clickhouse_client.pool.execute_query(update_sql, [event_uid])
+                    pg_client = get_pg_event_client()
+                    # PG 标准 UPDATE(替代原 CK ALTER TABLE UPDATE)
+                    update_sql = "UPDATE k8s_events SET level = '已告警' WHERE eventuid = $1"
+                    pg_client.pool.execute_command(update_sql, [event_uid])
                     logger.info(f"已更新eventUid {event_uid} 的level字段为'已告警'")
                 except Exception as update_e:
                     logger.error(f"更新level字段失败: {update_e}")

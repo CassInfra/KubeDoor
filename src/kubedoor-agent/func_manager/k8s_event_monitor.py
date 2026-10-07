@@ -2,29 +2,50 @@
 # -*- coding: utf-8 -*-
 """
 K8S事件实时监控模块
-使用kubernetes_asyncio库异步监听K8S事件，并通过WebSocket推送到kubedoor-master
+分页 list + watch 全集群事件(逐行解析原始 JSON),通过WebSocket批量推送到kubedoor-master
+
+- 不用 kubernetes_asyncio.watch.Watch:它对每个事件都要 loads/dumps 再反序列化成模型对象,
+  遇到 410 还会拿同一个过期的 resourceVersion 重试一次(必然再 410)。
+- events 默认不进 apiserver 的 watch cache,watch 直接打到 etcd,没有 BOOKMARK:集群安静超过
+  etcd compaction 窗口(约 5~10 分钟)后,用旧 resourceVersion 续 watch 必然 410。
+  410 时重新 list,和已经发给 master 的版本(eventUid → resourceVersion)比对,只补发新增/变化的事件,
+  不再把集群里的事件全部重推一遍(master 的告警去重窗口只有几分钟,全量重推会重复告警)。
+- watch 带服务端超时和 sock_read 超时,连接静默断掉也能发现。
+- 每次连上 master 都会重新 list:断线期间漏掉的事件补发,master 已经有的不重发。
 """
 
 import asyncio
 import json
+import random
+import time
 from datetime import datetime
-from kubernetes_asyncio import client, watch
+
 from kubernetes_asyncio.client.rest import ApiException
 from loguru import logger
 from utils import PROM_K8S_TAG_VALUE, MSG_TOKEN
 from func_manager.event_monitor_config import *
 
+PAGE_SIZE = 500
+YIELD_EVERY = 100  # 每处理多少个事件让出一次事件循环
+MAX_BACKOFF = 60
+
 
 class K8sEventMonitor:
-    """K8S事件监听器"""
+    """K8S事件监听器，带背压控制"""
 
     def __init__(self, core_v1_api):
         self.core_v1 = core_v1_api
         self.ws_conn = None
         self.monitor_task = None
+        self.batch_sender_task = None
         self.is_running = False
         self.last_event_time = None
+        self.last_alive_time = None  # watch 最近一次确认连通的时间(连上 / 收到任何一行 / list 成功)
         self.event_count = 0
+        # 事件队列，用于背压控制
+        self.event_queue = asyncio.Queue(maxsize=1000)
+        self._rv = None  # 下次 watch 的起点,None 表示先 list
+        self._sent = {}  # eventUid -> 已发给 master 的 resourceVersion,跨 master 重连保留
 
     def set_websocket_connection(self, ws_conn):
         """设置WebSocket连接"""
@@ -99,110 +120,187 @@ class K8sEventMonitor:
             logger.debug(f"原始事件数据: {json.dumps(event, indent=2, ensure_ascii=False)}")
             return None
 
-    async def send_event_to_master(self, event_data):
-        """通过WebSocket发送事件数据到kubedoor-master"""
-        if not self.is_websocket_healthy():
-            logger.warning("WebSocket连接不健康，无法发送事件")
+    async def _forward(self, event_type, raw_object):
+        """格式化后放进发送队列;队列满时等发送任务腾出位置(背压),不丢事件"""
+        event_data = self.format_event_data({"type": event_type, "raw_object": raw_object})
+        if not event_data:
             return
+        resource_version = (raw_object.get("metadata") or {}).get("resourceVersion")
+        await self.event_queue.put((event_data, resource_version))
+        self.last_event_time = datetime.now()
+        logger.debug(
+            f"📨 [{event_data['eventStatus']}] {event_data['level']} - "
+            f"{event_data['kind']}/{event_data['name']} - {event_data['reason']} - "
+            f"首次: {event_data['firstTimestamp']} 最后: {event_data['lastTimestamp']}"
+        )
 
-        try:
-            # 构造WebSocket消息
-            ws_message = {"type": "k8s_event", "data": event_data, "timestamp": datetime.now().isoformat()}
+    def _mark_sent(self, batch):
+        for event_data, resource_version in batch:
+            uid = event_data.get("eventUid")
+            if not uid:
+                continue
+            if event_data.get("eventStatus") == "DELETED":
+                self._sent.pop(uid, None)
+            elif resource_version:
+                self._sent[uid] = resource_version
 
-            await self.ws_conn.send_json(ws_message)
+    async def _batch_send_events(self):
+        """批量发送事件到 master，实现背压控制"""
+        batch = []
+        batch_size = 10
+        batch_timeout = 1.0  # 1秒超时
 
-            # 更新统计信息
-            self.event_count += 1
-            self.last_event_time = datetime.now()
-
-            logger.debug(
-                f"事件已发送 (#{self.event_count}): {event_data['kind']}/{event_data['name']} - {event_data['reason']}"
-            )
-
-        except Exception as e:
-            logger.error(f"发送事件到master失败: {e}")
-            # 连接异常时清空连接引用
-            self.ws_conn = None
-
-    async def monitor_events(self, namespace=None):
-        """监控K8S事件，带重连机制"""
-        retry_count = 0
-        max_retries = 5
-        base_delay = 1  # 基础重试延迟（秒）
-
-        while self.is_running and retry_count < max_retries:
+        while self.is_running:
             try:
-                logger.info("🚀 开始监控K8S事件...")
-                logger.info(f"📍 监控范围: {'所有命名空间' if not namespace else f'命名空间 {namespace}'}")
+                # 等待事件或超时
+                try:
+                    batch.append(await asyncio.wait_for(self.event_queue.get(), timeout=batch_timeout))
+                except asyncio.TimeoutError:
+                    pass
 
-                if retry_count > 0:
-                    logger.info(f"🔄 第 {retry_count} 次重试监控K8S事件")
-
-                # 创建事件监听器
-                w = watch.Watch()
-
-                # 开始监听事件
-                if namespace:
-                    stream = w.stream(self.core_v1.list_namespaced_event, namespace=namespace)
-                else:
-                    stream = w.stream(self.core_v1.list_event_for_all_namespaces)
-
-                # 重置重试计数器（成功建立连接）
-                retry_count = 0
-
-                async for event in stream:
-                    if not self.is_running:
-                        logger.info("事件监控已停止")
-                        return
-
-                    try:
-                        # 格式化事件数据
-                        event_data = self.format_event_data(event)
-
-                        if event_data:
-                            # 发送事件到master
-                            await self.send_event_to_master(event_data)
-
-                            # 记录事件日志
-                            logger.debug(
-                                f"📨 [{event_data['eventStatus']}] {event_data['level']} - "
-                                f"{event_data['kind']}/{event_data['name']} - {event_data['reason']} - "
-                                f"首次: {event_data['firstTimestamp']} 最后: {event_data['lastTimestamp']}"
-                            )
-
-                    except Exception as e:
-                        logger.error(f"处理事件时出错: {e}")
-                        continue
+                # 达到批量大小或有数据且队列为空时发送
+                if len(batch) >= batch_size or (batch and self.event_queue.empty()):
+                    if self.is_websocket_healthy():
+                        try:
+                            ws_message = {
+                                "type": "k8s_event_batch",
+                                "data": [event_data for event_data, _ in batch],
+                                "timestamp": datetime.now().isoformat(),
+                            }
+                            await self.ws_conn.send_json(ws_message)
+                            self.event_count += len(batch)
+                            self._mark_sent(batch)
+                            logger.debug(f"批量发送 {len(batch)} 个事件")
+                        except Exception as e:
+                            logger.error(f"批量发送事件失败: {e}")
+                            self.ws_conn = None
+                    # 没发出去的不记进 _sent,下次重新 list 时会补发
+                    batch = []
 
             except asyncio.CancelledError:
-                logger.info("⏹️ 事件监控被取消")
-                return
-            except ApiException as e:
-                retry_count += 1
-                if retry_count >= K8S_EVENT_MAX_RETRIES:
-                    logger.error(f"K8s API异常达到最大重试次数({K8S_EVENT_MAX_RETRIES}): {e}")
-                    break
-
-                delay = min(K8S_EVENT_RETRY_DELAY**retry_count, 60)  # 指数退避，最大60秒
-                logger.warning(f"K8s API异常，{delay}秒后重试 (第{retry_count}/{K8S_EVENT_MAX_RETRIES}次): {e}")
-                await asyncio.sleep(delay)
-                continue
-
+                break
             except Exception as e:
-                retry_count += 1
-                if retry_count >= K8S_EVENT_MAX_RETRIES:
-                    logger.error(f"监控事件时发生异常达到最大重试次数({K8S_EVENT_MAX_RETRIES}): {e}")
-                    break
+                logger.error(f"批量发送任务异常: {e}")
+                await asyncio.sleep(1)
 
-                delay = min(K8S_EVENT_RETRY_DELAY**retry_count, 60)  # 指数退避，最大60秒
-                logger.warning(f"监控事件异常，{delay}秒后重试 (第{retry_count}/{K8S_EVENT_MAX_RETRIES}次): {e}")
-                await asyncio.sleep(delay)
-                continue
+    async def _relist(self):
+        """分页 list 全部事件,补发 master 还没有的版本,watch 起点设成 list 的 resourceVersion"""
+        listed = set()
+        forwarded = 0
+        cont = None
+        while True:
+            kwargs = {"limit": PAGE_SIZE, "_preload_content": False, "_request_timeout": 60}
+            if cont:
+                kwargs["_continue"] = cont
+            # _preload_content=False 时 kubernetes_asyncio 不会对非 2xx 抛异常,要自己判断
+            resp = await self.core_v1.list_event_for_all_namespaces(**kwargs)
+            try:
+                body = await resp.read()
+                if resp.status != 200:
+                    raise ApiException(status=resp.status, reason=body[:300].decode("utf-8", "replace"))
+            finally:
+                resp.release()
+            data = json.loads(body)
+            for obj in data.get("items") or []:
+                item_meta = obj.get("metadata") or {}
+                uid = item_meta.get("uid")
+                if not uid:
+                    continue
+                listed.add(uid)
+                sent_version = self._sent.get(uid)
+                if sent_version != item_meta.get("resourceVersion"):
+                    await self._forward("ADDED" if sent_version is None else "MODIFIED", obj)
+                    forwarded += 1
+            meta = data.get("metadata") or {}
+            cont = meta.get("continue")
+            if not cont:
+                break
+            await asyncio.sleep(0)
+        # 已经过期删除的事件不用再记
+        for uid in [uid for uid in self._sent if uid not in listed]:
+            del self._sent[uid]
+        self._rv = meta.get("resourceVersion")
+        self.last_alive_time = datetime.now()
+        log = logger.info if forwarded else logger.debug
+        log(f"📋 K8S事件 list 完成: 共 {len(listed)} 条，补发 {forwarded} 条")
 
-        self.is_running = False
+    async def _watch(self):
+        """从 self._rv 开始 watch,服务端到点正常断开时返回(外层循环接着 watch)"""
+        timeout = K8S_EVENT_STREAM_TIMEOUT + random.randint(0, 60)
+        resp = await self.core_v1.list_event_for_all_namespaces(
+            watch=True,
+            resource_version=self._rv,
+            allow_watch_bookmarks=True,
+            timeout_seconds=timeout,
+            _preload_content=False,
+            # sock_read 比服务端超时多 30 秒:连接静默断掉时也能发现
+            _request_timeout=(10, timeout + 30),
+        )
+        try:
+            if resp.status != 200:
+                body = await resp.read()
+                raise ApiException(status=resp.status, reason=body[:300].decode("utf-8", "replace"))
+            self.last_alive_time = datetime.now()
+            handled = 0
+            while True:
+                line = await resp.content.readline()
+                if not line:
+                    return
+                self.last_alive_time = datetime.now()
+                event = json.loads(line)
+                event_type = event.get("type")
+                obj = event.get("object") or {}
+                if event_type == "ERROR":
+                    raise ApiException(status=obj.get("code"), reason=f"{obj.get('reason')}: {obj.get('message')}")
+                if event_type in ("ADDED", "MODIFIED", "DELETED"):
+                    await self._forward(event_type, obj)
+                elif event_type != "BOOKMARK":
+                    continue
+                resource_version = (obj.get("metadata") or {}).get("resourceVersion")
+                if resource_version:
+                    self._rv = resource_version
+                handled += 1
+                if handled % YIELD_EVERY == 0:
+                    await asyncio.sleep(0)
+        finally:
+            resp.release()
 
-    async def start_monitoring(self, namespace=None):
-        """启动事件监控"""
+    async def monitor_events(self):
+        """list + watch 主循环:正常断开从最后的 resourceVersion 续上,410 重新 list,其它异常退避后重试"""
+        backoff = K8S_EVENT_RETRY_DELAY
+        try:
+            while self.is_running:
+                relisted = False  # 这一轮的 watch 是不是从刚 list 出来的 resourceVersion 开始
+                try:
+                    if self._rv is None:
+                        relisted = True
+                        await self._relist()
+                    started = time.monotonic()
+                    await self._watch()
+                    if time.monotonic() - started >= 1:
+                        backoff = K8S_EVENT_RETRY_DELAY
+                        continue
+                    # 刚连上就被断开(apiserver / 代理异常),退避一下,别空转
+                    logger.warning(f"K8S事件 watch 连上即被断开，{backoff}秒后重试")
+                except asyncio.CancelledError:
+                    raise
+                except ApiException as e:
+                    if e.status == 410:
+                        self._rv = None
+                        if not relisted:
+                            # resourceVersion 已被 etcd 压缩(集群安静太久),立即重新 list 补齐
+                            logger.debug(f"K8S事件 resourceVersion 已过期，重新 list: {e.reason}")
+                            continue
+                    logger.warning(f"K8S事件 list/watch 失败({e.status} {e.reason})，{backoff}秒后重试")
+                except Exception as e:
+                    logger.warning(f"K8S事件 list/watch 异常({type(e).__name__}: {e})，{backoff}秒后重试")
+                await asyncio.sleep(backoff + random.random())
+                backoff = min(backoff * 2, MAX_BACKOFF)
+        finally:
+            self.is_running = False
+
+    async def start_monitoring(self):
+        """启动事件监控(每次连上 master 调用):先 list 补发断线期间漏掉的事件,再接着 watch"""
         if self.is_running:
             logger.warning("事件监控已在运行中")
             return
@@ -210,9 +308,15 @@ class K8sEventMonitor:
         # 重置统计信息
         self.event_count = 0
         self.last_event_time = None
+        self.last_alive_time = datetime.now()
+        # 上个连接没发出去的事件不在 _sent 里,list 时会补发
+        self.event_queue = asyncio.Queue(maxsize=1000)
+        self._rv = None
 
         self.is_running = True
-        self.monitor_task = asyncio.create_task(self.monitor_events(namespace))
+        # 启动监控任务和批量发送任务
+        self.monitor_task = asyncio.create_task(self.monitor_events())
+        self.batch_sender_task = asyncio.create_task(self._batch_send_events())
         logger.info(f"🎯 K8S事件监控已启动 (WebSocket健康: {self.is_websocket_healthy()})")
 
     async def stop_monitoring(self):
@@ -221,6 +325,8 @@ class K8sEventMonitor:
             return
 
         self.is_running = False
+
+        # 停止监控任务
         if self.monitor_task:
             self.monitor_task.cancel()
             try:
@@ -228,6 +334,15 @@ class K8sEventMonitor:
             except asyncio.CancelledError:
                 pass
             self.monitor_task = None
+
+        # 停止批量发送任务
+        if self.batch_sender_task:
+            self.batch_sender_task.cancel()
+            try:
+                await self.batch_sender_task
+            except asyncio.CancelledError:
+                pass
+            self.batch_sender_task = None
 
         # 输出统计信息
         if self.event_count > 0:

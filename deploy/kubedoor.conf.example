@@ -1,0 +1,231 @@
+# =============================================================================
+# KubeDoor 安装配置文件(模板)
+#
+#   使用前先复制一份并按注释修改:cp kubedoor.conf.example kubedoor.conf
+#   kubedoor.conf 含密码和 token,已被 deploy/.gitignore 忽略,不要提交到 git。
+#
+#   ./install.sh master     安装控制端(master + web + alarm + ai + grafana + 监控栈)
+#   ./install.sh agent      安装集群端(agent + vmagent + ksm + node-exporter)
+#
+# 本文件是 shell 语法,值里有空格或特殊字符时必须用双引号包起来。
+# master 端和 agent 端共用这一个文件,各自只读自己需要的段落。
+# =============================================================================
+
+
+# =============================================================================
+# 一、通用
+# =============================================================================
+
+# 所有组件部署到的命名空间,不存在会自动创建
+NAMESPACE="kubedoor"
+
+# kubectl 使用的 context。留空=用当前 context(kubectl config current-context)
+# 管理多套集群时,在这里指定目标集群,避免装错地方
+KUBE_CONTEXT=""
+
+# 镜像仓库与各组件版本
+IMAGE_REPO="swr.cn-south-1.myhuaweicloud.com/starsl.cn"
+TAG_MASTER="2.1.0"
+TAG_AGENT="2.1.0"
+TAG_WEB="2.1.0"
+TAG_AI="2.1.0"
+TAG_ALARM="2.1.0"
+
+# 多集群指标区分用的标签 key。master 和所有 agent 必须填同一个值,
+# 只能用字母/数字/下划线。
+PROM_K8S_TAG_KEY="origin_prometheus"
+
+# 操作通知(扩缩容、改镜像、告警等)。类型:wecom / dingding / feishu / slack
+# 钉钉机器人的安全设置请把自定义关键词设为:告警
+MSG_TYPE="wecom"
+MSG_TOKEN=""
+
+# 存储类。留空=用集群默认 StorageClass。
+# 只有 master 端开了 VictoriaMetrics 才需要(要建 PVC)
+STORAGE_CLASS=""
+
+# --- 第三方组件镜像(离线/内网环境改成自己仓库的地址)---
+IMAGE_GRAFANA="registry.cn-shenzhen.aliyuncs.com/starsl/grafana-oss:11.4.0"
+IMAGE_VICTORIA_METRICS="registry.cn-shenzhen.aliyuncs.com/starsl/victoria-metrics:stable"
+IMAGE_VMAGENT="registry.cn-shenzhen.aliyuncs.com/starsl/vmagent:stable"
+IMAGE_VMALERT="registry.cn-shenzhen.aliyuncs.com/starsl/vmalert:stable"
+IMAGE_ALERTMANAGER="registry.cn-shenzhen.aliyuncs.com/starsl/alertmanager:latest"
+IMAGE_KUBE_STATE_METRICS="registry.cn-shenzhen.aliyuncs.com/starsl/kube-state-metrics:v2.14.0"
+IMAGE_NODE_EXPORTER="registry.cn-shenzhen.aliyuncs.com/starsl/node-exporter"
+IMAGE_BUSYBOX_CURL="registry.cn-shenzhen.aliyuncs.com/starsl/busybox-curl"
+
+
+# =============================================================================
+# 二、master 端 —— PostgreSQL 连接
+#     先用 deploy/postgres/docker-compose.yaml 把库跑起来,再把地址填到这里。
+#     也可以填现成的 PostgreSQL(云上托管版也行):不需要任何扩展,库的属主账号即可。
+#     PG_HOST 必须是 K8S 集群内的 Pod 能访问到的地址(不能填 127.0.0.1)。
+# =============================================================================
+
+PG_HOST=""          # 必填
+PG_PORT="5432"
+PG_USER="kubedoor"
+PG_PASSWORD=""      # 必填,和 deploy/postgres/.env 里的 PG_PASSWORD 一致
+PG_DATABASE="kubedoor"
+
+# asyncpg 连接池大小与单条语句默认超时(秒)
+PG_POOL_MIN="2"
+PG_POOL_MAX="20"
+PG_CMD_TIMEOUT="60"
+
+
+# =============================================================================
+# 三、master 端 —— Web 控制台
+# =============================================================================
+
+# Web 的 NodePort。留空=由 K8S 随机分配(30000-32767)
+WEB_NODEPORT=""
+
+# 登录账号,htpasswd 格式 "用户名:加密密码",一行一个。
+# 在 https://tool.lu/htpasswd/ 生成,加密方式选 Crypt。
+# 默认给了两个账号:
+#   kubedoor / kubedoor          —— 管理员(读写)
+#   Up4biLko1dNh / qCa22jDkfc9y  —— 预留给跨集群的 agent 连接 master 用
+# 其它账号默认是只读权限,只能读不能改。
+WEB_AUTH_USERS="kubedoor:a3rsHbfPnb4Ps
+Up4biLko1dNh:cUo3fhryKizac"
+
+# 上面哪些账号是读写权限(空格分隔)。没列出来的账号只能读,不能做任何变更操作。
+WEB_RW_USERS="kubedoor Up4biLko1dNh"
+
+# KubeDoor Web 的外部访问地址,形如 http://<节点IP>:<Web 的 NodePort>
+# 填了以后 IM 告警通知里的【屏蔽】按钮会直接跳到 KubeDoor 的屏蔽页并预填条件
+KUBEDOOR_EXTURL=""
+
+# Alertmanager 的外部访问地址。KUBEDOOR_EXTURL 没填时,【屏蔽】按钮回退到这里
+ALERTMANAGER_EXTURL=""
+
+# 告警里找不到 annotations.at 时,默认 @ 的人(IM 工具里的用户 ID)
+DEFAULT_AT=""
+
+# 告警去重窗口(秒)、告警屏蔽规则缓存(秒)
+ALERT_DEDUP_WINDOW="300"
+SILENCE_CACHE_TTL="15"
+
+
+# =============================================================================
+# 四、master 端 —— 可选组件
+# =============================================================================
+
+# Grafana 看板(KubeDoor-Dash 走 PostgreSQL,K8S/Node 两块走 Prometheus)
+ENABLE_GRAFANA="true"
+GRAFANA_ADMIN_USER="admin"
+GRAFANA_ADMIN_PASSWORD="admin"
+
+# 外部 MCP 接口（/mcp、/sse），供 Claude Desktop、Cursor 等其他 AI 客户端接入，复用 Web 登录账号鉴权。
+# 默认开启；设为 false 只关闭对外的 MCP 入口，不影响网页里的 AI 助手。
+ENABLE_MCP="true"
+
+# 内置 AI 助手（kubedoor-ai）是必装组件，不能关闭。模型地址、密钥、模型名由每个用户在浏览器配置。
+# 内部鉴权及 kubeconfig 加密密钥由安装脚本自动生成并保存到
+# kubedoor.conf.ai-secrets（0600），升级时必须保留该文件与集群 Secret。
+# 可通过环境变量 AI_INTERNAL_TOKEN / AI_ENCRYPTION_KEY 覆盖，均为64位十六进制。
+
+
+# =============================================================================
+# 五、master 端 —— 时序库与告警链路
+#
+#     链路:K8S <--vmagent--> 时序库 <--vmalert--> alertmanager --> kubedoor-alarm --> IM
+#
+#     ENABLE_VICTORIA_METRICS=true 时会在集群里装一个 VictoriaMetrics 单机版,
+#     PROM_URL 自动指向它,下面的 PROM_URL 不用填。
+#     已经有 Prometheus / VictoriaMetrics 的,设成 false 并填 PROM_URL。
+# =============================================================================
+
+ENABLE_VICTORIA_METRICS="true"
+
+# 【ENABLE_VICTORIA_METRICS=true 时生效】内置 VictoriaMetrics 的参数
+VM_RETENTION="30d"
+VM_STORAGE="100Gi"
+VM_USER="monit"
+VM_PASSWORD="dduF1E3sj"
+VM_NODEPORT=""
+
+# 【ENABLE_VICTORIA_METRICS=false 时必填】已有时序库的读地址,
+# 有认证的写成 http://user:pass@host:port 格式。
+# VictoriaMetrics 集群版填 vmselect 地址,如 http://vmselect:8481/select/0/prometheus
+PROM_URL=""
+
+# 时序库类型,写给 master 做区分:Prometheus / Victoria-Metrics-Single / Victoria-Metrics-Cluster
+PROM_TYPE="Victoria-Metrics-Single"
+
+# vmalert:按内置规则算告警。用自己的 Prometheus 告警规则就设 false
+ENABLE_VMALERT="true"
+
+# alertmanager:告警路由与去重。设 false 时要自己把告警 webhook 指到
+# http://kubedoor-alarm.<NAMESPACE>/alert/store 和 /msg/<MSG_TYPE>=<MSG_TOKEN>
+ENABLE_ALERTMANAGER="true"
+ALERTMANAGER_NODEPORT=""
+
+
+# =============================================================================
+# 六、master 端 —— 镜像更新权限 / 镜像仓库凭据
+#
+#     改镜像属于高危操作,这里按集群控制谁、在什么时间段可以做。
+#     default 段是兜底,其它段的 key 要和 agent 端的 K8S_NAME 对上。
+# =============================================================================
+
+UPDATE_IMAGE_JSON='{
+  "default": {
+    "isOperationAllowed": false
+  },
+  "my-test-k8s": {
+    "isOperationAllowed": true,
+    "allowedOperationPeriod": "19:00-08:00",
+    "user": ["kubedoor"]
+  }
+}'
+
+# 查询镜像 tag 列表用的仓库凭据。用不到就保持默认空壳。
+# 华为 SWR / 阿里 ACR 填 ak/sk,Harbor 填用户名/密码。
+REGISTRY_SECRET_JSON='{
+  "harbor.example.com": {
+    "default": {
+      "ak": "username",
+      "sk": "password"
+    }
+  }
+}'
+
+
+# =============================================================================
+# 七、agent 端
+# =============================================================================
+
+# 本集群的名字,会作为指标标签 <PROM_K8S_TAG_KEY> 的值,在 Web 上用来区分集群。
+# 每个集群必须唯一,只能用字母/数字/下划线/中划线。
+K8S_NAME=""         # 必填
+
+# agent 连 master 的地址:
+#   同一个 K8S 集群:ws://kubedoor-master.kubedoor        (走 service,免认证)
+#   跨集群:ws://Up4biLko1dNh:qCa22jDkfc9y@<web外部IP>:<NodePort>
+MASTER_WS="ws://kubedoor-master.kubedoor"
+
+# Java 服务做 dump / jfr / jstack 时,结果文件上传到的对象存储地址。
+# 暂时没有可以留空,装完再改 kubedoor-agent-config 这个 ConfigMap。
+# 目前是免账号密码直接上传,对象存储(如华为云 OBS)的配置方法见 help/FAQ.md。
+OSS_URL=""
+
+# --- agent 端的采集组件 ---
+# 本集群已有完整的 Prometheus 采集并远程写到 master 的时序库时,下面三个都设 false
+
+# vmagent:采集本集群指标并远程写到时序库
+ENABLE_VMAGENT="true"
+
+# vmagent 的远程写地址。master 和 agent 在同一集群时可用集群内地址:
+#   http://monit:dduF1E3sj@victoria-metrics.kubedoor:8428/api/v1/write
+# 跨集群要填 master 侧时序库的外部地址。
+# 留空且 ENABLE_VMAGENT=true 时,脚本会用 VM_USER/VM_PASSWORD 拼出集群内地址。
+REMOTE_WRITE_URL=""
+
+# kube-state-metrics:K8S 对象状态指标,KubeDoor 的核心数据源之一。
+# 设 false 时 vmagent 改为全集群查找已有的 KSM(按 Service 标签 app.kubernetes.io/name=kube-state-metrics)
+ENABLE_KUBE_STATE_METRICS="true"
+
+# node-exporter:节点指标。节点上已经有 node-exporter 就设 false
+ENABLE_NODE_EXPORTER="true"

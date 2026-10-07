@@ -9,7 +9,7 @@
 - ✅ **智能优先级处理**: 不传 priority 时自动追加到最后，传入时检查重复值
 - ✅ **YAML 生成**: 根据数据库数据生成完整的 VirtualService YAML 配置
 - ✅ **K8S 集群关联管理**: 支持 VirtualService 与 K8S 集群的关联关系管理
-- ✅ **MySQL 数据库**: 使用 MySQL 进行数据持久化
+- ✅ **PostgreSQL 数据库**: 使用 PostgreSQL 进行数据持久化(psycopg 3.x)
 - ✅ **优先级重新整理**: 支持批量重新整理路由优先级
 - ✅ **健康检查**: 提供系统健康状态检查接口
 
@@ -19,7 +19,6 @@
 ├── kubedoor-master.py   # 主要 API 服务文件
 ├── istio_route/
 │   ├── istio_route.py   # 路由管理核心逻辑
-│   ├── init_database.py # 数据库初始化脚本
 │   └── README.md        # 说明文档
 └── utils.py             # 工具函数和配置
 ```
@@ -100,33 +99,30 @@
 
 ### 1. 环境配置
 
-在 `utils.py` 中配置数据库连接信息，或通过环境变量设置：
+与 kubedoor-master 共用 PostgreSQL 连接,通过环境变量设置(K8S 部署时在 `kubedoor-config` 这个 ConfigMap 里):
 
 ```env
-DB_HOST=localhost
-DB_PORT=3306
-DB_USER=root
-DB_PASSWORD=your_password
-DB_NAME=virtualservice
+PG_HOST=10.1.1.50
+PG_PORT=5432
+PG_USER=kubedoor
+PG_PASSWORD=your_password
+PG_DATABASE=kubedoor
 ```
 
 ### 2. 数据库初始化
 
-运行数据库初始化脚本：
-
-```bash
-python istio_route/init_database.py
-```
+不需要手动建表。kubedoor-master 启动时会执行 `db.sql`,Istio 的三张表(`vs_global` /
+`vs_http_routes` / `k8s_cluster`)和其它表一起自动创建。
 
 ### 3. 启动服务
 
-启动 kubedoor-master 主服务：
+启动 kubedoor-master 主服务:
 
 ```bash
 python kubedoor-master.py
 ```
 
-服务将启动在配置的端口（默认 5000）
+服务监听 80 端口
 
 ### 4. API 访问
 
@@ -686,15 +682,8 @@ curl -X POST "http://localhost:5001/api/istio/vs/k8s" \
 
 ### 1. 数据库连接问题
 
-检查 `.env` 文件配置：
-
-```env
-DB_HOST=localhost
-DB_PORT=3306
-DB_USER=root
-DB_PASSWORD=your_password
-DB_NAME=virtualservice
-```
+检查 master 的 `PG_*` 环境变量(K8S 部署时看 `kubedoor-config` 这个 ConfigMap),
+确认 `PG_HOST` 是 Pod 能访问到的地址。
 
 ### 2. 优先级冲突
 
@@ -708,8 +697,8 @@ DB_NAME=virtualservice
 
 检查：
 
-- 端口 5001 是否被占用
-- MySQL 服务是否运行
+- 端口 80 是否被占用
+- PostgreSQL 服务是否运行
 - 数据库权限是否正确
 
 ## 扩展开发

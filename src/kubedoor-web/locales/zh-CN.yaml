@@ -78,6 +78,7 @@ menus:
   alarm: 监控告警
   alarmStatistics: 告警面板
   alarmDetail: K8S告警详情
+  alarmSilence: 告警屏蔽
   peakResources: 高峰资源
   resourceManagement: 高峰资源管控
   resourceCollection: 每日高峰资源
@@ -158,10 +159,12 @@ resource:
     envPct: 流量%
     updateAi: UpdateAI
     p95PodQps: P95PodQPS
-    p95PodMemPct: P95Pod内存%
+    p95PodMemPct: P80Pod内存%
     p95PodQpsAi: P95PodQPSAI
-    p95PodCpuPct: P95PodCPU%
-    p95PodWssPct: P95PodWss%
+    p95PodCpuPct: P80PodCPU%
+    p95PodWssPct: P80PodWss%
+    p95PodHeapPct: P95podHeap%
+    p95PodG1EPct: P95podG1E%
     p95PodG1gcQps: P95PodG1GCQPS
     p95PodG1gcQpsAi: P95PodG1GCQPSAI
     p95PodLoad: P95Pod负载
@@ -184,6 +187,7 @@ resource:
     futureTime: 请选择未来时间
     cron: Cron是必填项
     greaterThanZero: 必须>=-1
+    podCountManualNoFallback: 新增或尚未采集高峰期数据的服务不能为-1，请填写Pod数(0表示暂不启动)
   message:
     createSuccess: 创建成功
     createFailed: 创建失败

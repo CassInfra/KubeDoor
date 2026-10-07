@@ -549,8 +549,8 @@ const getEnvOptions = async (): Promise<void> => {
   }
 };
 
+// 命名空间和关键字保留,新集群没有该命名空间时由 getNsOptions 回退
 const handleEnvChange = async (val: string) => {
-  searchForm.ns = "";
   searchStore.setEnv(val);
   if (val) {
     await getNsOptions(val);

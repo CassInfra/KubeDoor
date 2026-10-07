@@ -1,6 +1,7 @@
-import asyncio, utils, json, sys
+import asyncio, utils, json, sys, base64
 from functools import partial
 from urllib.parse import urlencode
+import aiohttp
 from aiohttp import ClientSession, ClientWebSocketResponse, WSMsgType, web
 from kubernetes_asyncio import client, config
 from kubernetes_asyncio.client.rest import ApiException
@@ -20,9 +21,17 @@ from func_manager.restart_service import RebootService
 from func_manager.k8s_event_monitor import K8sEventMonitor
 from func_manager.event_monitor_config import *
 from func_manager.admis_service import AdmisService
+from func_manager.jvm_config import get_jvm_configs
 from scaler.balance_node_pod_service import BalanceNodeService
 from func_manager.mcp_service import MCPService
+from func_manager.workload_cache import WorkloadCache
+from func_manager.workload_streamer import WorkloadStreamer
+from func_manager.ai_tools import AiToolHandler
+from func_manager.ws_lifecycle import run_connection_tasks
+from k8s_client_manager import OffloadApiClient
 from scaler.scale_service import ScaleService
+from scaler.cci_scaler import get_schedule_profile_info
+from load_balance import analyze_and_plan, execute_plan, get_isolated_pods, cleanup_pods
 
 
 # 配置日志
@@ -36,6 +45,7 @@ logger.add(
 VERSION = utils.get_version()
 # 全局变量
 ws_conn = None
+http_session = None  # 全局 HTTP session，用于转发请求
 v1 = None  # AppsV1Api
 batch_v1 = None  # BatchV1Api
 core_v1 = None  # CoreV1Api
@@ -54,24 +64,31 @@ balance_node_service = None
 mcp_service = None
 update_image_handler = None
 reboot_service = None
+workload_cache = None  # Deployment/Pod 的 list+watch 内存缓存
+workload_streamer = None  # 把缓存变化推给 master 的订阅者
+ai_tool_handler = None
 
 
 def init_kubernetes():
     """在程序启动时加载 Kubernetes 配置并初始化客户端"""
-    global v1, batch_v1, core_v1, networking_v1, admission_api, custom_api, deployment_monitor, event_monitor, scale_service, admis_service, balance_node_service, mcp_service, update_image_handler, reboot_service
+    global v1, batch_v1, core_v1, networking_v1, admission_api, custom_api, deployment_monitor, event_monitor, scale_service, admis_service, balance_node_service, mcp_service, update_image_handler, reboot_service, workload_cache, workload_streamer, ai_tool_handler
     try:
         config.load_incluster_config()
-        v1 = client.AppsV1Api()
-        batch_v1 = client.BatchV1Api()
-        core_v1 = client.CoreV1Api()
-        networking_v1 = client.NetworkingV1Api()
-        admission_api = client.AdmissionregistrationV1Api()
-        custom_api = client.CustomObjectsApi()
+        ai_tool_handler = AiToolHandler()
+        # 大响应的反序列化放到线程里做,list 全集群对象时不卡事件循环(探活 / 心跳 / watch 都在这个循环上)
+        v1 = client.AppsV1Api(OffloadApiClient())
+        batch_v1 = client.BatchV1Api(OffloadApiClient())
+        core_v1 = client.CoreV1Api(OffloadApiClient())
+        networking_v1 = client.NetworkingV1Api(OffloadApiClient())
+        admission_api = client.AdmissionregistrationV1Api(OffloadApiClient())
+        custom_api = client.CustomObjectsApi(OffloadApiClient())
         deployment_monitor = DeploymentMonitor(v1, core_v1)
         event_monitor = K8sEventMonitor(core_v1)
         scale_service = ScaleService(v1, core_v1, custom_api, delete_cronjob_or_not)
         balance_node_service = BalanceNodeService(core_v1, v1)
-        mcp_service = MCPService(core_v1, custom_api, v1)
+        workload_cache = WorkloadCache(core_v1, v1)
+        workload_streamer = WorkloadStreamer(workload_cache)
+        mcp_service = MCPService(core_v1, custom_api, v1, workload_cache)
         reboot_service = RebootService(v1, delete_cronjob_or_not)
         update_image_handler = partial(update_image, apps_v1=v1, deployment_monitor=deployment_monitor)
         admis_service = AdmisService(v1, core_v1, admission_api, request_futures)
@@ -84,22 +101,40 @@ def init_kubernetes():
 async def handle_http_request(
     ws: ClientWebSocketResponse, request_id: str, method: str, query: dict, body: dict, path: str
 ):
-    """异步处理 HTTP 请求并发送响应"""
+    """异步处理 HTTP 请求并发送响应，使用全局 session 复用连接"""
     try:
-        async with ClientSession() as session:
-            logger.info(f"转发请求: {method} {path}?{urlencode(query)}【{json.dumps(body)}】")
-            if method == "GET":
-                async with session.get(path, params=query, ssl=False) as resp:
+        logger.info(f"转发请求: {method} {path}?{urlencode(query)}【{json.dumps(body)}】")
+        if method == "GET":
+            async with http_session.get(path, params=query, ssl=False, timeout=aiohttp.ClientTimeout(total=300)) as resp:
+                content_type = resp.content_type
+                # 处理二进制响应（如 gzip 文件下载）
+                if content_type in ['application/gzip', 'application/octet-stream']:
+                    binary_data = await resp.read()
+                    # 获取 Content-Disposition 头
+                    content_disposition = resp.headers.get('Content-Disposition', '')
+                    response_data = {
+                        "binary": True,
+                        "content_type": content_type,
+                        "content_disposition": content_disposition,
+                        "data": base64.b64encode(binary_data).decode('utf-8')
+                    }
+                else:
                     response_data = await resp.json()
-            elif method == "POST":
-                async with session.post(path, params=query, json=body, ssl=False) as resp:
-                    response_data = await resp.json()
-            elif method == "DELETE":
-                async with session.delete(path, params=query, json=body, ssl=False) as resp:
-                    response_data = await resp.json()
-            else:
-                response_data = {"success": False, "error": f"agent收到master发来的不支持的请求方法: {method}"}
-                logger.error(response_data["error"])
+        elif method == "POST":
+            async with http_session.post(path, params=query, json=body, ssl=False) as resp:
+                response_data = await resp.json()
+                if resp.status >= 400:
+                    logger.error(f"请求返回错误状态码 {resp.status}: {method} {path} -> {response_data}")
+                    response_data = {"success": False, "status": resp.status, **response_data}
+        elif method == "DELETE":
+            async with http_session.delete(path, params=query, json=body, ssl=False) as resp:
+                response_data = await resp.json()
+                if resp.status >= 400:
+                    logger.error(f"请求返回错误状态码 {resp.status}: {method} {path} -> {response_data}")
+                    response_data = {"success": False, "status": resp.status, **response_data}
+        else:
+            response_data = {"success": False, "error": f"agent收到master发来的不支持的请求方法: {method}"}
+            logger.error(response_data["error"])
     except Exception as e:
         response_data = {"success": False, "error": str(e)}
         logger.error(response_data["error"])
@@ -123,6 +158,8 @@ async def process_request(ws: ClientWebSocketResponse):
                 if request_id in request_futures:
                     request_futures[request_id].set_result(deploy_res)
                     del request_futures[request_id]
+            elif data.get("type") == "ai_tool":
+                asyncio.create_task(ai_tool_handler.handle(ws, data))
             elif data.get("type") == "request":
                 request_id = data["request_id"]
                 method = data["method"]
@@ -150,6 +187,11 @@ async def process_request(ws: ClientWebSocketResponse):
                 if connection_id in pod_logs_tasks:
                     pod_logs_tasks[connection_id].cancel()
                     del pod_logs_tasks[connection_id]
+            elif data.get("type") == "workload_sub":
+                # 页面订阅 Deployment/Pod 实时状态(master 每次都发全量期望状态)
+                workload_streamer.subscribe(ws, data)
+            elif data.get("type") == "workload_unsub":
+                workload_streamer.unsubscribe(data.get("sub_id"))
         elif msg.type == WSMsgType.ERROR:
             logger.error(f"WebSocket 错误：{msg.data}")
 
@@ -185,11 +227,11 @@ async def monitor_health_check():
                 logger.warning("⚠️ 健康检查: 事件监控未运行")
                 raise Exception("事件监控未运行")
 
-            # 检查是否长时间没有事件（可能表示K8s事件流断开）
-            if event_monitor.last_event_time:
-                time_since_last_event = current_time - event_monitor.last_event_time
-                if time_since_last_event.total_seconds() > EVENT_TIMEOUT_THRESHOLD:
-                    logger.warning(f"⚠️ 健康检查: 已有 {time_since_last_event.total_seconds():.0f} 秒没有收到K8s事件")
+            # 检查K8s事件 watch 是否长时间没有活动(集群安静时可以很久没有事件,但 watch 每几分钟会重连一次)
+            if event_monitor.last_alive_time:
+                idle_seconds = (current_time - event_monitor.last_alive_time).total_seconds()
+                if idle_seconds > EVENT_TIMEOUT_THRESHOLD:
+                    logger.warning(f"⚠️ 健康检查: K8s事件 watch 已有 {idle_seconds:.0f} 秒没有活动")
 
             # 定期输出统计信息
             time_since_last_check = current_time - last_check_time
@@ -206,11 +248,11 @@ async def monitor_health_check():
 
 async def connect_to_server():
     """连接到 WebSocket 服务端，并处理连接断开的情况"""
-    uri = f"{utils.KUBEDOOR_MASTER}/ws?env={utils.PROM_K8S_TAG_VALUE}&ver={VERSION}"
+    uri = f"{utils.KUBEDOOR_MASTER}/ws?env={utils.PROM_K8S_TAG_VALUE}&ver={VERSION}&ai_tools=1"
     while True:
         try:
             async with ClientSession() as session:
-                async with session.ws_connect(uri, ssl=False) as ws:
+                async with session.ws_connect(uri, ssl=False, max_msg_size=16 * 1024 * 1024) as ws:
                     logger.info("成功连接到服务端")
                     global ws_conn
                     ws_conn = ws
@@ -219,44 +261,17 @@ async def connect_to_server():
 
                     # 设置事件监听器的WebSocket连接
                     event_monitor.set_websocket_connection(ws)
+                    # 实时状态推送改用新连接,旧连接上的订阅作废(master 会重新下发)
+                    workload_streamer.attach(ws)
 
-                    # 并发运行请求处理、心跳发送、事件监听和健康检查，使用return_when=FIRST_EXCEPTION
-                    # 这样任何一个任务异常都会导致重新连接，而不是整个程序崩溃
                     try:
-                        done, pending = await asyncio.wait(
-                            [
-                                asyncio.create_task(process_request(ws)),
-                                asyncio.create_task(heartbeat(ws)),
-                                asyncio.create_task(event_monitor.start_monitoring()),
-                                asyncio.create_task(monitor_health_check()),
-                            ],
-                            return_when=asyncio.FIRST_EXCEPTION,
-                        )
-
-                        # 取消所有待处理的任务
-                        for task in pending:
-                            task.cancel()
-                            try:
-                                await task
-                            except asyncio.CancelledError:
-                                pass
-
-                        # 检查已完成的任务是否有异常
-                        for task in done:
-                            if task.exception():
-                                logger.error(f"任务异常: {task.exception()}")
-                                raise task.exception()
-
-                    except Exception as task_e:
-                        logger.error(f"WebSocket任务异常: {task_e}")
-                        # 停止事件监控
-                        await event_monitor.stop_monitoring()
-                        # 清空WebSocket连接引用
+                        await run_connection_tasks(ws, event_monitor, process_request, heartbeat, monitor_health_check)
+                    finally:
                         event_monitor.set_websocket_connection(None)
+                        workload_streamer.detach()
                         ws_conn = None
                         if admis_service:
                             admis_service.set_ws_conn(None)
-                        raise task_e
 
         except Exception as e:
             logger.error(f"连接到服务端失败：{e}")
@@ -264,21 +279,37 @@ async def connect_to_server():
             if event_monitor:
                 await event_monitor.stop_monitoring()
                 event_monitor.set_websocket_connection(None)
+            if workload_streamer:
+                workload_streamer.detach()
             ws_conn = None
             if admis_service:
                 admis_service.set_ws_conn(None)
-            logger.info(f"等待 {WEBSOCKET_RECONNECT_DELAY} 秒后重新连接...")
-            await asyncio.sleep(WEBSOCKET_RECONNECT_DELAY)
+        logger.info(f"等待 {WEBSOCKET_RECONNECT_DELAY} 秒后重新连接...")
+        await asyncio.sleep(WEBSOCKET_RECONNECT_DELAY)
 
 
 async def health_check(request):
     return web.json_response({"ver": VERSION, "status": "healthy"})
 
 
+async def get_cci_schedule_profile(custom_api, apps_v1_api, request):
+    """获取ScheduleProfile信息"""
+    namespace = request.query.get("namespace")
+    deployment_name = request.query.get("deployment")
+    if not namespace or not deployment_name:
+        return web.json_response({"error": "缺少namespace或deployment参数"}, status=400)
+    try:
+        result = await get_schedule_profile_info(custom_api, apps_v1_api, namespace, deployment_name)
+        return web.json_response(result)
+    except Exception as e:
+        logger.error(f"获取ScheduleProfile失败: {e}")
+        return web.json_response({"error": str(e)}, status=500)
+
+
 async def stream_pod_logs(
     ws: ClientWebSocketResponse, connection_id: str, namespace: str, pod_name: str, container: str = ""
 ):
-    """流式获取Pod日志并发送给master"""
+    """流式获取Pod日志并发送给master，使用 bytearray 和批量发送优化性能"""
     try:
         logger.info(f"开始获取Pod日志: {namespace}/{pod_name}")
 
@@ -296,22 +327,52 @@ async def stream_pod_logs(
             _preload_content=False,
         )
 
-        # 流式读取日志
-        buffer = ""
-        async for chunk in log_stream.content:
-            if chunk:
-                try:
-                    buffer += chunk.decode('utf-8', errors='ignore')
-                    lines = buffer.split('\n')
-                    buffer = lines[-1]  # 保留最后一行（可能不完整）
+        # 使用 bytearray 提高性能
+        buffer = bytearray()
+        batch_lines = []
+        batch_size = 10  # 批量发送行数
 
-                    for line in lines[:-1]:
-                        if line.strip():
-                            # 直接发送纯净的日志内容，不包装成JSON
-                            await ws.send_str(line)
+        async for chunk in log_stream.content:
+            if not chunk:
+                continue
+            buffer.extend(chunk)
+
+            # 查找换行符并处理完整行
+            while b'\n' in buffer:
+                line_end = buffer.find(b'\n')
+                line_bytes = buffer[:line_end]
+                buffer = buffer[line_end + 1:]
+
+                try:
+                    line = line_bytes.decode('utf-8', errors='ignore').strip()
+                    if line:
+                        batch_lines.append(line)
+                        # 批量发送
+                        if len(batch_lines) >= batch_size:
+                            await ws.send_json(
+                                {
+                                    "type": "pod_logs",
+                                    "connection_id": connection_id,
+                                    "pod_name": pod_name,
+                                    "container": container,
+                                    "log": '\n'.join(batch_lines),
+                                }
+                            )
+                            batch_lines.clear()
                 except Exception as decode_error:
                     logger.warning(f"解码日志行失败: {decode_error}")
-                    continue
+
+        # 发送剩余日志
+        if batch_lines:
+            await ws.send_json(
+                {
+                    "type": "pod_logs",
+                    "connection_id": connection_id,
+                    "pod_name": pod_name,
+                    "container": container,
+                    "log": '\n'.join(batch_lines),
+                }
+            )
 
     except asyncio.CancelledError:
         logger.info(f"Pod日志流被取消: {connection_id}")
@@ -349,6 +410,99 @@ async def scale(request):
     return await scale_service.handle_scale(request)
 
 
+# ==================== 负载均衡接口 ====================
+
+async def handle_load_balance_analyze(request):
+    """🔄 分析负载并生成迁移计划"""
+    try:
+        body = await request.json()
+        config = body.get("config", {})
+        result = await analyze_and_plan(core_v1, v1, custom_api, config)
+        return web.json_response({"success": True, "data": result})
+    except Exception as e:
+        logger.error(f"❌ 负载均衡分析失败: {e}")
+        return web.json_response({"success": False, "error": str(e)}, status=500)
+
+
+async def handle_load_balance_execute(request):
+    """🚀 执行迁移计划"""
+    try:
+        body = await request.json()
+        migrations = body.get("migrations", [])
+        exclude_nodes = body.get("exclude_nodes", [])
+        if not migrations:
+            return web.json_response({"success": False, "error": "迁移列表为空"}, status=400)
+        result = await execute_plan(core_v1, v1, custom_api, migrations, exclude_nodes)
+        return web.json_response({"success": True, "data": result})
+    except Exception as e:
+        logger.error(f"❌ 负载均衡执行失败: {e}")
+        return web.json_response({"success": False, "error": str(e)}, status=500)
+
+
+async def handle_load_balance_isolated(request):
+    """🔍 获取隔离Pod列表"""
+    try:
+        config = {
+            "exclude_namespaces": request.query.get("exclude_namespaces", "kube-system,kube-public,istio-system").split(",")
+        }
+        result = await get_isolated_pods(core_v1, v1, custom_api, config)
+        return web.json_response({"success": True, "data": result})
+    except Exception as e:
+        logger.error(f"❌ 获取隔离Pod列表失败: {e}")
+        return web.json_response({"success": False, "error": str(e)}, status=500)
+
+
+async def handle_load_balance_cleanup(request):
+    """🧹 清理隔离Pod"""
+    try:
+        body = await request.json()
+        pods = body.get("pods", [])
+        if not pods:
+            return web.json_response({"success": False, "error": "Pod列表为空"}, status=400)
+        result = await cleanup_pods(core_v1, v1, custom_api, pods)
+        return web.json_response({"success": True, "data": result})
+    except Exception as e:
+        logger.error(f"❌ 清理隔离Pod失败: {e}")
+        return web.json_response({"success": False, "error": str(e)}, status=500)
+
+
+async def handle_load_balance_nodes_cpu(request):
+    """🖥️ 获取节点CPU使用率"""
+    try:
+        from load_balance.load_balancer import LoadBalancer
+        lb = LoadBalancer(core_v1, v1, custom_api)
+        nodes_cpu = await lb.get_all_nodes_cpu()
+        return web.json_response({"success": True, "data": nodes_cpu})
+    except Exception as e:
+        logger.error(f"❌ 获取节点CPU失败: {e}")
+        return web.json_response({"success": False, "error": str(e)}, status=500)
+
+
+async def handle_load_balance_namespaces(request):
+    """📋 获取所有namespace列表"""
+    try:
+        from load_balance.load_balancer import LoadBalancer
+        lb = LoadBalancer(core_v1, v1, custom_api)
+        namespaces = await lb.get_all_namespaces()
+        return web.json_response({"success": True, "data": namespaces})
+    except Exception as e:
+        logger.error(f"❌ 获取namespace列表失败: {e}")
+        return web.json_response({"success": False, "error": str(e)}, status=500)
+
+
+async def handle_load_balance_check_pods(request):
+    """🔍 检查Pod Ready状态"""
+    try:
+        data = await request.json()
+        pods = data.get("pods", [])
+        from load_balance.load_balancer import check_pods_status
+        result = await check_pods_status(core_v1, pods)
+        return web.json_response({"success": True, "data": result})
+    except Exception as e:
+        logger.error(f"❌ 检查Pod状态失败: {e}")
+        return web.json_response({"success": False, "error": str(e)}, status=500)
+
+
 async def cron(request):
     """创建定时任务，执行扩缩容或重启"""
     request_info = await request.json()
@@ -376,6 +530,7 @@ async def cron(request):
         metadata=client.V1ObjectMeta(name=name_pre),
         spec=client.V1CronJobSpec(
             schedule=cron_new,
+            time_zone="Asia/Shanghai",
             job_template=client.V1JobTemplateSpec(
                 spec=client.V1JobSpec(
                     template=client.V1PodTemplateSpec(
@@ -444,6 +599,8 @@ async def setup_routes(app):
     if balance_node_service is None:
         raise RuntimeError("BalanceNodeService 未初始化")
     app.router.add_post('/api/balance_node', balance_node_service.balance_node)  # 未使用的接口
+    # CCI扩容接口
+    app.router.add_get('/api/cci/schedule-profile', lambda request: get_cci_schedule_profile(custom_api, v1, request))
     # node管理接口
     app.router.add_get('/api/nodes/list', lambda request: get_nodes_list(core_v1, custom_api, request))
     app.router.add_post('/api/nodes/cordon', lambda request: cordon_nodes(core_v1, request))
@@ -475,6 +632,7 @@ async def setup_routes(app):
     # app.router.add_delete('/api/agent/istio/vs/delete', lambda request: istio_manager.delete_virtualservice(custom_api, request))
 
     # K8S资源管理接口
+    app.router.add_get('/api/agent/jvm/configs', lambda request: get_jvm_configs(v1, request))
     app.router.add_post('/api/agent/res/ops', k8s_resource_handler.handle_k8s_operation)
     app.router.add_get('/api/agent/res/content', k8s_resource_handler.handle_get_resource_content)
     app.router.add_delete('/api/agent/res/delete', k8s_resource_handler.handle_delete_resource)
@@ -504,6 +662,15 @@ async def setup_routes(app):
         '/api/agent/daemonset/restart', lambda request: stateful_daemon_manager.restart_daemonset(request, v1)
     )
 
+    # 负载均衡接口
+    app.router.add_post('/api/load-balance/analyze', handle_load_balance_analyze)
+    app.router.add_post('/api/load-balance/execute', handle_load_balance_execute)
+    app.router.add_get('/api/load-balance/isolated', handle_load_balance_isolated)
+    app.router.add_post('/api/load-balance/cleanup', handle_load_balance_cleanup)
+    app.router.add_get('/api/load-balance/nodes-cpu', handle_load_balance_nodes_cpu)
+    app.router.add_get('/api/load-balance/namespaces', handle_load_balance_namespaces)
+    app.router.add_post('/api/load-balance/check-pods', handle_load_balance_check_pods)
+
 
 async def start_https_server():
     """启动 HTTPS 服务器"""
@@ -523,10 +690,45 @@ async def start_https_server():
         await asyncio.sleep(3600)
 
 
+async def cleanup():
+    """清理资源"""
+    global http_session
+    if ai_tool_handler:
+        await ai_tool_handler.close()
+    # 停止 Deployment/Pod 缓存和实时推送
+    if workload_streamer:
+        await workload_streamer.stop()
+    if workload_cache:
+        await workload_cache.stop()
+    # 关闭 HTTP session
+    if http_session:
+        await http_session.close()
+        logger.info("HTTP session 已关闭")
+    # 关闭 K8S 客户端
+    for api_client in [v1, batch_v1, core_v1, networking_v1, admission_api, custom_api]:
+        if api_client and hasattr(api_client, 'api_client'):
+            try:
+                await api_client.api_client.close()
+            except Exception as e:
+                logger.warning(f"关闭 K8S 客户端失败: {e}")
+    logger.info("K8S 客户端已关闭")
+
+
 async def main():
     """主函数"""
+    global http_session
     init_kubernetes()  # 初始化 Kubernetes 配置
-    await asyncio.gather(connect_to_server(), start_https_server())
+    # Deployment/Pod 缓存跟进程走,只启动一次,不随 master 连接重建
+    workload_cache.start()
+    workload_streamer.start()
+    # 初始化全局 HTTP session
+    timeout = aiohttp.ClientTimeout(total=120)
+    http_session = ClientSession(timeout=timeout)
+    logger.info("HTTP session 已初始化")
+    try:
+        await asyncio.gather(connect_to_server(), start_https_server())
+    finally:
+        await cleanup()
 
 
 if __name__ == "__main__":

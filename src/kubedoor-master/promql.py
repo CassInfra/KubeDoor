@@ -19,20 +19,24 @@ min_over_time(
   )[{duration}:]
 )
 ''',
-    # 使用核数P95
+    # 使用核数P80
+    # 先按 pod 取最大的容器再平均:pod 里除了业务容器还可能有 sandbox / sidecar 的 series,
+    # 直接对容器 avg 会被摊薄(单业务容器 + sandbox 时正好少一半)
     "core_usage": '''
 quantile_over_time(
   0.80,
   avg by ({env_key} namespace, owner_name) (
-      irate(
-        container_cpu_usage_seconds_total{{env} container!="",container!="POD"}[3m]
+      max by ({env_key} namespace, pod) (
+        irate(
+          container_cpu_usage_seconds_total{{env} container!="",container!="POD"}[3m]
+        )
       )
     * on ({env_key} namespace,pod) group_left (owner_name)
       kube_pod_owner{{env} owner_is_controller="true",owner_kind="ReplicaSet"}
   )[{duration}:]
 )
 ''',
-    # CPU使用率P95
+    # CPU使用率P80
     "core_usage_percent": '''
 quantile_over_time(
   0.80,
@@ -51,18 +55,20 @@ quantile_over_time(
   )[{duration}:]
 )*10000000
 ''',
-    # WSS内存使用MB P95
+    # WSS内存使用MB P80(同上,先按 pod 取最大的容器)
     "wss_usage_MB": '''
 quantile_over_time(
   0.80,
   avg by ({env_key} namespace, owner_name) (
-      container_memory_working_set_bytes{{env} container!="",container!="POD"}
+      max by ({env_key} namespace, pod) (
+        container_memory_working_set_bytes{{env} container!="",container!="POD"}
+      )
     * on ({env_key} namespace,pod) group_left (owner_name)
       kube_pod_owner{{env} owner_is_controller="true",owner_kind="ReplicaSet"}
   )[{duration}:]
 )/1024/1024
 ''',
-    # WSS内存使用率P95
+    # WSS内存使用率P80
     "wss_usage_percent": '''
 quantile_over_time(
   0.80,
@@ -76,6 +82,65 @@ quantile_over_time(
       )
     * on ({env_key} namespace,pod) group_left (owner_name)
       kube_pod_owner{{env} owner_is_controller="true",owner_kind="ReplicaSet"}
+  )[{duration}:]
+)*100
+''',
+    # 堆内存使用率P95：先去重并分别求和heap的used/max，再计算同一容器的比值。
+    # 按pod选heap使用量最大的容器，避免分子/分母来自不同容器；各pod平均后取时间P95。
+    # max=-1表示未定义；只累计正数上限，无有效上限时不产生占用率。
+    "heap_usage_percent": '''
+quantile_over_time(
+  0.95,
+  avg by ({env_key} namespace, owner_name) (
+      max by ({env_key} namespace, pod) (
+        topk by ({env_key} namespace, pod) (
+          1,
+          sum by ({env_key} namespace, pod, container) (
+            max by ({env_key} namespace, pod, container, id) (
+              jvm_memory_used_bytes{{env} area="heap",container!="",container!="POD"}
+            )
+          )
+        )
+      /
+        on ({env_key} namespace, pod, container)
+        sum by ({env_key} namespace, pod, container) (
+          max by ({env_key} namespace, pod, container, id) (
+            jvm_memory_max_bytes{{env} area="heap",container!="",container!="POD"}
+          ) > 0
+        )
+      )
+    * on ({env_key} namespace,pod) group_left (owner_name)
+      max by ({env_key} namespace, pod, owner_name) (
+        kube_pod_owner{{env} owner_is_controller="true",owner_kind="ReplicaSet"}
+      )
+  )[{duration}:]
+)*100
+''',
+    # G1 Eden Space使用率P95：指定内存池，按同一容器的used/committed计算。
+    # 去重后按pod选Eden使用量最大的容器，各pod平均后取时间P95；无有效committed时缺失。
+    "g1e_usage_percent": '''
+quantile_over_time(
+  0.95,
+  avg by ({env_key} namespace, owner_name) (
+      max by ({env_key} namespace, pod) (
+        topk by ({env_key} namespace, pod) (
+          1,
+          max by ({env_key} namespace, pod, container) (
+            jvm_memory_used_bytes{{env} area="heap",id="G1 Eden Space",container!="",container!="POD"}
+          )
+        )
+      /
+        on ({env_key} namespace, pod, container)
+        (
+          max by ({env_key} namespace, pod, container) (
+            jvm_memory_committed_bytes{{env} area="heap",id="G1 Eden Space",container!="",container!="POD"}
+          ) > 0
+        )
+      )
+    * on ({env_key} namespace,pod) group_left (owner_name)
+      max by ({env_key} namespace, pod, owner_name) (
+        kube_pod_owner{{env} owner_is_controller="true",owner_kind="ReplicaSet"}
+      )
   )[{duration}:]
 )*100
 ''',

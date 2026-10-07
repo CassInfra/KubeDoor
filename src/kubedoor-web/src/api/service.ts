@@ -8,6 +8,15 @@ export type ResultTable = {
   error?: string;
 };
 
+// 资源内容接口（/api/agent/res/content）返回的是 YAML 文本，data 为字符串
+export type ResContentResult = {
+  success?: boolean;
+  data?: string;
+  total?: number;
+  message?: string;
+  error?: string;
+};
+
 /**
  * 获取Service列表
  * @param env K8S环境
@@ -52,7 +61,7 @@ export const getServiceContent = (
   serviceName: string,
   resourceType: string
 ) => {
-  return http.request<ResultTable>("get", "/api/agent/res/content", {
+  return http.request<ResContentResult>("get", "/api/agent/res/content", {
     params: {
       env,
       namespace,
@@ -65,12 +74,12 @@ export const getServiceContent = (
 /**
  * 更新Service内容
  * @param env K8S环境
- * @param method 更新方式 (apply|replace)
+ * @param method 更新方式 (apply|replace|create)
  * @param yamlContent YAML内容
  */
 export const updateServiceContent = (
   env: string,
-  method: "apply" | "replace",
+  method: "apply" | "replace" | "create",
   yamlContent: string
 ) => {
   return http.request<ResultTable>("post", "/api/agent/res/ops", {

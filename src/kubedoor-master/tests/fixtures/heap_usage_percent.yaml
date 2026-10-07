@@ -1,0 +1,204 @@
+# Native PromQL regression data. JVM observations are exact bytes.
+# P95: 8 observations from 10% to 80% interpolate to 76.5%; P90 would be 73%.
+# The production expression is inserted dynamically by test_peak_heap_promql.py.
+evaluation_interval: 15s
+fuzzy_compare: true
+tests:
+- name: pool-ratios-positive-max-only-dedup-container-match-and-scope
+  interval: 15s
+  input_series:
+  - series: jvm_memory_used_bytes{ienv="prod",namespace="ns1",pod="pod-a",container="main",id="Eden",job="scraper-a",area="heap"}
+    values: 10485760+0x8
+  - series: jvm_memory_used_bytes{ienv="prod",namespace="ns1",pod="pod-a",container="main",id="Survivor",job="scraper-a",area="heap"}
+    values: 2097152+0x8
+  - series: jvm_memory_used_bytes{ienv="prod",namespace="ns1",pod="pod-a",container="main",id="Old",job="scraper-a",area="heap"}
+    values: 20971520+0x8
+  - series: jvm_memory_max_bytes{ienv="prod",namespace="ns1",pod="pod-a",container="main",id="Eden",job="scraper-a",area="heap"}
+    values: -1+0x8
+  - series: jvm_memory_max_bytes{ienv="prod",namespace="ns1",pod="pod-a",container="main",id="Survivor",job="scraper-a",area="heap"}
+    values: 0+0x8
+  - series: jvm_memory_max_bytes{ienv="prod",namespace="ns1",pod="pod-a",container="main",id="Old",job="scraper-a",area="heap"}
+    values: 134217728+0x8
+  - series: jvm_memory_used_bytes{ienv="prod",namespace="ns1",pod="pod-b",container="main",id="Old",job="scraper-a",area="heap"}
+    values: 62914560+0x8
+  - series: jvm_memory_max_bytes{ienv="prod",namespace="ns1",pod="pod-b",container="main",id="Old",job="scraper-a",area="heap"}
+    values: 104857600+0x8
+  - series: jvm_memory_used_bytes{ienv="prod",namespace="ns1",pod="pod-b",container="java-sidecar",id="Old",job="scraper-a",area="heap"}
+    values: 10485760+0x8
+  - series: jvm_memory_max_bytes{ienv="prod",namespace="ns1",pod="pod-b",container="java-sidecar",id="Old",job="scraper-a",area="heap"}
+    values: 1048576000+0x8
+  - series: jvm_memory_used_bytes{ienv="prod",namespace="ns1",pod="pod-c",container="main",id="Eden",job="scraper-a",area="heap"}
+    values: 26214400+0x8
+  - series: jvm_memory_used_bytes{ienv="prod",namespace="ns1",pod="pod-c",container="main",id="Old",job="scraper-a",area="heap"}
+    values: 26214400+0x8
+  - series: jvm_memory_max_bytes{ienv="prod",namespace="ns1",pod="pod-c",container="main",id="Eden",job="scraper-a",area="heap"}
+    values: 20971520+0x8
+  - series: jvm_memory_max_bytes{ienv="prod",namespace="ns1",pod="pod-c",container="main",id="Old",job="scraper-a",area="heap"}
+    values: 83886080+0x8
+  - series: jvm_memory_used_bytes{ienv="prod",namespace="ns1",pod="pod-a",container="main",id="Metaspace",job="scraper-a",area="nonheap"}
+    values: 20971520000+0x8
+  - series: jvm_memory_max_bytes{ienv="prod",namespace="ns1",pod="pod-a",container="main",id="Metaspace",job="scraper-a",area="nonheap"}
+    values: 1048576+0x8
+  - series: jvm_memory_used_bytes{ienv="prod",namespace="ns1",pod="pod-b",container="POD",id="Old",job="scraper-a",area="heap"}
+    values: 1048576000+0x8
+  - series: jvm_memory_max_bytes{ienv="prod",namespace="ns1",pod="pod-b",container="POD",id="Old",job="scraper-a",area="heap"}
+    values: 1048576+0x8
+  - series: jvm_memory_used_bytes{ienv="prod",namespace="ns1",pod="pod-b",container="",id="Old",job="scraper-a",area="heap"}
+    values: 2097152000+0x8
+  - series: jvm_memory_max_bytes{ienv="prod",namespace="ns1",pod="pod-b",container="",id="Old",job="scraper-a",area="heap"}
+    values: 1048576+0x8
+  - series: jvm_memory_used_bytes{ienv="prod",namespace="ns1",pod="pod-a",container="main",id="Eden",job="scraper-b",area="heap"}
+    values: 10485760+0x8
+  - series: jvm_memory_used_bytes{ienv="prod",namespace="ns1",pod="pod-a",container="main",id="Survivor",job="scraper-b",area="heap"}
+    values: 2097152+0x8
+  - series: jvm_memory_used_bytes{ienv="prod",namespace="ns1",pod="pod-a",container="main",id="Old",job="scraper-b",area="heap"}
+    values: 20971520+0x8
+  - series: jvm_memory_max_bytes{ienv="prod",namespace="ns1",pod="pod-a",container="main",id="Eden",job="scraper-b",area="heap"}
+    values: -1+0x8
+  - series: jvm_memory_max_bytes{ienv="prod",namespace="ns1",pod="pod-a",container="main",id="Survivor",job="scraper-b",area="heap"}
+    values: 0+0x8
+  - series: jvm_memory_max_bytes{ienv="prod",namespace="ns1",pod="pod-a",container="main",id="Old",job="scraper-b",area="heap"}
+    values: 134217728+0x8
+  - series: jvm_memory_used_bytes{ienv="prod",namespace="ns1",pod="pod-b",container="main",id="Old",job="scraper-b",area="heap"}
+    values: 62914560+0x8
+  - series: jvm_memory_max_bytes{ienv="prod",namespace="ns1",pod="pod-b",container="main",id="Old",job="scraper-b",area="heap"}
+    values: 104857600+0x8
+  - series: jvm_memory_used_bytes{ienv="prod",namespace="ns1",pod="pod-b",container="java-sidecar",id="Old",job="scraper-b",area="heap"}
+    values: 10485760+0x8
+  - series: jvm_memory_max_bytes{ienv="prod",namespace="ns1",pod="pod-b",container="java-sidecar",id="Old",job="scraper-b",area="heap"}
+    values: 1048576000+0x8
+  - series: jvm_memory_used_bytes{ienv="prod",namespace="ns1",pod="pod-c",container="main",id="Eden",job="scraper-b",area="heap"}
+    values: 26214400+0x8
+  - series: jvm_memory_used_bytes{ienv="prod",namespace="ns1",pod="pod-c",container="main",id="Old",job="scraper-b",area="heap"}
+    values: 26214400+0x8
+  - series: jvm_memory_max_bytes{ienv="prod",namespace="ns1",pod="pod-c",container="main",id="Eden",job="scraper-b",area="heap"}
+    values: 20971520+0x8
+  - series: jvm_memory_max_bytes{ienv="prod",namespace="ns1",pod="pod-c",container="main",id="Old",job="scraper-b",area="heap"}
+    values: 83886080+0x8
+  - series: jvm_memory_used_bytes{ienv="prod",namespace="ns1",pod="pod-a",container="main",id="Metaspace",job="scraper-b",area="nonheap"}
+    values: 20971520000+0x8
+  - series: jvm_memory_max_bytes{ienv="prod",namespace="ns1",pod="pod-a",container="main",id="Metaspace",job="scraper-b",area="nonheap"}
+    values: 1048576+0x8
+  - series: jvm_memory_used_bytes{ienv="prod",namespace="ns1",pod="pod-b",container="POD",id="Old",job="scraper-b",area="heap"}
+    values: 1048576000+0x8
+  - series: jvm_memory_max_bytes{ienv="prod",namespace="ns1",pod="pod-b",container="POD",id="Old",job="scraper-b",area="heap"}
+    values: 1048576+0x8
+  - series: jvm_memory_used_bytes{ienv="prod",namespace="ns1",pod="pod-b",container="",id="Old",job="scraper-b",area="heap"}
+    values: 2097152000+0x8
+  - series: jvm_memory_max_bytes{ienv="prod",namespace="ns1",pod="pod-b",container="",id="Old",job="scraper-b",area="heap"}
+    values: 1048576+0x8
+  - series: kube_pod_owner{ienv="prod",namespace="ns1",pod="pod-a",owner_name="deploy-svc-hash",owner_kind="ReplicaSet",owner_is_controller="true",job="ksm-a"}
+    values: 1+0x8
+  - series: kube_pod_owner{ienv="prod",namespace="ns1",pod="pod-a",owner_name="deploy-svc-hash",owner_kind="ReplicaSet",owner_is_controller="true",job="ksm-b"}
+    values: 1+0x8
+  - series: kube_pod_owner{ienv="prod",namespace="ns1",pod="pod-b",owner_name="deploy-svc-hash",owner_kind="ReplicaSet",owner_is_controller="true",job="ksm-a"}
+    values: 1+0x8
+  - series: kube_pod_owner{ienv="prod",namespace="ns1",pod="pod-b",owner_name="deploy-svc-hash",owner_kind="ReplicaSet",owner_is_controller="true",job="ksm-b"}
+    values: 1+0x8
+  - series: kube_pod_owner{ienv="prod",namespace="ns1",pod="pod-c",owner_name="deploy-svc-hash",owner_kind="ReplicaSet",owner_is_controller="true",job="ksm-a"}
+    values: 1+0x8
+  - series: kube_pod_owner{ienv="prod",namespace="ns1",pod="pod-c",owner_name="deploy-svc-hash",owner_kind="ReplicaSet",owner_is_controller="true",job="ksm-b"}
+    values: 1+0x8
+  - series: jvm_memory_used_bytes{ienv="prod",namespace="ns2",pod="pod-a",container="main",id="Old",job="scraper-a",area="heap"}
+    values: 20971520+0x8
+  - series: jvm_memory_max_bytes{ienv="prod",namespace="ns2",pod="pod-a",container="main",id="Old",job="scraper-a",area="heap"}
+    values: 41943040+0x8
+  - series: kube_pod_owner{ienv="prod",namespace="ns2",pod="pod-a",owner_name="deploy-svc-hash",owner_kind="ReplicaSet",owner_is_controller="true",job="ksm-a"}
+    values: 1+0x8
+  - series: jvm_memory_used_bytes{ienv="other",namespace="ns1",pod="pod-a",container="main",id="Old",job="scraper-a",area="heap"}
+    values: 10380902400+0x8
+  - series: jvm_memory_max_bytes{ienv="other",namespace="ns1",pod="pod-a",container="main",id="Old",job="scraper-a",area="heap"}
+    values: 10485760000+0x8
+  - series: kube_pod_owner{ienv="other",namespace="ns1",pod="pod-a",owner_name="deploy-svc-hash",owner_kind="ReplicaSet",owner_is_controller="true",job="ksm-a"}
+    values: 1+0x8
+  promql_expr_test:
+  - eval_time: 2m
+    exp_samples:
+    - labels: '{ienv="prod",namespace="ns1",owner_name="deploy-svc-hash"}'
+      value: 45
+    - labels: '{ienv="prod",namespace="ns2",owner_name="deploy-svc-hash"}'
+      value: 50
+- name: p95-not-p90-eight-observations-10-to-80
+  interval: 15s
+  input_series:
+  - series: jvm_memory_used_bytes{ienv="prod",namespace="ns1",pod="pod-a",container="main",id="Old",job="scraper-a",area="heap"}
+    values: _ 10485760 20971520 31457280 41943040 52428800 62914560 73400320 83886080
+  - series: jvm_memory_max_bytes{ienv="prod",namespace="ns1",pod="pod-a",container="main",id="Old",job="scraper-a",area="heap"}
+    values: 104857600+0x8
+  - series: kube_pod_owner{ienv="prod",namespace="ns1",pod="pod-a",owner_name="deploy-svc-hash",owner_kind="ReplicaSet",owner_is_controller="true",job="ksm-a"}
+    values: 1+0x8
+  promql_expr_test:
+  - eval_time: 2m
+    exp_samples:
+    - labels: '{ienv="prod",namespace="ns1",owner_name="deploy-svc-hash"}'
+      value: 76.5
+- name: negative-zero-absent-or-mismatched-main-max-must-be-unknown
+  interval: 15s
+  input_series:
+  - series: jvm_memory_used_bytes{ienv="prod",namespace="ns1",pod="negative",container="main",id="Old",job="scraper-a",area="heap"}
+    values: 62914560+0x8
+  - series: kube_pod_owner{ienv="prod",namespace="ns1",pod="negative",owner_name="deploy-svc-hash",owner_kind="ReplicaSet",owner_is_controller="true",job="ksm-a"}
+    values: 1+0x8
+  - series: jvm_memory_max_bytes{ienv="prod",namespace="ns1",pod="negative",container="main",id="Old",job="scraper-a",area="heap"}
+    values: -1+0x8
+  - series: jvm_memory_used_bytes{ienv="prod",namespace="ns1",pod="zero",container="main",id="Old",job="scraper-a",area="heap"}
+    values: 62914560+0x8
+  - series: kube_pod_owner{ienv="prod",namespace="ns1",pod="zero",owner_name="deploy-svc-hash",owner_kind="ReplicaSet",owner_is_controller="true",job="ksm-a"}
+    values: 1+0x8
+  - series: jvm_memory_max_bytes{ienv="prod",namespace="ns1",pod="zero",container="main",id="Old",job="scraper-a",area="heap"}
+    values: 0+0x8
+  - series: jvm_memory_used_bytes{ienv="prod",namespace="ns1",pod="absent",container="main",id="Old",job="scraper-a",area="heap"}
+    values: 62914560+0x8
+  - series: kube_pod_owner{ienv="prod",namespace="ns1",pod="absent",owner_name="deploy-svc-hash",owner_kind="ReplicaSet",owner_is_controller="true",job="ksm-a"}
+    values: 1+0x8
+  - series: jvm_memory_used_bytes{ienv="prod",namespace="ns1",pod="main-unknown-sidecar-valid",container="main",id="Old",job="scraper-a",area="heap"}
+    values: 62914560+0x8
+  - series: kube_pod_owner{ienv="prod",namespace="ns1",pod="main-unknown-sidecar-valid",owner_name="deploy-svc-hash",owner_kind="ReplicaSet",owner_is_controller="true",job="ksm-a"}
+    values: 1+0x8
+  - series: jvm_memory_max_bytes{ienv="prod",namespace="ns1",pod="main-unknown-sidecar-valid",container="main",id="Old",job="scraper-a",area="heap"}
+    values: -1+0x8
+  - series: jvm_memory_used_bytes{ienv="prod",namespace="ns1",pod="main-unknown-sidecar-valid",container="java-sidecar",id="Old",job="scraper-a",area="heap"}
+    values: 10485760+0x8
+  - series: jvm_memory_max_bytes{ienv="prod",namespace="ns1",pod="main-unknown-sidecar-valid",container="java-sidecar",id="Old",job="scraper-a",area="heap"}
+    values: 20971520+0x8
+  promql_expr_test:
+  - eval_time: 2m
+    exp_samples: []
+- name: pod-ratio-average-before-time-p95
+  interval: 15s
+  input_series:
+  - series: jvm_memory_used_bytes{ienv="prod",namespace="ns1",pod="pod-a",container="main",id="Old",job="scraper-a",area="heap"}
+    values: _ 0 0 0 0 104857600 104857600 104857600 104857600
+  - series: jvm_memory_max_bytes{ienv="prod",namespace="ns1",pod="pod-a",container="main",id="Old",job="scraper-a",area="heap"}
+    values: 104857600+0x8
+  - series: jvm_memory_used_bytes{ienv="prod",namespace="ns1",pod="pod-b",container="main",id="Old",job="scraper-a",area="heap"}
+    values: _ 104857600 104857600 104857600 104857600 0 0 0 0
+  - series: jvm_memory_max_bytes{ienv="prod",namespace="ns1",pod="pod-b",container="main",id="Old",job="scraper-a",area="heap"}
+    values: 104857600+0x8
+  - series: kube_pod_owner{ienv="prod",namespace="ns1",pod="pod-a",owner_name="deploy-svc-hash",owner_kind="ReplicaSet",owner_is_controller="true",job="ksm-a"}
+    values: 1+0x8
+  - series: kube_pod_owner{ienv="prod",namespace="ns1",pod="pod-b",owner_name="deploy-svc-hash",owner_kind="ReplicaSet",owner_is_controller="true",job="ksm-a"}
+    values: 1+0x8
+  promql_expr_test:
+  - eval_time: 2m
+    exp_samples:
+    - labels: '{ienv="prod",namespace="ns1",owner_name="deploy-svc-hash"}'
+      value: 50
+- name: largest-used-container-not-highest-ratio-container
+  interval: 15s
+  input_series:
+  - series: jvm_memory_used_bytes{ienv="prod",namespace="ns1",pod="pod-a",container="main",id="Old",job="scraper-a",area="heap"}
+    values: 62914560+0x8
+  - series: jvm_memory_max_bytes{ienv="prod",namespace="ns1",pod="pod-a",container="main",id="Old",job="scraper-a",area="heap"}
+    values: 104857600+0x8
+  - series: jvm_memory_used_bytes{ienv="prod",namespace="ns1",pod="pod-a",container="java-sidecar",id="Old",job="scraper-a",area="heap"}
+    values: 10485760+0x8
+  - series: jvm_memory_max_bytes{ienv="prod",namespace="ns1",pod="pod-a",container="java-sidecar",id="Old",job="scraper-a",area="heap"}
+    values: 10485760+0x8
+  - series: kube_pod_owner{ienv="prod",namespace="ns1",pod="pod-a",owner_name="deploy-svc-hash",owner_kind="ReplicaSet",owner_is_controller="true",job="ksm-a"}
+    values: 1+0x8
+  promql_expr_test:
+  - eval_time: 2m
+    exp_samples:
+    - labels: '{ienv="prod",namespace="ns1",owner_name="deploy-svc-hash"}'
+      value: 60

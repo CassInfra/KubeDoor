@@ -1,7 +1,13 @@
 <script setup lang="ts">
-import { ref } from "vue";
+import { computed, ref } from "vue";
+import { useMediaQuery } from "@vueuse/core";
 import ReCol from "@/components/ReCol";
-import { formRules } from "../utils/rule";
+import {
+  createJvmFormRules,
+  createPodCountManualRules,
+  formRules
+} from "../utils/rule";
+import { JVM_PARAMETERS } from "../utils/jvm";
 import { FormProps } from "../utils/types";
 import addLine from "@iconify-icons/ri/add-line";
 import { transformI18n } from "@/plugins/i18n";
@@ -26,6 +32,19 @@ const props = withDefaults(defineProps<FormProps>(), {
 
 const formRef = ref();
 const newFormInline = ref(props.formInline);
+const rules = {
+  ...formRules,
+  ...createPodCountManualRules(newFormInline.value, props.isEdit),
+  ...createJvmFormRules(newFormInline.value)
+};
+const hasJvmParameters = computed(() =>
+  JVM_PARAMETERS.some(
+    ({ inputKey }) => newFormInline.value[inputKey] !== undefined
+  )
+);
+// 与 el-col 的 lg 断点一致:≥1200px 时 JVM 参数一行两个、右列标签收窄,
+// 否则一行一个,标签和表单其它项同宽
+const jvmTwoColumns = useMediaQuery("(min-width: 1200px)");
 const namespaceList = ref(props.namespace);
 
 function getRef() {
@@ -46,7 +65,7 @@ defineExpose({ getRef });
   <el-form
     ref="formRef"
     :model="newFormInline"
-    :rules="formRules"
+    :rules="rules"
     label-width="145px"
   >
     <el-row :gutter="20">
@@ -160,16 +179,62 @@ defineExpose({ getRef });
           <el-input v-model="newFormInline.limit_mem_mb" type="number" />
         </el-form-item>
       </re-col>
+      <template v-if="hasJvmParameters">
+        <!-- 左列用表单的标签宽度,和上面的输入框对齐;右列标签窄,多分一格给左列,两个输入框差不多宽 -->
+        <re-col
+          v-for="(field, index) in JVM_PARAMETERS"
+          :key="field.key"
+          :value="index % 2 ? 9 : 11"
+          :xs="24"
+          :sm="24"
+          :md="20"
+        >
+          <el-form-item
+            :label="field.label"
+            :prop="field.inputKey"
+            :label-width="jvmTwoColumns && index % 2 ? '80px' : undefined"
+            class="jvm-parameter"
+          >
+            <el-input
+              v-model="newFormInline[field.inputKey]"
+              inputmode="decimal"
+              :disabled="newFormInline[field.inputKey] === undefined"
+              placeholder="-"
+            >
+              <template #suffix>{{ field.unit }}</template>
+            </el-input>
+          </el-form-item>
+        </re-col>
+      </template>
     </el-row>
     <div class="warning-box">
       <p>
         ⚠️需求值与限制值的调整，仅在[开启管控]后执行重启时才会应用到微服务，否则改动仅会写入数据库。
+      </p>
+      <p v-if="hasJvmParameters">
+        Xss 使用 k（KiB），其他 JVM 参数使用
+        m（MiB）；仅可修改已采集项，保存后在下次发布或重启时生效。
       </p>
     </div>
   </el-form>
 </template>
 
 <style scoped>
+.jvm-parameter :deep(.el-form-item__label),
+.jvm-parameter :deep(.el-input__inner),
+.jvm-parameter :deep(.el-input__suffix) {
+  color: #409eff;
+}
+
+.jvm-parameter :deep(.el-input__suffix) {
+  font-weight: 700;
+}
+
+/* 一行两个时输入框窄,错误提示不换行,免得压到下一行 */
+.jvm-parameter :deep(.el-form-item__error) {
+  white-space: nowrap;
+}
+
 .avatar-uploader .el-upload {
   position: relative;
   overflow: hidden;

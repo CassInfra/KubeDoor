@@ -204,12 +204,12 @@ import {
 import { CanvasRenderer } from "echarts/renderers";
 import {
   getPromOverview,
-  getCkAlertDaily,
-  getCkTopEvents,
-  getCkTopPodAlerts,
-  type CkAlertDailyItem,
-  type CkEventItem,
-  type CkPodAlertItem,
+  getAlertDaily,
+  getTopEvents,
+  getTopPodAlerts,
+  type AlertDailyItem,
+  type EventTopItem,
+  type PodAlertItem,
   type OverviewCard,
   type PromOverviewMetrics
 } from "@/api/overview";
@@ -269,9 +269,9 @@ const envList = ref<string[]>([]);
 const selectedEnv = ref<string>("");
 const summaryCards = ref<OverviewCard[]>([]);
 const lastUpdated = ref<string>("");
-const podAlerts = ref<CkPodAlertItem[]>([]);
-const eventTop10 = ref<CkEventItem[]>([]);
-const alertDaily = ref<CkAlertDailyItem[]>([]);
+const podAlerts = ref<PodAlertItem[]>([]);
+const eventTop10 = ref<EventTopItem[]>([]);
+const alertDaily = ref<AlertDailyItem[]>([]);
 const eventPieRef = ref<HTMLDivElement>();
 const alertBarRef = ref<HTMLDivElement>();
 let eventPieChart: echarts.ECharts | null = null;
@@ -694,9 +694,9 @@ const fetchAllData = async () => {
     const envParam = selectedEnv.value || undefined;
     const [promRes, podRes, eventRes, dailyRes] = await Promise.all([
       getPromOverview(envParam),
-      getCkTopPodAlerts(envParam),
-      getCkTopEvents(envParam),
-      getCkAlertDaily(envParam)
+      getTopPodAlerts(envParam),
+      getTopEvents(envParam),
+      getAlertDaily(envParam)
     ]);
     const metrics = promRes.data ?? createPromOverviewMetrics();
     promOverview.value = metrics;

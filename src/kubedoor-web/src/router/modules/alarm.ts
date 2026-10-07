@@ -42,6 +42,16 @@ export default {
       }
     },
     {
+      path: "/alarm/silence",
+      name: "alarm-silence",
+      component: () => import("@/views/alarm/silence.vue"),
+      meta: {
+        title: $t("menus.alarmSilence"),
+        icon: "ep:mute-notification",
+        usePathKey: true
+      }
+    },
+    {
       path: "/monitk8s/index",
       name: "Monitk8s",
       component: () => import("@/views/monitk8s/index.vue"),

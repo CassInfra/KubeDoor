@@ -1,4 +1,6 @@
-interface FormItemProps {
+import type { JvmControlValues, JvmFormValues } from "./jvm";
+
+interface FormItemProps extends JvmControlValues, JvmFormValues {
   env: string;
   namespace: string;
   deployment: string;

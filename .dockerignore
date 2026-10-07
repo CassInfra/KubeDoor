@@ -1,0 +1,16 @@
+.git
+.codegraph
+.venv*
+.cache-ai-tests
+**/node_modules
+**/dist
+**/__pycache__
+**/*.egg-info
+**/.pytest_cache
+**/*.ai-secrets
+deploy
+# agent / ai 镜像构建时安装 kubectl、istioctl、yq 的脚本；deploy 下其余文件(含 kubedoor.conf)不进构建上下文
+!deploy/tools/install-ai-tools.sh
+docs
+CLAUDE.md
+AGENTS.md

@@ -2,13 +2,12 @@ loguru
 asyncio
 aiohttp
 requests
-clickhouse_driver
+asyncpg
+psycopg[c,pool]
 pydantic
-mysql-connector-python
 PyYAML
 typing-extensions
 python-dotenv
-clickhouse-connect
 huaweicloudsdkcore==3.1.165
 huaweicloudsdkswr==3.1.165
 aliyun-python-sdk-core==2.16.0

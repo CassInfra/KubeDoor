@@ -9,7 +9,7 @@ K8S 事件告警系统是一个基于规则驱动的智能告警解决方案，�
 - 🎯 **规则驱动**: 基于 JSON 配置文件的灵活告警规则
 - 🔍 **多条件匹配**: 支持字段包含/不包含、开头/结尾匹配、数值比较等多种匹配条件
 - 🚫 **智能过滤**: 忽略 DELETED 事件和配置的忽略规则
-- 🔄 **热重载**: 支持运行时重新加载告警规则
+- 🔄 **修改生效**: 规则在 master 启动时加载，修改 ConfigMap 后需重启 master
 - 📱 **多渠道通知**: 支持企业微信、钉钉、飞书、Slack 等多种告警通知方式
 
 ## 快速开始
@@ -23,7 +23,7 @@ K8S 事件告警系统是一个基于规则驱动的智能告警解决方案，�
 系统对 `eventStatus=DELETED` 的事件采用**硬编码忽略**策略：
 
 - **优先级最高**: 在所有规则检查之前，直接忽略 DELETED 事件
-- **不影响入库**: 事件仍会正常存储到 ClickHouse，只是跳过告警处理
+- **不影响入库**: 事件仍会正常存储到 PostgreSQL，只是跳过告警处理
 - **统计计入**: DELETED 事件会被计入忽略事件统计
 - **日志记录**: 会记录调试日志 "DELETED 事件被直接忽略"
 
@@ -72,17 +72,17 @@ K8S 事件告警系统是一个基于规则驱动的智能告警解决方案，�
 
 ## 告警规则配置
 
-告警规则配置文件 `rules/alert_rules.json`:
+告警规则配置文件 `deploy/manifests/master/alert_rules.json`，安装时做成 ConfigMap `kubedoor-master-file-cfg`，挂载到 master 的 `/k8s_event/rules/`（镜像内不自带规则文件），格式示例如下（集群名、服务名均为示意）:
 
 ```json
 {
   "global_ignore_rules": [
     {
-      "name": "环境过滤规则",
+      "name": "环境过滤规则(排除非生产环境的K8S)",
       "enabled": true,
       "conditions": {
         "k8s": {
-          "not_contains": ["prod", "cassmall-hwbeta-kunlun", "cassmall-hwbeta-penglai"]
+          "contains": ["test-a", "test-b"]
         }
       }
     },
@@ -136,7 +136,7 @@ K8S 事件告警系统是一个基于规则驱动的智能告警解决方案，�
           "contains": ["Unhealthy"]
         },
         "name": {
-          "not_starts_with": ["deploy-datax-cloud-"]
+          "not_starts_with": ["deploy-demo-"]
         },
         "count": {
           "greater_than": 1
@@ -246,7 +246,7 @@ K8S 事件告警系统是一个基于规则驱动的智能告警解决方案，�
       "enabled": true,
       "conditions": {
         "k8s": {
-          "not_contains": ["prod", "cassmall-kunlun", "cassmall-penglai"]
+          "not_contains": ["prod", "prd", "online"]
         }
       }
     },
@@ -285,10 +285,10 @@ K8S 事件告警系统是一个基于规则驱动的智能告警解决方案，�
           "contains": ["Unhealthy"]
         },
         "k8s": {
-          "not_contains": ["cassmall-hwbeta-kunlun", "cassmall-hwbeta-penglai"]
+          "not_contains": ["test", "dev"]
         },
         "name": {
-          "not_starts_with": ["deploy-micro-service-", "deploy-integration-changyuan-", "deploy-datax-cloud-"]
+          "not_starts_with": ["deploy-demo-", "deploy-batch-", "deploy-temp-"]
         },
         "count": {
           "greater_than": 1

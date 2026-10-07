@@ -24,27 +24,18 @@ export default ({ mode }: ConfigEnv): UserConfigExport => {
       port: VITE_PORT,
       host: "0.0.0.0",
       // 本地跨域代理 https://cn.vitejs.dev/config/server-options.html#server-proxy
+      // 指向一套已部署的 KubeDoor Web（由它的 Nginx 再转发给 master / ai），请改成自己的地址，
+      // 例如先执行 kubectl -n kubedoor port-forward svc/kubedoor-web 8080:80
       proxy: {
         "/api": {
-          // target: "http://10.7.0.226:31027",
-          target: "https://kubedoor-test.casstime.net",
+          target: "http://127.0.0.1:8080",
           changeOrigin: true
         },
         "/ws": {
-          target: "wss://kubedoor-test.casstime.net",
+          target: "ws://127.0.0.1:8080",
           changeOrigin: true,
           ws: true
         }
-        // "/kunlun": {
-        //   target: "http://10.7.0.226:31500",
-        //   changeOrigin: true,
-        //   rewrite: path => path.replace(/^\/kunlun/, "")
-        // },
-        // "/penglai": {
-        //   target: "http://10.7.0.226:31501",
-        //   changeOrigin: true,
-        //   rewrite: path => path.replace(/^\/penglai/, "")
-        // }
       },
       // 预热文件以提前转换和缓存结果，降低启动期间的初始页面加载时长并防止转换瀑布
       warmup: {

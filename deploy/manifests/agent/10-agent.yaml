@@ -1,0 +1,147 @@
+# kubedoor-agent:每个被纳管的 K8S 集群装一套。
+# 通过 WebSocket 主动连到 master,接收指令后用 ServiceAccount 的权限操作本集群,
+# 同时把 K8S 事件流回传给 master 入库。
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: kubedoor-agent-config
+  namespace: __NAMESPACE__
+  labels:
+    app: kubedoor-agent
+data:
+  # master 的 WebSocket 地址。跨集群时要带 basic auth 账号密码
+  KUBEDOOR_MASTER: '__MASTER_WS__'
+  # 本集群的名字,必须和指标里 <PROM_K8S_TAG_KEY> 标签的值一致
+  PROM_K8S_TAG_VALUE: '__K8S_NAME__'
+  MSG_TYPE: '__MSG_TYPE__'
+  MSG_TOKEN: '__MSG_TOKEN__'
+  # Java 服务 dump/jfr/jstack 的结果上传地址,留空则这些功能不可用
+  OSS_URL: '__OSS_URL__'
+
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: kubedoor-agent
+  namespace: __NAMESPACE__
+
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: kubedoor-agent
+  namespace: __NAMESPACE__
+  annotations:
+    kubernetes.io/service-account.name: "kubedoor-agent"
+type: kubernetes.io/service-account-token
+
+---
+# agent 要代理执行扩缩容、改镜像、重启、驱逐、改 configmap/ingress/istio 等各类操作,
+# 覆盖面基本等于集群管理员。收紧权限会直接导致对应功能报错,请按实际需要裁剪。
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: kubedoor-agent-cr
+rules:
+  - apiGroups: ['*']
+    resources: ['*']
+    verbs: ['*']
+  - nonResourceURLs: ['*']
+    verbs: ['*']
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: kubedoor-agent-crb
+subjects:
+  - kind: ServiceAccount
+    name: kubedoor-agent
+    namespace: __NAMESPACE__
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: kubedoor-agent-cr
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: kubedoor-agent
+  namespace: __NAMESPACE__
+  labels:
+    app: kubedoor-agent
+    app.kubernetes.io/part-of: kubedoor
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: kubedoor-agent
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  template:
+    metadata:
+      labels:
+        app: kubedoor-agent
+    spec:
+      serviceAccountName: kubedoor-agent
+      containers:
+        - name: kubedoor-agent
+          image: '__IMAGE_REPO__/kubedoor-agent:__TAG_AGENT__'
+          imagePullPolicy: Always
+          envFrom:
+            - configMapRef:
+                name: kubedoor-agent-config
+          env:
+            - name: TZ
+              value: Asia/Shanghai
+          ports:
+            - name: https
+              containerPort: 443
+          resources:
+            limits:
+              cpu: "2"
+              memory: 2Gi
+            requests:
+              cpu: 50m
+              memory: 128Mi
+          livenessProbe:
+            httpGet:
+              path: /api/health
+              port: 443
+              scheme: HTTPS
+            initialDelaySeconds: 20
+            timeoutSeconds: 3
+            periodSeconds: 10
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /api/health
+              port: 443
+              scheme: HTTPS
+            initialDelaySeconds: 5
+            timeoutSeconds: 3
+            periodSeconds: 10
+            failureThreshold: 3
+      restartPolicy: Always
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: kubedoor-agent
+  namespace: __NAMESPACE__
+  labels:
+    app: kubedoor-agent
+spec:
+  type: ClusterIP
+  ports:
+    - name: https
+      protocol: TCP
+      port: 443
+      targetPort: 443
+  selector:
+    app: kubedoor-agent

@@ -765,14 +765,10 @@ const getEnvOptions = async (): Promise<void> => {
   }
 };
 
-// 处理环境变化
+// 处理环境变化:命名空间和关键字保留,新集群没有该命名空间时由 getNsOptions 回退
 const handleEnvChange = async (val: string) => {
   searchForm.env = val;
-  searchForm.ns = "";
-  searchForm.keyword = "";
-  appliedKeyword.value = "";
   searchStore.setEnv(val);
-  searchStore.setNamespace("");
   expandedRowKeys.value = [];
   tableData.value = [];
   lastFetchedEnv.value = null;
@@ -1255,7 +1251,7 @@ const getServiceTypeTagType = (type: string) => {
     case "ExternalName":
       return "info";
     default:
-      return "";
+      return "info";
   }
 };
 

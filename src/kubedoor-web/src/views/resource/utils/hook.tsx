@@ -10,6 +10,12 @@ import {
 } from "@/components/ReDialog";
 // import headerOperator from "../headerOperator.vue";
 import type { FormItemProps } from "../utils/types";
+import {
+  JVM_PARAMETERS,
+  formatJvmBytes,
+  getJvmControlPayload,
+  getJvmFormValues
+} from "./jvm";
 import { deviceDetection } from "@pureadmin/utils";
 import {
   getEnv,
@@ -239,6 +245,44 @@ export function useResource(tableRef: Ref, searchStore: any) {
       align: "center",
       sortable: true
     },
+    ...[
+      { prop: "p95_pod_heap_pct", label: "resource.column.p95PodHeapPct" },
+      { prop: "p95_pod_g1e_pct", label: "resource.column.p95PodG1EPct" }
+    ].map<TableColumnList[number]>(({ prop, label }) => ({
+      label: transformI18n(label),
+      prop,
+      align: "center",
+      sortable: true,
+      minWidth: 140,
+      headerRenderer: () =>
+        h("span", { style: { color: "red" } }, transformI18n(label)),
+      cellRenderer: ({ row }) => {
+        const rawValue = row[prop];
+        const value = Number(rawValue);
+        const display =
+          rawValue != null &&
+          rawValue !== "" &&
+          Number.isFinite(value) &&
+          value >= 0
+            ? `${value.toFixed(2)}%`
+            : "-";
+        return h("span", { style: { color: "red" } }, display);
+      }
+    })),
+    ...JVM_PARAMETERS.map<TableColumnList[number]>(({ key, label, unit }) => ({
+      label,
+      prop: key,
+      align: "center" as const,
+      sortable: true,
+      minWidth: label === "MaxMeta" ? 120 : 100,
+      headerRenderer: () => h("span", { style: { color: "#409eff" } }, label),
+      cellRenderer: ({ row }) =>
+        h(
+          "span",
+          { style: { color: "#409eff" } },
+          formatJvmBytes(row[key], unit)
+        )
+    })),
     {
       label: transformI18n("resource.column.update"),
       prop: "update",
@@ -330,12 +374,22 @@ export function useResource(tableRef: Ref, searchStore: any) {
   }
 
   const editDialogSubmit = (options, row, isSubmit: boolean) => {
-    return new Promise<void>(resolve => {
+    return new Promise<boolean>(resolve => {
       const FormRef = editFormRef.value.getRef();
       const curData = options.props.formInline as FormItemProps;
 
       FormRef.validate(async valid => {
         if (valid) {
+          let jvmValues: ReturnType<typeof getJvmControlPayload>;
+          try {
+            jvmValues = getJvmControlPayload(curData);
+          } catch (error) {
+            message(error instanceof Error ? error.message : "JVM 参数无效", {
+              type: "error"
+            });
+            resolve(false);
+            return;
+          }
           if (row?.namespace) {
             // 修改
             editData({
@@ -344,7 +398,8 @@ export function useResource(tableRef: Ref, searchStore: any) {
               deployment: curData.deployment,
               pod_count_manual: curData.pod_count_manual,
               limit_cpu_m: curData.limit_cpu_m,
-              limit_mem_mb: curData.limit_mem_mb
+              limit_mem_mb: curData.limit_mem_mb,
+              ...jvmValues
             })
               .then(res => {
                 console.log(res);
@@ -353,7 +408,7 @@ export function useResource(tableRef: Ref, searchStore: any) {
                     type: "success"
                   });
                 onSearch();
-                resolve();
+                resolve(true);
               })
               .catch(error => {
                 isSubmit &&
@@ -361,6 +416,7 @@ export function useResource(tableRef: Ref, searchStore: any) {
                     type: "error"
                   });
                 console.error(error);
+                resolve(false);
               });
           } else {
             // 新增
@@ -372,7 +428,8 @@ export function useResource(tableRef: Ref, searchStore: any) {
               limit_cpu_m: curData.limit_cpu_m,
               limit_mem_mb: curData.limit_mem_mb,
               request_cpu_m: curData.request_cpu_m,
-              request_mem_mb: curData.request_mem_mb
+              request_mem_mb: curData.request_mem_mb,
+              ...jvmValues
             })
               .then(async res => {
                 console.log(res);
@@ -384,15 +441,18 @@ export function useResource(tableRef: Ref, searchStore: any) {
                 queryForm.env = curData.env;
                 onEnvChange(curData.env);
                 queryForm.namespace = curData.namespace;
-                resolve();
+                resolve(true);
               })
               .catch(error => {
                 message(transformI18n("resource.message.createFailed"), {
                   type: "error"
                 });
                 console.error(error);
+                resolve(false);
               });
           }
+        } else {
+          resolve(false);
         }
       });
     });
@@ -404,7 +464,7 @@ export function useResource(tableRef: Ref, searchStore: any) {
         label: transformI18n("resource.operation.saveAndScale"),
         type: "primary",
         btnClick: async ({ dialog: { options, index } }) => {
-          await editDialogSubmit(options, row, false);
+          if (!(await editDialogSubmit(options, row, false))) return;
           const curData = options.props.formInline as FormItemProps;
           await onChangeCapacity(curData);
           closeDialog(options, index);
@@ -414,7 +474,7 @@ export function useResource(tableRef: Ref, searchStore: any) {
         label: transformI18n("resource.operation.saveAndReboot"),
         type: "primary",
         btnClick: async ({ dialog: { options, index } }) => {
-          await editDialogSubmit(options, row, false);
+          if (!(await editDialogSubmit(options, row, false))) return;
           await onReboot(row);
           closeDialog(options, index);
         }
@@ -423,7 +483,7 @@ export function useResource(tableRef: Ref, searchStore: any) {
         label: transformI18n("buttons.pureSave"),
         type: "primary",
         btnClick: async ({ dialog: { options, index } }) => {
-          await editDialogSubmit(options, row, true);
+          if (!(await editDialogSubmit(options, row, true))) return;
           onSearch();
           closeDialog(options, index);
         }
@@ -435,35 +495,37 @@ export function useResource(tableRef: Ref, searchStore: any) {
         }
       }
     ] as ButtonProps[];
+    const editProps = {
+      formInline: {
+        env: row?.env || queryForm.env,
+        namespace: row?.namespace || "",
+        deployment: row?.deployment || "",
+        pod_count_manual:
+          row?.pod_count_manual !== undefined ? row?.pod_count_manual : "",
+        pod_count_ai: row?.pod_count_ai !== undefined ? row?.pod_count_ai : "",
+        limit_cpu_m: row?.limit_cpu_m !== undefined ? row?.limit_cpu_m : "",
+        limit_mem_mb: row?.limit_mem_mb !== undefined ? row?.limit_mem_mb : "",
+        request_mem_mb:
+          row?.request_mem_mb !== undefined ? row?.request_mem_mb : "",
+        request_cpu_m:
+          row?.request_cpu_m !== undefined ? row?.request_cpu_m : "",
+        pod_count: row?.pod_count !== undefined ? row?.pod_count : "",
+        // 最近一次采集时间，判断「指定Pod」能否设为 -1（手动新增未采集的服务为空）
+        update: row?.update || "",
+        ...getJvmFormValues(row)
+      },
+      namespace: namespaceList.value,
+      envList: envList.value,
+      isEdit: row?.namespace ? true : false
+    };
     addDialog({
       title: `${title == "新增" ? transformI18n("resource.add") : transformI18n("resource.edit")}`,
-      props: {
-        formInline: {
-          env: row?.env || queryForm.env,
-          namespace: row?.namespace || "",
-          deployment: row?.deployment || "",
-          pod_count_manual:
-            row?.pod_count_manual !== undefined ? row?.pod_count_manual : "",
-          pod_count_ai:
-            row?.pod_count_ai !== undefined ? row?.pod_count_ai : "",
-          limit_cpu_m: row?.limit_cpu_m !== undefined ? row?.limit_cpu_m : "",
-          limit_mem_mb:
-            row?.limit_mem_mb !== undefined ? row?.limit_mem_mb : "",
-          request_mem_mb:
-            row?.request_mem_mb !== undefined ? row?.request_mem_mb : "",
-          request_cpu_m:
-            row?.request_cpu_m !== undefined ? row?.request_cpu_m : "",
-          pod_count: row?.pod_count !== undefined ? row?.pod_count : ""
-        },
-        namespace: namespaceList.value,
-        envList: envList.value,
-        isEdit: row?.namespace ? true : false
-      },
+      props: editProps,
       width: "46%",
       draggable: true,
       fullscreen: deviceDetection(),
       closeOnClickModal: false,
-      contentRenderer: () => h(editForm, { ref: editFormRef }),
+      contentRenderer: () => h(editForm, { ref: editFormRef, ...editProps }),
       footerButtons: title == "新增" ? footerButtons.slice(2, 4) : footerButtons
       // beforeSure: (done, { options }) => {
       //   const FormRef = editFormRef.value.getRef();
@@ -568,19 +630,20 @@ export function useResource(tableRef: Ref, searchStore: any) {
         showAddLabelRes = res.data.length;
       }
 
+      const scaleProps = {
+        isScale: true,
+        content,
+        showInterval: params.length > 1, // 是否显示间隔.
+        showAddLabel: showAddLabelRes
+      };
       addDialog({
         title: transformI18n("resource.scale"),
-        props: {
-          isScale: true,
-          content,
-          showInterval: params.length > 1, // 是否显示间隔.
-          showAddLabel: showAddLabelRes
-        },
+        props: scaleProps,
         width: "40%",
         draggable: true,
         fullscreen: deviceDetection(),
         closeOnClickModal: false,
-        contentRenderer: () => h(scale, { ref: ScaleRef }),
+        contentRenderer: () => h(scale, { ref: ScaleRef, ...scaleProps }),
         beforeSure: async done => {
           const data = await ScaleRef.value.getData();
           let res;
@@ -660,18 +723,20 @@ export function useResource(tableRef: Ref, searchStore: any) {
         })
         .join("<br>");
 
+      const rebootProps = {
+        isScale: false,
+        content,
+        showInterval: params.length > 1,
+        showAddLabel: -1
+      };
       addDialog({
         title: transformI18n("resource.reboot"),
         width: "40%",
-        props: {
-          isScale: false,
-          content,
-          showInterval: params.length > 1
-        },
+        props: rebootProps,
         draggable: true,
         fullscreen: deviceDetection(),
         closeOnClickModal: false,
-        contentRenderer: () => h(scale, { ref: ScaleRef }),
+        contentRenderer: () => h(scale, { ref: ScaleRef, ...rebootProps }),
         beforeSure: async done => {
           const data = await ScaleRef.value.getData();
           let res;

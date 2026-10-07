@@ -1,0 +1,278 @@
+# G1 Eden PromQL regression data; JVM observations are exact bytes.
+# P95 of 8 values from 10% to 80% is 76.5%; P90 is 73%.
+# Insert the current production query dynamically in test_peak_g1e_promql.py.
+evaluation_interval: 15s
+fuzzy_compare: true
+tests:
+- name: exact-eden-id-committed-not-max-dedup-and-container-scope
+  interval: 15s
+  input_series:
+  - series: jvm_memory_used_bytes{ienv="prod",namespace="ns1",pod="pod-a",container="main",id="G1
+      Eden Space",job="scraper-a",area="heap"}
+    values: 20971520+0x8
+  - series: jvm_memory_committed_bytes{ienv="prod",namespace="ns1",pod="pod-a",container="main",id="G1
+      Eden Space",job="scraper-a",area="heap"}
+    values: 104857600+0x8
+  - series: jvm_memory_max_bytes{ienv="prod",namespace="ns1",pod="pod-a",container="main",id="G1
+      Eden Space",job="scraper-a",area="heap"}
+    values: 1048576000+0x8
+  - series: jvm_memory_used_bytes{ienv="prod",namespace="ns1",pod="pod-b",container="main",id="G1
+      Eden Space",job="scraper-a",area="heap"}
+    values: 62914560+0x8
+  - series: jvm_memory_committed_bytes{ienv="prod",namespace="ns1",pod="pod-b",container="main",id="G1
+      Eden Space",job="scraper-a",area="heap"}
+    values: 104857600+0x8
+  - series: jvm_memory_max_bytes{ienv="prod",namespace="ns1",pod="pod-b",container="main",id="G1
+      Eden Space",job="scraper-a",area="heap"}
+    values: 1048576000+0x8
+  - series: jvm_memory_used_bytes{ienv="prod",namespace="ns1",pod="pod-b",container="java-sidecar",id="G1
+      Eden Space",job="scraper-a",area="heap"}
+    values: 10485760+0x8
+  - series: jvm_memory_committed_bytes{ienv="prod",namespace="ns1",pod="pod-b",container="java-sidecar",id="G1
+      Eden Space",job="scraper-a",area="heap"}
+    values: 1048576000+0x8
+  - series: jvm_memory_used_bytes{ienv="prod",namespace="ns1",pod="pod-a",container="main",id="G1
+      Old Gen",job="scraper-a",area="heap"}
+    values: 20971520000+0x8
+  - series: jvm_memory_committed_bytes{ienv="prod",namespace="ns1",pod="pod-a",container="main",id="G1
+      Old Gen",job="scraper-a",area="heap"}
+    values: 1048576+0x8
+  - series: jvm_memory_used_bytes{ienv="prod",namespace="ns1",pod="pod-a",container="main",id="G1
+      Survivor Space",job="scraper-a",area="heap"}
+    values: 20971520000+0x8
+  - series: jvm_memory_committed_bytes{ienv="prod",namespace="ns1",pod="pod-a",container="main",id="G1
+      Survivor Space",job="scraper-a",area="heap"}
+    values: 1048576+0x8
+  - series: jvm_memory_used_bytes{ienv="prod",namespace="ns1",pod="pod-a",container="main",id="G1
+      Eden Space suffix",job="scraper-a",area="heap"}
+    values: 20971520000+0x8
+  - series: jvm_memory_committed_bytes{ienv="prod",namespace="ns1",pod="pod-a",container="main",id="G1
+      Eden Space suffix",job="scraper-a",area="heap"}
+    values: 1048576+0x8
+  - series: jvm_memory_used_bytes{ienv="prod",namespace="ns1",pod="pod-a",container="main",id="G1
+      Eden Space",job="scraper-a",area="nonheap"}
+    values: 20971520000+0x8
+  - series: jvm_memory_committed_bytes{ienv="prod",namespace="ns1",pod="pod-a",container="main",id="G1
+      Eden Space",job="scraper-a",area="nonheap"}
+    values: 1048576+0x8
+  - series: jvm_memory_used_bytes{ienv="prod",namespace="ns1",pod="pod-b",container="",id="G1
+      Eden Space",job="scraper-a",area="heap"}
+    values: 20971520000+0x8
+  - series: jvm_memory_committed_bytes{ienv="prod",namespace="ns1",pod="pod-b",container="",id="G1
+      Eden Space",job="scraper-a",area="heap"}
+    values: 1048576+0x8
+  - series: jvm_memory_used_bytes{ienv="prod",namespace="ns1",pod="pod-b",container="POD",id="G1
+      Eden Space",job="scraper-a",area="heap"}
+    values: 20971520000+0x8
+  - series: jvm_memory_committed_bytes{ienv="prod",namespace="ns1",pod="pod-b",container="POD",id="G1
+      Eden Space",job="scraper-a",area="heap"}
+    values: 1048576+0x8
+  - series: jvm_memory_used_bytes{ienv="prod",namespace="ns1",pod="pod-a",container="main",id="G1
+      Eden Space",job="scraper-b",area="heap"}
+    values: 10485760+0x8
+  - series: jvm_memory_committed_bytes{ienv="prod",namespace="ns1",pod="pod-a",container="main",id="G1
+      Eden Space",job="scraper-b",area="heap"}
+    values: 104857600+0x8
+  - series: jvm_memory_max_bytes{ienv="prod",namespace="ns1",pod="pod-a",container="main",id="G1
+      Eden Space",job="scraper-b",area="heap"}
+    values: 1048576000+0x8
+  - series: jvm_memory_used_bytes{ienv="prod",namespace="ns1",pod="pod-b",container="main",id="G1
+      Eden Space",job="scraper-b",area="heap"}
+    values: 31457280+0x8
+  - series: jvm_memory_committed_bytes{ienv="prod",namespace="ns1",pod="pod-b",container="main",id="G1
+      Eden Space",job="scraper-b",area="heap"}
+    values: 104857600+0x8
+  - series: jvm_memory_max_bytes{ienv="prod",namespace="ns1",pod="pod-b",container="main",id="G1
+      Eden Space",job="scraper-b",area="heap"}
+    values: 1048576000+0x8
+  - series: jvm_memory_used_bytes{ienv="prod",namespace="ns1",pod="pod-b",container="java-sidecar",id="G1
+      Eden Space",job="scraper-b",area="heap"}
+    values: 10485760+0x8
+  - series: jvm_memory_committed_bytes{ienv="prod",namespace="ns1",pod="pod-b",container="java-sidecar",id="G1
+      Eden Space",job="scraper-b",area="heap"}
+    values: 1048576000+0x8
+  - series: jvm_memory_used_bytes{ienv="prod",namespace="ns1",pod="pod-a",container="main",id="G1
+      Old Gen",job="scraper-b",area="heap"}
+    values: 20971520000+0x8
+  - series: jvm_memory_committed_bytes{ienv="prod",namespace="ns1",pod="pod-a",container="main",id="G1
+      Old Gen",job="scraper-b",area="heap"}
+    values: 1048576+0x8
+  - series: jvm_memory_used_bytes{ienv="prod",namespace="ns1",pod="pod-a",container="main",id="G1
+      Survivor Space",job="scraper-b",area="heap"}
+    values: 20971520000+0x8
+  - series: jvm_memory_committed_bytes{ienv="prod",namespace="ns1",pod="pod-a",container="main",id="G1
+      Survivor Space",job="scraper-b",area="heap"}
+    values: 1048576+0x8
+  - series: jvm_memory_used_bytes{ienv="prod",namespace="ns1",pod="pod-a",container="main",id="G1
+      Eden Space suffix",job="scraper-b",area="heap"}
+    values: 20971520000+0x8
+  - series: jvm_memory_committed_bytes{ienv="prod",namespace="ns1",pod="pod-a",container="main",id="G1
+      Eden Space suffix",job="scraper-b",area="heap"}
+    values: 1048576+0x8
+  - series: jvm_memory_used_bytes{ienv="prod",namespace="ns1",pod="pod-a",container="main",id="G1
+      Eden Space",job="scraper-b",area="nonheap"}
+    values: 20971520000+0x8
+  - series: jvm_memory_committed_bytes{ienv="prod",namespace="ns1",pod="pod-a",container="main",id="G1
+      Eden Space",job="scraper-b",area="nonheap"}
+    values: 1048576+0x8
+  - series: jvm_memory_used_bytes{ienv="prod",namespace="ns1",pod="pod-b",container="",id="G1
+      Eden Space",job="scraper-b",area="heap"}
+    values: 20971520000+0x8
+  - series: jvm_memory_committed_bytes{ienv="prod",namespace="ns1",pod="pod-b",container="",id="G1
+      Eden Space",job="scraper-b",area="heap"}
+    values: 1048576+0x8
+  - series: jvm_memory_used_bytes{ienv="prod",namespace="ns1",pod="pod-b",container="POD",id="G1
+      Eden Space",job="scraper-b",area="heap"}
+    values: 20971520000+0x8
+  - series: jvm_memory_committed_bytes{ienv="prod",namespace="ns1",pod="pod-b",container="POD",id="G1
+      Eden Space",job="scraper-b",area="heap"}
+    values: 1048576+0x8
+  - series: kube_pod_owner{ienv="prod",namespace="ns1",pod="pod-a",owner_name="deploy-svc-hash",owner_kind="ReplicaSet",owner_is_controller="true",job="ksm-a"}
+    values: 1+0x8
+  - series: kube_pod_owner{ienv="prod",namespace="ns1",pod="pod-a",owner_name="deploy-svc-hash",owner_kind="ReplicaSet",owner_is_controller="true",job="ksm-b"}
+    values: 1+0x8
+  - series: kube_pod_owner{ienv="prod",namespace="ns1",pod="pod-b",owner_name="deploy-svc-hash",owner_kind="ReplicaSet",owner_is_controller="true",job="ksm-a"}
+    values: 1+0x8
+  - series: kube_pod_owner{ienv="prod",namespace="ns1",pod="pod-b",owner_name="deploy-svc-hash",owner_kind="ReplicaSet",owner_is_controller="true",job="ksm-b"}
+    values: 1+0x8
+  - series: jvm_memory_used_bytes{ienv="prod",namespace="ns2",pod="pod-a",container="main",id="G1
+      Eden Space",job="scraper-a",area="heap"}
+    values: 52428800+0x8
+  - series: jvm_memory_committed_bytes{ienv="prod",namespace="ns2",pod="pod-a",container="main",id="G1
+      Eden Space",job="scraper-a",area="heap"}
+    values: 104857600+0x8
+  - series: kube_pod_owner{ienv="prod",namespace="ns2",pod="pod-a",owner_name="deploy-svc-hash",owner_kind="ReplicaSet",owner_is_controller="true",job="ksm-a"}
+    values: 1+0x8
+  - series: jvm_memory_used_bytes{ienv="other",namespace="ns1",pod="pod-a",container="main",id="G1
+      Eden Space",job="scraper-a",area="heap"}
+    values: 94371840+0x8
+  - series: jvm_memory_committed_bytes{ienv="other",namespace="ns1",pod="pod-a",container="main",id="G1
+      Eden Space",job="scraper-a",area="heap"}
+    values: 104857600+0x8
+  - series: kube_pod_owner{ienv="other",namespace="ns1",pod="pod-a",owner_name="deploy-svc-hash",owner_kind="ReplicaSet",owner_is_controller="true",job="ksm-a"}
+    values: 1+0x8
+  promql_expr_test:
+  - eval_time: 2m
+    exp_samples:
+    - labels: '{ienv="prod",namespace="ns1",owner_name="deploy-svc-hash"}'
+      value: 40
+    - labels: '{ienv="prod",namespace="ns2",owner_name="deploy-svc-hash"}'
+      value: 50
+- name: p95-not-p90-eight-observations-10-to-80
+  interval: 15s
+  input_series:
+  - series: jvm_memory_used_bytes{ienv="prod",namespace="ns1",pod="pod-a",container="main",id="G1
+      Eden Space",job="scraper-a",area="heap"}
+    values: _ 10485760 20971520 31457280 41943040 52428800 62914560 73400320 83886080
+  - series: jvm_memory_committed_bytes{ienv="prod",namespace="ns1",pod="pod-a",container="main",id="G1
+      Eden Space",job="scraper-a",area="heap"}
+    values: 104857600+0x8
+  - series: kube_pod_owner{ienv="prod",namespace="ns1",pod="pod-a",owner_name="deploy-svc-hash",owner_kind="ReplicaSet",owner_is_controller="true",job="ksm-a"}
+    values: 1+0x8
+  promql_expr_test:
+  - eval_time: 2m
+    exp_samples:
+    - labels: '{ienv="prod",namespace="ns1",owner_name="deploy-svc-hash"}'
+      value: 76.5
+- name: zero-negative-missing-or-other-container-committed-is-unknown
+  interval: 15s
+  input_series:
+  - series: jvm_memory_used_bytes{ienv="prod",namespace="ns1",pod="zero",container="main",id="G1
+      Eden Space",job="scraper-a",area="heap"}
+    values: 62914560+0x8
+  - series: kube_pod_owner{ienv="prod",namespace="ns1",pod="zero",owner_name="deploy-svc-hash",owner_kind="ReplicaSet",owner_is_controller="true",job="ksm-a"}
+    values: 1+0x8
+  - series: jvm_memory_committed_bytes{ienv="prod",namespace="ns1",pod="zero",container="main",id="G1
+      Eden Space",job="scraper-a",area="heap"}
+    values: 0+0x8
+  - series: jvm_memory_used_bytes{ienv="prod",namespace="ns1",pod="absent",container="main",id="G1
+      Eden Space",job="scraper-a",area="heap"}
+    values: 62914560+0x8
+  - series: kube_pod_owner{ienv="prod",namespace="ns1",pod="absent",owner_name="deploy-svc-hash",owner_kind="ReplicaSet",owner_is_controller="true",job="ksm-a"}
+    values: 1+0x8
+  - series: jvm_memory_used_bytes{ienv="prod",namespace="ns1",pod="negative",container="main",id="G1
+      Eden Space",job="scraper-a",area="heap"}
+    values: 62914560+0x8
+  - series: kube_pod_owner{ienv="prod",namespace="ns1",pod="negative",owner_name="deploy-svc-hash",owner_kind="ReplicaSet",owner_is_controller="true",job="ksm-a"}
+    values: 1+0x8
+  - series: jvm_memory_committed_bytes{ienv="prod",namespace="ns1",pod="negative",container="main",id="G1
+      Eden Space",job="scraper-a",area="heap"}
+    values: -1048576+0x8
+  - series: jvm_memory_used_bytes{ienv="prod",namespace="ns1",pod="main-unknown-sidecar-valid",container="main",id="G1
+      Eden Space",job="scraper-a",area="heap"}
+    values: 62914560+0x8
+  - series: kube_pod_owner{ienv="prod",namespace="ns1",pod="main-unknown-sidecar-valid",owner_name="deploy-svc-hash",owner_kind="ReplicaSet",owner_is_controller="true",job="ksm-a"}
+    values: 1+0x8
+  - series: jvm_memory_used_bytes{ienv="prod",namespace="ns1",pod="main-unknown-sidecar-valid",container="java-sidecar",id="G1
+      Eden Space",job="scraper-a",area="heap"}
+    values: 10485760+0x8
+  - series: jvm_memory_committed_bytes{ienv="prod",namespace="ns1",pod="main-unknown-sidecar-valid",container="java-sidecar",id="G1
+      Eden Space",job="scraper-a",area="heap"}
+    values: 20971520+0x8
+  - series: jvm_memory_used_bytes{ienv="prod",namespace="ns1",pod="nong1",container="main",id="G1
+      Old Gen",job="scraper-a",area="heap"}
+    values: 62914560+0x8
+  - series: jvm_memory_committed_bytes{ienv="prod",namespace="ns1",pod="nong1",container="main",id="G1
+      Old Gen",job="scraper-a",area="heap"}
+    values: 104857600+0x8
+  - series: kube_pod_owner{ienv="prod",namespace="ns1",pod="nong1",owner_name="deploy-svc-hash",owner_kind="ReplicaSet",owner_is_controller="true",job="ksm-a"}
+    values: 1+0x8
+  promql_expr_test:
+  - eval_time: 2m
+    exp_samples: []
+- name: pod-average-before-time-p95
+  interval: 15s
+  input_series:
+  - series: jvm_memory_used_bytes{ienv="prod",namespace="ns1",pod="pod-a",container="main",id="G1
+      Eden Space",job="scraper-a",area="heap"}
+    values: _ 0 0 0 0 104857600 104857600 104857600 104857600
+  - series: jvm_memory_committed_bytes{ienv="prod",namespace="ns1",pod="pod-a",container="main",id="G1
+      Eden Space",job="scraper-a",area="heap"}
+    values: 104857600+0x8
+  - series: jvm_memory_used_bytes{ienv="prod",namespace="ns1",pod="pod-b",container="main",id="G1
+      Eden Space",job="scraper-a",area="heap"}
+    values: _ 104857600 104857600 104857600 104857600 0 0 0 0
+  - series: jvm_memory_committed_bytes{ienv="prod",namespace="ns1",pod="pod-b",container="main",id="G1
+      Eden Space",job="scraper-a",area="heap"}
+    values: 104857600+0x8
+  - series: kube_pod_owner{ienv="prod",namespace="ns1",pod="pod-a",owner_name="deploy-svc-hash",owner_kind="ReplicaSet",owner_is_controller="true",job="ksm-a"}
+    values: 1+0x8
+  - series: kube_pod_owner{ienv="prod",namespace="ns1",pod="pod-b",owner_name="deploy-svc-hash",owner_kind="ReplicaSet",owner_is_controller="true",job="ksm-a"}
+    values: 1+0x8
+  promql_expr_test:
+  - eval_time: 2m
+    exp_samples:
+    - labels: '{ienv="prod",namespace="ns1",owner_name="deploy-svc-hash"}'
+      value: 50
+- name: ratio-before-quantile-when-committed-changes
+  interval: 15s
+  input_series:
+  - series: jvm_memory_used_bytes{ienv="prod",namespace="ns1",pod="pod-a",container="main",id="G1
+      Eden Space",job="scraper-a",area="heap"}
+    values: _ 10485760 10485760 10485760 10485760 83886080 83886080 83886080 83886080
+  - series: jvm_memory_committed_bytes{ienv="prod",namespace="ns1",pod="pod-a",container="main",id="G1
+      Eden Space",job="scraper-a",area="heap"}
+    values: _ 10485760 10485760 10485760 10485760 167772160 167772160 167772160 167772160
+  - series: kube_pod_owner{ienv="prod",namespace="ns1",pod="pod-a",owner_name="deploy-svc-hash",owner_kind="ReplicaSet",owner_is_controller="true",job="ksm-a"}
+    values: 1+0x8
+  promql_expr_test:
+  - eval_time: 2m
+    exp_samples:
+    - labels: '{ienv="prod",namespace="ns1",owner_name="deploy-svc-hash"}'
+      value: 100
+- name: zero-used-with-positive-committed-is-observed-zero
+  interval: 15s
+  input_series:
+  - series: jvm_memory_used_bytes{ienv="prod",namespace="ns1",pod="pod-a",container="main",id="G1
+      Eden Space",job="scraper-a",area="heap"}
+    values: 0+0x8
+  - series: jvm_memory_committed_bytes{ienv="prod",namespace="ns1",pod="pod-a",container="main",id="G1
+      Eden Space",job="scraper-a",area="heap"}
+    values: 104857600+0x8
+  - series: kube_pod_owner{ienv="prod",namespace="ns1",pod="pod-a",owner_name="deploy-svc-hash",owner_kind="ReplicaSet",owner_is_controller="true",job="ksm-a"}
+    values: 1+0x8
+  promql_expr_test:
+  - eval_time: 2m
+    exp_samples:
+    - labels: '{ienv="prod",namespace="ns1",owner_name="deploy-svc-hash"}'
+      value: 0

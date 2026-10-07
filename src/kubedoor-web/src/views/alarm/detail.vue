@@ -53,7 +53,7 @@
               </el-form-item>
             </el-col>
 
-            <el-col :span="4">
+            <el-col :span="3">
               <el-form-item label="告警名称">
                 <el-select
                   v-model="searchForm.alertName"
@@ -138,7 +138,21 @@
               </el-form-item>
             </el-col>
 
-            <el-col :span="4">
+            <el-col :span="3">
+              <el-form-item label="屏蔽">
+                <el-select
+                  v-model="searchForm.silenced"
+                  placeholder="全部"
+                  clearable
+                  @change="handleSearch"
+                >
+                  <el-option label="已屏蔽" value="1" />
+                  <el-option label="未屏蔽" value="0" />
+                </el-select>
+              </el-form-item>
+            </el-col>
+
+            <el-col :span="3">
               <el-form-item>
                 <el-tooltip
                   effect="dark"
@@ -228,6 +242,27 @@
             show-overflow-tooltip
           >
             <template #default="scope">
+              <el-tooltip
+                v-if="scope.row.silenced"
+                effect="dark"
+                :content="
+                  '该告警命中屏蔽规则' +
+                  (scope.row.silence_id ? ' #' + scope.row.silence_id : '') +
+                  '，已入库但未推送通知。点击查看规则'
+                "
+                placement="top"
+              >
+                <el-tag
+                  type="info"
+                  size="small"
+                  effect="plain"
+                  class="silenced-tag"
+                  @click="goSilenceRule(scope.row)"
+                >
+                  <el-icon><MuteNotification /></el-icon>
+                  已屏蔽
+                </el-tag>
+              </el-tooltip>
               <span :style="{ color: getSeverityColor(scope.row.severity) }">
                 {{ scope.row.alert_name }}
               </span>
@@ -375,7 +410,12 @@
                 </el-button>
                 <template #dropdown>
                   <el-dropdown-menu>
-                    <el-dropdown-item @click="handleModifyPod(scope.row)"
+                    <el-dropdown-item @click="handleSilence(scope.row)"
+                      >屏蔽</el-dropdown-item
+                    >
+                    <el-dropdown-item
+                      divided
+                      @click="handleModifyPod(scope.row)"
                       >隔离</el-dropdown-item
                     >
                     <el-dropdown-item @click="handleDeletePod(scope.row)"
@@ -445,6 +485,13 @@
         <el-button type="primary" @click="handleCopyAndClose">关闭</el-button>
       </template>
     </el-dialog>
+
+    <!-- 一键屏蔽：从告警行带出匹配条件 -->
+    <SilenceEditDialog
+      v-model="silenceDialogVisible"
+      :prefill="silencePrefill"
+      @saved="handleSearch"
+    />
   </div>
 </template>
 
@@ -467,7 +514,9 @@ import {
 import { showAddLabel } from "@/api/monit";
 import dayjs from "dayjs";
 import { ElMessage, ElMessageBox } from "element-plus";
-import { ArrowDown } from "@element-plus/icons-vue";
+import { ArrowDown, MuteNotification } from "@element-plus/icons-vue";
+import SilenceEditDialog from "./components/SilenceEditDialog.vue";
+import type { SilenceMatcher } from "@/api/silence";
 import {
   modifyPod,
   deletePod,
@@ -553,7 +602,8 @@ const getDefaultQueryState = () => ({
   alertName: [] as string[],
   status: ["firing"] as string[],
   severity: [] as string[],
-  operate: ""
+  operate: "",
+  silenced: ""
 });
 
 const initialDefaults = getDefaultQueryState();
@@ -591,6 +641,9 @@ const searchForm = ref({
       ? [...initialSeverityFromQuery]
       : [...initialDefaults.severity],
   operate: initialOperateFromQuery ?? initialDefaults.operate,
+  // 从屏蔽管理页「已屏蔽」数字跳转过来时会带上 silenced=1
+  silenced:
+    getStringFromQuery(route.query.silenced) ?? initialDefaults.silenced,
   startTime: dayjs().startOf("day").format("YYYY-MM-DD HH:mm:ss")
 });
 const envOptions = ref([]);
@@ -978,6 +1031,31 @@ const handleSortChange = ({
   }
 };
 
+// 一键屏蔽：把当前告警行的关键字段作为匹配条件预填到屏蔽弹窗
+const silenceDialogVisible = ref(false);
+const silencePrefill = ref<SilenceMatcher[] | null>(null);
+
+const handleSilence = (row: any) => {
+  const fields: Array<[string, string]> = [
+    ["env", row.env],
+    ["namespace", row.namespace],
+    ["alertname", row.alert_name],
+    ["pod", row.pod]
+  ];
+  silencePrefill.value = fields
+    .filter(([, value]) => value)
+    .map(([key, value]) => ({ key, op: "=" as const, value: String(value) }));
+  silenceDialogVisible.value = true;
+};
+
+// 点击「已屏蔽」标记，跳到屏蔽管理页定位对应规则
+const goSilenceRule = (row: any) => {
+  router.push({
+    name: "alarm-silence",
+    query: row.silence_id ? { keyword: String(row.silence_id) } : {}
+  });
+};
+
 // 处理重置
 const handleReset = () => {
   const defaults = getDefaultQueryState();
@@ -988,6 +1066,7 @@ const handleReset = () => {
     status: [...defaults.status],
     severity: [...defaults.severity],
     operate: defaults.operate,
+    silenced: defaults.silenced,
     startTime: dayjs().startOf("day").format("YYYY-MM-DD HH:mm:ss")
   };
   handleSearch();
@@ -1404,6 +1483,17 @@ onUnmounted(() => {
   display: flex;
   justify-content: flex-end;
   margin-top: 20px;
+}
+
+/* 已屏蔽标记：跟在告警名称前，点击可跳到对应屏蔽规则 */
+.silenced-tag {
+  margin-right: 6px;
+  cursor: pointer;
+}
+
+.silenced-tag .el-icon {
+  margin-right: 2px;
+  vertical-align: -1px;
 }
 
 /* :deep(.el-table) {

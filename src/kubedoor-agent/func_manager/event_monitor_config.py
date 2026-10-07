@@ -8,13 +8,12 @@ WEBSOCKET_RECONNECT_DELAY = 5  # WebSocket重连延迟（秒）
 WEBSOCKET_MAX_RETRIES = 5      # WebSocket最大重试次数
 
 # K8s事件监控配置
-K8S_EVENT_STREAM_TIMEOUT = 300  # K8s事件流超时时间（秒）
-K8S_EVENT_RETRY_DELAY = 2       # K8s事件重试延迟（秒）
-K8S_EVENT_MAX_RETRIES = 5       # K8s事件最大重试次数
+K8S_EVENT_STREAM_TIMEOUT = 300  # watch 的服务端超时（秒），到点正常断开后接着 watch，实际再加 0~60 秒随机
+K8S_EVENT_RETRY_DELAY = 2       # list/watch 出错后的初始重试延迟（秒），指数退避，最大60秒
 
 # 健康检查配置
 HEALTH_CHECK_INTERVAL = 30      # 健康检查间隔（秒）
-EVENT_TIMEOUT_THRESHOLD = 300   # 事件超时阈值（秒）- 超过此时间没有事件则认为异常
+EVENT_TIMEOUT_THRESHOLD = 600   # K8s事件 watch 超过此时间（秒）没有任何活动（连上/收到事件/list 成功）则告警
 STATS_REPORT_INTERVAL = 120     # 统计信息报告间隔（秒）
 
 # 心跳配置

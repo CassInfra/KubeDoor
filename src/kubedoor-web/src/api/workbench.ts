@@ -32,15 +32,8 @@ export const updateAdmission = (
   admission: boolean,
   admission_namespace: string
 ) => {
-  return http.request<any>("post", "/api/sql", {
-    params: {
-      add_http_cors_header: 1,
-      default_format: "JSONCompact"
-    },
-    data: `ALTER TABLE __KUBEDOORDB__.k8s_agent_status UPDATE admission=${admission ? 1 : 0}, admission_namespace='${admission_namespace}' WHERE env='${env}'`,
-    headers: {
-      "Content-Type": "text/plain;charset=UTF-8"
-    }
+  return http.request<any>("post", "/api/db/agent/admission", {
+    data: { env, admission, admission_namespace }
   });
 };
 
@@ -92,40 +85,19 @@ export const updateAgentCollect = (
   collect: boolean,
   peak_hours?: string
 ) => {
-  return http.request<any>("post", "/api/sql", {
-    params: {
-      add_http_cors_header: 1,
-      default_format: "JSONCompact"
-    },
-    data: `ALTER TABLE __KUBEDOORDB__.k8s_agent_status UPDATE collect=${collect ? 1 : 0}${peak_hours ? `, peak_hours='${peak_hours}'` : ", peak_hours=''"} WHERE env='${env}'`,
-    headers: {
-      "Content-Type": "text/plain;charset=UTF-8"
-    }
+  return http.request<any>("post", "/api/db/agent/collect", {
+    data: { env, collect, peak_hours: peak_hours ?? "" }
   });
 };
 
 export const updateNmsNotConfirm = (env: string, nmsNotConfirm: number) => {
-  return http.request<any>("post", "/api/sql", {
-    params: {
-      add_http_cors_header: 1,
-      default_format: "JSONCompact"
-    },
-    data: `ALTER TABLE __KUBEDOORDB__.k8s_agent_status UPDATE nms_not_confirm=${nmsNotConfirm} WHERE env='${env}'`,
-    headers: {
-      "Content-Type": "text/plain;charset=UTF-8"
-    }
+  return http.request<any>("post", "/api/db/agent/nms_not_confirm", {
+    data: { env, nms_not_confirm: nmsNotConfirm }
   });
 };
 
 export const updateScheduler = (env: string, scheduler: number) => {
-  return http.request<any>("post", "/api/sql", {
-    params: {
-      add_http_cors_header: 1,
-      default_format: "JSONCompact"
-    },
-    data: `ALTER TABLE __KUBEDOORDB__.k8s_agent_status UPDATE scheduler=${scheduler} WHERE env='${env}'`,
-    headers: {
-      "Content-Type": "text/plain;charset=UTF-8"
-    }
+  return http.request<any>("post", "/api/db/agent/scheduler", {
+    data: { env, scheduler }
   });
 };

@@ -2,7 +2,7 @@
 import { ref } from "vue";
 import { transformI18n } from "@/plugins/i18n";
 import ReCol from "@/components/ReCol";
-import { getNodeResourceRank } from "@/api/monit";
+import { getNodeResourceRank, getCciScheduleProfile } from "@/api/monit";
 import { ElMessage } from "element-plus";
 // import { message } from "@/utils/message";
 
@@ -41,6 +41,9 @@ const schedulerRef = ref(false); // 调度到指定节点
 const resourceTypeRef = ref("cpu"); // 资源类型选择
 const nodeListRef = ref([]); // 节点列表
 const selectedNodesRef = ref([]); // 选中的节点
+const cciRef = ref(false); // CCI扩容
+const cciLocalMaxNum = ref(0); // CCI本地pod数
+const cciLoading = ref(false); // CCI加载状态
 
 const validateData = (rule, value, callback) => {
   const inputTime = new Date(value);
@@ -157,6 +160,36 @@ const handleSchedulerChange = () => {
   }
 };
 
+// 处理CCI勾选变化
+const handleCciChange = async () => {
+  if (cciRef.value) {
+    // 勾选CCI时，取消调度到指定节点
+    schedulerRef.value = false;
+    handleSchedulerChange();
+    // 获取ScheduleProfile信息
+    cciLoading.value = true;
+    try {
+      const result = await getCciScheduleProfile(
+        props.params?.env || "",
+        props.params?.namespace || "",
+        props.params?.deployment || ""
+      );
+      cciLocalMaxNum.value = result.maxNum || 0;
+    } catch (e) {
+      cciLocalMaxNum.value = props.params?.podCount || 0;
+    } finally {
+      cciLoading.value = false;
+    }
+  }
+};
+
+// 监听临时扩容变化，取消时重置CCI
+const handleTempChange = () => {
+  if (!form.value.temp) {
+    cciRef.value = false;
+  }
+};
+
 function getData() {
   return new Promise((resolve, reject) => {
     formRef.value.validate((valid: any) => {
@@ -183,7 +216,9 @@ function getData() {
           temp: form.value.temp,
           strategy: form.value.strategy,
           scheduler: schedulerRef.value,
-          selectedNodes: selectedNodesRef.value
+          selectedNodes: selectedNodesRef.value,
+          cci: cciRef.value,
+          cciLocalMaxNum: cciLocalMaxNum.value
         });
       }
     });
@@ -247,11 +282,22 @@ defineExpose({ getData });
             </el-form-item>
           </re-col>
           <re-col :offset="2" :value="20" :xs="24" :sm="24">
-            <div style="display: flex; gap: 20px; align-items: center">
+            <div
+              style="
+                display: flex;
+                gap: 20px;
+                align-items: center;
+                flex-wrap: wrap;
+              "
+            >
               <label
                 style="display: flex; align-items: center; cursor: pointer"
               >
-                <el-checkbox v-model="form.temp" style="margin-right: 8px" />
+                <el-checkbox
+                  v-model="form.temp"
+                  style="margin-right: 8px"
+                  @change="handleTempChange"
+                />
                 <span>临时扩容</span>
               </label>
               <label
@@ -259,10 +305,35 @@ defineExpose({ getData });
               >
                 <el-checkbox
                   v-model="schedulerRef"
+                  :disabled="cciRef"
                   style="margin-right: 8px"
                   @change="handleSchedulerChange"
                 />
                 <span>调度到指定节点</span>
+              </label>
+              <label
+                v-if="form.temp"
+                style="display: flex; align-items: center; cursor: pointer"
+              >
+                <el-checkbox
+                  v-model="cciRef"
+                  style="margin-right: 8px"
+                  @change="handleCciChange"
+                />
+                <span style="color: #f56c6c">CCI扩容</span>
+              </label>
+              <label v-if="cciRef" style="display: flex; align-items: center">
+                <span style="color: #f56c6c; margin-right: 4px"
+                  >本地Pod数:</span
+                >
+                <el-input-number
+                  v-model="cciLocalMaxNum"
+                  :min="0"
+                  :loading="cciLoading"
+                  size="small"
+                  :controls="false"
+                  style="width: 60px"
+                />
               </label>
             </div>
           </re-col>

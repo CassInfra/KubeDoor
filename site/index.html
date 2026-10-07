@@ -1,0 +1,774 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>花折 · KubeDoor — AI 驱动的多 K8S 集群智能管控平台</title>
+<meta name="description" content="花折 · KubeDoor：开源的多 K8S 集群智能管控平台。一个平台统一纳管多套 Kubernetes —— 监控、资源管理、告警事件、高峰期资源治理与准入管控一站搞定；内置可审批、可审计的 AI 运维助手，并以标准 MCP 对外开放。">
+<meta name="keywords" content="KubeDoor,花折,Kubernetes,K8S,多集群管理,AI 运维,MCP,准入控制,告警,VictoriaMetrics,PostgreSQL">
+<meta name="author" content="StarsL.cn">
+<meta name="theme-color" content="#05070f">
+<meta name="color-scheme" content="dark">
+<link rel="canonical" href="https://cassinfra.github.io/KubeDoor/">
+<link rel="icon" type="image/png" sizes="64x64" href="assets/img/favicon.png">
+<link rel="apple-touch-icon" sizes="180x180" href="assets/img/apple-touch-icon.png">
+
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="花折 · KubeDoor">
+<meta property="og:locale" content="zh_CN">
+<meta property="og:title" content="花折 · KubeDoor — AI 驱动的多 K8S 集群智能管控平台">
+<meta property="og:description" content="统一纳管多套 Kubernetes：监控、资源管理、告警事件、高峰期资源治理与准入管控；内置可审批、可审计的 AI 运维助手，并以标准 MCP 开放。">
+<meta property="og:url" content="https://cassinfra.github.io/KubeDoor/">
+<meta property="og:image" content="https://cassinfra.github.io/KubeDoor/assets/img/og-cover.jpg">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta property="og:image:alt" content="花折 · KubeDoor：AI 驱动的多 K8S 集群智能管控平台">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="花折 · KubeDoor — AI 驱动的多 K8S 集群智能管控平台">
+<meta name="twitter:description" content="统一纳管多套 Kubernetes，内置可审批、可审计的 AI 运维助手，并以标准 MCP 对外开放。">
+<meta name="twitter:image" content="https://cassinfra.github.io/KubeDoor/assets/img/og-cover.jpg">
+
+<script type="application/ld+json">{"@context":"https://schema.org","@type":"SoftwareSourceCode","name":"花折 · KubeDoor","description":"AI 驱动的多 K8S 集群智能管控平台","url":"https://cassinfra.github.io/KubeDoor/","codeRepository":"https://github.com/CassInfra/KubeDoor","license":"https://opensource.org/licenses/MIT","programmingLanguage":["Python","TypeScript"]}</script>
+<link rel="stylesheet" href="assets/css/main.css">
+<script>(function (d) { var c = d.documentElement, q = location.search, m = window.matchMedia; c.className += ' js'; try { if (q.indexOf('still') < 0 && (q.indexOf('motion') > -1 || !(m && m('(prefers-reduced-motion: reduce)').matches))) c.className += ' motion-ok'; } catch (e) {} })(document);</script>
+<script defer src="assets/js/main.js"></script>
+</head>
+<body>
+<svg class="sprite" aria-hidden="true" focusable="false">
+  <symbol id="i-github" viewBox="0 0 24 24"><path fill="currentColor" stroke="none" d="M12 1.5a10.5 10.5 0 0 0-3.32 20.46c.53.1.72-.23.72-.5v-1.8c-2.92.64-3.54-1.24-3.54-1.24-.48-1.21-1.17-1.54-1.17-1.54-.95-.65.08-.64.08-.64 1.06.08 1.61 1.08 1.61 1.08.94 1.6 2.46 1.14 3.06.87.1-.68.37-1.14.66-1.4-2.33-.27-4.78-1.17-4.78-5.18 0-1.15.41-2.08 1.08-2.82-.11-.26-.47-1.33.1-2.77 0 0 .88-.28 2.89 1.07a10 10 0 0 1 5.26 0c2-1.35 2.88-1.07 2.88-1.07.58 1.44.22 2.51.11 2.77.67.74 1.08 1.67 1.08 2.82 0 4.03-2.46 4.91-4.8 5.17.38.33.71.97.71 1.96v2.9c0 .28.19.61.73.5A10.5 10.5 0 0 0 12 1.5Z"/></symbol>
+  <symbol id="i-star" viewBox="0 0 24 24"><path fill="currentColor" stroke="none" d="m12 2.8 2.84 5.76 6.36.93-4.6 4.48 1.08 6.33L12 17.31l-5.68 2.99 1.08-6.33-4.6-4.48 6.36-.93z"/></symbol>
+  <symbol id="i-arrow" viewBox="0 0 24 24"><path d="M5 12h14M13 6l6 6-6 6"/></symbol>
+  <symbol id="i-check" viewBox="0 0 24 24"><path d="m5 12.5 4.2 4.2L19 7"/></symbol>
+  <symbol id="i-copy" viewBox="0 0 24 24"><rect x="8" y="8" width="12" height="12" rx="2.5"/><path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2"/></symbol>
+  <symbol id="i-chat" viewBox="0 0 24 24"><path d="M4 5.5A2.5 2.5 0 0 1 6.5 3h11A2.5 2.5 0 0 1 20 5.5v8a2.5 2.5 0 0 1-2.5 2.5H10l-4.5 4v-4h0A1.5 1.5 0 0 1 4 14.5z"/><path d="M8.5 9.5h7M8.5 12.5h4.5"/></symbol>
+  <symbol id="i-layers" viewBox="0 0 24 24"><path d="m12 3 9 4.8-9 4.8-9-4.8z"/><path d="m3 12.2 9 4.8 9-4.8"/><path d="m3 16.4 9 4.8 9-4.8"/></symbol>
+  <symbol id="i-shield" viewBox="0 0 24 24"><path d="M12 2.8 4.5 5.9v5.6c0 4.6 3.2 8.5 7.5 9.7 4.3-1.2 7.5-5.1 7.5-9.7V5.9z"/><path d="m8.6 12.1 2.4 2.4 4.5-4.8"/></symbol>
+  <symbol id="i-diff" viewBox="0 0 24 24"><rect x="4" y="3" width="16" height="18" rx="2.5"/><path d="M9 8.5h6M12 5.5v6M9 16h6"/></symbol>
+  <symbol id="i-noreplay" viewBox="0 0 24 24"><path d="M20 12a8 8 0 1 1-2.6-5.9"/><path d="M20 4v5h-5"/><path d="m4 4 16 16"/></symbol>
+  <symbol id="i-model" viewBox="0 0 24 24"><rect x="6" y="6" width="12" height="12" rx="2.5"/><path d="M9.5 2.5v3.5M14.5 2.5v3.5M9.5 18v3.5M14.5 18v3.5M2.5 9.5H6M2.5 14.5H6M18 9.5h3.5M18 14.5h3.5"/><path d="M10 10h4v4h-4z"/></symbol>
+  <symbol id="i-plug" viewBox="0 0 24 24"><path d="M9 3v4.5M15 3v4.5"/><path d="M6.5 7.5h11V11a5.5 5.5 0 0 1-11 0z"/><path d="M12 16.5V21"/></symbol>
+  <symbol id="i-chart" viewBox="0 0 24 24"><path d="M3.5 3.5v17h17"/><path d="m7.5 14.5 3.8-4.6 3 2.8 5.2-6.2"/></symbol>
+  <symbol id="i-memory" viewBox="0 0 24 24"><path d="M5 4.5A1.5 1.5 0 0 1 6.5 3H17a2 2 0 0 1 2 2v14.5a1.5 1.5 0 0 1-1.5 1.5H7.5A2.5 2.5 0 0 1 5 18.5z"/><path d="M5 18.5A2.5 2.5 0 0 1 7.5 16H19"/><path d="M12 6.5 13 8.7l2.3.3-1.7 1.6.4 2.3-2-1.1-2 1.1.4-2.3-1.7-1.6 2.3-.3z"/></symbol>
+  <symbol id="i-monitor" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="12.5" rx="2.5"/><path d="M8 20.5h8M12 16.5v4"/><path d="m7 12.5 3-3 2.2 2.2L17 7"/></symbol>
+  <symbol id="i-cube" viewBox="0 0 24 24"><path d="m12 2.8 8.5 4.7v9L12 21.2l-8.5-4.7v-9z"/><path d="m3.5 7.5 8.5 4.7 8.5-4.7M12 12.2v9"/></symbol>
+  <symbol id="i-terminal" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="2.5"/><path d="m7 9 3 3-3 3M12.5 15h4.5"/></symbol>
+  <symbol id="i-tag" viewBox="0 0 24 24"><path d="M3.5 12.2V4.5a1 1 0 0 1 1-1h7.7l8.3 8.3a1.5 1.5 0 0 1 0 2.1l-6.2 6.2a1.5 1.5 0 0 1-2.1 0z"/><circle cx="8" cy="8" r="1.6"/></symbol>
+  <symbol id="i-clock" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5"/><path d="M12 7.5V12l3 2"/></symbol>
+  <symbol id="i-bell" viewBox="0 0 24 24"><path d="M6 16.5V11a6 6 0 1 1 12 0v5.5l1.5 1.5h-15z"/><path d="M10 21h4"/></symbol>
+  <symbol id="i-gauge" viewBox="0 0 24 24"><path d="M3.5 17.5a8.5 8.5 0 1 1 17 0"/><path d="m12 15 4.2-4.6"/><circle cx="12" cy="15.5" r="1.3"/></symbol>
+  <symbol id="i-coffee" viewBox="0 0 24 24"><path d="M4 9h12v4.5a5 5 0 0 1-5 5H9a5 5 0 0 1-5-5z"/><path d="M16 10h1.8a2.2 2.2 0 0 1 0 4.4H16"/><path d="M8 2.8v3M12 2.8v3"/><path d="M4 21h12"/></symbol>
+  <symbol id="i-balance" viewBox="0 0 24 24"><path d="M12 3.5v17M6 20.5h12M4.5 7h15"/><path d="m4.5 7-2.5 6a2.5 2.5 0 0 0 5 0zM19.5 7 17 13a2.5 2.5 0 0 0 5 0z"/></symbol>
+  <symbol id="i-lock" viewBox="0 0 24 24"><rect x="4.5" y="10" width="15" height="11" rx="2.5"/><path d="M8 10V7.5a4 4 0 0 1 8 0V10"/><path d="M12 14.5v2.5"/></symbol>
+  <symbol id="i-route" viewBox="0 0 24 24"><circle cx="6" cy="18" r="2.5"/><circle cx="18" cy="6" r="2.5"/><path d="M8.5 18H15a3 3 0 0 0 0-6H9a3 3 0 0 1 0-6h6.5"/></symbol>
+  <symbol id="i-db" viewBox="0 0 24 24"><ellipse cx="12" cy="5.5" rx="7.5" ry="2.8"/><path d="M4.5 5.5v13c0 1.5 3.4 2.8 7.5 2.8s7.5-1.3 7.5-2.8v-13"/><path d="M4.5 12c0 1.5 3.4 2.8 7.5 2.8s7.5-1.3 7.5-2.8"/></symbol>
+  <symbol id="i-pulse" viewBox="0 0 24 24"><path d="M3 12h4l2.5-6 4 12 2.5-6H21"/></symbol>
+  <symbol id="i-gateway" viewBox="0 0 24 24"><rect x="3" y="9" width="18" height="6" rx="2"/><path d="M7 9V5.5M12 9V3.5M17 9V5.5M7 15v3.5M12 15v5M17 15v3.5"/></symbol>
+  <symbol id="i-book" viewBox="0 0 24 24"><path d="M12 6.5C10 5 7.5 4.5 4 4.5v13c3.5 0 6 .5 8 2 2-1.5 4.5-2 8-2v-13c-3.5 0-6 .5-8 2z"/><path d="M12 6.5v13"/></symbol>
+  <symbol id="i-robot" viewBox="0 0 24 24"><rect x="4.5" y="8" width="15" height="11" rx="3"/><path d="M12 4.5V8M9.5 13v.5M14.5 13v.5M9.5 16.5h5"/><circle cx="12" cy="3.8" r="1"/><path d="M2.5 12v3M21.5 12v3"/></symbol>
+  <symbol id="i-mute" viewBox="0 0 24 24"><path d="M6 16.5V11a6 6 0 0 1 9.4-4.9M18 11v5.5l1.5 1.5H8"/><path d="M10 21h4M3.5 3.5l17 17"/></symbol>
+  <symbol id="i-help" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5"/><path d="M9.6 9.4a2.5 2.5 0 0 1 4.8.9c0 1.8-2.4 2.1-2.4 3.7"/><path d="M12 17v.4"/></symbol>
+  <symbol id="i-rocket" viewBox="0 0 24 24"><path d="M14.5 4.5c2.5-1 4.5-1 5-1 0 .5 0 2.5-1 5L13 14l-3-3z"/><path d="M10 11 6.5 10 4 12.5l3.5 1M13 14l1 3.5 2.5-2.5-1-3.5"/><path d="M7 17c-1.5.5-2.5 1.5-3 3.5 2-.5 3-1.5 3.5-3"/></symbol>
+  <symbol id="i-external" viewBox="0 0 24 24"><path d="M14 4h6v6M20 4l-9 9"/><path d="M18 14v4.5a1.5 1.5 0 0 1-1.5 1.5h-11A1.5 1.5 0 0 1 4 18.5v-11A1.5 1.5 0 0 1 5.5 6H10"/></symbol>
+  <symbol id="i-menu" viewBox="0 0 24 24"><path d="M4 7h16M4 12h16M4 17h16"/></symbol>
+  <symbol id="i-close" viewBox="0 0 24 24"><path d="M6 6l12 12M18 6 6 18"/></symbol>
+  <symbol id="i-left" viewBox="0 0 24 24"><path d="m15 5-7 7 7 7"/></symbol>
+  <symbol id="i-right" viewBox="0 0 24 24"><path d="m9 5 7 7-7 7"/></symbol>
+  <symbol id="i-zoom" viewBox="0 0 24 24"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m15.5 15.5 5 5M10.5 8v5M8 10.5h5"/></symbol>
+</svg>
+
+<a class="skip-link" href="#main">跳到主要内容</a>
+<div class="bg-layer" aria-hidden="true"></div>
+
+<header class="site-header" id="site-header">
+  <div class="container nav-inner">
+    <a class="brand" href="#top" aria-label="花折 KubeDoor 首页">
+      <img src="assets/img/logo.png" width="34" height="34" alt="">
+      <span class="brand-text">花折 <b>KubeDoor</b></span>
+    </a>
+    <nav class="nav" aria-label="主导航">
+      <ul class="nav-links">
+        <li><a href="#ai">AI 助手</a></li>
+        <li><a href="#features">能力</a></li>
+        <li><a href="#architecture">架构</a></li>
+        <li><a href="#screenshots">截图</a></li>
+        <li><a href="#deploy">部署</a></li>
+        <li><a href="#timeline">版本</a></li>
+        <li><a href="#docs">文档</a></li>
+      </ul>
+    </nav>
+    <div class="nav-actions">
+      <a class="btn-gh" href="https://github.com/CassInfra/KubeDoor" target="_blank" rel="noopener" aria-label="GitHub 仓库">
+        <svg class="icon" aria-hidden="true"><use href="#i-github"/></svg>
+        <span class="btn-gh-label">GitHub</span>
+        <span class="star-count" data-star-count hidden><svg class="icon icon-star" aria-hidden="true"><use href="#i-star"/></svg><span data-star-value></span></span>
+      </a>
+      <button class="nav-toggle" type="button" aria-controls="mobile-menu" aria-expanded="false" aria-label="打开导航菜单">
+        <svg class="icon icon-open" aria-hidden="true"><use href="#i-menu"/></svg>
+        <svg class="icon icon-close" aria-hidden="true"><use href="#i-close"/></svg>
+      </button>
+    </div>
+  </div>
+  <nav class="mobile-menu" id="mobile-menu" aria-label="移动端导航" hidden>
+    <ul>
+      <li><a href="#ai">AI 助手</a></li>
+      <li><a href="#features">能力</a></li>
+      <li><a href="#architecture">架构</a></li>
+      <li><a href="#screenshots">截图</a></li>
+      <li><a href="#deploy">部署</a></li>
+      <li><a href="#timeline">版本</a></li>
+      <li><a href="#docs">文档</a></li>
+    </ul>
+  </nav>
+</header>
+
+<main id="main" tabindex="-1">
+
+<!-- ============ HERO ============ -->
+<section class="hero" id="top" aria-labelledby="hero-title">
+  <canvas class="hero-canvas" aria-hidden="true"></canvas>
+  <div class="hero-grid" aria-hidden="true"></div>
+  <div class="container hero-inner">
+    <div class="hero-copy">
+      <a class="hero-pill" href="#ai"><span class="pill-tag">v2.1</span><span>内置 AI 运维助手 · 标准 MCP 开放接入</span><svg class="icon" aria-hidden="true"><use href="#i-arrow"/></svg></a>
+      <h1 id="hero-title">
+        <span class="hero-brand">花折 · KubeDoor</span>
+        <span class="hero-tagline"><span class="grad-text">AI 驱动</span>的<br>多 K8S 集群<br>智能管控平台</span>
+      </h1>
+      <p class="hero-poem">花开堪折直须折，莫待无花空折枝</p>
+      <p class="hero-lead">一个平台统一纳管多套 Kubernetes —— 监控、<span class="nw">资源管理</span>、<span class="nw">告警事件</span>、<span class="nw">高峰期资源治理</span>与<span class="nw">准入管控</span><span class="nw">一站搞定</span>；内置<strong>可审批、可审计</strong>的 <span class="nw">AI 运维助手</span>，<span class="nw">并以<strong>标准 MCP</strong> 对外开放。</span></p>
+      <div class="hero-ctas">
+        <a class="btn btn-primary" href="https://github.com/CassInfra/KubeDoor" target="_blank" rel="noopener">
+          <svg class="icon" aria-hidden="true"><use href="#i-github"/></svg>GitHub<svg class="icon icon-star" aria-hidden="true"><use href="#i-star"/></svg>Star
+        </a>
+        <a class="btn btn-ghost" href="#deploy">三步部署<svg class="icon" aria-hidden="true"><use href="#i-arrow"/></svg></a>
+        <a class="btn btn-text" href="https://github.com/CassInfra/KubeDoor/blob/main/docs/ai-assistant.md" target="_blank" rel="noopener">AI 助手文档<svg class="icon" aria-hidden="true"><use href="#i-external"/></svg></a>
+      </div>
+      <ul class="hero-badges" aria-label="许可证与技术栈">
+        <li><span class="dot dot-cyan"></span>MIT</li>
+        <li>Python</li>
+        <li>Vue 3</li>
+        <li>PostgreSQL</li>
+        <li>Kubernetes</li>
+      </ul>
+    </div>
+
+    <div class="hero-demo">
+      <div class="console" data-demo role="img" aria-label="动画示意：在 KubeDoor 助手中选择集群 prod-a，用自然语言询问 Deployment deploy-demo-order 频繁重启的原因。助手自动调用 pods、previous_logs、events、metrics 等只读工具给出结论；用户要求把内存 limit 调到 1Gi 时，助手先展示冻结的准确参数和服务端 dry-run 配置差异，经人工点击“批准这次操作”后才执行。">
+        <div class="console-bar">
+          <span class="dots" aria-hidden="true"><i></i><i></i><i></i></span>
+          <span class="console-title"><span class="ai-badge">AI</span>KubeDoor 助手</span>
+          <span class="console-status"><i class="live-dot"></i>Agent 在线</span>
+        </div>
+        <div class="console-scope">
+          <span class="scope-chip"><em>K8S 集群</em>prod-a</span>
+          <span class="scope-chip"><em>命名空间</em>demo</span>
+          <span class="scope-chip"><em>Deployment</em>deploy-demo-order</span>
+        </div>
+        <div class="console-body" data-demo-body>
+          <div class="msg msg-user"><div class="msg-meta">你</div><div class="msg-bubble">这个服务最近频繁重启，结合日志、事件和监控帮我找原因</div></div>
+          <div class="tool-group">
+            <div class="tool-head"><span>工具调用 <b>4</b></span><span class="tool-head-note">只读 · 自动执行</span></div>
+            <div class="tool-list">
+              <span class="tool-chip is-done"><i class="st"></i><code>pods</code></span>
+              <span class="tool-chip is-done"><i class="st"></i><code>previous_logs</code></span>
+              <span class="tool-chip is-done"><i class="st"></i><code>events</code></span>
+              <span class="tool-chip is-done"><i class="st"></i><code>metrics</code></span>
+            </div>
+          </div>
+          <div class="msg msg-ai">
+            <div class="msg-meta"><span class="ai-mini">AI</span>AI 助手 · prod-a</div>
+            <div class="msg-content">
+              <p><strong>结论：</strong>容器内存长期贴近 limit（512Mi），上次退出原因为 <code>OOMKilled</code>，随后进入 BackOff 反复重启。</p>
+              <table class="mini-table"><thead><tr><th>证据</th><th>来源</th><th>结果</th></tr></thead><tbody>
+                <tr><td>上次退出</td><td><code>pods</code></td><td>OOMKilled · 退出码 137</td></tr>
+                <tr><td>退出前日志</td><td><code>previous_logs</code></td><td>无应用报错，进程被终止</td></tr>
+                <tr><td>内存峰值（6h）</td><td><code>metrics</code></td><td>约为 limit 的 98%</td></tr>
+                <tr><td>近期事件</td><td><code>events</code></td><td>BackOff × 12</td></tr>
+              </tbody></table>
+              <p>该命名空间未开启准入控制，建议将内存 limit 调整为 1Gi，需要我提交修改吗？</p>
+            </div>
+          </div>
+          <div class="msg msg-user"><div class="msg-meta">你</div><div class="msg-bubble">好，把内存 limit 调到 1Gi</div></div>
+          <div class="tool-group">
+            <div class="tool-head"><span>工具调用 <b>1</b></span><span class="tool-head-note">变更 · 需批准</span></div>
+            <div class="approve is-approved">
+              <div class="approve-head"><code>api</code><span class="op-tag">PATCH</span><span class="state-tag">已完成</span></div>
+              <div class="approve-meta">集群 prod-a · 命名空间 demo · 来源 agent</div>
+              <div class="sec-label">准确参数</div>
+              <pre class="params">path: /apis/apps/v1/namespaces/demo/<wbr>deployments/<wbr>deploy-demo-order
+content_type: application/json-patch+json</pre>
+              <div class="sec-label">配置差异 <span class="tag-mini">服务端 dryRun=All</span></div>
+              <pre class="diff"><span class="d-hd">--- current</span><span class="d-hd">+++ proposed</span><span class="d-ctx">   "limits": {</span><span class="d-ctx">     "cpu": "500m",</span><span class="d-del">-    "memory": "512Mi"</span><span class="d-add">+    "memory": "1Gi"</span></pre>
+              <div class="approve-foot"><span class="approve-hint">resourceVersion / uid 已冻结 · 执行前已复核</span><span class="approve-done"><svg class="icon" aria-hidden="true"><use href="#i-check"/></svg>已批准 · 按冻结参数执行</span></div>
+            </div>
+          </div>
+          <div class="msg msg-ai">
+            <div class="msg-meta"><span class="ai-mini">AI</span>AI 助手 · prod-a</div>
+            <div class="msg-content">
+              <p>已按批准时冻结的参数执行，Deployment 开始滚动更新：</p>
+              <table class="mini-table"><thead><tr><th>项目</th><th>修改前</th><th>修改后</th></tr></thead><tbody>
+                <tr><td>内存 limit</td><td>512Mi</td><td class="ok">1Gi</td></tr>
+              </tbody></table>
+              <p>稍后可以让我核验新 Pod 的就绪状态与内存曲线。</p>
+            </div>
+          </div>
+        </div>
+        <div class="console-input">
+          <span class="input-line"><span class="input-placeholder">描述问题或操作要求…（Enter 发送）</span><span class="input-typed" data-demo-input></span><i class="caret"></i></span>
+          <span class="send-btn">发送</span>
+        </div>
+      </div>
+      <p class="demo-note">示意动画 · 工具名与审批流程取自真实实现，数据仅为演示</p>
+    </div>
+  </div>
+</section>
+
+<!-- ============ PROOF ============ -->
+<section class="proof" aria-label="关键数据">
+  <div class="container">
+    <ul class="stats">
+      <li class="stat reveal"><span class="stat-num" data-count="63">63</span><span class="stat-label">项业务操作接入 AI<small>37 项查询 · 26 项变更</small></span></li>
+      <li class="stat reveal" style="--d:1"><span class="stat-num" data-count="5">5</span><span class="stat-label">类通用 K8S 执行器<small>API · CLI · Pod exec</small></span></li>
+      <li class="stat reveal" style="--d:2"><span class="stat-num" data-count="17">17</span><span class="stat-label">个 MCP 工具<small>Streamable HTTP + SSE</small></span></li>
+      <li class="stat reveal" style="--d:3"><span class="stat-num" data-count="44">44</span><span class="stat-label">条内置告警规则<small>Pod · JVM · Deploy · 节点</small></span></li>
+      <li class="stat reveal" style="--d:4"><span class="stat-num" data-count="4">4</span><span class="stat-label">种 IM 通知渠道<small>企微 · 钉钉 · 飞书 · Slack</small></span></li>
+      <li class="stat reveal" style="--d:5"><span class="stat-num" data-count="1">1</span><span class="stat-label">个业务数据库<small>PostgreSQL · 另需时序库</small></span></li>
+    </ul>
+  </div>
+</section>
+
+<!-- ============ AI ============ -->
+<section class="section section-ai" id="ai" aria-labelledby="ai-title">
+  <div class="container">
+    <header class="section-head reveal">
+      <p class="eyebrow">// 01 · AI 运维助手</p>
+      <h2 id="ai-title">会排障，更<span class="grad-text">守规矩</span>的 K8S 运维助手</h2>
+      <p class="section-lead">在 Web 顶部打开「AI 助手」，选定一个集群，用一句话描述问题。助手自动选择数据来源，联合日志、事件、监控与历史数据定位原因；任何变更都先冻结参数并展示变更预览（K8S API 写入附服务端 <span class="nw">Dry-run 差异）</span>，<span class="nw">默认人工批准后才执行。</span></p>
+    </header>
+
+    <div class="ai-grid">
+      <article class="card glow-card card-lead reveal">
+        <div class="card-icon"><svg class="icon" aria-hidden="true"><use href="#i-chat"/></svg></div>
+        <h3>一句话运维 K8S</h3>
+        <p>选定集群即可用自然语言提问，每轮只操作所选集群；统一网关覆盖 63 项 KubeDoor 业务操作与 5 类通用执行器，查询类自动执行。</p>
+        <ul class="chip-row" aria-label="通用执行器">
+          <li>K8S API / CRD</li><li>kubectl</li><li>istioctl</li><li>jq · yq · curl · dig · openssl · rg</li><li>Pod exec</li>
+        </ul>
+        <p class="lead-eg"><small>例如</small><span>这个服务最近频繁重启，结合日志、事件和监控帮我找原因</span></p>
+      </article>
+      <article class="card glow-card card-feature card-approve reveal" style="--d:1">
+        <div class="ca-text">
+          <div class="card-icon"><svg class="icon" aria-hidden="true"><use href="#i-shield"/></svg></div>
+          <h3>先审批，再执行</h3>
+          <p>KubeDoor 业务操作与 Pod 内命令展示准确参数和变更预览；通用 K8S API 写入与 <code>kubectl apply</code> 另附服务端 Dry-run 配置差异。批准后按冻结参数原样执行，模型无法偷换。</p>
+        </div>
+        <figure class="ca-demo">
+          <div class="approve" role="img" aria-label="审批卡示意：对 HPA 的 PATCH 操作，显示准确参数、服务端 dryRun 生成的配置差异，以及「拒绝」「批准这次操作」按钮">
+            <div class="approve-head"><code>api</code><span class="op-tag">PATCH</span><span class="state-tag">等待批准</span></div>
+            <div class="approve-meta">集群 prod-a · 命名空间 demo · 来源 agent</div>
+            <div class="sec-label">准确参数</div>
+            <pre class="params">path: /apis/autoscaling/v2/namespaces/demo/<wbr>horizontalpodautoscalers/<wbr>deploy-demo-order
+content_type: application/json-patch+json</pre>
+            <div class="sec-label">配置差异 <span class="tag-mini">服务端 dryRun=All</span></div>
+            <pre class="diff"><span class="d-hd">--- current</span><span class="d-hd">+++ proposed</span><span class="d-ctx">   "spec": {</span><span class="d-del">-    "maxReplicas": 4,</span><span class="d-add">+    "maxReplicas": 6,</span><span class="d-ctx">     "metrics": [</span></pre>
+            <div class="approve-foot"><span class="approve-hint">批准后执行以上动作</span><span class="a-btn">拒绝</span><span class="a-btn a-btn-ok">批准这次操作</span></div>
+          </div>
+          <figcaption class="ca-note">示意 · 字段与按钮取自真实审批卡，数据仅为演示</figcaption>
+        </figure>
+      </article>
+      <article class="card glow-card reveal">
+        <div class="card-icon"><svg class="icon" aria-hidden="true"><use href="#i-layers"/></svg></div>
+        <h3>平台能力优先</h3>
+        <p>重启、扩缩容、定时 / 周期任务与资源管控优先走 KubeDoor 已验证的接口，覆盖不到才用通用工具，不让模型凭空拼 YAML。</p>
+        <ul class="chip-row" aria-label="业务操作示例">
+          <li>restart_deployment</li><li>scale_deployment</li><li>cron_deployment_restart</li><li>resource_config_update</li>
+        </ul>
+      </article>
+      <article class="card glow-card reveal" style="--d:1">
+        <div class="card-icon"><svg class="icon" aria-hidden="true"><use href="#i-noreplay"/></svg></div>
+        <h3>绝不盲目重放</h3>
+        <p>超时或断线导致写入结果未知时，标记「执行结果不确定」，本轮不再执行任何写操作、也不会换通道重试，需先查询实际状态；服务重启也不会重发已派发的操作。</p>
+      </article>
+      <article class="card glow-card reveal" style="--d:2">
+        <div class="card-icon"><svg class="icon" aria-hidden="true"><use href="#i-model"/></svg></div>
+        <h3>模型自由选</h3>
+        <p>任意兼容 OpenAI Chat Completions、支持工具调用的模型均可接入，含免鉴权的自建模型；DeepSeek 思考模式专项适配，「测试连接」实测工具调用。</p>
+      </article>
+      <article class="card glow-card reveal">
+        <div class="card-icon"><svg class="icon" aria-hidden="true"><use href="#i-plug"/></svg></div>
+        <h3>Agent 直通 · 加密直连</h3>
+        <p>在线 Agent 以集群内身份执行，无需上传 kubeconfig；也可上传 kubeconfig（<code>AES-256-GCM</code> 加密保存）直连，Agent 离线照样可用。</p>
+      </article>
+      <article class="card glow-card reveal" style="--d:1">
+        <div class="card-icon"><svg class="icon" aria-hidden="true"><use href="#i-chart"/></svg></div>
+        <h3>历史 + 实时 + 监控联合分析</h3>
+        <p>入库的资源与 JVM 快照、历史事件与告警，加上实时日志、事件与 VictoriaMetrics 自由 MetricsQL 查询，服务端强制限定当前集群。</p>
+      </article>
+      <article class="card glow-card reveal" style="--d:2">
+        <div class="card-icon"><svg class="icon" aria-hidden="true"><use href="#i-memory"/></svg></div>
+        <h3>全局记忆 · DeepAgents</h3>
+        <p>会话一键总结为可编辑的经验草稿，审核后存入全局记忆、下一轮按需引入；基于 DeepAgents，内置运维 Skill 与子 Agent 并行调查。</p>
+      </article>
+    </div>
+
+    <div class="guard glass reveal">
+      <div class="guard-head">
+        <p class="eyebrow eyebrow-sm">// 安全护栏</p>
+        <h3 id="guard-title">每一次变更，都可审批、可追溯</h3>
+      </div>
+      <ol class="guard-flow">
+        <li><span class="g-num">1</span><b>只读查询</b><span>自动执行</span></li>
+        <li><span class="g-num">2</span><b>变更请求</b><span>冻结完整参数</span></li>
+        <li><span class="g-num">3</span><b>变更预览</b><span>API 写入附 Dry-run 差异</span></li>
+        <li><span class="g-num">4</span><b>批准执行</b><span>30 分钟内有效</span></li>
+        <li><span class="g-num">5</span><b>派发账本</b><span>同一动作只派发一次</span></li>
+        <li><span class="g-num">6</span><b>结果核验</b><span>不确定就先查询，不重放</span></li>
+      </ol>
+      <ul class="guard-chips">
+        <li>只读账号无法发起变更</li>
+        <li>所选集群是本轮硬边界</li>
+        <li>Pod exec / curl / openssl 一律审批</li>
+        <li>参数数组执行，不开放 shell</li>
+        <li>模型 API Key 不落服务端，流式输出、checkpoint 与日志中全程脱敏</li>
+        <li>「自动批准执行」需读写账号手动勾选，仅当前页面有效</li>
+        <li>会话、动作与事件全部入库</li>
+      </ul>
+    </div>
+
+    <div class="mcp reveal">
+      <div class="mcp-copy">
+        <p class="eyebrow eyebrow-sm">// 标准 MCP</p>
+        <h3 id="mcp-title">一个地址，接入主流 AI 客户端</h3>
+        <p>同一套工具网关、权限、审批与审计，以标准 MCP 对外开放。外部 MCP 默认开启（<code>ENABLE_MCP="true"</code>），关闭它只会撤掉对外入口，不影响网页里的 AI 助手。</p>
+        <ul class="endpoint-list">
+          <li><code>/mcp</code><span>Streamable HTTP · 推荐</span></li>
+          <li><code>/sse</code><span>SSE · 兼容旧客户端</span></li>
+        </ul>
+        <ul class="tick-list">
+          <li>复用 Web 登录账号（basic auth），只读账号只能调用查询类工具</li>
+          <li>保留 1.x 的 16 个工具名，新增统一工具 <code>kubedoor_tool</code> 与 Skill 资源 <code>skills://kubedoor-k8s</code></li>
+          <li>写操作返回待批准动作与浏览器链接，用同一账号在 Web 中批准后才执行</li>
+        </ul>
+        <a class="link-arrow" href="https://github.com/CassInfra/KubeDoor/blob/main/docs/ai-assistant.md" target="_blank" rel="noopener">阅读 AI 助手与 MCP 文档<svg class="icon" aria-hidden="true"><use href="#i-arrow"/></svg></a>
+      </div>
+      <div class="code-panel glass">
+        <div class="code-tabs" role="tablist" aria-label="MCP 客户端配置示例">
+          <button class="code-tab" type="button" role="tab" id="tab-json" aria-controls="panel-json" aria-selected="true">JSON 配置</button>
+          <button class="code-tab" type="button" role="tab" id="tab-cli" aria-controls="panel-cli" aria-selected="false" tabindex="-1">Claude Code</button>
+        </div>
+        <div class="code-body" role="tabpanel" id="panel-json" aria-labelledby="tab-json">
+          <button class="copy-btn" type="button" data-copy-target="code-json" aria-label="复制 JSON 配置"><svg class="icon" aria-hidden="true"><use href="#i-copy"/></svg><span>复制</span></button>
+<pre class="code"><code id="code-json"><span class="c-p">{</span>
+  <span class="c-k">"mcpServers"</span>: <span class="c-p">{</span>
+    <span class="c-k">"kubedoor"</span>: <span class="c-p">{</span>
+      <span class="c-k">"url"</span>: <span class="c-s">"http://&lt;节点IP&gt;:&lt;Web NodePort&gt;/mcp"</span>,
+      <span class="c-k">"headers"</span>: <span class="c-p">{</span>
+        <span class="c-k">"Authorization"</span>: <span class="c-s">"Basic &lt;base64(用户名:密码)&gt;"</span>
+      <span class="c-p">}</span>
+    <span class="c-p">}</span>
+  <span class="c-p">}</span>
+<span class="c-p">}</span></code></pre>
+        </div>
+        <div class="code-body" role="tabpanel" id="panel-cli" aria-labelledby="tab-cli" hidden>
+          <button class="copy-btn" type="button" data-copy-target="code-cli" aria-label="复制 Claude Code 命令"><svg class="icon" aria-hidden="true"><use href="#i-copy"/></svg><span>复制</span></button>
+<pre class="code"><code id="code-cli"><span class="c-cmd">claude</span> mcp add --transport http kubedoor \
+  http://&lt;节点IP&gt;:&lt;Web NodePort&gt;/mcp \
+  --header <span class="c-s">"Authorization: Basic &lt;base64(用户名:密码)&gt;"</span></code></pre>
+        </div>
+        <p class="code-note">示例按接口推导，字段名以各客户端文档为准；只支持 SSE 的客户端把地址改为 <code>/sse</code>。生产环境建议为 MCP 单独建账号，并在入口前置 HTTPS。</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============ FEATURES ============ -->
+<section class="section section-features" id="features" aria-labelledby="features-title">
+  <div class="container">
+    <header class="section-head reveal">
+      <p class="eyebrow">// 02 · 全栈能力</p>
+      <h2 id="features-title">一个平台，管好<span class="grad-text">多套 K8S</span></h2>
+      <p class="section-lead">从监控大屏到准入控制，从实时日志到节点均衡，覆盖 K8S 日常运维的完整链路；其中的查询与运维操作，大多也能直接交给 AI 助手完成。</p>
+    </header>
+
+    <div class="feature-grid">
+      <article class="card glow-card fcard fcard-wide reveal">
+        <div class="fcard-text">
+          <div class="card-icon"><svg class="icon" aria-hidden="true"><use href="#i-monitor"/></svg></div>
+          <h3><span class="nw">多集群统一监控 ·</span> <span class="nw">总览大屏 · Grafana</span></h3>
+          <p>资源总览大屏汇总各集群的节点、工作负载、Pod 与 PVC，标出风险节点、Top10 异常告警与事件，30 秒自动刷新；另内嵌 K8S、节点与高峰资源三套 Grafana 看板。指标来自内置 VictoriaMetrics，也可对接已有 Prometheus。</p>
+        </div>
+        <figure class="fcard-shot">
+          <img src="assets/img/shots/k8s-monitor-card.webp" width="720" height="405" loading="lazy" decoding="async" alt="K8S 监控看板（Grafana）截图：节点内存与 CPU 比例、命名空间资源统计、工作负载与节点数量、网络流量曲线">
+        </figure>
+      </article>
+      <article class="card glow-card fcard reveal" style="--d:1">
+        <div class="card-icon"><svg class="icon" aria-hidden="true"><use href="#i-cube"/></svg></div>
+        <h3>K8S 资源管理</h3>
+        <p>Deployment、Pod、Service、Ingress、ConfigMap、StatefulSet、DaemonSet 与节点统一管理，Monaco 在线编辑 YAML，支持批量删除、扩缩容与重启；Istio VirtualService 管理为<span class="nw">试用功能</span>。</p>
+      </article>
+      <article class="card glow-card fcard reveal">
+        <div class="card-icon"><svg class="icon" aria-hidden="true"><use href="#i-terminal"/></svg></div>
+        <h3>实时状态 · Pod 日志</h3>
+        <p>Deployment 就绪与滚动状态经 K8S Watch 实时推送；Pod 日志实时跟随，异常多色标记、关键字定位，可按容器或整个 Deployment（全部 Pod 聚合）查看，单个 Pod 的完整日志可 gzip 下载。</p>
+      </article>
+      <article class="card glow-card fcard reveal" style="--d:1">
+        <div class="card-icon"><svg class="icon" aria-hidden="true"><use href="#i-tag"/></svg></div>
+        <h3>发布管控</h3>
+        <p>镜像更新自动列出仓库最近 20 个标签（阿里云 ACR、华为云 SWR、Harbor）；只读账号可按集群、时段与用户授权发布，进度推送 IM。</p>
+      </article>
+      <article class="card glow-card fcard reveal" style="--d:2">
+        <div class="card-icon"><svg class="icon" aria-hidden="true"><use href="#i-clock"/></svg></div>
+        <h3>定时任务 · Pod 隔离 · 弹性</h3>
+        <p>扩缩容与重启支持立即、定时、周期执行；Pod 一键隔离保留现场，可同时临时扩容、调度到指定节点；支持华为云 CCI 弹性扩容。</p>
+      </article>
+      <article class="card glow-card fcard reveal">
+        <div class="card-icon"><svg class="icon" aria-hidden="true"><use href="#i-bell"/></svg></div>
+        <h3>告警聚合 · 事件告警 · 告警屏蔽</h3>
+        <p>内置 44 条告警规则，Pod 告警按日聚合、可标记处理；K8S 事件全量入库并按 JSON 规则告警；指标告警支持 Alertmanager 风格屏蔽<span class="nw">（<code>=</code> <code>!=</code> <code>=~</code> <code>!~</code>）</span>，命中仍入库留痕。</p>
+      </article>
+      <article class="card glow-card fcard fcard-wide fcard-flow reveal" style="--d:1">
+        <div class="fcard-text">
+          <div class="card-icon"><svg class="icon" aria-hidden="true"><use href="#i-gauge"/></svg></div>
+          <h3>高峰资源画像 · 准入控制</h3>
+          <p>每天采集业务高峰时段的资源数据，取近 10 天集群 CPU 总消耗最大的一天写入管控表；在「Agent管理」开启「准入控制」后，Deployment 创建与发布时由 Mutating Webhook 按管控表改写副本数和第一个容器的 requests / limits，扩缩容时只改写副本数，让资源申请与真实使用保持一致。</p>
+        </div>
+        <ol class="mini-flow" aria-label="高峰资源管控流程">
+          <li><b>每日高峰采集</b><span>CPU / 内存取 P80</span></li>
+          <li><b>近 10 天最大日</b><span>写入管控表</span></li>
+          <li><b>准入 Webhook</b><span>改写副本数 · requests · limits</span></li>
+        </ol>
+      </article>
+      <article class="card glow-card fcard reveal">
+        <div class="card-icon"><svg class="icon" aria-hidden="true"><use href="#i-coffee"/></svg></div>
+        <h3>JVM 参数管控 · Java 诊断</h3>
+        <p>采集并管控 Xms、Xmx、Xss、MaxMetaspaceSize，开启准入控制后在下次发布或重启时替换已有参数；展示堆与 G1 Eden 使用率，一键 Dump、Jstack、JFR。</p>
+      </article>
+      <article class="card glow-card fcard reveal" style="--d:1">
+        <div class="card-icon"><svg class="icon" aria-hidden="true"><use href="#i-balance"/></svg></div>
+        <h3>节点负载均衡</h3>
+        <p>按节点 CPU 极差判断失衡，迭代生成迁移计划（整体标准差下降才采纳），分批隔离式迁移并轮询新 Pod 就绪；手动触发，需 metrics-server。</p>
+      </article>
+      <article class="card glow-card fcard reveal" style="--d:2">
+        <div class="card-icon"><svg class="icon" aria-hidden="true"><use href="#i-lock"/></svg></div>
+        <h3>权限与留痕</h3>
+        <p>nginx basic auth 登录，读写与只读账号分离，只读账号仅开放查询接口（改镜像按 <code>UPDATE_IMAGE_JSON</code> 授权放行）；访问日志记录操作账号，AI 操作的参数、审批与结果全部入库。</p>
+      </article>
+    </div>
+  </div>
+</section>
+
+<!-- ============ ARCHITECTURE ============ -->
+<section class="section section-arch" id="architecture" aria-labelledby="arch-title">
+  <div class="container">
+    <header class="section-head reveal">
+      <p class="eyebrow">// 03 · 架构</p>
+      <h2 id="arch-title">控制端一套，<span class="grad-text">集群端按需扩展</span></h2>
+      <p class="section-lead">控制端与集群端可以装在同一个集群（单集群场景），也可以分开部署，纳管任意多套 Kubernetes。</p>
+    </header>
+    <figure class="arch-figure glass reveal">
+      <div class="arch-scroll">
+        <a class="arch-link" href="assets/img/architecture.svg" target="_blank" rel="noopener" title="在新标签页打开高清架构图（可缩放）"><img src="assets/img/architecture.svg" width="1600" height="940" loading="lazy" decoding="async" alt="KubeDoor 2.x 架构图：浏览器和外部 MCP 客户端经 kubedoor-web（nginx 统一认证）访问 kubedoor-master 与 kubedoor-ai；各业务集群的 kubedoor-agent 主动以 WebSocket 连接 master，在集群内执行操作并回传事件、日志与实时状态；master 与 kubedoor-ai 共用一个 PostgreSQL，监控数据来自 VictoriaMetrics 或已有 Prometheus，告警经 vmalert、Alertmanager 与 kubedoor-alarm 推送 IM。"></a>
+      </div>
+      <figcaption class="arch-caption"><span class="arch-hint">左右滑动查看，或点开大图缩放 · </span><a class="inline-link" href="assets/img/architecture.svg" target="_blank" rel="noopener">在新标签页打开高清架构图</a></figcaption>
+    </figure>
+    <ul class="arch-points">
+      <li class="reveal">
+        <div class="card-icon card-icon-sm"><svg class="icon" aria-hidden="true"><use href="#i-route"/></svg></div>
+        <h3>Agent 主动外连</h3>
+        <p>每个业务集群的 kubedoor-agent 主动以 WebSocket 连接 master（同集群走 Service，跨集群经 Web 入口并带 basic auth），控制端默认无需反向访问业务集群（仅 AI 的 kubeconfig 直连会从控制端访问 API Server）。</p>
+      </li>
+      <li class="reveal" style="--d:1">
+        <div class="card-icon card-icon-sm"><svg class="icon" aria-hidden="true"><use href="#i-db"/></svg></div>
+        <h3>单一 PostgreSQL</h3>
+        <p>管控配置、高峰资源、K8S 事件、告警记录、Istio 路由与 AI 会话都存在 PostgreSQL 原生表，不依赖扩展；启动自动建表，事件、告警与高峰快照按保留天数每天清理。</p>
+      </li>
+      <li class="reveal" style="--d:2">
+        <div class="card-icon card-icon-sm"><svg class="icon" aria-hidden="true"><use href="#i-pulse"/></svg></div>
+        <h3>监控栈可内置也可外接</h3>
+        <p>时序库必需（Deployment 列表、资源总览与高峰采集都依赖它）：可一并部署 VictoriaMetrics、vmalert、Alertmanager 与 Grafana，也可对接已有 Prometheus / VictoriaMetrics，各集群指标需能从同一地址查到并带标签 <code>&lt;PROM_K8S_TAG_KEY&gt;=&lt;K8S_NAME&gt;</code>。</p>
+      </li>
+      <li class="reveal" style="--d:3">
+        <div class="card-icon card-icon-sm"><svg class="icon" aria-hidden="true"><use href="#i-gateway"/></svg></div>
+        <h3>AI 与 MCP 共用网关</h3>
+        <p>kubedoor-ai 同时服务 Web 助手与外部 MCP，统一经 Web nginx 认证，共享工具网关、权限、审批与审计，服务本身不单独对外暴露。</p>
+      </li>
+    </ul>
+  </div>
+</section>
+
+<!-- ============ SCREENSHOTS ============ -->
+<section class="section section-shots" id="screenshots" aria-labelledby="shots-title">
+  <div class="container">
+    <header class="section-head reveal">
+      <p class="eyebrow">// 04 · 界面一览</p>
+      <h2 id="shots-title">看得见的<span class="grad-text">多集群全景</span></h2>
+      <p class="section-lead"><span class="hint-kbd">点击截图查看大图，可用 ← / → 键或左右滑动切换，Esc 关闭。</span><span class="hint-touch">点击截图查看大图，左右滑动切换。</span></p>
+    </header>
+
+    <div class="gallery" data-gallery>
+      <figure class="shot shot-featured reveal">
+        <button class="shot-btn" type="button" data-full="assets/img/shots/overview.webp" data-w="1920" data-h="1080" data-caption="K8S 资源总览大屏：多集群汇总、风险节点、最高使用率、Top10 异常告警与事件、近 10 日告警趋势" aria-label="查看大图：K8S 资源总览大屏">
+          <img src="assets/img/shots/overview.webp" width="1920" height="1080" loading="lazy" decoding="async" alt="K8S 资源总览大屏：集群、节点、工作负载、容器组与持久卷统计，风险节点徽章，最高使用率进度条，Top10 异常 Pod 告警、Top10 异常 K8S 事件与近 10 日告警柱状图">
+          <span class="shot-zoom" aria-hidden="true"><svg class="icon"><use href="#i-zoom"/></svg></span>
+        </button>
+        <figcaption><b>K8S 资源总览大屏</b><span>多集群汇总 · 风险节点 · Top10 异常告警与事件 · 近 10 日告警趋势</span></figcaption>
+      </figure>
+
+      <figure class="shot reveal">
+        <button class="shot-btn" type="button" data-full="assets/img/shots/logs.webp" data-w="1920" data-h="1015" data-caption="Pod 实时日志：异常多色标记、关键字定位与筛选（1.x 界面）" aria-label="查看大图：Pod 实时日志">
+          <img src="assets/img/shots/logs-thumb.webp" width="720" height="381" loading="lazy" decoding="async" alt="Pod 实时日志窗口：WARN 与异常行高亮，关键字搜索结果逐个定位">
+          <span class="shot-zoom" aria-hidden="true"><svg class="icon"><use href="#i-zoom"/></svg></span>
+        </button>
+        <figcaption><b>Pod 实时日志</b><span>多色标记 · 关键字定位与筛选<em class="ver-tag">1.x</em></span></figcaption>
+      </figure>
+      <figure class="shot reveal">
+        <button class="shot-btn" type="button" data-full="assets/img/shots/alarm.webp" data-w="1920" data-h="1017" data-caption="告警面板：按告警名聚合，告警中 / 总数一目了然（1.x 界面）" aria-label="查看大图：告警面板">
+          <img src="assets/img/shots/alarm-thumb.webp" width="720" height="381" loading="lazy" decoding="async" alt="告警面板：按告警名称展示卡片，标注严重程度与告警中、总数">
+          <span class="shot-zoom" aria-hidden="true"><svg class="icon"><use href="#i-zoom"/></svg></span>
+        </button>
+        <figcaption><b>告警面板</b><span>按告警名聚合 · 严重程度分级<em class="ver-tag">1.x</em></span></figcaption>
+      </figure>
+      <figure class="shot reveal" style="--d:1">
+        <button class="shot-btn" type="button" data-full="assets/img/shots/nodes.webp" data-w="1920" data-h="1025" data-caption="节点管理：资源用量、调度状态与批量禁止 / 允许调度（1.x 界面）" aria-label="查看大图：节点管理">
+          <img src="assets/img/shots/nodes-thumb.webp" width="720" height="384" loading="lazy" decoding="async" alt="节点管理页：各节点 CPU、内存、磁盘与 Pod 数量用量，调度状态与操作按钮">
+          <span class="shot-zoom" aria-hidden="true"><svg class="icon"><use href="#i-zoom"/></svg></span>
+        </button>
+        <figcaption><b>节点管理</b><span>资源用量 · 批量禁止 / 允许调度<em class="ver-tag">1.x</em></span></figcaption>
+      </figure>
+      <figure class="shot reveal">
+        <button class="shot-btn" type="button" data-full="assets/img/shots/peak.webp" data-w="1920" data-h="1080" data-caption="高峰资源看板（Grafana）：每日高峰时段资源统计、各资源 TOP10 与命名空间分析（1.x 界面；看板标题沿用 P95 字样，CPU/内存实际取 P80）" aria-label="查看大图：高峰资源看板">
+          <img src="assets/img/shots/peak-thumb.webp" width="720" height="405" loading="lazy" decoding="async" alt="高峰资源 Grafana 看板：全局资源统计卡片，微服务负载、CPU、内存与 Pod 数 TOP10，命名空间级别资源占比表">
+          <span class="shot-zoom" aria-hidden="true"><svg class="icon"><use href="#i-zoom"/></svg></span>
+        </button>
+        <figcaption><b>高峰资源看板</b><span>每日高峰统计 · TOP10（Grafana）<em class="ver-tag">1.x</em></span></figcaption>
+      </figure>
+      <figure class="shot reveal">
+        <button class="shot-btn" type="button" data-full="assets/img/shots/node-monitor.webp" data-w="1920" data-h="1033" data-caption="节点监控看板（Grafana）：主机资源总览、最近 7 天 P99 使用率、整体负载 / 内存 / 磁盘趋势与单机明细（1.x 界面）" aria-label="查看大图：节点监控看板">
+          <img src="assets/img/shots/node-monitor-thumb.webp" width="720" height="387" loading="lazy" decoding="async" alt="节点监控 Grafana 看板：主机健康值、CPU、内存、磁盘、IO 与网络总览表，最近 7 天 P99 使用率，整体负载、内存与磁盘曲线">
+          <span class="shot-zoom" aria-hidden="true"><svg class="icon"><use href="#i-zoom"/></svg></span>
+        </button>
+        <figcaption><b>节点监控看板</b><span>主机资源总览 · P99 使用率（Grafana）<em class="ver-tag">1.x</em></span></figcaption>
+      </figure>
+      <figure class="shot reveal" style="--d:1">
+        <button class="shot-btn" type="button" data-full="assets/img/shots/k8s-monitor.webp" data-w="1920" data-h="1022" data-caption="K8S 监控看板（Grafana）：节点、命名空间与 Pod 资源实时监控（1.x 界面）" aria-label="查看大图：K8S 监控看板">
+          <img src="assets/img/shots/k8s-monitor-thumb.webp" width="720" height="383" loading="lazy" decoding="async" alt="K8S 资源实时监控 Grafana 看板：节点内存与 CPU 比例、命名空间资源统计、网络流量曲线">
+          <span class="shot-zoom" aria-hidden="true"><svg class="icon"><use href="#i-zoom"/></svg></span>
+        </button>
+        <figcaption><b>K8S 监控看板</b><span>节点 · 命名空间 · Pod 实时监控<em class="ver-tag">1.x</em></span></figcaption>
+      </figure>
+    </div>
+    <p class="shots-note reveal">截图来自真实环境，集群名、IP、域名等已遮挡；标注 1.x 的为早期界面，细节以当前版本为准。</p>
+  </div>
+</section>
+
+<!-- ============ DEPLOY ============ -->
+<section class="section section-deploy" id="deploy" aria-labelledby="deploy-title">
+  <div class="container">
+    <header class="section-head reveal">
+      <p class="eyebrow">// 05 · 三步部署</p>
+      <h2 id="deploy-title">一个脚本，<span class="grad-text">三步上线</span></h2>
+      <p class="section-lead">一份配置文件 + 一个 bash 脚本完成部署，不再需要 Helm。PostgreSQL 独立运行在 K8S 之外，也可以直接使用现成的数据库。</p>
+    </header>
+    <ul class="prereq reveal" aria-label="前置条件">
+      <li class="prereq-label">前置条件</li>
+      <li><b>K8S</b> ≥ 1.21</li>
+      <li><b>bash 4+</b> 与 kubectl</li>
+      <li><b>时序库</b>内置 VictoriaMetrics 或已有 Prometheus</li>
+      <li><b>StorageClass</b>启用内置 VictoriaMetrics 时需要</li>
+      <li><b>metrics-server</b>用量列、节点均衡</li>
+      <li><b>镜像</b>仅 amd64</li>
+    </ul>
+
+    <ol class="steps">
+      <li class="step reveal">
+        <div class="step-side"><span class="step-num">01</span><h3>起数据库</h3><p>在一台 K8S 节点能访问到的机器上用 docker compose 启动 PostgreSQL。无需手动建表，master 与 kubedoor-ai 启动时会自动建表。</p></div>
+        <div class="terminal">
+          <div class="terminal-bar"><span class="dots" aria-hidden="true"><i></i><i></i><i></i></span><span class="terminal-title">bash · 数据库主机</span><button class="copy-btn" type="button" data-copy-target="cmd-1" aria-label="复制第一步命令"><svg class="icon" aria-hidden="true"><use href="#i-copy"/></svg><span>复制</span></button></div>
+<pre class="code"><code id="cmd-1"><span class="c-cmd">git</span> clone \
+  https://github.com/CassInfra/KubeDoor.git
+<span class="c-cmd">cd</span> KubeDoor/deploy/postgres
+<span class="c-cmd">cp</span> .env.example .env
+<span class="c-c"># 至少改掉 PG_PASSWORD</span>
+<span class="c-cmd">vi</span> .env
+<span class="c-cmd">docker</span> compose up -d</code></pre>
+        </div>
+      </li>
+      <li class="step reveal">
+        <div class="step-side"><span class="step-num">02</span><h3>装控制端</h3><p><code>PG_HOST</code> 要填 K8S 里的 Pod 能访问到的地址（不能是 127.0.0.1）。装完会打印 Web 控制台地址与默认账号 <code>kubedoor / kubedoor</code>；<code>WEB_AUTH_USERS</code> 里还预置了一个供跨集群 Agent 使用的读写账号，两个默认账号的密码都已公开，上线前请全部修改（跨集群 <code>MASTER_WS</code> 里的账号同步替换）。</p></div>
+        <div class="terminal">
+          <div class="terminal-bar"><span class="dots" aria-hidden="true"><i></i><i></i><i></i></span><span class="terminal-title">bash · 可执行 kubectl 的机器</span><button class="copy-btn" type="button" data-copy-target="cmd-2" aria-label="复制第二步命令"><svg class="icon" aria-hidden="true"><use href="#i-copy"/></svg><span>复制</span></button></div>
+<pre class="code"><code id="cmd-2"><span class="c-c"># 与数据库不在同一台机器时，先在这里 git clone 仓库</span>
+<span class="c-cmd">cd</span> KubeDoor/deploy
+<span class="c-c"># 从模板复制一份配置，再改 PG_HOST / PG_PASSWORD / MSG_TOKEN 等</span>
+<span class="c-cmd">cp</span> kubedoor.conf.example kubedoor.conf
+<span class="c-cmd">vi</span> kubedoor.conf
+./install.sh master</code></pre>
+        </div>
+      </li>
+      <li class="step reveal">
+        <div class="step-side"><span class="step-num">03</span><h3>装集群端</h3><p>到每个业务集群执行。<code>K8S_NAME</code> 是集群唯一标识；同集群 <code>MASTER_WS</code> 填 <code>ws://kubedoor-master.kubedoor</code>，跨集群填 <code>ws://&lt;账号&gt;:&lt;口令&gt;@&lt;控制端节点IP&gt;:&lt;Web NodePort&gt;</code>，账号必须是 <code>WEB_RW_USERS</code> 里的读写账号（装控制端后脚本会打印这一行），还要把 <code>REMOTE_WRITE_URL</code> 改成控制端时序库的外部地址（用内置 VictoriaMetrics 时同样会打印）。</p></div>
+        <div class="terminal">
+          <div class="terminal-bar"><span class="dots" aria-hidden="true"><i></i><i></i><i></i></span><span class="terminal-title">bash · 每个业务集群</span><button class="copy-btn" type="button" data-copy-target="cmd-3" aria-label="复制第三步命令"><svg class="icon" aria-hidden="true"><use href="#i-copy"/></svg><span>复制</span></button></div>
+<pre class="code"><code id="cmd-3"><span class="c-c"># 改 K8S_NAME 和 MASTER_WS（跨集群再改 REMOTE_WRITE_URL）；换机器执行时先从 kubedoor.conf.example 复制</span>
+<span class="c-cmd">vi</span> kubedoor.conf
+./install.sh agent</code></pre>
+        </div>
+      </li>
+    </ol>
+
+    <div class="deploy-notes">
+      <div class="note glass reveal">
+        <h3><svg class="icon" aria-hidden="true"><use href="#i-help"/></svg>先看看会生成什么</h3>
+        <p><code>./install.sh render master -o /tmp/out</code> 只渲染 YAML 不部署，适合改完配置后先 review；<code>./install.sh status</code> 查看部署状态。</p>
+      </div>
+      <div class="note note-warn glass reveal" style="--d:1">
+        <h3><svg class="icon" aria-hidden="true"><use href="#i-db"/></svg>1.x（Helm）用户请全新安装</h3>
+        <p>2.x 的数据库已从 ClickHouse / MySQL 换成 PostgreSQL，旧版 Helm chart 不能与新代码混用，旧数据也不能直接沿用。请先在旧版「Agent管理」关闭「准入控制」，再 <code>helm uninstall</code> 旧版本，然后按全新安装部署。</p>
+      </div>
+      <div class="note glass reveal" style="--d:2">
+        <h3><svg class="icon" aria-hidden="true"><use href="#i-book"/></svg>更多场景</h3>
+        <p>已有 Prometheus / VictoriaMetrics、离线内网、调整登录账号等，见 <a class="inline-link" href="https://github.com/CassInfra/KubeDoor/blob/main/deploy/README.md" target="_blank" rel="noopener">完整部署文档</a>。</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============ TIMELINE ============ -->
+<section class="section section-timeline" id="timeline" aria-labelledby="timeline-title">
+  <div class="container">
+    <header class="section-head reveal">
+      <p class="eyebrow">// 06 · 版本演进</p>
+      <h2 id="timeline-title">从资源管控到 <span class="grad-text">AI 运维</span></h2>
+    </header>
+    <ol class="timeline">
+      <li class="tl-item tl-current reveal">
+        <div class="tl-date"><time datetime="2026-10-05">2026-10-05</time><span class="tl-ver">2.1.0 · 当前</span></div>
+        <div class="tl-body"><h3>内置 AI 运维助手，MCP 并入 AI 服务</h3><p>Web 内置 AI 助手（审批、Dry-run 差异、全局记忆、kubeconfig 加密直连）；外部 MCP 并入 kubedoor-ai，新增 Streamable HTTP 入口并接入读写权限与浏览器审批；Deployment 实时状态推送；JVM 启动参数管控与高峰期堆、G1 Eden 使用率。</p></div>
+      </li>
+      <li class="tl-item reveal">
+        <div class="tl-date"><time datetime="2026-10-04">2026-10-04</time><span class="tl-ver">2.0.0</span></div>
+        <div class="tl-body"><h3>统一 PostgreSQL，脚本化部署</h3><p>移除 ClickHouse / MySQL，统一使用 PostgreSQL；<code>install.sh</code> 取代 Helm；新增告警屏蔽、节点负载均衡、华为云 CCI 弹性扩容与 Pod 日志下载。</p></div>
+      </li>
+      <li class="tl-item reveal">
+        <div class="tl-date"><time datetime="2025-11-24">2025-11-24</time><span class="tl-ver">1.7.0</span></div>
+        <div class="tl-body"><h3>K8S 资源总览大屏</h3><p>多集群资源总览大屏：风险节点、最高使用率、Top10 异常 Pod 告警与 K8S 事件、近 10 日告警趋势；重构 Agent 架构，增加接口缓存与分页。</p></div>
+      </li>
+      <li class="tl-item reveal">
+        <div class="tl-date"><time datetime="2025-11-09">2025-11-09</time><span class="tl-ver">1.6.0</span></div>
+        <div class="tl-body"><h3>全面的 K8S 资源管理</h3><p>Deployment、Pod、Service、Ingress、ConfigMap、StatefulSet、DaemonSet、节点与 Istio 的增删改查及批量操作。</p></div>
+      </li>
+      <li class="tl-item reveal">
+        <div class="tl-date"><time datetime="2025-09">2025-09</time><span class="tl-ver">1.5.2</span></div>
+        <div class="tl-body"><h3>K8S 事件监控与告警</h3><p>K8S 事件采集分析与规则告警；镜像更新自动获取标签，并可按账号、时段授权；Istio VirtualService 管理与同步（试用）；新增 Slack 通知与暗黑模式。</p></div>
+      </li>
+      <li class="tl-item reveal">
+        <div class="tl-date"><time datetime="2025-08-05">2025-08-05</time><span class="tl-ver">1.3.6</span></div>
+        <div class="tl-body"><h3>Pod 实时日志</h3><p>Pod 实时日志跟踪，支持关键字定位与过滤；优化高峰期资源采集算法。</p></div>
+      </li>
+      <li class="tl-item reveal">
+        <div class="tl-date"><time datetime="2025-05">2025-05</time><span class="tl-ver">1.3.0</span></div>
+        <div class="tl-body"><h3>MCP 体验版</h3><p>首次以 MCP 接入大模型客户端，用对话方式操作 K8S 集群。</p></div>
+      </li>
+      <li class="tl-item reveal">
+        <div class="tl-date"><time datetime="2025-03">2025-03</time><span class="tl-ver">1.1.0</span></div>
+        <div class="tl-body"><h3>多集群新架构，准入控制回归</h3><p>1.0 起改为多 K8S 集群统一管控架构（统一监控、告警聚合、高峰期资源管控）；1.1 基于 K8S 准入控制，让微服务 Pod 数、需求值、限制值与高峰资源保持一致。</p></div>
+      </li>
+      <li class="tl-item reveal">
+        <div class="tl-date"><time datetime="2025-01-05">2025-01-05</time><span class="tl-ver">0.2.0</span></div>
+        <div class="tl-body"><h3>正式开源</h3><p>以基于 K8S 准入控制的微服务资源管控平台在 GitHub 开源，聚焦每日高峰时段的资源；同月 0.3.0 加入多 K8S 集群统一监控、告警与通知。</p></div>
+      </li>
+    </ol>
+    <p class="timeline-more reveal"><a class="link-arrow" href="https://github.com/CassInfra/KubeDoor/releases" target="_blank" rel="noopener">查看全部版本发布记录<svg class="icon" aria-hidden="true"><use href="#i-arrow"/></svg></a></p>
+  </div>
+</section>
+
+<!-- ============ DOCS & COMMUNITY ============ -->
+<section class="section section-docs" id="docs" aria-labelledby="docs-title">
+  <div class="container">
+    <header class="section-head reveal">
+      <p class="eyebrow">// 07 · 文档与社区</p>
+      <h2 id="docs-title">从这里<span class="grad-text">开始</span></h2>
+    </header>
+    <ul class="doc-grid">
+      <li class="reveal"><a class="doc-card glow-card" href="https://github.com/CassInfra/KubeDoor/blob/main/deploy/README.md" target="_blank" rel="noopener"><span class="doc-icon"><svg class="icon" aria-hidden="true"><use href="#i-rocket"/></svg></span><span class="doc-text"><b>部署指南</b><span>三步安装、常见场景与排查</span></span><svg class="icon doc-go" aria-hidden="true"><use href="#i-arrow"/></svg></a></li>
+      <li class="reveal" style="--d:1"><a class="doc-card glow-card" href="https://github.com/CassInfra/KubeDoor/blob/main/docs/ai-assistant.md" target="_blank" rel="noopener"><span class="doc-icon"><svg class="icon" aria-hidden="true"><use href="#i-robot"/></svg></span><span class="doc-text"><b>AI 助手与 MCP</b><span>模型配置、审批、kubeconfig、全局记忆</span></span><svg class="icon doc-go" aria-hidden="true"><use href="#i-arrow"/></svg></a></li>
+      <li class="reveal" style="--d:2"><a class="doc-card glow-card" href="https://github.com/CassInfra/KubeDoor/blob/main/docs/alert-silence.md" target="_blank" rel="noopener"><span class="doc-icon"><svg class="icon" aria-hidden="true"><use href="#i-mute"/></svg></span><span class="doc-text"><b>告警屏蔽</b><span>matcher 语法、状态与接口</span></span><svg class="icon doc-go" aria-hidden="true"><use href="#i-arrow"/></svg></a></li>
+      <li class="reveal"><a class="doc-card glow-card" href="https://github.com/CassInfra/KubeDoor/blob/main/docs/jvm-resource-control.md" target="_blank" rel="noopener"><span class="doc-icon"><svg class="icon" aria-hidden="true"><use href="#i-coffee"/></svg></span><span class="doc-text"><b>JVM 参数管控</b><span>启动参数采集、编辑与生效方式</span></span><svg class="icon doc-go" aria-hidden="true"><use href="#i-arrow"/></svg></a></li>
+      <li class="reveal" style="--d:1"><a class="doc-card glow-card" href="https://github.com/CassInfra/KubeDoor/blob/main/help/K8S%E8%B5%84%E6%BA%90%E7%AE%A1%E6%8E%A7%E5%8A%9F%E8%83%BD%E8%AF%B4%E6%98%8E.md" target="_blank" rel="noopener"><span class="doc-icon"><svg class="icon" aria-hidden="true"><use href="#i-shield"/></svg></span><span class="doc-text"><b>K8S 资源管控</b><span>准入控制与高峰资源管控说明</span></span><svg class="icon doc-go" aria-hidden="true"><use href="#i-arrow"/></svg></a></li>
+      <li class="reveal" style="--d:2"><a class="doc-card glow-card" href="https://github.com/CassInfra/KubeDoor/blob/main/help/K8S%E4%BA%8B%E4%BB%B6%E5%91%8A%E8%AD%A6%E8%A7%84%E5%88%99%E9%85%8D%E7%BD%AE%E8%AF%B4%E6%98%8E.md" target="_blank" rel="noopener"><span class="doc-icon"><svg class="icon" aria-hidden="true"><use href="#i-bell"/></svg></span><span class="doc-text"><b>K8S 事件告警规则</b><span>忽略规则、告警规则与条件语法</span></span><svg class="icon doc-go" aria-hidden="true"><use href="#i-arrow"/></svg></a></li>
+      <li class="reveal"><a class="doc-card glow-card" href="https://github.com/CassInfra/KubeDoor/blob/main/help/K8S%E5%BE%AE%E6%9C%8D%E5%8A%A1%E9%95%9C%E5%83%8F%E6%9B%B4%E6%96%B0%E9%85%8D%E7%BD%AE%E8%AF%B4%E6%98%8E.md" target="_blank" rel="noopener"><span class="doc-icon"><svg class="icon" aria-hidden="true"><use href="#i-tag"/></svg></span><span class="doc-text"><b>镜像更新配置</b><span>授权账号、时间段与仓库凭据</span></span><svg class="icon doc-go" aria-hidden="true"><use href="#i-arrow"/></svg></a></li>
+      <li class="reveal" style="--d:1"><a class="doc-card glow-card" href="https://github.com/CassInfra/KubeDoor/blob/main/help/FAQ.md" target="_blank" rel="noopener"><span class="doc-icon"><svg class="icon" aria-hidden="true"><use href="#i-help"/></svg></span><span class="doc-text"><b>常见问题 FAQ</b><span>使用与排障中的高频问题</span></span><svg class="icon doc-go" aria-hidden="true"><use href="#i-arrow"/></svg></a></li>
+    </ul>
+
+    <div class="community">
+      <div class="community-card glass reveal">
+        <div class="community-text">
+          <p class="eyebrow eyebrow-sm">// 交流群</p>
+          <h3 id="community-title">一起把 KubeDoor 做得更好</h3>
+          <p>觉得项目不错，欢迎点个 Star；有想法或需求，欢迎在 Issue 中交流。加作者微信或关注公众号「运维如诗」加入交流群。</p>
+          <div class="community-links">
+            <a class="btn btn-ghost btn-sm" href="https://github.com/CassInfra/KubeDoor/issues" target="_blank" rel="noopener"><svg class="icon" aria-hidden="true"><use href="#i-github"/></svg>提交 Issue</a>
+            <a class="btn btn-ghost btn-sm" href="https://gitee.com/starsl/KubeDoor" target="_blank" rel="noopener">Gitee 镜像<svg class="icon" aria-hidden="true"><use href="#i-external"/></svg></a>
+          </div>
+        </div>
+        <img class="community-qr" src="assets/img/community.webp" width="1170" height="400" loading="lazy" decoding="async" alt="三个二维码：作者微信、KubeDoor 赞赏码、公众号「运维如诗」">
+      </div>
+      <div class="people glass reveal" style="--d:1">
+        <div class="people-main">
+          <p class="eyebrow eyebrow-sm">// 贡献者</p>
+          <h3 id="people-title">感谢每一位贡献者</h3>
+          <ul class="avatars">
+            <li><a href="https://github.com/starsliao" target="_blank" rel="noopener"><img src="assets/img/avatars/starsliao.webp" width="56" height="56" loading="lazy" alt=""><span>StarsL.cn</span></a></li>
+            <li><a href="https://github.com/shidousanxia" target="_blank" rel="noopener"><img src="assets/img/avatars/shidousanxia.webp" width="56" height="56" loading="lazy" alt=""><span>shidousanxia</span></a></li>
+            <li><a href="https://github.com/seaworld008" target="_blank" rel="noopener"><img src="assets/img/avatars/seaworld008.webp" width="56" height="56" loading="lazy" alt=""><span>seaworld008</span></a></li>
+            <li><a href="https://github.com/comqx" target="_blank" rel="noopener"><img src="assets/img/avatars/comqx.webp" width="56" height="56" loading="lazy" alt=""><span>comqx</span></a></li>
+            <li><a href="https://github.com/xiaofennie" target="_blank" rel="noopener"><img src="assets/img/avatars/xiaofennie.webp" width="56" height="56" loading="lazy" alt=""><span>xiaofennie</span></a></li>
+          </ul>
+        </div>
+        <div class="thanks">
+          <p><b>特别鸣谢 <a class="inline-link" href="https://www.casstime.com" target="_blank" rel="noopener">CassTime 开思</a></b>：KubeDoor 的诞生离不开开思的支持。</p>
+          <p>也感谢 Python、AIOHTTP、Vue、Pure Admin、Element Plus、Kubernetes、VictoriaMetrics、Grafana、PostgreSQL、Nginx、DeepAgents 等优秀的开源项目。</p>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+</main>
+
+<footer class="site-footer">
+  <div class="container footer-inner">
+    <div class="footer-brand">
+      <a class="brand" href="#top"><img src="assets/img/logo.png" width="30" height="30" alt=""><span class="brand-text">花折 <b>KubeDoor</b></span></a>
+      <p>AI 驱动的多 K8S 集群智能管控平台</p>
+      <p class="footer-poem">花开堪折直须折，莫待无花空折枝</p>
+    </div>
+    <nav class="footer-links" aria-label="页脚链接">
+      <a href="https://github.com/CassInfra/KubeDoor" target="_blank" rel="noopener">GitHub</a>
+      <a href="https://gitee.com/starsl/KubeDoor" target="_blank" rel="noopener">Gitee</a>
+      <a href="https://github.com/CassInfra/KubeDoor/releases" target="_blank" rel="noopener">Releases</a>
+      <a href="https://github.com/CassInfra/KubeDoor/issues" target="_blank" rel="noopener">Issues</a>
+      <a href="https://StarsL.cn" target="_blank" rel="noopener">作者博客</a>
+      <a href="https://github.com/CassInfra/KubeDoor/blob/main/README.EN.md" target="_blank" rel="noopener" lang="en">English</a>
+    </nav>
+    <div class="footer-meta">
+      <p><a href="https://github.com/CassInfra/KubeDoor/blob/main/LICENSE.txt" target="_blank" rel="noopener">MIT License</a> · © 2025 CassTime · 作者 <a href="https://StarsL.cn" target="_blank" rel="noopener">StarsL.cn</a></p>
+      <a class="to-top" href="#top">回到顶部<svg class="icon" aria-hidden="true"><use href="#i-arrow"/></svg></a>
+    </div>
+  </div>
+</footer>
+
+<dialog class="lightbox" id="lightbox" aria-label="截图预览">
+  <div class="lb-inner">
+    <figure class="lb-figure">
+      <img class="lb-img" src="data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7" alt="">
+      <figcaption class="lb-caption"></figcaption>
+    </figure>
+    <button class="lb-btn lb-prev" type="button" aria-label="上一张"><svg class="icon" aria-hidden="true"><use href="#i-left"/></svg></button>
+    <button class="lb-btn lb-next" type="button" aria-label="下一张"><svg class="icon" aria-hidden="true"><use href="#i-right"/></svg></button>
+    <button class="lb-btn lb-close" type="button" aria-label="关闭预览"><svg class="icon" aria-hidden="true"><use href="#i-close"/></svg></button>
+    <p class="lb-count" aria-live="polite"></p>
+  </div>
+</dialog>
+</body>
+</html>

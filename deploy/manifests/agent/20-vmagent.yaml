@@ -1,0 +1,244 @@
+# vmagent:采集本集群的指标并远程写到 master 侧的时序库。
+# 抓取任务:vmagent 自身 / node-exporter / kubelet / cadvisor / kube-state-metrics /
+#          带 prometheus.io/jvm 注解的业务 Pod。
+#
+# external_labels 里的 <PROM_K8S_TAG_KEY>: <K8S_NAME> 是多集群区分的关键 ——
+# 所有集群的 key 必须相同,value 必须唯一。
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: vmagent
+  namespace: __NAMESPACE__
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: kubedoor-vmagent
+rules:
+  - apiGroups: ["", "networking.k8s.io", "extensions"]
+    resources:
+      - nodes
+      - nodes/metrics
+      - nodes/proxy
+      - services
+      - endpoints
+      - endpointslices
+      - pods
+      - app
+      - ingresses
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources:
+      - namespaces
+      - configmaps
+    verbs: ["get"]
+  - nonResourceURLs: ["/metrics", "/metrics/resources"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: kubedoor-vmagent
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: kubedoor-vmagent
+subjects:   
+  - kind: ServiceAccount
+    name: vmagent
+    namespace: __NAMESPACE__
+
+---
+# vmagent-config.yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: vmagent-config
+  namespace: __NAMESPACE__
+data:
+  scrape.yml: |
+    global:
+      scrape_interval: 30s
+      scrape_timeout: 30s
+      external_labels:
+        __PROM_K8S_TAG_KEY__: __K8S_NAME__
+
+    scrape_configs:
+      - job_name: 'vmagent'
+        static_configs:
+        - targets: ['localhost:8429']
+
+      - job_name: 'k8s-node-exporter'
+        kubernetes_sd_configs:
+        - role: node
+        relabel_configs:
+        - action: replace
+          source_labels: [__address__]
+          regex: '(.*):10250'
+          replacement: '${1}:9100'
+          target_label: __address__
+        - action: replace
+          regex: (.*)
+          replacement: $1
+          source_labels: [__meta_kubernetes_node_name]
+          target_label: kubernetes_node
+
+      - job_name: 'k8s-kubelet'
+        scheme: https
+        tls_config:
+          ca_file: /var/run/secrets/kubernetes.io/serviceaccount/ca.crt
+        bearer_token_file: /var/run/secrets/kubernetes.io/serviceaccount/token
+        kubernetes_sd_configs:
+        - role: node
+        relabel_configs:
+        - target_label: __address__
+          replacement: kubernetes.default.svc:443
+        - source_labels: [__meta_kubernetes_node_name]
+          regex: (.+)
+          target_label: __metrics_path__
+          replacement: /api/v1/nodes/${1}/proxy/metrics
+
+      - job_name: 'k8s-cadvisor'
+        scheme: https
+        tls_config:
+          ca_file: /var/run/secrets/kubernetes.io/serviceaccount/ca.crt
+        bearer_token_file: /var/run/secrets/kubernetes.io/serviceaccount/token
+        kubernetes_sd_configs:
+        - role: node
+        relabel_configs:
+        - target_label: __address__
+          replacement: kubernetes.default.svc:443
+        - source_labels: [__meta_kubernetes_node_name]
+          regex: (.+)
+          target_label: __metrics_path__
+          replacement: /api/v1/nodes/${1}/proxy/metrics/cadvisor
+        metric_relabel_configs:
+        - source_labels: [instance]
+          separator: ;
+          regex: (.+)
+          target_label: node
+          replacement: $1
+          action: replace
+
+      # 自带 KSM 时只在本命名空间里找,免得集群里已有的 KSM 被重复采集;
+      # ENABLE_KUBE_STATE_METRICS=false 时 install.sh 会去掉 namespaces 这段,改为全集群找
+      - job_name: 'kube-state-metrics'
+        kubernetes_sd_configs:
+        - role: service
+          # BEGIN-KSM
+          namespaces:
+            names:
+            - __NAMESPACE__
+          # END-KSM
+        relabel_configs:
+        - source_labels: [__meta_kubernetes_service_label_app_kubernetes_io_name]
+          regex: kube-state-metrics
+          replacement: $1
+          action: keep
+
+      - job_name: 'k8s-pods-jvm'
+        kubernetes_sd_configs:
+        - role: pod
+        relabel_configs:
+        - source_labels: [__meta_kubernetes_namespace]
+          regex: kube.*|nacos|apollo
+          action: drop
+        - source_labels: [__meta_kubernetes_pod_container_init]
+          regex: true
+          action: drop
+          
+        - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_jvm]
+          regex: true|True
+          action: keep
+        - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_jvmpath]
+          action: replace
+          target_label: __metrics_path__
+          regex: (.+)
+        - source_labels: [__address__, __meta_kubernetes_pod_annotation_prometheus_io_port]
+          action: replace
+          target_label: __address__
+          regex: ([^:]+)(?::\d+)?;(\d+)
+          replacement: $1:$2
+
+        - source_labels: [__meta_kubernetes_pod_container_name]
+          action: replace
+          target_label: k8s_app
+        - source_labels: [__meta_kubernetes_namespace]
+          action: replace
+          target_label: k8s_ns
+        - source_labels: [__meta_kubernetes_pod_name]
+          action: replace
+          target_label: k8s_pod
+          
+        - source_labels: [__meta_kubernetes_pod_container_name]
+          action: replace
+          target_label: container
+        - source_labels: [__meta_kubernetes_namespace]
+          action: replace
+          target_label: namespace
+        - source_labels: [__meta_kubernetes_pod_name]
+          action: replace
+          target_label: pod
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vmagent
+  namespace: __NAMESPACE__
+  labels:
+    app: vmagent
+spec:
+  selector:
+    matchLabels:
+      app: vmagent
+  template:
+    metadata:
+      labels:
+        app: vmagent
+    spec:
+      serviceAccountName: vmagent
+      containers:
+        - name: vmagent
+          image: '__IMAGE_VMAGENT__'
+          imagePullPolicy: Always
+          args:
+            - -promscrape.config=/config/scrape.yml
+            - '-remoteWrite.url=__REMOTE_WRITE_URL__'
+            - -promscrape.maxScrapeSize=500MB
+            - -remoteWrite.disableOnDiskQueue
+            - -loggerTimezone=Asia/Shanghai
+            #- -remoteWrite.dropSamplesOnOverload
+          env:
+            - name: TZ
+              value: Asia/Shanghai
+          ports:
+            - name: http
+              containerPort: 8429
+          volumeMounts:
+            - name: config
+              mountPath: /config
+          resources:
+            limits:
+              cpu: '2'
+              memory: 2Gi
+            requests:
+              cpu: 100m
+              memory: 256Mi
+      volumes:
+        - name: config
+          configMap:
+            name: vmagent-config
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: vmagent
+  namespace: __NAMESPACE__
+spec:
+  selector:
+    app: vmagent
+  ports:
+    - name: http
+      port: 8429
+      targetPort: http
