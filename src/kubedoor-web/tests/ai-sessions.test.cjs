@@ -79,6 +79,7 @@ async function harness(t) {
     detail: [],
     create: [],
     run: [],
+    title: [],
     summary: [],
     decision: [],
     rename: [],
@@ -125,6 +126,12 @@ async function harness(t) {
       return state.run
         ? state.run.promise
         : { run_id: `run-${calls.run.length}`, status: "running" };
+    },
+    generateSessionTitle: async (id, message, provider) => {
+      calls.title.push({ id, message, provider });
+      return state.title
+        ? state.title.promise
+        : { id, title: "检查日志", generated: true };
     },
     summarizeMemory: async (id, provider) => {
       calls.summary.push({ id, provider });
@@ -257,6 +264,55 @@ test("simultaneous first sends from an empty store also share one draft and run"
   await Promise.all([first, second]);
   assert.equal(h.calls.run.length, 1);
   assert.equal(h.ai.messages[0].content, "第一次");
+});
+
+test("first message starts title generation without waiting for it", async t => {
+  const h = await harness(t);
+  h.state.run = deferred();
+  h.state.title = deferred();
+  const sending = h.ai.send("检查 checkout 服务的异常日志");
+  await flush();
+  h.state.run.resolve({ run_id: "run-title", status: "running" });
+  await sending;
+  assert.equal(h.calls.title.length, 1);
+  assert.equal(h.calls.title[0].message, "检查 checkout 服务的异常日志");
+  assert.equal(h.ai.sessions[0].title, "新会话");
+  h.state.title.resolve({
+    id: h.ai.sessionId,
+    title: "检查日志",
+    generated: true
+  });
+  await flush();
+  assert.equal(h.ai.sessions[0].title, "检查日志");
+});
+
+test("title failure does not fail the first conversation and manual rename wins", async t => {
+  const h = await harness(t);
+  h.state.run = deferred();
+  h.state.title = deferred();
+  const sending = h.ai.send("检查服务");
+  await flush();
+  h.state.run.resolve({ run_id: "run-title", status: "running" });
+  await sending;
+  await h.ai.renameSession(h.ai.sessionId, "我的排查任务");
+  h.state.title.resolve({
+    id: h.ai.sessionId,
+    title: "检查日志",
+    generated: true
+  });
+  await flush();
+  assert.equal(h.ai.sessions[0].title, "我的排查任务");
+  h.state.title = deferred();
+  h.ai.activeRun = null;
+  await h.ai.createSession();
+  h.state.run = deferred();
+  const retry = h.ai.send("新的首条问题");
+  await flush();
+  h.state.run.resolve({ run_id: "run-title-2", status: "running" });
+  await retry;
+  h.state.title.reject(new Error("title unavailable"));
+  await flush();
+  assert.equal(h.ai.error, "");
 });
 
 test("failed draft persistence preserves its title and retries with the same idempotency key", async t => {

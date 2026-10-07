@@ -120,6 +120,11 @@ def create_app(service=None, token=None):
                     result = await svc.memory_library.delete(identity, mid, request.query_params.get("version"))
             elif endpoint == "memory-summary":
                 result = await svc.memory_library.summarize(identity, sid, (await body(request)).get("provider"))
+            elif endpoint == "title":
+                data = await body(request)
+                result = await svc.generate_session_title(
+                    identity, sid, data.get("message"), data.get("provider")
+                )
             elif endpoint == "session":
                 if request.method == "GET":
                     result = await svc.session_detail(identity, sid)
@@ -234,6 +239,7 @@ def create_app(service=None, token=None):
     route("/memories", "memories", ["GET", "POST"])
     route("/memories/{mid}", "memory", ["GET", "PATCH", "DELETE"])
     route("/sessions/{sid}/memory-summary", "memory-summary", ["POST"])
+    route("/sessions/{sid}/title", "title", ["POST"])
     route("/sessions/{sid}", "session", ["GET", "PATCH", "DELETE"])
     route("/sessions/{sid}/runs", "runs", ["POST"])
     route("/runs/{rid}/events", "events", ["GET"])

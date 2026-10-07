@@ -307,6 +307,15 @@ export const aiApi = {
       signal,
       120000
     ),
+  generateSessionTitle: (id: string, message: string, provider: AIProvider) =>
+    request<{ id: string; title: string; generated: boolean }>(
+      `/sessions/${itemPath(id)}/title`,
+      "POST",
+      { message, provider },
+      undefined,
+      undefined,
+      25000
+    ),
   decision: (
     id: string,
     actionId: string,

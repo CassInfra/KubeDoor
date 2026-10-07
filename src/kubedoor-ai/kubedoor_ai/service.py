@@ -11,7 +11,7 @@ from urllib.parse import quote, quote_plus, urlsplit, urlunsplit
 import asyncpg
 import httpx
 import openai
-from langchain_core.messages import HumanMessage
+from langchain_core.messages import HumanMessage, SystemMessage
 from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 
 from .domain import AIError, CredentialCipher, Identity, Provider, normalize_scope, redact
@@ -204,6 +204,61 @@ class Service:
     async def new_session(self, identity, title="新会话", key=None):
         title = str(title).strip()[:200] or "新会话"
         return await self.store.one("INSERT INTO kubedoor_ai_sessions(id,username,title,idempotency_key) VALUES($1::uuid,$2,$3,$4) ON CONFLICT(username,idempotency_key) DO UPDATE SET username=EXCLUDED.username RETURNING *", str(uuid.uuid4()), identity.username, title, key)
+
+    async def generate_session_title(self, identity, session_id, message, provider_raw):
+        """Generate a short title independently of the active conversation run.
+
+        This endpoint is deliberately best-effort: the chat request has already
+        been accepted before this method is called, and a title failure must not
+        affect the run or its stream. The conditional update also preserves a
+        title that the user renamed while the model was responding.
+        """
+        if not isinstance(message, str) or not message.strip() or len(message) > 100000:
+            raise AIError("首条消息不能为空", 400, "invalid_title_request")
+        session = await self.store.session(session_id, identity)
+        provider = Provider.parse(provider_raw)
+        prompt = (
+            "使用四到五个字直接返回这句话的简要主题，不要解释、不要标点、"
+            "不要语气词、不要多余文本，不要加粗，如果没有主题，请直接返回“闲聊”"
+        )
+        try:
+            model = self.runtime.model_factory(provider)
+            response = await asyncio.wait_for(
+                model.ainvoke([
+                    SystemMessage(content=prompt),
+                    HumanMessage(content=message.strip()),
+                ], config={"callbacks": []}),
+                timeout=20,
+            )
+        except Exception:
+            return {"id": session_id, "title": session["title"], "generated": False}
+        value = getattr(response, "content", "")
+        if isinstance(value, list):
+            value = "".join(
+                item.get("text", "") for item in value
+                if isinstance(item, dict) and isinstance(item.get("text"), str)
+            )
+        if not isinstance(value, str):
+            return {"id": session_id, "title": session["title"], "generated": False}
+        # Keep the model's requested plain-text shape even when a provider adds
+        # quotes, Markdown fences, punctuation, or a short explanation.
+        title = value.replace("```", "").strip().splitlines()[0].strip()
+        title = re.sub(r"^(?:主题|标题)\s*[:：]\s*", "", title)
+        title = title.strip("\"'“”‘’* ")
+        title = re.sub(r"[\s，。！？；：:,.!?;、]+", "", title)
+        if not title:
+            title = "闲聊"
+        title = title[:20]
+        row = await self.store.one(
+            "UPDATE kubedoor_ai_sessions SET title=$2,updated_at=now() "
+            "WHERE id=$1::uuid AND username=$3 AND title='新会话' "
+            "RETURNING id,title,updated_at",
+            session_id, title, identity.username,
+        )
+        if not row:
+            current = await self.store.session(session_id, identity)
+            return {"id": session_id, "title": current["title"], "generated": False}
+        return {**row, "generated": True}
 
     async def new_run(self, identity, session_id, scope, origin="chat", skill_ids=None, key=None, memory_ids=None):
         await self.store.session(session_id, identity)

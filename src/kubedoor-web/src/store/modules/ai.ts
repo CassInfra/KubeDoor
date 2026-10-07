@@ -93,6 +93,10 @@ export const useAIStore = defineStore("kubedoor-ai", () => {
   let summaryGeneration = 0;
   const sessionCache = new Map<string, { data: AISession; weight: number }>();
   const draftScopes = new Map<string, AIScope>();
+  const titleGenerations = new Map<string, number>();
+  // Keep an asynchronously generated title visible while an older session
+  // list response still contains the server's previous default title.
+  const autoTitleOverrides = new Map<string, string>();
   let owner = "";
   let assistantId = "";
   const approvalReady = ref(false);
@@ -223,6 +227,8 @@ export const useAIStore = defineStore("kubedoor-ai", () => {
     summarizingMemory.value = false;
     sessionCache.clear();
     draftScopes.clear();
+    titleGenerations.clear();
+    autoTitleOverrides.clear();
     sessionLoading.value = false;
     sessionReady.value = true;
     submitting.value = false;
@@ -313,11 +319,21 @@ export const useAIStore = defineStore("kubedoor-ai", () => {
     const username = owner;
     const result = await aiApi.sessions();
     if (generation !== listGeneration || username !== owner) return;
-    const remote = result.sessions || [];
+    const remote = (result.sessions || []).map(item => {
+      const override = autoTitleOverrides.get(item.id);
+      if (!override) return item;
+      if (item.title === "新会话") return { ...item, title: override };
+      if (item.title !== "新会话") autoTitleOverrides.delete(item.id);
+      return item;
+    });
     sessions.value = [...sessions.value.filter(item => item.draft), ...remote];
     const available = new Set(remote.map(item => item.id));
     for (const id of sessionCache.keys()) {
       if (!available.has(id) && id !== sessionId.value) sessionCache.delete(id);
+    }
+    for (const id of autoTitleOverrides.keys()) {
+      if (!available.has(id) && id !== sessionId.value)
+        autoTitleOverrides.delete(id);
     }
   }
 
@@ -539,6 +555,8 @@ export const useAIStore = defineStore("kubedoor-ai", () => {
   async function renameSession(id: string, title: string) {
     const session = sessions.value.find(item => item.id === id);
     const username = owner;
+    titleGenerations.set(id, (titleGenerations.get(id) || 0) + 1);
+    autoTitleOverrides.delete(id);
     if (!session?.draft) await aiApi.renameSession(id, title.trim());
     if (username !== owner) return;
     listGeneration++;
@@ -556,6 +574,8 @@ export const useAIStore = defineStore("kubedoor-ai", () => {
     listGeneration++;
     sessionCache.delete(id);
     draftScopes.delete(id);
+    titleGenerations.delete(id);
+    autoTitleOverrides.delete(id);
     sessions.value = sessions.value.filter(item => item.id !== id);
     if (sessionId.value === id) {
       beginSelection("");
@@ -622,6 +642,34 @@ export const useAIStore = defineStore("kubedoor-ai", () => {
       return draft;
     } finally {
       if (summary === summaryGeneration) summarizingMemory.value = false;
+    }
+  }
+
+  async function generateSessionTitle(
+    id: string,
+    message: string,
+    username: string,
+    generation: number,
+    modelProvider: AIProvider
+  ) {
+    try {
+      const result = await aiApi.generateSessionTitle(id, message, {
+        ...modelProvider
+      });
+      if (
+        username !== owner ||
+        generation !== (titleGenerations.get(id) || 0) ||
+        !result.generated
+      )
+        return;
+      autoTitleOverrides.set(id, result.title);
+      const session = sessions.value.find(item => item.id === id);
+      if (session && session.title === "新会话") session.title = result.title;
+      const cached = sessionCache.get(id);
+      if (cached && cached.data.title === "新会话")
+        cached.data.title = result.title;
+    } catch {
+      // Title generation is best effort and must never affect the active run.
     }
   }
 
@@ -889,6 +937,9 @@ export const useAIStore = defineStore("kubedoor-ai", () => {
       throw new Error("请选择已登记的 K8S 集群。");
     error.value = "";
     streamError.value = "";
+    const firstUserMessage = !messages.value.some(
+      messageItem => messageItem.role === "user"
+    );
     const memoryIds = selectedMemories.value.map(item => item.id);
     if (!sessionId.value) {
       // Automatic first-send drafts keep the pending references. Explicit new
@@ -959,6 +1010,17 @@ export const useAIStore = defineStore("kubedoor-ai", () => {
       assistantMessage();
       void connectRun(run.run_id);
       void refreshSessions().catch(() => undefined);
+      if (firstUserMessage) {
+        // This request is intentionally detached from the conversation stream.
+        // A slow or failed title model call cannot delay or fail the run.
+        void generateSessionTitle(
+          currentSession,
+          message.trim(),
+          username,
+          titleGenerations.get(currentSession) || 0,
+          { ...provider.value }
+        );
+      }
     } catch (reason) {
       if (username !== owner) return;
       error.value = errorText(reason);
