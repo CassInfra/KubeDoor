@@ -127,6 +127,8 @@ resource:
   keywordPlaceholder: Namespace or Deployment
   placeholder: Please select
   rollingUpdatePlaceholder: For example, 1 or 35%
+  syncTo: Sync to
+  syncHint: Only syncs the target database; it does not operate the target service. Restart the target service manually to apply it.
   search: Search
   reset: Reset
   scale: Deployment Scale
@@ -192,11 +194,13 @@ resource:
     greaterThanZero: Must be greater than or equal -1
     podCountManualNoFallback: Cannot be -1 for a service added manually or without peak data yet; enter a Pod count (0 = do not start Pods)
     rollingUpdateValue: Enter a non-negative integer or a percentage from 0% through 100%
+    syncTarget: Select a target K8S
   message:
     createSuccess: Created successfully
     createFailed: Created failed
     editSuccess: Operator successfully
     editFailed: Operator failed
+    syncTargetMissing: Source saved, but the target K8S has no matching service; nothing was synchronized
     dateAndEnvIsNecessary: Please select a env and date
     isExecute: Confirm to execute?
     isExecuteScale: Is execute scale?

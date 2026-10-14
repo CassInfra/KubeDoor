@@ -31,6 +31,7 @@ import {
   getMaxDay
 } from "@/api/resource";
 import { showAddLabel } from "@/api/monit";
+import { getAgentNames } from "@/api/istio";
 // import { ElMessageBox } from "element-plus";
 import { type Ref, h, ref, reactive, onMounted, watch } from "vue";
 import { transformI18n } from "@/plugins/i18n";
@@ -43,6 +44,7 @@ export function useResource(tableRef: Ref, searchStore: any) {
     env: searchStore.env || ""
   });
   const envList = ref([]);
+  const syncEnvList = ref<string[]>([]);
   const namespaceList = ref([]);
   const deploymentList = ref([]);
   const editFormRef = ref();
@@ -388,6 +390,28 @@ export function useResource(tableRef: Ref, searchStore: any) {
     onSearch();
   }
 
+  function getSyncPayload(form: FormItemProps) {
+    if (!form.sync_enabled) return {};
+    const targetEnv = String(form.sync_env || "").trim();
+    if (!targetEnv || targetEnv === form.env) {
+      throw new Error(transformI18n("resource.rules.syncTarget"));
+    }
+    return { sync_env: targetEnv };
+  }
+
+  function showSaveResult(
+    result: any,
+    successKey: string,
+    showSuccess = true
+  ) {
+    if (result?.sync_env && result.sync_target_found === false) {
+      message(transformI18n("resource.message.syncTargetMissing"), {
+        type: "warning"
+      });
+    }
+    if (showSuccess) message(transformI18n(successKey), { type: "success" });
+  }
+
   const editDialogSubmit = (options, row, isSubmit: boolean) => {
     return new Promise<boolean>(resolve => {
       const FormRef = editFormRef.value.getRef();
@@ -396,8 +420,10 @@ export function useResource(tableRef: Ref, searchStore: any) {
       FormRef.validate(async valid => {
         if (valid) {
           let jvmValues: ReturnType<typeof getJvmControlPayload>;
+          let syncValues: { sync_env?: string };
           try {
             jvmValues = getJvmControlPayload(curData);
+            syncValues = getSyncPayload(curData);
           } catch (error) {
             message(error instanceof Error ? error.message : "JVM 参数无效", {
               type: "error"
@@ -412,17 +438,18 @@ export function useResource(tableRef: Ref, searchStore: any) {
               namespace: curData.namespace,
               deployment: curData.deployment,
               pod_count_manual: curData.pod_count_manual,
+              // 编辑时需求值不改源服务，仅供后端补写目标环境的空值。
+              request_cpu_m: curData.request_cpu_m,
+              request_mem_mb: curData.request_mem_mb,
               limit_cpu_m: curData.limit_cpu_m,
               limit_mem_mb: curData.limit_mem_mb,
               ...getRollingUpdatePayload(curData),
-              ...jvmValues
+              ...jvmValues,
+              ...syncValues
             })
               .then(res => {
                 console.log(res);
-                isSubmit &&
-                  message(transformI18n("resource.message.editSuccess"), {
-                    type: "success"
-                  });
+                showSaveResult(res, "resource.message.editSuccess", isSubmit);
                 onSearch();
                 resolve(true);
               })
@@ -446,13 +473,12 @@ export function useResource(tableRef: Ref, searchStore: any) {
               request_cpu_m: curData.request_cpu_m,
               request_mem_mb: curData.request_mem_mb,
               ...getRollingUpdatePayload(curData),
-              ...jvmValues
+              ...jvmValues,
+              ...syncValues
             })
               .then(async res => {
                 console.log(res);
-                message(transformI18n("resource.message.createSuccess"), {
-                  type: "success"
-                });
+                showSaveResult(res, "resource.message.createSuccess");
                 let envRes = await getEnv();
                 envList.value = envRes.data;
                 queryForm.env = curData.env;
@@ -528,6 +554,8 @@ export function useResource(tableRef: Ref, searchStore: any) {
           row?.request_mem_mb !== undefined ? row?.request_mem_mb : "",
         request_cpu_m:
           row?.request_cpu_m !== undefined ? row?.request_cpu_m : "",
+        sync_enabled: false,
+        sync_env: "",
         pod_count: row?.pod_count !== undefined ? row?.pod_count : "",
         // 最近一次采集时间，判断「指定Pod」能否设为 -1（手动新增未采集的服务为空）
         update: row?.update || "",
@@ -535,6 +563,7 @@ export function useResource(tableRef: Ref, searchStore: any) {
       },
       namespace: namespaceList.value,
       envList: envList.value,
+      syncEnvList: syncEnvList.value,
       isEdit: row?.namespace ? true : false
     };
     addDialog({
@@ -832,8 +861,16 @@ export function useResource(tableRef: Ref, searchStore: any) {
   );
 
   onMounted(async () => {
-    const [envRes] = await Promise.all([getEnv()]);
-    envList.value = envRes.data;
+    const [envResult, agentResult] = await Promise.allSettled([
+      getEnv(),
+      getAgentNames()
+    ]);
+    if (envResult.status !== "fulfilled") throw envResult.reason;
+    envList.value = envResult.value.data;
+    syncEnvList.value =
+      agentResult.status === "fulfilled" && Array.isArray(agentResult.value.data)
+        ? agentResult.value.data.map(String)
+        : [];
     if (
       searchStore.env &&
       envList.value.find(item => item[0] == searchStore.env)
@@ -854,6 +891,7 @@ export function useResource(tableRef: Ref, searchStore: any) {
   return {
     maxDay,
     envList,
+    syncEnvList,
     namespaceList,
     deploymentList,
     onEnvChange,

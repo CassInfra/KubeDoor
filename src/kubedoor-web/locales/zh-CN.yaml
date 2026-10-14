@@ -127,6 +127,8 @@ resource:
   keywordPlaceholder: 命名空间或微服务匹配
   placeholder: 请选择
   rollingUpdatePlaceholder: 例如 1 或 35%
+  syncTo: 同步到
+  syncHint: 只同步目标库，不操作目标服务；需要手动重启目标服务才会生效
   search: 搜索
   reset: 重置
   scale: 微服务扩缩容
@@ -192,11 +194,13 @@ resource:
     greaterThanZero: 必须>=-1
     podCountManualNoFallback: 新增或尚未采集高峰期数据的服务不能为-1，请填写Pod数(0表示暂不启动)
     rollingUpdateValue: 必须为非负整数或 0% 至 100% 的百分比
+    syncTarget: 请选择同步目标 K8S
   message:
     createSuccess: 创建成功
     createFailed: 创建失败
     editSuccess: 操作成功
     editFailed: 操作失败
+    syncTargetMissing: 源配置已保存，但目标 K8S 没有相同服务，未同步
     dateAndEnvIsNecessary: 请选择环境和日期
     isExecute: 是否执行当前操作？
     isExecuteScale: 是否执行扩缩容？

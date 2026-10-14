@@ -17,7 +17,7 @@ from loguru import logger
 
 import utils
 from jvm_config import normalize_rolling_update_value
-from db import pg_fetch, pg_fetchval, pg_execute
+from db import pg_fetch, pg_fetchval, pg_execute, pg_execute_transaction
 
 
 def _cell(v):
@@ -107,6 +107,79 @@ def _pod_count_manual(data):
     return count
 
 
+def _sync_target_env(data):
+    """读取可选的资源请求同步目标环境。
+
+    同步只用于把当前编辑表单中的 request CPU/内存补到另一个环境，
+    不允许空环境值伪装成目标环境，也不把源环境编辑隐式变成跨环境写入。
+    """
+    if 'sync_env' not in data or data['sync_env'] in (None, ''):
+        return None
+    value = data['sync_env']
+    if not isinstance(value, str) or not value.strip():
+        raise web.HTTPBadRequest(text='sync_env 必须是非空环境名称')
+    return value.strip()
+
+
+async def _validate_sync_target_env(sync_env, source_env):
+    """确认同步目标是已接入的 K8S 环境，且不能指向当前环境。"""
+    if not sync_env:
+        return None
+    if sync_env == source_env:
+        raise web.HTTPBadRequest(text='同步目标 K8S 不能与当前环境相同')
+    exists = await pg_fetchval(
+        'SELECT 1 FROM k8s_agent_status WHERE env = $1 LIMIT 1', sync_env,
+    )
+    if not exists:
+        raise web.HTTPBadRequest(text='同步目标 K8S 环境不存在或尚未接入')
+    return sync_env
+
+
+async def _sync_target_found(target_env, namespace, deployment):
+    """返回目标环境是否已有相同 namespace/deployment 管控行。"""
+    return bool(await pg_fetchval(
+        'SELECT 1 FROM k8s_res_control WHERE env=$1 AND namespace=$2 AND deployment=$3 LIMIT 1',
+        target_env, namespace, deployment,
+    ))
+
+
+def _sync_request_statement(target_env, namespace, deployment, request_cpu_m, request_mem_mb):
+    """构造目标补空 SQL；-1/NULL 是未配置，0 是显式值。"""
+    cpu = request_cpu_m if isinstance(request_cpu_m, int) and request_cpu_m >= 0 else None
+    memory = request_mem_mb if isinstance(request_mem_mb, int) and request_mem_mb >= 0 else None
+    if cpu is None and memory is None:
+        return None
+    sql = """
+        UPDATE k8s_res_control
+        SET request_cpu_m = CASE
+                WHEN $4 IS NOT NULL AND (request_cpu_m IS NULL OR request_cpu_m = -1) THEN $4
+                ELSE request_cpu_m
+            END,
+            request_mem_mb = CASE
+                WHEN $5 IS NOT NULL AND (request_mem_mb IS NULL OR request_mem_mb = -1) THEN $5
+                ELSE request_mem_mb
+            END
+        WHERE env = $1 AND namespace = $2 AND deployment = $3
+          AND (($4 IS NOT NULL AND (request_cpu_m IS NULL OR request_cpu_m = -1))
+            OR ($5 IS NOT NULL AND (request_mem_mb IS NULL OR request_mem_mb = -1)))
+    """
+    return sql, (target_env, namespace, deployment, cpu, memory)
+
+
+async def _sync_request_values(target_env, namespace, deployment, request_cpu_m, request_mem_mb):
+    """兼容单独调用方：向目标环境已有服务补写空的 request CPU/内存值。"""
+    statement = _sync_request_statement(
+        target_env, namespace, deployment, request_cpu_m, request_mem_mb,
+    )
+    if statement is None:
+        return 0
+    status = await pg_execute(statement[0], *statement[1])
+    try:
+        return int(status.rsplit(' ', 1)[-1])
+    except (AttributeError, ValueError):
+        return 0
+
+
 async def _ensure_pod_count_fallback(env, namespace, deployment):
     """指定Pod=-1 时准入回退到 AI推荐 / 当日Pod。手动新增且还没采集过的服务当日Pod 为 0，
     回退会把副本数改成 0，所以只允许采集过高峰期数据或已有 AI推荐的服务设为 -1。"""
@@ -186,6 +259,9 @@ async def res_list(request):
 async def res_add(request):
     """新增管控服务(原前端 addData 的 INSERT)"""
     d = await request.json()
+    sync_env = _sync_target_env(d)
+    if sync_env:
+        await _validate_sync_target_env(sync_env, d['env'])
     pod_count_manual = _pod_count_manual(d)
     if pod_count_manual < 0:
         # 手动新增的服务没有采集数据(当日Pod=0)，-1 会被准入回退成 0 副本
@@ -194,26 +270,59 @@ async def res_add(request):
     strategy = _rolling_strategy_updates(d)
     columns = ['env', 'namespace', 'deployment', 'pod_count_manual', 'limit_cpu_m',
                'limit_mem_mb', *strategy, 'request_cpu_m', 'request_mem_mb', *jvm]
+    request_cpu_m = int(d['request_cpu_m'])
+    request_mem_mb = int(d['request_mem_mb'])
     values = [d['env'], d['namespace'], d['deployment'], pod_count_manual,
               int(d['limit_cpu_m']), int(d['limit_mem_mb']), *strategy.values(),
-              int(d['request_cpu_m']), int(d['request_mem_mb']), *jvm.values()]
-    await pg_execute(
+              request_cpu_m, request_mem_mb, *jvm.values()]
+    insert_sql = (
         f"INSERT INTO k8s_res_control ({','.join(columns)}) "
-        f"VALUES ({','.join(f'${i}' for i in range(1, len(values) + 1))})",
-        *values,
+        f"VALUES ({','.join(f'${i}' for i in range(1, len(values) + 1))})"
     )
+    sync_updated = 0
+    target_found = False
+    target_statement = None
+    if sync_env:
+        target_found = await _sync_target_found(sync_env, d['namespace'], d['deployment'])
+        target_statement = _sync_request_statement(
+            sync_env, d['namespace'], d['deployment'], request_cpu_m, request_mem_mb,
+        )
+    if sync_env and target_statement is not None:
+        statuses = await pg_execute_transaction([
+            (insert_sql, tuple(values)), target_statement,
+        ])
+        try:
+            sync_updated = int(statuses[-1].rsplit(' ', 1)[-1])
+        except (AttributeError, IndexError, ValueError):
+            sync_updated = 0
+    else:
+        await pg_execute(insert_sql, *values)
     utils.invalidate_admis_cache()
-    return web.json_response({"success": True, "msg": "新增成功"})
+    result = {"success": True, "msg": "新增成功"}
+    if sync_env:
+        result.update({"sync_env": sync_env, "sync_updated": sync_updated,
+                       "sync_target_found": target_found})
+    return web.json_response(result)
 
 
 async def res_edit(request):
     """编辑管控服务，保存后于下次发布或滚动重启应用。"""
     d = await request.json()
+    sync_env = _sync_target_env(d)
+    if sync_env:
+        await _validate_sync_target_env(sync_env, d['env'])
     pod_count_manual = _pod_count_manual(d)
     if pod_count_manual == -1:
         await _ensure_pod_count_fallback(d['env'], d['namespace'], d['deployment'])
     jvm = _jvm_updates(d)
     strategy = _rolling_strategy_updates(d)
+    request_cpu_m = request_mem_mb = None
+    if sync_env:
+        try:
+            request_cpu_m = None if d.get('request_cpu_m') in (None, '') else int(d['request_cpu_m'])
+            request_mem_mb = None if d.get('request_mem_mb') in (None, '') else int(d['request_mem_mb'])
+        except (TypeError, ValueError) as exc:
+            raise web.HTTPBadRequest(text='同步的需求 CPU/内存必须是整数或空值') from exc
     values = [int(d['limit_mem_mb']), int(d['limit_cpu_m']), pod_count_manual]
     assignments = ['limit_mem_mb=$1', 'limit_cpu_m=$2', 'pod_count_manual=$3']
     for field, value in (*strategy.items(), *jvm.items()):
@@ -221,13 +330,34 @@ async def res_edit(request):
         assignments.append(f'{field}=${len(values)}')
     offset = len(values)
     values.extend([d['env'], d['namespace'], d['deployment']])
-    await pg_execute(
+    source_sql = (
         f"UPDATE k8s_res_control SET {', '.join(assignments)} "
-        f"WHERE env=${offset + 1} AND namespace=${offset + 2} AND deployment=${offset + 3}",
-        *values,
+        f"WHERE env=${offset + 1} AND namespace=${offset + 2} AND deployment=${offset + 3}"
     )
+    sync_updated = 0
+    target_found = False
+    target_statement = None
+    if sync_env:
+        target_found = await _sync_target_found(sync_env, d['namespace'], d['deployment'])
+        target_statement = _sync_request_statement(
+            sync_env, d['namespace'], d['deployment'], request_cpu_m, request_mem_mb,
+        )
+    if sync_env and target_statement is not None:
+        statuses = await pg_execute_transaction([
+            (source_sql, tuple(values)), target_statement,
+        ])
+        try:
+            sync_updated = int(statuses[-1].rsplit(' ', 1)[-1])
+        except (AttributeError, IndexError, ValueError):
+            sync_updated = 0
+    else:
+        await pg_execute(source_sql, *values)
     utils.invalidate_admis_cache()
-    return web.json_response({"success": True, "msg": "更新成功"})
+    result = {"success": True, "msg": "更新成功"}
+    if sync_env:
+        result.update({"sync_env": sync_env, "sync_updated": sync_updated,
+                       "sync_target_found": target_found})
+    return web.json_response(result)
 
 
 async def res_update_pod_count(request):

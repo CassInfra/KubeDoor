@@ -9,6 +9,8 @@ interface FormItemProps extends JvmControlValues, JvmFormValues {
   limit_mem_mb: string;
   max_surge: string | number | null;
   max_unavailable: string | number | null;
+  sync_enabled?: boolean;
+  sync_env?: string;
   [string: string]: any;
 }
 interface FormProps {
@@ -16,6 +18,7 @@ interface FormProps {
   isEdit: boolean;
   namespace: any[];
   envList: any[];
+  syncEnvList: string[];
 }
 
 export type { FormItemProps, FormProps };

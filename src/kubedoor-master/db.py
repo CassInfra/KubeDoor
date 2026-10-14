@@ -111,6 +111,16 @@ async def pg_execute(sql: str, *args, timeout: Optional[float] = None) -> str:
         return await conn.execute(sql, *args, timeout=timeout)
 
 
+async def pg_execute_transaction(statements: Sequence[Sequence[Any]], timeout: Optional[float] = None) -> List[str]:
+    """在同一个事务中依次执行多条参数化写语句，失败时整体回滚。"""
+    async with get_pool().acquire() as conn:
+        async with conn.transaction():
+            statuses = []
+            for sql, args in statements:
+                statuses.append(await conn.execute(sql, *args, timeout=timeout))
+            return statuses
+
+
 async def pg_executemany(sql: str, args_iter: Sequence[Sequence[Any]], timeout: Optional[float] = None) -> None:
     """批量执行(高效插入)。args_iter 为参数元组序列。"""
     async with get_pool().acquire() as conn:

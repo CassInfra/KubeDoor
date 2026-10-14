@@ -13,6 +13,7 @@ import { FormProps } from "../utils/types";
 import addLine from "@iconify-icons/ri/add-line";
 import { transformI18n } from "@/plugins/i18n";
 import { getNamespace } from "@/api/resource";
+import { QuestionFilled } from "@element-plus/icons-vue";
 
 const props = withDefaults(defineProps<FormProps>(), {
   formInline: () => ({
@@ -26,20 +27,39 @@ const props = withDefaults(defineProps<FormProps>(), {
     request_mem_mb: "",
     pod_count: "",
     max_surge: "",
-    max_unavailable: ""
+    max_unavailable: "",
+    sync_enabled: false,
+    sync_env: ""
   }),
   namespace: () => [],
   envList: () => [],
+  syncEnvList: () => [],
   isEdit: false
 });
 
 const formRef = ref();
 const newFormInline = ref(props.formInline);
+const syncEnvList = computed(() =>
+  props.syncEnvList.filter(env => env && env !== newFormInline.value.env)
+);
+const syncRules = [
+  {
+    trigger: ["change", "blur"],
+    validator: (_rule, value, callback) => {
+      if (newFormInline.value.sync_enabled && !value) {
+        callback(new Error(transformI18n("resource.rules.syncTarget")));
+        return;
+      }
+      callback();
+    }
+  }
+];
 const rules = {
   ...formRules,
   ...createPodCountManualRules(newFormInline.value, props.isEdit),
   ...createJvmFormRules(newFormInline.value),
-  ...createRollingUpdateRules()
+  ...createRollingUpdateRules(),
+  sync_env: syncRules
 };
 const hasJvmParameters = computed(() =>
   JVM_PARAMETERS.some(
@@ -60,6 +80,10 @@ async function onFormEnvChange(val: string) {
   namespaceList.value = [];
   const namespaceRes = await getNamespace(val);
   namespaceList.value = namespaceRes.data;
+}
+
+function onSyncToggle(enabled: boolean) {
+  if (!enabled) newFormInline.value.sync_env = "";
 }
 
 defineExpose({ getRef });
@@ -234,6 +258,38 @@ defineExpose({ getRef });
           </el-form-item>
         </re-col>
       </template>
+      <re-col :value="20" :xs="24" :sm="24">
+        <el-form-item prop="sync_env" label-width="0" class="sync-resource">
+          <div class="sync-resource__control">
+            <el-checkbox
+              v-model="newFormInline.sync_enabled"
+              @change="onSyncToggle"
+            >
+              {{ transformI18n("resource.syncTo") }}
+            </el-checkbox>
+            <el-tooltip
+              :content="transformI18n('resource.syncHint')"
+              placement="top"
+            >
+              <el-icon class="sync-resource__hint"><QuestionFilled /></el-icon>
+            </el-tooltip>
+            <el-select
+              v-model="newFormInline.sync_env"
+              :disabled="!newFormInline.sync_enabled"
+              :placeholder="transformI18n('resource.placeholder')"
+              clearable
+              filterable
+            >
+              <el-option
+                v-for="item in syncEnvList"
+                :key="item"
+                :label="item"
+                :value="item"
+              />
+            </el-select>
+          </div>
+        </el-form-item>
+      </re-col>
     </el-row>
     <div class="warning-box">
       <p>
@@ -261,6 +317,22 @@ defineExpose({ getRef });
 /* 一行两个时输入框窄,错误提示不换行,免得压到下一行 */
 .jvm-parameter :deep(.el-form-item__error) {
   white-space: nowrap;
+}
+
+.sync-resource__control {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 12px;
+}
+
+.sync-resource__control :deep(.el-select) {
+  min-width: 220px;
+}
+
+.sync-resource__hint {
+  color: var(--el-text-color-secondary);
+  cursor: help;
 }
 
 .avatar-uploader .el-upload {
