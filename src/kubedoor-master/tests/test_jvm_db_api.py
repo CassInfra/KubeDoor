@@ -57,6 +57,18 @@ def test_partial_edit_keeps_xss_exact_and_other_jvm_fields_unchanged(monkeypatch
     assert 'jvm_xmx_bytes' not in sql
 
 
+def test_rolling_update_values_are_normalized_and_only_explicit_fields_change(monkeypatch):
+    sql, args = save(monkeypatch, edit_data(max_unavailable='035%', max_surge=2))
+    assert 'max_unavailable=$4' in sql and 'max_surge=$5' in sql
+    assert args == (2048, 1000, 3, '35%', '2', 'prod', 'infra', 'java-service')
+
+
+def test_rolling_update_null_clears_and_omitted_values_are_preserved(monkeypatch):
+    sql, args = save(monkeypatch, edit_data(max_surge=None))
+    assert 'max_surge=$4' in sql and 'max_unavailable' not in sql
+    assert args == (2048, 1000, 3, None, 'prod', 'infra', 'java-service')
+
+
 def test_zero_and_explicit_null_are_distinct(monkeypatch):
     sql, args = save(monkeypatch, edit_data(jvm_xms_bytes=0, jvm_xss_bytes=None))
     assert args[3:5] == (0, None)
@@ -72,6 +84,14 @@ def test_add_keeps_field_and_placeholder_order(monkeypatch):
     assert args[-2:] == (1073741824, 524288)
 
 
+def test_add_accepts_integer_and_percentage_strategy_values(monkeypatch):
+    data = edit_data(request_cpu_m=100, request_mem_mb=256,
+                     max_unavailable='35%', max_surge=2)
+    sql, args = save(monkeypatch, data, db_api.res_add)
+    assert 'limit_mem_mb,max_unavailable,max_surge,request_cpu_m' in sql
+    assert args[6:8] == ('35%', '2')
+
+
 @pytest.mark.parametrize('invalid', [True, -1, 0.5, '512k', 2 ** 53])
 def test_invalid_byte_values_fail_before_database_write(monkeypatch, invalid):
     async def unexpected_execute(*args):
@@ -80,6 +100,16 @@ def test_invalid_byte_values_fail_before_database_write(monkeypatch, invalid):
     monkeypatch.setattr(db_api, 'pg_execute', unexpected_execute)
     with pytest.raises(web.HTTPBadRequest):
         asyncio.run(db_api.res_edit(Request(edit_data(jvm_xss_bytes=invalid))))
+
+
+@pytest.mark.parametrize('invalid', [True, False, -1, 1.5, '1.5', '-1', '101%', '1.5%'])
+def test_invalid_rolling_update_values_fail_before_database_write(monkeypatch, invalid):
+    async def unexpected_execute(*args):
+        pytest.fail('invalid rollingUpdate fields must not reach PostgreSQL')
+
+    monkeypatch.setattr(db_api, 'pg_execute', unexpected_execute)
+    with pytest.raises(web.HTTPBadRequest):
+        asyncio.run(db_api.res_edit(Request(edit_data(max_unavailable=invalid))))
 
 
 def test_heap_bounds_reject_xms_larger_than_xmx():
@@ -97,3 +127,21 @@ def test_jvm_list_preserves_null_and_fractional_megabyte_as_exact_bytes():
     indexes = {column['name']: i for i, column in enumerate(payload['meta'])}
     assert payload['data'][0][indexes['jvm_xms_bytes']] is None
     assert payload['data'][0][indexes['jvm_xss_bytes']] == 524288
+
+
+def test_resource_control_api_exposes_nullable_strategy_fields():
+    row = [None] * len(db_api.RES_CONTROL_COLUMNS)
+    row[db_api.RES_CONTROL_COLUMNS.index('max_unavailable')] = '35%'
+    row[db_api.RES_CONTROL_COLUMNS.index('max_surge')] = '2'
+    payload = json.loads(db_api._table_response([row], db_api.RES_CONTROL_COLUMNS).text)
+    indexes = {column['name']: i for i, column in enumerate(payload['meta'])}
+    assert payload['data'][0][indexes['max_unavailable']] == '35%'
+    assert payload['data'][0][indexes['max_surge']] == '2'
+
+
+def test_schema_creates_and_idempotently_adds_strategy_columns():
+    schema = (pathlib.Path(__file__).resolve().parent.parent / 'db.sql').read_text(encoding='utf-8').lower()
+    assert 'max_unavailable   text' in schema
+    assert 'max_surge         text' in schema
+    assert 'add column if not exists max_unavailable text' in schema
+    assert 'add column if not exists max_surge text' in schema

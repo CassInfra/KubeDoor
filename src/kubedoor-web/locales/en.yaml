@@ -126,6 +126,7 @@ resource:
   keyword: Keyword
   keywordPlaceholder: Namespace or Deployment
   placeholder: Please select
+  rollingUpdatePlaceholder: For example, 1 or 35%
   search: Search
   reset: Reset
   scale: Deployment Scale
@@ -153,6 +154,8 @@ resource:
     requestMemMb: RequestMemMB
     limitCpuM: LimitCPUm
     limitMemMb: LimitMemMB
+    maxSurge: Max Surge
+    maxUnavailable: Max Unavailable
     date: Date
     env: Env
     update: Update
@@ -188,6 +191,7 @@ resource:
     cron: Cron is required
     greaterThanZero: Must be greater than or equal -1
     podCountManualNoFallback: Cannot be -1 for a service added manually or without peak data yet; enter a Pod count (0 = do not start Pods)
+    rollingUpdateValue: Enter a non-negative integer or a percentage from 0% through 100%
   message:
     createSuccess: Created successfully
     createFailed: Created failed

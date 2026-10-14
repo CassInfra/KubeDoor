@@ -1,6 +1,7 @@
 import asyncio
 import base64
 import json
+import re
 from datetime import datetime, timedelta
 
 from aiohttp import web
@@ -113,6 +114,10 @@ class AdmisService:
             return web.json_response(self._admis_fail(uid, result[0], result[1]))
 
         jvm_config = result[8] if len(result) > 8 and isinstance(result[8], dict) else {}
+        strategy_config = {
+            "max_unavailable": jvm_config.get("max_unavailable"),
+            "max_surge": jvm_config.get("max_surge"),
+        }
         (
             pod_count,
             pod_count_ai,
@@ -132,6 +137,9 @@ class AdmisService:
         logger.info(deploy_baseinfo)
 
         try:
+            spec = obj.get("spec", {}) or {}
+            old_spec = (old_object or {}).get("spec", {}) or {}
+            strategy_changed = not bool(scheduler) and spec.get("strategy") != old_spec.get("strategy")
             if kind == 'Scale' and operation == 'UPDATE':
                 admis_msg = (
                     f"admis:【{utils.PROM_K8S_TAG_VALUE}】【{namespace}】【{deployment_name}】收到scale请求，仅修改replicas为: {replicas}"
@@ -162,12 +170,17 @@ class AdmisService:
                         scheduler,
                         obj['spec']['template']['spec']['containers'][0].get('args'),
                         jvm_config,
+                        strategy_config,
+                        spec.get("strategy"),
                     )
                 )
             if (
                 kind == 'Deployment'
                 and operation == 'UPDATE'
-                and obj['spec']['template'] != old_object['spec']['template']
+                and (
+                    spec.get('template') != old_spec.get('template')
+                    or strategy_changed
+                )
             ):
                 admis_msg = (
                     f"admis:【{utils.PROM_K8S_TAG_VALUE}】【{namespace}】【{deployment_name}】收到 update 请求，修改所有参数"
@@ -191,6 +204,8 @@ class AdmisService:
                         scheduler,
                         obj['spec']['template']['spec']['containers'][0].get('args'),
                         jvm_config,
+                        strategy_config,
+                        spec.get("strategy"),
                     )
                 )
             if (
@@ -217,8 +232,9 @@ class AdmisService:
             if (
                 kind == 'Deployment'
                 and operation == 'UPDATE'
-                and obj['spec']['template'] == old_object['spec']['template']
-                and obj['spec']['replicas'] == old_object['spec']['replicas']
+                and spec.get('template') == old_spec.get('template')
+                and spec.get('replicas') == old_spec.get('replicas')
+                and not strategy_changed
             ):
                 logger.info(
                     f"admis:【{utils.PROM_K8S_TAG_VALUE}】【{namespace}】【{deployment_name}】template 和 replicas 没变，不处理"
@@ -342,9 +358,13 @@ class AdmisService:
         scheduler,
         container_args=None,
         jvm_config=None,
+        strategy_config=None,
+        strategy_object=None,
     ):
         change_list = []
         scheduler_enabled = bool(scheduler)
+        strategy_config = strategy_config or {}
+        strategy_updates = {}
         if scheduler_enabled:
             info_dict = await self._get_pod_label_and_max_unavailable(namespace, deployment_name)
             if not info_dict:
@@ -359,12 +379,11 @@ class AdmisService:
             if int(replicas) * max_unavailable_ratio < 1:
                 logger.info(f"maxUnavailable_value原值为{max_unavailable_value}，改为1")
                 max_unavailable_value = 1
-            restart_strategy = {
+            change_list.append({
                 "op": "replace",
                 "path": "/spec/strategy/rollingUpdate/maxUnavailable",
                 "value": max_unavailable_value,
-            }
-            change_list.append(restart_strategy)
+            })
         else:
             has_scheduler = await self._get_deployment_affinity_old(namespace, deployment_name)
             if has_scheduler:
@@ -373,6 +392,12 @@ class AdmisService:
                 logger.info(
                     f"检查到【{namespace}】【{deployment_name}】已配置节点选择，并且调度开关已关闭，删除nodeAffinity字段"
                 )
+
+            configured_unavailable = self._validate_rolling_value(strategy_config.get("max_unavailable"))
+            configured_surge = self._validate_rolling_value(strategy_config.get("max_surge"))
+            strategy_updates["maxUnavailable"] = "30%" if configured_unavailable is None else configured_unavailable
+            strategy_updates["maxSurge"] = 0 if configured_surge is None else configured_surge
+            change_list.extend(self._rolling_strategy_patches(strategy_object, strategy_updates))
 
         change_list.append({"op": "replace", "path": "/spec/replicas", "value": replicas})
         logger.info(f"改前：{resources_dict}")
@@ -411,6 +436,50 @@ class AdmisService:
             "kind": "AdmissionReview",
             "response": {"uid": uid, "allowed": True, "patchType": "JSONPatch", "patch": code},
         }
+
+    @staticmethod
+    def _validate_rolling_value(value):
+        max_int32 = (1 << 31) - 1
+        if type(value) is int and 0 <= value <= max_int32:
+            return value
+        if isinstance(value, str) and len(value) <= 10 and re.fullmatch(r"[0-9]+", value):
+            parsed = int(value)
+            return parsed if parsed <= max_int32 else None
+        if isinstance(value, str) and re.fullmatch(r"(?:100|[1-9]\d|0)%", value):
+            return value
+        return None
+
+    @staticmethod
+    def _process_max_unavailable(max_unavailable):
+        if isinstance(max_unavailable, (int, float)):
+            return max_unavailable
+        if isinstance(max_unavailable, str) and '%' in max_unavailable:
+            return float(max_unavailable.strip('%')) / 100
+        if isinstance(max_unavailable, str) and '.' in max_unavailable:
+            return float(max_unavailable)
+        return int(max_unavailable)
+
+    @staticmethod
+    def _rolling_strategy_patches(strategy, updates):
+        if not updates:
+            return []
+        if isinstance(strategy, dict):
+            if strategy.get("type") == "Recreate":
+                return []
+            rolling_update = strategy.get("rollingUpdate")
+            if isinstance(rolling_update, dict):
+                return [
+                    {"op": "add", "path": f"/spec/strategy/rollingUpdate/{field}", "value": value}
+                    for field, value in updates.items()
+                ]
+            return [{"op": "add", "path": "/spec/strategy/rollingUpdate", "value": updates}]
+        if strategy is not None:
+            return []
+        return [{
+            "op": "add",
+            "path": "/spec/strategy",
+            "value": {"type": "RollingUpdate", "rollingUpdate": updates},
+        }]
 
     async def _get_pod_label_and_max_unavailable(self, namespace, deployment_name):
         try:
@@ -471,16 +540,6 @@ class AdmisService:
             },
         }
         return affinity
-
-    @staticmethod
-    def _process_max_unavailable(max_unavailable):
-        if isinstance(max_unavailable, (int, float)):
-            return max_unavailable
-        if isinstance(max_unavailable, str) and '%' in max_unavailable:
-            return float(max_unavailable.strip('%')) / 100
-        if isinstance(max_unavailable, str) and '.' in max_unavailable:
-            return float(max_unavailable)
-        return int(max_unavailable)
 
     @staticmethod
     def _admis_pass(uid):

@@ -110,15 +110,16 @@ async def get_jvm_configs(apps_v1, request: web.Request) -> web.Response:
                 deployments = await apps_v1.list_deployment_for_all_namespaces(**options)
             for deployment in deployments.items:
                 containers = deployment.spec.template.spec.containers or []
-                if not containers:
-                    continue
-                config = extract_jvm_config(containers[0].args)
-                if any(value is not None for value in config.values()):
-                    configs.append({
-                        "namespace": deployment.metadata.namespace,
-                        "deployment": deployment.metadata.name,
-                        **config,
-                    })
+                config = extract_jvm_config(containers[0].args if containers else None)
+                strategy = getattr(deployment.spec, "strategy", None)
+                rolling_update = getattr(strategy, "rolling_update", None)
+                configs.append({
+                    "namespace": deployment.metadata.namespace,
+                    "deployment": deployment.metadata.name,
+                    **config,
+                    "max_unavailable": getattr(rolling_update, "max_unavailable", None),
+                    "max_surge": getattr(rolling_update, "max_surge", None),
+                })
             continuation = deployments.metadata._continue
             if not continuation:
                 break

@@ -16,6 +16,7 @@ import {
   getJvmControlPayload,
   getJvmFormValues
 } from "./jvm";
+import { getRollingUpdatePayload } from "./rolling-update";
 import { deviceDetection } from "@pureadmin/utils";
 import {
   getEnv,
@@ -245,6 +246,20 @@ export function useResource(tableRef: Ref, searchStore: any) {
       align: "center",
       sortable: true
     },
+    {
+      label: transformI18n("resource.column.maxSurge"),
+      prop: "max_surge",
+      align: "center",
+      sortable: true,
+      formatter: ({ max_surge }) => max_surge ?? "-"
+    },
+    {
+      label: transformI18n("resource.column.maxUnavailable"),
+      prop: "max_unavailable",
+      align: "center",
+      sortable: true,
+      formatter: ({ max_unavailable }) => max_unavailable ?? "-"
+    },
     ...[
       { prop: "p95_pod_heap_pct", label: "resource.column.p95PodHeapPct" },
       { prop: "p95_pod_g1e_pct", label: "resource.column.p95PodG1EPct" }
@@ -399,6 +414,7 @@ export function useResource(tableRef: Ref, searchStore: any) {
               pod_count_manual: curData.pod_count_manual,
               limit_cpu_m: curData.limit_cpu_m,
               limit_mem_mb: curData.limit_mem_mb,
+              ...getRollingUpdatePayload(curData),
               ...jvmValues
             })
               .then(res => {
@@ -429,6 +445,7 @@ export function useResource(tableRef: Ref, searchStore: any) {
               limit_mem_mb: curData.limit_mem_mb,
               request_cpu_m: curData.request_cpu_m,
               request_mem_mb: curData.request_mem_mb,
+              ...getRollingUpdatePayload(curData),
               ...jvmValues
             })
               .then(async res => {
@@ -505,6 +522,8 @@ export function useResource(tableRef: Ref, searchStore: any) {
         pod_count_ai: row?.pod_count_ai !== undefined ? row?.pod_count_ai : "",
         limit_cpu_m: row?.limit_cpu_m !== undefined ? row?.limit_cpu_m : "",
         limit_mem_mb: row?.limit_mem_mb !== undefined ? row?.limit_mem_mb : "",
+        max_surge: row?.max_surge ?? "",
+        max_unavailable: row?.max_unavailable ?? "",
         request_mem_mb:
           row?.request_mem_mb !== undefined ? row?.request_mem_mb : "",
         request_cpu_m:

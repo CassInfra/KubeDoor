@@ -16,6 +16,7 @@ from aiohttp import web
 from loguru import logger
 
 import utils
+from jvm_config import normalize_rolling_update_value
 from db import pg_fetch, pg_fetchval, pg_execute
 
 
@@ -46,7 +47,7 @@ def _table_response(rows, columns):
 RES_CONTROL_COLUMNS = [
     'env', 'namespace', 'deployment', 'pod_count_init', 'pod_count', 'pod_count_manual',
     'p95_pod_cpu_pct', 'p95_pod_mem_pct', 'request_cpu_m', 'request_mem_mb',
-    'limit_cpu_m', 'limit_mem_mb', 'update', 'pod_mem_saved_mb', 'pod_qps',
+    'limit_cpu_m', 'limit_mem_mb', 'max_unavailable', 'max_surge', 'update', 'pod_mem_saved_mb', 'pod_qps',
     'pod_g1gc_qps', 'pod_count_ai', 'pod_qps_ai', 'pod_load_ai', 'pod_g1gc_qps_ai', 'update_ai',
     'jvm_xms_bytes', 'jvm_xmx_bytes', 'jvm_xss_bytes', 'jvm_max_metaspace_bytes',
     'p95_pod_heap_pct',
@@ -55,6 +56,7 @@ RES_CONTROL_COLUMNS = [
 
 
 _JVM_FIELDS = ('jvm_xms_bytes', 'jvm_xmx_bytes', 'jvm_xss_bytes', 'jvm_max_metaspace_bytes')
+_STRATEGY_FIELDS = ('max_unavailable', 'max_surge')
 
 
 def _jvm_updates(data):
@@ -70,6 +72,19 @@ def _jvm_updates(data):
     xms, xmx = values.get('jvm_xms_bytes'), values.get('jvm_xmx_bytes')
     if xms is not None and xmx is not None and xms > xmx and xmx > 0:
         raise web.HTTPBadRequest(text='Xms 不能大于 Xmx')
+    return values
+
+
+def _rolling_strategy_updates(data):
+    """仅更新请求明确携带的 Deployment RollingUpdate 参数。"""
+    values = {}
+    for field in _STRATEGY_FIELDS:
+        if field not in data:
+            continue
+        try:
+            values[field] = normalize_rolling_update_value(data[field])
+        except ValueError as exc:
+            raise web.HTTPBadRequest(text=f'{field}: {exc}') from exc
     return values
 
 
@@ -176,11 +191,12 @@ async def res_add(request):
         # 手动新增的服务没有采集数据(当日Pod=0)，-1 会被准入回退成 0 副本
         raise _pod_count_error('新增服务必须填写指定Pod(0 表示暂不启动 Pod)，不能为 -1')
     jvm = _jvm_updates(d)
+    strategy = _rolling_strategy_updates(d)
     columns = ['env', 'namespace', 'deployment', 'pod_count_manual', 'limit_cpu_m',
-               'limit_mem_mb', 'request_cpu_m', 'request_mem_mb', *jvm]
+               'limit_mem_mb', *strategy, 'request_cpu_m', 'request_mem_mb', *jvm]
     values = [d['env'], d['namespace'], d['deployment'], pod_count_manual,
-              int(d['limit_cpu_m']), int(d['limit_mem_mb']), int(d['request_cpu_m']),
-              int(d['request_mem_mb']), *jvm.values()]
+              int(d['limit_cpu_m']), int(d['limit_mem_mb']), *strategy.values(),
+              int(d['request_cpu_m']), int(d['request_mem_mb']), *jvm.values()]
     await pg_execute(
         f"INSERT INTO k8s_res_control ({','.join(columns)}) "
         f"VALUES ({','.join(f'${i}' for i in range(1, len(values) + 1))})",
@@ -197,9 +213,10 @@ async def res_edit(request):
     if pod_count_manual == -1:
         await _ensure_pod_count_fallback(d['env'], d['namespace'], d['deployment'])
     jvm = _jvm_updates(d)
+    strategy = _rolling_strategy_updates(d)
     values = [int(d['limit_mem_mb']), int(d['limit_cpu_m']), pod_count_manual]
     assignments = ['limit_mem_mb=$1', 'limit_cpu_m=$2', 'pod_count_manual=$3']
-    for field, value in jvm.items():
+    for field, value in (*strategy.items(), *jvm.items()):
         values.append(value)
         assignments.append(f'{field}=${len(values)}')
     offset = len(values)

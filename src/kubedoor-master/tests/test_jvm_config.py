@@ -18,13 +18,13 @@ def config(deployment='web', **values):
 
 def test_normalize_accepts_partial_config_and_preserves_zero():
     rows, invalid = jvm_config.normalize_configs([
-        config(jvm_xms_bytes=0, jvm_xmx_bytes=1024**3),
+        config(jvm_xms_bytes=0, jvm_xmx_bytes=1024**3, max_unavailable=2, max_surge='35%'),
         config('unparsed'),
-        config('safe-max', jvm_xss_bytes=jvm_config.MAX_JVM_BYTES),
+        config('safe-max', jvm_xss_bytes=jvm_config.MAX_JVM_BYTES, max_surge='001%'),
     ])
     assert rows == [
-        ('ns1', 'web', 0, 1024**3, None, None),
-        ('ns1', 'safe-max', None, None, jvm_config.MAX_JVM_BYTES, None),
+        ('ns1', 'web', 0, 1024**3, None, None, '2', '35%'),
+        ('ns1', 'safe-max', None, None, jvm_config.MAX_JVM_BYTES, None, None, '1%'),
     ]
     assert invalid == 0
 
@@ -39,13 +39,45 @@ def test_normalize_rejects_unsafe_or_noninteger_bytes(value):
 def test_normalize_rejects_bad_keys_records_and_duplicate_services():
     rows, invalid = jvm_config.normalize_configs([
         config(jvm_xmx_bytes=1024),
-        config(jvm_xmx_bytes=2048),
+        config(jvm_xmx_bytes=2048, max_surge='25%'),
         {'namespace': 'ns1', 'deployment': '', 'jvm_xms_bytes': 1},
         {'namespace': None, 'deployment': 'bad', 'jvm_xms_bytes': 1},
         None,
     ])
-    assert rows == [('ns1', 'web', None, 1024, None, None)]
+    assert rows == [('ns1', 'web', None, 1024, None, None, None, None)]
     assert invalid == 4
+
+
+@pytest.mark.parametrize('value', [True, False, 1.5, -1, '1.5', '-1', '101%', '1.5%', '１%'])
+def test_normalize_rejects_invalid_rolling_update_values(value):
+    rows, invalid = jvm_config.normalize_configs([config(max_surge=value)])
+    assert rows == []
+    assert invalid == 1
+
+
+@pytest.mark.parametrize(('value', 'expected'), [
+    (0, '0'), ('0003', '3'), ('0%', '0%'), ('100%', '100%'),
+])
+def test_normalize_canonicalizes_supported_rolling_update_values(value, expected):
+    rows, invalid = jvm_config.normalize_configs([config(max_unavailable=value)])
+    assert rows == [('ns1', 'web', None, None, None, None, expected, None)]
+    assert invalid == 0
+
+
+def test_invalid_strategy_value_does_not_discard_valid_jvm_values():
+    rows, invalid = jvm_config.normalize_configs([
+        config(jvm_xms_bytes=1024, max_unavailable='invalid'),
+    ])
+    assert rows == [('ns1', 'web', 1024, None, None, None, None, None)]
+    assert invalid == 1
+
+
+def test_invalid_jvm_value_does_not_discard_valid_strategy_values():
+    rows, invalid = jvm_config.normalize_configs([
+        config(jvm_xms_bytes=True, max_surge='35%'),
+    ])
+    assert rows == [('ns1', 'web', None, None, None, None, None, '35%')]
+    assert invalid == 1
 
 
 def test_fill_missing_configs_uses_one_update_for_600_services(monkeypatch):
@@ -58,16 +90,17 @@ def test_fill_missing_configs_uses_one_update_for_600_services(monkeypatch):
 
     assert asyncio.run(jvm_config.fill_missing_configs('prod', configs)) == 599
     execute.assert_awaited_once()
-    sql, env, namespaces, deployments, xms, xmx, xss, metaspace = execute.call_args.args
+    sql, env, namespaces, deployments, xms, xmx, xss, metaspace, unavailable, surge = execute.call_args.args
     assert env == 'prod'
     assert namespaces == ['ns1'] * 600
     assert deployments == [f'service-{i}' for i in range(600)]
     assert xms == [1024] * 600
     assert xmx == [2048] * 600
     assert xss == metaspace == [None] * 600
+    assert unavailable == surge == [None] * 600
     assert 'INSERT' not in sql.upper()
     assert 'c.env = $1 AND c.namespace = v.namespace AND c.deployment = v.deployment' in sql
-    for field in jvm_config.JVM_FIELDS:
+    for field in jvm_config.CONFIG_FIELDS:
         assert f'{field} = COALESCE(c.{field}, v.{field})' in sql
         assert f'(c.{field} IS NULL AND v.{field} IS NOT NULL)' in sql
 

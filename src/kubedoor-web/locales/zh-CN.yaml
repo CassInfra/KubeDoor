@@ -126,6 +126,7 @@ resource:
   keyword: 关键字
   keywordPlaceholder: 命名空间或微服务匹配
   placeholder: 请选择
+  rollingUpdatePlaceholder: 例如 1 或 35%
   search: 搜索
   reset: 重置
   scale: 微服务扩缩容
@@ -153,6 +154,8 @@ resource:
     requestMemMb: 需求内存M
     limitCpuM: 限制CPUm
     limitMemMb: 限制内存M
+    maxSurge: 最大超出
+    maxUnavailable: 最大删除
     date: 查询日期
     env: 环境
     update: Update
@@ -188,6 +191,7 @@ resource:
     cron: Cron是必填项
     greaterThanZero: 必须>=-1
     podCountManualNoFallback: 新增或尚未采集高峰期数据的服务不能为-1，请填写Pod数(0表示暂不启动)
+    rollingUpdateValue: 必须为非负整数或 0% 至 100% 的百分比
   message:
     createSuccess: 创建成功
     createFailed: 创建失败

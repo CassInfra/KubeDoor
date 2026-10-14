@@ -5,6 +5,7 @@ import ReCol from "@/components/ReCol";
 import {
   createJvmFormRules,
   createPodCountManualRules,
+  createRollingUpdateRules,
   formRules
 } from "../utils/rule";
 import { JVM_PARAMETERS } from "../utils/jvm";
@@ -23,7 +24,9 @@ const props = withDefaults(defineProps<FormProps>(), {
     limit_mem_mb: "",
     request_cpu_m: "",
     request_mem_mb: "",
-    pod_count: ""
+    pod_count: "",
+    max_surge: "",
+    max_unavailable: ""
   }),
   namespace: () => [],
   envList: () => [],
@@ -35,7 +38,8 @@ const newFormInline = ref(props.formInline);
 const rules = {
   ...formRules,
   ...createPodCountManualRules(newFormInline.value, props.isEdit),
-  ...createJvmFormRules(newFormInline.value)
+  ...createJvmFormRules(newFormInline.value),
+  ...createRollingUpdateRules()
 };
 const hasJvmParameters = computed(() =>
   JVM_PARAMETERS.some(
@@ -177,6 +181,30 @@ defineExpose({ getRef });
           prop="limit_mem_mb"
         >
           <el-input v-model="newFormInline.limit_mem_mb" type="number" />
+        </el-form-item>
+      </re-col>
+      <re-col :value="20" :xs="24" :sm="24">
+        <el-form-item
+          :label="transformI18n('resource.column.maxSurge')"
+          prop="max_surge"
+        >
+          <el-input
+            v-model="newFormInline.max_surge"
+            :placeholder="transformI18n('resource.rollingUpdatePlaceholder')"
+            clearable
+          />
+        </el-form-item>
+      </re-col>
+      <re-col :value="20" :xs="24" :sm="24">
+        <el-form-item
+          :label="transformI18n('resource.column.maxUnavailable')"
+          prop="max_unavailable"
+        >
+          <el-input
+            v-model="newFormInline.max_unavailable"
+            :placeholder="transformI18n('resource.rollingUpdatePlaceholder')"
+            clearable
+          />
         </el-form-item>
       </re-col>
       <template v-if="hasJvmParameters">

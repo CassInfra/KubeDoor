@@ -7,6 +7,7 @@ import {
   validateJvmHeapSizes,
   type JvmFormValues
 } from "./jvm";
+import { isValidRollingUpdateValue } from "./rolling-update";
 
 export function createJvmFormRules(form: JvmFormValues): FormRules {
   return Object.fromEntries(
@@ -34,6 +35,20 @@ export function createJvmFormRules(form: JvmFormValues): FormRules {
       ]
     ])
   );
+}
+
+export function createRollingUpdateRules(): FormRules {
+  const validator = (_rule, value, callback) => {
+    if (!isValidRollingUpdateValue(value)) {
+      callback(new Error(transformI18n("resource.rules.rollingUpdateValue")));
+      return;
+    }
+    callback();
+  };
+  return {
+    max_surge: [{ trigger: ["blur", "change"], validator }],
+    max_unavailable: [{ trigger: ["blur", "change"], validator }]
+  };
 }
 
 /**

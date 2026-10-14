@@ -11,7 +11,7 @@ from datetime import datetime, timedelta
 from functools import wraps
 from loguru import logger
 from promql import query_dict, node_rank_query
-from jvm_config import JVM_FIELDS
+from jvm_config import CONFIG_FIELDS, JVM_FIELDS
 import db
 from db import (
     pg_fetch,
@@ -447,7 +447,7 @@ async def get_deploy_admis_async(env, namespace, deployment, include_jvm=False):
       - 2 元素 [code, msg]  → 非管控放行(200) / 免确认(200) / 未找到(404) / 异常(503)
       - 8 元素 [pod_count, pod_count_ai, pod_count_manual, request_cpu_m,
                 request_mem_mb, limit_cpu_m, limit_mem_mb, scheduler] → 命中管控服务
-      - 支持 JVM 的新版 agent 显式传 include_jvm=True 时，追加第 9 元素 JVM 字段字典
+      - 支持新配置的新版 agent 显式传 include_jvm=True 时，追加第 9 元素配置字典
     """
     cache_key = (env, namespace, deployment, include_jvm)
     now = time.time()
@@ -467,7 +467,8 @@ async def get_deploy_admis_async(env, namespace, deployment, include_jvm=False):
             "c.pod_count, c.pod_count_ai, c.pod_count_manual, "
             "c.request_cpu_m, c.request_mem_mb, c.limit_cpu_m, c.limit_mem_mb, "
             "c.deployment AS ctrl_deploy, "
-            "c.jvm_xms_bytes, c.jvm_xmx_bytes, c.jvm_xss_bytes, c.jvm_max_metaspace_bytes "
+            "c.jvm_xms_bytes, c.jvm_xmx_bytes, c.jvm_xss_bytes, c.jvm_max_metaspace_bytes, "
+            "c.max_unavailable, c.max_surge "
             "FROM k8s_agent_status AS a "
             "LEFT JOIN k8s_res_control AS c "
             "  ON c.env = $1 AND c.namespace = $2 AND c.deployment = $3 "
@@ -498,7 +499,7 @@ async def get_deploy_admis_async(env, namespace, deployment, include_jvm=False):
                     scheduler,
                 ]
                 if include_jvm:
-                    result.append(dict(zip(JVM_FIELDS, row[10:14])))
+                    result.append(dict(zip(CONFIG_FIELDS, row[10:16])))
                 logger.info(f"🔊master(admis)返回:【{env}】【{namespace}】【{deployment}】{result}")
             elif nms_not_confirm:
                 content = f'master(admis)返回: 新服务免确认已启用【{env}】【{namespace}】【{deployment}】允许部署/扩缩容,因为k8s_res_control表中找不到该服务,该服务不会被管控，也不会配置固定节点均衡模式（未开启则忽略）。'

@@ -39,9 +39,11 @@ class FakeFetch:
     def __init__(self, result):
         self.result = result
         self.calls = 0
+        self.last_sql = None
 
     async def __call__(self, sql, *args, timeout=None):
         self.calls += 1
+        self.last_sql = sql
         if isinstance(self.result, Exception):
             raise self.result
         return self.result
@@ -67,34 +69,39 @@ def test_admis_namespace_not_controlled(monkeypatch):
 
 def test_admis_controlled_service_returns_8_values(monkeypatch):
     # scheduler, nms_not_confirm, pod_count, pod_count_ai, pod_count_manual,
-    # request_cpu_m, request_mem_mb, limit_cpu_m, limit_mem_mb, ctrl_deploy, 四项 JVM
-    row = (True, False, 3, 4, 5, 100, 256, 200, 512, 'web', None, None, None, None)
+    # request_cpu_m, request_mem_mb, limit_cpu_m, limit_mem_mb, ctrl_deploy, 配置字典
+    row = (True, False, 3, 4, 5, 100, 256, 200, 512, 'web', None, None, None, None, None, None)
     result, _ = admis(monkeypatch, [row])
     assert result == [3, 4, 5, 100, 256, 200, 512, True]
 
 
 def test_admis_jvm_capability_preserves_partial_values_and_units(monkeypatch):
     row = (True, False, 3, 4, 5, 100, 256, 200, 512, 'web',
-           0, 1073741824, 524288, None)
-    result, _ = admis(monkeypatch, [row], include_jvm=True)
+           0, 1073741824, 524288, None, '35%', '2')
+    result, fake = admis(monkeypatch, [row], include_jvm=True)
     assert result[:8] == [3, 4, 5, 100, 256, 200, 512, True]
     assert result[8] == {
         'jvm_xms_bytes': 0,
         'jvm_xmx_bytes': 1073741824,
         'jvm_xss_bytes': 524288,
         'jvm_max_metaspace_bytes': None,
+        'max_unavailable': '35%',
+        'max_surge': '2',
     }
+    assert 'c.max_unavailable, c.max_surge' in fake.last_sql
 
 
 def test_admis_cache_does_not_send_jvm_to_legacy_agent(monkeypatch):
     row = (False, False, 3, -1, -1, 100, 256, 200, 512, 'web',
-           1073741824, 1073741824, None, None)
+           1073741824, 1073741824, None, None, '20%', '1')
     fake = FakeFetch([row])
     monkeypatch.setattr(utils, 'pg_fetch', fake)
     modern = asyncio.run(utils.get_deploy_admis_async('prod', 'ns1', 'web', include_jvm=True))
     legacy = asyncio.run(utils.get_deploy_admis_async('prod', 'ns1', 'web'))
     assert len(modern) == 9 and len(legacy) == 8
     assert modern[:8] == legacy
+    assert modern[8]['max_unavailable'] == '20%'
+    assert modern[8]['max_surge'] == '1'
     assert fake.calls == 2
     assert asyncio.run(utils.get_deploy_admis_async('prod', 'ns1', 'web')) == legacy
     assert fake.calls == 2

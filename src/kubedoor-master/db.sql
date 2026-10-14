@@ -50,6 +50,8 @@ CREATE TABLE IF NOT EXISTS k8s_res_control (
     request_mem_mb    integer  NOT NULL DEFAULT -1,  -- 高峰期p95 内存,最小1
     limit_cpu_m       integer  NOT NULL DEFAULT -1,
     limit_mem_mb      integer  NOT NULL DEFAULT -1,
+    max_unavailable   text,                         -- Deployment strategy.rollingUpdate.maxUnavailable (整数或百分比)
+    max_surge         text,                         -- Deployment strategy.rollingUpdate.maxSurge (整数或百分比)
     -- JVM 参数按精确字节保存；NULL 表示尚未采集，0 保留 JVM 显式默认值语义。
     jvm_xms_bytes     bigint CHECK (jvm_xms_bytes BETWEEN 0 AND 9007199254740991),
     jvm_xmx_bytes     bigint CHECK (jvm_xmx_bytes BETWEEN 0 AND 9007199254740991),
@@ -70,6 +72,8 @@ CREATE TABLE IF NOT EXISTS k8s_res_control (
 -- 已有数据库升级：master 启动执行，重复运行不会修改已有管控值。
 -- 旧库可能保留 p80_pod_heap_mb（MiB）和 p90_pod_heap_pct（P90）；P95另建列，不改名或复用旧值。
 ALTER TABLE k8s_res_control
+    ADD COLUMN IF NOT EXISTS max_unavailable text,
+    ADD COLUMN IF NOT EXISTS max_surge text,
     ADD COLUMN IF NOT EXISTS jvm_xms_bytes bigint CHECK (jvm_xms_bytes BETWEEN 0 AND 9007199254740991),
     ADD COLUMN IF NOT EXISTS jvm_xmx_bytes bigint CHECK (jvm_xmx_bytes BETWEEN 0 AND 9007199254740991),
     ADD COLUMN IF NOT EXISTS jvm_xss_bytes bigint CHECK (jvm_xss_bytes BETWEEN 0 AND 9007199254740991),

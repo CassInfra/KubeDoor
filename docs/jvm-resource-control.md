@@ -84,6 +84,23 @@ Deployment 的 `spec.template.spec.containers[0].args`，且 `args[0]` 必须精
   与整个 heap 的 used/max 使用率分开统计；仅供展示，不参与启动参数管控。
   升级后重新采集最近 10 天高峰数据，以填充所选高峰日的 Eden 占比。
 
+## Deployment 滚动更新参数管控
+
+- 每日参数补采使用 Agent 已有的分页 Deployment LIST，一次返回每个 Deployment 当前
+  `spec.strategy.rollingUpdate.maxSurge` 和 `maxUnavailable`；不会为每个服务单独请求 Kubernetes API。
+  数字及百分比以原有 IntOrString 形式保存，例如 `1` 与 `35%`。
+- 管控表保存为 nullable 字符串。补采只填充 NULL，用户保存的值优先保留。
+  资源页面在“限制内存(M)”后展示并允许编辑“最大超出”(maxSurge)和“最大删除”
+  (maxUnavailable)，均支持非负整数或整数百分比；未采集项保持空值。
+- 启用管控后，Deployment 创建、镜像发布或其他触发准入的更新会把已保存值写回
+  `spec.strategy.rollingUpdate`。保存本身不修改运行中的 Deployment；需要等下一次发布或滚动更新。
+  普通调度下，未设置或无效的 `maxUnavailable` 回退到 `30%`，`maxSurge` 回退到 `0`；
+  `Recreate` 策略不写入滚动更新字段。
+- 固定节点调度完整保留原有行为：策略单独变化仍按原逻辑放行，模板更新仍按原规则计算并写入
+  `maxUnavailable`（包含原最小值处理）；新增的两个管控值和回退默认值不作用于固定节点调度。
+- 新数据库包含两个 nullable 字段；master 启动时为已有数据库幂等补列。数据库空值由准入逻辑按
+  调度模式处理，不在采集时覆盖 Kubernetes 当前配置。
+
 ## 本地验证
 
 ```powershell

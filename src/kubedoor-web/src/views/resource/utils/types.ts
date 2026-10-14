@@ -7,6 +7,8 @@ interface FormItemProps extends JvmControlValues, JvmFormValues {
   pod_count_manual: string;
   limit_cpu_m: string;
   limit_mem_mb: string;
+  max_surge: string | number | null;
+  max_unavailable: string | number | null;
   [string: string]: any;
 }
 interface FormProps {
