@@ -18,7 +18,6 @@ interface FormProps {
   isEdit: boolean;
   namespace: any[];
   envList: any[];
-  syncEnvList: string[];
 }
 
 export type { FormItemProps, FormProps };

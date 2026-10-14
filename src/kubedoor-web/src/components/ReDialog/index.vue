@@ -170,37 +170,59 @@ function handleClose(
       <template v-if="options?.footerRenderer">
         <component :is="options?.footerRenderer({ options, index })" />
       </template>
-      <span v-else>
-        <template v-for="(btn, key) in footerButtons(options)" :key="key">
-          <el-popconfirm
-            v-if="btn.popconfirm"
-            v-bind="btn.popconfirm"
-            @confirm="
-              btn.btnClick({
-                dialog: { options, index },
-                button: { btn, index: key }
-              })
-            "
-          >
-            <template #reference>
-              <el-button v-bind="btn">{{ btn?.label }}</el-button>
-            </template>
-          </el-popconfirm>
-          <el-button
-            v-else
-            v-bind="btn"
-            :loading="key === 1 && sureBtnMap[index]?.loading"
-            @click="
-              btn.btnClick({
-                dialog: { options, index },
-                button: { btn, index: key }
-              })
-            "
-          >
-            {{ btn?.label }}
-          </el-button>
-        </template>
-      </span>
+      <div v-else class="pure-dialog__footer-row">
+        <component
+          :is="options?.footerPrefixRenderer({ options, index })"
+          v-if="options?.footerPrefixRenderer"
+        />
+        <span class="pure-dialog__footer-buttons">
+          <template v-for="(btn, key) in footerButtons(options)" :key="key">
+            <el-popconfirm
+              v-if="btn.popconfirm"
+              v-bind="btn.popconfirm"
+              @confirm="
+                btn.btnClick({
+                  dialog: { options, index },
+                  button: { btn, index: key }
+                })
+              "
+            >
+              <template #reference>
+                <el-button v-bind="btn">{{ btn?.label }}</el-button>
+              </template>
+            </el-popconfirm>
+            <el-button
+              v-else
+              v-bind="btn"
+              :loading="key === 1 && sureBtnMap[index]?.loading"
+              @click="
+                btn.btnClick({
+                  dialog: { options, index },
+                  button: { btn, index: key }
+                })
+              "
+            >
+              {{ btn?.label }}
+            </el-button>
+          </template>
+        </span>
+      </div>
     </template>
   </el-dialog>
 </template>
+
+<style scoped>
+.pure-dialog__footer-row {
+  display: flex;
+  width: 100%;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.pure-dialog__footer-buttons {
+  display: inline-flex;
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+</style>

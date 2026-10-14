@@ -1,6 +1,7 @@
 // import "./reset.css";
 // import dayjs from "dayjs";
 import editForm from "../form/index.vue";
+import syncFooter from "../form/sync-footer.vue";
 import scale from "../scale/index.vue";
 import { message } from "@/utils/message";
 import {
@@ -563,17 +564,21 @@ export function useResource(tableRef: Ref, searchStore: any) {
       },
       namespace: namespaceList.value,
       envList: envList.value,
-      syncEnvList: syncEnvList.value,
       isEdit: row?.namespace ? true : false
     };
     addDialog({
       title: `${title == "新增" ? transformI18n("resource.add") : transformI18n("resource.edit")}`,
       props: editProps,
-      width: "46%",
+      width: "min(860px, 94vw)",
       draggable: true,
       fullscreen: deviceDetection(),
       closeOnClickModal: false,
       contentRenderer: () => h(editForm, { ref: editFormRef, ...editProps }),
+      footerPrefixRenderer: () =>
+        h(syncFooter, {
+          formInline: editProps.formInline,
+          syncEnvList: syncEnvList.value
+        }),
       footerButtons: title == "新增" ? footerButtons.slice(2, 4) : footerButtons
       // beforeSure: (done, { options }) => {
       //   const FormRef = editFormRef.value.getRef();

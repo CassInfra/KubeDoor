@@ -193,6 +193,14 @@ interface DialogOptions extends DialogProps {
     options: DialogOptions;
     index: number;
   }) => VNode | Component;
+  /** 渲染在默认 footer 按钮左侧的内容 */
+  footerPrefixRenderer?: ({
+    options,
+    index
+  }: {
+    options: DialogOptions;
+    index: number;
+  }) => VNode | Component;
   /** 自定义底部按钮操作 */
   footerButtons?: Array<ButtonProps>;
   /** `Dialog` 打开后的回调 */
