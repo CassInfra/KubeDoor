@@ -68,6 +68,10 @@ def test_edit_syncs_only_target_empty_request_values_in_transaction(monkeypatch)
     target_sql, target_args = calls['transaction'][0][1]
     assert 'UPDATE k8s_res_control SET' in source_sql
     assert source_args[-3:] == ('prod', 'infra', 'java-service')
+    assert '$4::integer IS NOT NULL' in target_sql
+    assert 'THEN $4::integer' in target_sql
+    assert '$5::integer IS NOT NULL' in target_sql
+    assert 'THEN $5::integer' in target_sql
     assert 'request_cpu_m IS NULL OR request_cpu_m = -1' in target_sql
     assert 'request_mem_mb IS NULL OR request_mem_mb = -1' in target_sql
     assert target_args == ('staging', 'infra', 'java-service', 100, 256)

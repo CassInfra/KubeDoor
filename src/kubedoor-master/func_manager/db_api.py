@@ -152,16 +152,16 @@ def _sync_request_statement(target_env, namespace, deployment, request_cpu_m, re
     sql = """
         UPDATE k8s_res_control
         SET request_cpu_m = CASE
-                WHEN $4 IS NOT NULL AND (request_cpu_m IS NULL OR request_cpu_m = -1) THEN $4
+                WHEN $4::integer IS NOT NULL AND (request_cpu_m IS NULL OR request_cpu_m = -1) THEN $4::integer
                 ELSE request_cpu_m
             END,
             request_mem_mb = CASE
-                WHEN $5 IS NOT NULL AND (request_mem_mb IS NULL OR request_mem_mb = -1) THEN $5
+                WHEN $5::integer IS NOT NULL AND (request_mem_mb IS NULL OR request_mem_mb = -1) THEN $5::integer
                 ELSE request_mem_mb
             END
         WHERE env = $1 AND namespace = $2 AND deployment = $3
-          AND (($4 IS NOT NULL AND (request_cpu_m IS NULL OR request_cpu_m = -1))
-            OR ($5 IS NOT NULL AND (request_mem_mb IS NULL OR request_mem_mb = -1)))
+          AND (($4::integer IS NOT NULL AND (request_cpu_m IS NULL OR request_cpu_m = -1))
+            OR ($5::integer IS NOT NULL AND (request_mem_mb IS NULL OR request_mem_mb = -1)))
     """
     return sql, (target_env, namespace, deployment, cpu, memory)
 
