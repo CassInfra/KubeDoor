@@ -201,6 +201,8 @@ resource:
     editSuccess: 操作成功
     editFailed: 操作失败
     syncTargetMissing: 源配置已保存，但目标 K8S 没有相同服务，未同步
+    syncSuccess: 已同步弹窗中的管控参数到目标数据库；需求 CPU/内存仅补写目标空值
+    syncNotUpdated: 目标管控记录未更新，请检查目标环境、命名空间和服务名
     dateAndEnvIsNecessary: 请选择环境和日期
     isExecute: 是否执行当前操作？
     isExecuteScale: 是否执行扩缩容？

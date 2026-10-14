@@ -201,6 +201,8 @@ resource:
     editSuccess: Operator successfully
     editFailed: Operator failed
     syncTargetMissing: Source saved, but the target K8S has no matching service; nothing was synchronized
+    syncSuccess: Dialog control values were synchronized to the target database; request CPU/memory only fill empty target values
+    syncNotUpdated: No target control record was updated; check the target environment, namespace, and service name
     dateAndEnvIsNecessary: Please select a env and date
     isExecute: Confirm to execute?
     isExecuteScale: Is execute scale?

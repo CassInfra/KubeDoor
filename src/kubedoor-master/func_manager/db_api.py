@@ -57,6 +57,9 @@ RES_CONTROL_COLUMNS = [
 
 _JVM_FIELDS = ('jvm_xms_bytes', 'jvm_xmx_bytes', 'jvm_xss_bytes', 'jvm_max_metaspace_bytes')
 _STRATEGY_FIELDS = ('max_unavailable', 'max_surge')
+_SYNC_CONTROL_FIELDS = (
+    'pod_count_manual', 'limit_cpu_m', 'limit_mem_mb', *_STRATEGY_FIELDS, *_JVM_FIELDS,
+)
 
 
 def _jvm_updates(data):
@@ -108,9 +111,8 @@ def _pod_count_manual(data):
 
 
 def _sync_target_env(data):
-    """读取可选的资源请求同步目标环境。
+    """读取可选的跨 K8S 管控参数同步目标环境。
 
-    同步只用于把当前编辑表单中的 request CPU/内存补到另一个环境，
     不允许空环境值伪装成目标环境，也不把源环境编辑隐式变成跨环境写入。
     """
     if 'sync_env' not in data or data['sync_env'] in (None, ''):
@@ -143,41 +145,36 @@ async def _sync_target_found(target_env, namespace, deployment):
     ))
 
 
-def _sync_request_statement(target_env, namespace, deployment, request_cpu_m, request_mem_mb):
-    """构造目标补空 SQL；-1/NULL 是未配置，0 是显式值。"""
+def _sync_control_statement(
+    target_env, namespace, deployment, control_values, request_cpu_m, request_mem_mb,
+):
+    """同步弹窗可编辑的管控参数；request CPU/内存仅补写目标空值。"""
+    assignments = []
+    args = []
+    for field in _SYNC_CONTROL_FIELDS:
+        if field not in control_values:
+            continue
+        args.append(control_values[field])
+        assignments.append(f'{field}=${len(args)}')
+
     cpu = request_cpu_m if isinstance(request_cpu_m, int) and request_cpu_m >= 0 else None
     memory = request_mem_mb if isinstance(request_mem_mb, int) and request_mem_mb >= 0 else None
-    if cpu is None and memory is None:
-        return None
-    sql = """
-        UPDATE k8s_res_control
-        SET request_cpu_m = CASE
-                WHEN $4::integer IS NOT NULL AND (request_cpu_m IS NULL OR request_cpu_m = -1) THEN $4::integer
-                ELSE request_cpu_m
-            END,
-            request_mem_mb = CASE
-                WHEN $5::integer IS NOT NULL AND (request_mem_mb IS NULL OR request_mem_mb = -1) THEN $5::integer
-                ELSE request_mem_mb
-            END
-        WHERE env = $1 AND namespace = $2 AND deployment = $3
-          AND (($4::integer IS NOT NULL AND (request_cpu_m IS NULL OR request_cpu_m = -1))
-            OR ($5::integer IS NOT NULL AND (request_mem_mb IS NULL OR request_mem_mb = -1)))
-    """
-    return sql, (target_env, namespace, deployment, cpu, memory)
+    for field, value in (('request_cpu_m', cpu), ('request_mem_mb', memory)):
+        args.append(value)
+        placeholder = len(args)
+        assignments.append(
+            f'{field}=CASE WHEN ${placeholder}::integer IS NOT NULL '
+            f'AND ({field} IS NULL OR {field}=-1) '
+            f'THEN ${placeholder}::integer ELSE {field} END'
+        )
 
-
-async def _sync_request_values(target_env, namespace, deployment, request_cpu_m, request_mem_mb):
-    """兼容单独调用方：向目标环境已有服务补写空的 request CPU/内存值。"""
-    statement = _sync_request_statement(
-        target_env, namespace, deployment, request_cpu_m, request_mem_mb,
+    offset = len(args)
+    args.extend((target_env, namespace, deployment))
+    sql = (
+        f"UPDATE k8s_res_control SET {', '.join(assignments)} "
+        f"WHERE env=${offset + 1} AND namespace=${offset + 2} AND deployment=${offset + 3}"
     )
-    if statement is None:
-        return 0
-    status = await pg_execute(statement[0], *statement[1])
-    try:
-        return int(status.rsplit(' ', 1)[-1])
-    except (AttributeError, ValueError):
-        return 0
+    return sql, tuple(args)
 
 
 async def _ensure_pod_count_fallback(env, namespace, deployment):
@@ -272,6 +269,13 @@ async def res_add(request):
                'limit_mem_mb', *strategy, 'request_cpu_m', 'request_mem_mb', *jvm]
     request_cpu_m = int(d['request_cpu_m'])
     request_mem_mb = int(d['request_mem_mb'])
+    control_values = {
+        'pod_count_manual': pod_count_manual,
+        'limit_cpu_m': int(d['limit_cpu_m']),
+        'limit_mem_mb': int(d['limit_mem_mb']),
+        **strategy,
+        **jvm,
+    }
     values = [d['env'], d['namespace'], d['deployment'], pod_count_manual,
               int(d['limit_cpu_m']), int(d['limit_mem_mb']), *strategy.values(),
               request_cpu_m, request_mem_mb, *jvm.values()]
@@ -284,10 +288,11 @@ async def res_add(request):
     target_statement = None
     if sync_env:
         target_found = await _sync_target_found(sync_env, d['namespace'], d['deployment'])
-        target_statement = _sync_request_statement(
-            sync_env, d['namespace'], d['deployment'], request_cpu_m, request_mem_mb,
+        target_statement = _sync_control_statement(
+            sync_env, d['namespace'], d['deployment'], control_values,
+            request_cpu_m, request_mem_mb,
         )
-    if sync_env and target_statement is not None:
+    if sync_env:
         statuses = await pg_execute_transaction([
             (insert_sql, tuple(values)), target_statement,
         ])
@@ -323,11 +328,15 @@ async def res_edit(request):
             request_mem_mb = None if d.get('request_mem_mb') in (None, '') else int(d['request_mem_mb'])
         except (TypeError, ValueError) as exc:
             raise web.HTTPBadRequest(text='同步的需求 CPU/内存必须是整数或空值') from exc
-    values = [int(d['limit_mem_mb']), int(d['limit_cpu_m']), pod_count_manual]
-    assignments = ['limit_mem_mb=$1', 'limit_cpu_m=$2', 'pod_count_manual=$3']
-    for field, value in (*strategy.items(), *jvm.items()):
-        values.append(value)
-        assignments.append(f'{field}=${len(values)}')
+    control_values = {
+        'limit_mem_mb': int(d['limit_mem_mb']),
+        'limit_cpu_m': int(d['limit_cpu_m']),
+        'pod_count_manual': pod_count_manual,
+        **strategy,
+        **jvm,
+    }
+    values = list(control_values.values())
+    assignments = [f'{field}=${index}' for index, field in enumerate(control_values, 1)]
     offset = len(values)
     values.extend([d['env'], d['namespace'], d['deployment']])
     source_sql = (
@@ -339,10 +348,11 @@ async def res_edit(request):
     target_statement = None
     if sync_env:
         target_found = await _sync_target_found(sync_env, d['namespace'], d['deployment'])
-        target_statement = _sync_request_statement(
-            sync_env, d['namespace'], d['deployment'], request_cpu_m, request_mem_mb,
+        target_statement = _sync_control_statement(
+            sync_env, d['namespace'], d['deployment'], control_values,
+            request_cpu_m, request_mem_mb,
         )
-    if sync_env and target_statement is not None:
+    if sync_env:
         statuses = await pg_execute_transaction([
             (source_sql, tuple(values)), target_statement,
         ])

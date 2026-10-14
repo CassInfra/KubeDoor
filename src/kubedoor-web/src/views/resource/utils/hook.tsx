@@ -405,10 +405,20 @@ export function useResource(tableRef: Ref, searchStore: any) {
     successKey: string,
     showSuccess = true
   ) {
-    if (result?.sync_env && result.sync_target_found === false) {
-      message(transformI18n("resource.message.syncTargetMissing"), {
-        type: "warning"
-      });
+    if (result?.sync_env) {
+      if (result.sync_target_found === false) {
+        message(transformI18n("resource.message.syncTargetMissing"), {
+          type: "warning"
+        });
+      } else if (Number(result.sync_updated) > 0) {
+        message(transformI18n("resource.message.syncSuccess"), {
+          type: "success"
+        });
+      } else {
+        message(transformI18n("resource.message.syncNotUpdated"), {
+          type: "warning"
+        });
+      }
     }
     if (showSuccess) message(transformI18n(successKey), { type: "success" });
   }
