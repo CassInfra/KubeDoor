@@ -27,6 +27,16 @@
             <el-button type="primary" @click="handleSearch">刷新</el-button>
             <el-button @click="handleReset">重置</el-button>
           </el-form-item>
+
+          <!-- 勾选后出现:批量更新 / 批量重启选中的 agent -->
+          <el-form-item v-if="selectedRows.length > 0">
+            <el-button type="primary" plain @click="handleBatchUpdate">
+              批量更新 ({{ selectedRows.length }})
+            </el-button>
+            <el-button type="warning" plain @click="handleBatchRestart">
+              批量重启 ({{ selectedRows.length }})
+            </el-button>
+          </el-form-item>
         </el-form>
       </div>
 
@@ -34,11 +44,19 @@
       <div class="mt-2">
         <el-card v-loading="loading">
           <el-table
+            ref="tableRef"
             :data="filteredTableData"
             style="width: 100%"
             stripe
             :default-sort="{ prop: 'key', order: 'ascending' }"
+            @selection-change="handleSelectionChange"
           >
+            <el-table-column
+              type="selection"
+              width="46"
+              align="center"
+              :selectable="isSelectable"
+            />
             <el-table-column
               prop="key"
               label="K8S"
@@ -75,15 +93,25 @@
               show-overflow-tooltip
               sortable
             />
-            <el-table-column label="更新" min-width="80" align="center">
+            <el-table-column label="操作" min-width="150" align="center">
               <template #default="scope">
                 <el-button
                   type="primary"
                   size="small"
                   plain
+                  :disabled="!scope.row.online"
                   @click="handleUpdate(scope.row)"
                 >
                   更新
+                </el-button>
+                <el-button
+                  type="warning"
+                  size="small"
+                  plain
+                  :disabled="!scope.row.online"
+                  @click="handleRestart(scope.row)"
+                >
+                  重启
                 </el-button>
               </template>
             </el-table-column>
@@ -92,6 +120,23 @@
               min-width="230"
               align="center"
             >
+              <template #header>
+                <span class="ai-connection-header">
+                  AI Kubeconfig
+                  <el-tooltip placement="top">
+                    <template #content>
+                      <div class="ai-connection-tip">
+                        这个 kubeconfig 会加密存储，仅供 AI
+                        助手使用，可以提供更好的 AI 调用 K8S
+                        的能力，不上传也不影响 AI 的功能。
+                      </div>
+                    </template>
+                    <el-icon class="ai-connection-header__hint">
+                      <QuestionFilled />
+                    </el-icon>
+                  </el-tooltip>
+                </span>
+              </template>
               <template #default="scope">
                 <div class="ai-connection-cell">
                   <el-tooltip
@@ -393,13 +438,60 @@
           </span>
         </template>
       </el-dialog>
+
+      <!-- 批量更新对话框 -->
+      <el-dialog
+        v-model="batchUpdateDialogVisible"
+        title="批量更新镜像"
+        width="500px"
+      >
+        <el-form :model="batchUpdateForm" label-width="80px" @submit.prevent>
+          <el-form-item :label="`K8S (${batchTargets.length})`">
+            <div class="batch-targets">
+              <el-tag v-for="row in batchTargets" :key="row.key" size="small">
+                {{ row.key }}
+              </el-tag>
+            </div>
+          </el-form-item>
+          <el-form-item label="镜像标签">
+            <el-input
+              v-model="batchUpdateForm.image_tag"
+              placeholder="请输入镜像标签（版本号），如 2.2.0"
+              clearable
+              @keyup.enter="submitBatchUpdate"
+            />
+          </el-form-item>
+        </el-form>
+        <template #footer>
+          <span class="dialog-footer">
+            <el-button @click="batchUpdateDialogVisible = false">
+              取消
+            </el-button>
+            <el-button
+              type="primary"
+              :loading="batchUpdateLoading"
+              @click="submitBatchUpdate"
+            >
+              确认
+            </el-button>
+          </span>
+        </template>
+      </el-dialog>
     </div>
   </div>
 </template>
 
 <script setup lang="ts">
-import { ref, reactive, computed, onMounted, defineAsyncComponent } from "vue";
-import { ElMessage, ElMessageBox } from "element-plus";
+import {
+  ref,
+  reactive,
+  computed,
+  onMounted,
+  defineAsyncComponent,
+  h
+} from "vue";
+import { ElMessage, ElMessageBox, type TableInstance } from "element-plus";
+import { QuestionFilled } from "@element-plus/icons-vue";
 import {
   getAgentStatus,
   initPeakData,
@@ -407,10 +499,11 @@ import {
   admisSwitch,
   updateAdmission,
   updateNmsNotConfirm,
-  updateScheduler
+  updateScheduler,
+  updateAgentImage,
+  restartAgent,
+  type AgentOpResult
 } from "@/api/workbench";
-
-import { updateImage } from "@/api/resource";
 
 import { getPromNamespace } from "@/api/monit";
 
@@ -817,25 +910,193 @@ const submitUpdate = async () => {
 
   updateLoading.value = true;
   try {
-    const res = await updateImage(updateForm.env, {
-      image_tag: updateForm.image_tag,
-      deployment: "kubedoor-agent",
-      namespace: "kubedoor"
-    });
-    if ((res as any).success) {
-      message(transformI18n((res as any).message), {
+    const res = await updateAgentImage(updateForm.env, updateForm.image_tag);
+    if (res.success) {
+      message(transformI18n(res.message), {
         type: "success"
       });
       updateDialogVisible.value = false;
       await getAgentData();
     } else {
-      message((res as any).message, {
+      message(res.message || res.error || "更新失败", {
         type: "error"
       });
     }
   } finally {
     updateLoading.value = false;
   }
+};
+
+// 重启失败的原因,没有则返回空串(重启接口 200 也可能带逐个 Deployment 的失败原因)
+const restartFailure = (res: AgentOpResult) =>
+  res.error_list?.[0]?.reason ||
+  (res.success === false ? res.message || res.error || "重启失败" : "");
+
+// 重启 agent
+const handleRestart = async (row: AgentData) => {
+  try {
+    await ElMessageBox.confirm(
+      `确认重启 ${row.key} 的 agent 吗？重启期间该集群的 agent 会短暂离线。`,
+      "重启 agent",
+      { confirmButtonText: "重启", cancelButtonText: "取消", type: "warning" }
+    );
+  } catch {
+    return; // 取消
+  }
+  let res: AgentOpResult;
+  try {
+    res = await restartAgent(row.key);
+  } catch {
+    return; // 接口出错的提示已由请求拦截器弹出
+  }
+  const reason = restartFailure(res);
+  if (reason) {
+    message(reason, { type: "error" });
+    return;
+  }
+  message(`已发起 ${row.key} 的 agent 重启`, { type: "success" });
+  await getAgentData();
+};
+
+// ---- 勾选与批量操作 ----
+const tableRef = ref<TableInstance>();
+const selectedRows = ref<AgentData[]>([]);
+// 离线的 agent 收不到指令(master 会直接拒绝),不能勾选
+const isSelectable = (row: AgentData) => row.online;
+const handleSelectionChange = (rows: AgentData[]) => {
+  selectedRows.value = rows;
+};
+
+type BatchFailure = { env: string; reason: string };
+
+// 接口出错时的原因:master 拒绝返回 { error },网络异常取 message
+const errorReason = (error: any): string =>
+  error?.response?.data?.error ||
+  error?.response?.data?.message ||
+  error?.message ||
+  "未知错误";
+
+// 并发执行并收集失败项:task 返回失败原因,返回空表示成功
+const runBatch = async (
+  rows: AgentData[],
+  task: (row: AgentData) => Promise<string | undefined>
+) => {
+  const results = await Promise.all(
+    rows.map(async row => {
+      try {
+        return { env: row.key, reason: (await task(row)) || "" };
+      } catch (error) {
+        return { env: row.key, reason: errorReason(error) };
+      }
+    })
+  );
+  const failures: BatchFailure[] = results.filter(item => item.reason);
+  return { total: rows.length, failures };
+};
+
+// 汇总提示:全部成功弹一条消息,有失败的列出每个集群的原因
+const reportBatch = (
+  title: string,
+  total: number,
+  failures: BatchFailure[]
+) => {
+  if (!failures.length) {
+    message(`${title}：${total} 个 agent 已全部提交`, { type: "success" });
+    return;
+  }
+  ElMessageBox.alert(
+    h("div", [
+      h(
+        "p",
+        `${title}：成功 ${total - failures.length} 个，失败 ${failures.length} 个`
+      ),
+      ...failures.map(item =>
+        h(
+          "p",
+          { style: "margin-top: 6px; color: var(--el-color-danger)" },
+          `${item.env}：${item.reason}`
+        )
+      )
+    ]),
+    "部分 agent 操作失败",
+    { type: "warning", confirmButtonText: "知道了" }
+  ).catch(() => {});
+};
+
+// 批量更新对话框:目标在打开时固定下来,避免表格刷新后勾选变化
+const batchTargets = ref<AgentData[]>([]);
+const batchUpdateDialogVisible = ref(false);
+const batchUpdateForm = reactive({ image_tag: "" });
+const batchUpdateLoading = ref(false);
+
+const handleBatchUpdate = () => {
+  if (!selectedRows.value.length) return;
+  batchTargets.value = [...selectedRows.value];
+  batchUpdateForm.image_tag = "";
+  batchUpdateDialogVisible.value = true;
+};
+
+const submitBatchUpdate = async () => {
+  const imageTag = batchUpdateForm.image_tag.trim();
+  if (!imageTag) {
+    ElMessage.warning("请输入镜像标签");
+    return;
+  }
+
+  batchUpdateLoading.value = true;
+  try {
+    const { total, failures } = await runBatch(
+      batchTargets.value,
+      async row => {
+        const res = await updateAgentImage(row.key, imageTag, { silent: true });
+        return res.success === false
+          ? res.message || res.error || "更新失败"
+          : undefined;
+      }
+    );
+    batchUpdateDialogVisible.value = false;
+    reportBatch(`批量更新镜像（${imageTag}）`, total, failures);
+    tableRef.value?.clearSelection();
+    await getAgentData();
+  } finally {
+    batchUpdateLoading.value = false;
+  }
+};
+
+// 批量重启
+const handleBatchRestart = async () => {
+  const targets = [...selectedRows.value];
+  if (!targets.length) return;
+  try {
+    await ElMessageBox.confirm(
+      h("div", [
+        h(
+          "p",
+          `确认重启以下 ${targets.length} 个 agent 吗？重启期间这些集群的 agent 会短暂离线。`
+        ),
+        h(
+          "div",
+          {
+            style:
+              "max-height: 160px; margin-top: 8px; overflow-y: auto; line-height: 1.8"
+          },
+          targets.map(row => row.key).join("、")
+        )
+      ]),
+      "批量重启 agent",
+      { confirmButtonText: "重启", cancelButtonText: "取消", type: "warning" }
+    );
+  } catch {
+    return; // 取消
+  }
+
+  const { total, failures } = await runBatch(targets, async row => {
+    const res = await restartAgent(row.key, { silent: true });
+    return restartFailure(res) || undefined;
+  });
+  reportBatch("批量重启", total, failures);
+  tableRef.value?.clearSelection();
+  await getAgentData();
 };
 
 // 页面加载时获取数据
@@ -874,5 +1135,28 @@ onMounted(() => {
   gap: 10px;
   align-items: center;
   justify-content: center;
+}
+
+.ai-connection-header {
+  display: inline-flex;
+  gap: 4px;
+  align-items: center;
+}
+
+.ai-connection-header__hint {
+  cursor: help;
+}
+
+.ai-connection-tip {
+  max-width: 280px;
+  line-height: 1.6;
+}
+
+.batch-targets {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  max-height: 120px;
+  overflow-y: auto;
 }
 </style>

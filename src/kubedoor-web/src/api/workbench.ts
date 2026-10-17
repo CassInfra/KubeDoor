@@ -101,3 +101,68 @@ export const updateScheduler = (env: string, scheduler: number) => {
     data: { env, scheduler }
   });
 };
+
+/** Agent 自己的 Deployment:install.sh 固定装在 kubedoor 命名空间 */
+const AGENT_NAMESPACE = "kubedoor";
+const AGENT_DEPLOYMENT = "kubedoor-agent";
+
+export type AgentOpResult = {
+  success?: boolean;
+  message?: string;
+  /** master / agent 拒绝或失败时的原因 */
+  error?: string;
+  /** 重启接口:200 也可能带逐个 Deployment 的失败原因 */
+  error_list?: Array<{
+    namespace: string;
+    deployment_name: string;
+    reason: string;
+  }>;
+};
+
+/**
+ * 更新 Agent 镜像(修改 kubedoor-agent 的镜像 tag,Agent 随之滚动重启)
+ * @param env K8S环境
+ * @param imageTag 镜像标签(版本号)
+ * @param options.silent 批量操作:出错不逐个弹提示,由调用方汇总
+ */
+export const updateAgentImage = (
+  env: string,
+  imageTag: string,
+  options?: { silent?: boolean }
+) => {
+  return http.request<AgentOpResult>(
+    "post",
+    "/api/update-image",
+    {
+      params: { env },
+      data: {
+        image_tag: imageTag,
+        deployment: AGENT_DEPLOYMENT,
+        namespace: AGENT_NAMESPACE
+      }
+    },
+    { silent: options?.silent }
+  );
+};
+
+/**
+ * 重启 Agent(滚动重启 kubedoor-agent)
+ * @param env K8S环境
+ * @param options.silent 批量操作:出错不逐个弹提示,由调用方汇总
+ */
+export const restartAgent = (env: string, options?: { silent?: boolean }) => {
+  return http.request<AgentOpResult>(
+    "post",
+    "/api/restart",
+    {
+      params: { env },
+      data: {
+        deployment_list: [
+          { namespace: AGENT_NAMESPACE, deployment_name: AGENT_DEPLOYMENT }
+        ],
+        node_scheduler: []
+      }
+    },
+    { silent: options?.silent }
+  );
+};
