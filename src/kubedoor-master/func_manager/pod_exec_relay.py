@@ -14,12 +14,15 @@ master → 浏览器:二进制帧是终端输出;文本帧 {"type": "started", "
 - 流控是端到端的:浏览器按 xterm 实际写完的字节 ack,agent 未确认字节超过窗口就停止读容器输出,所以队列正常不会积压;
   真积压说明浏览器已经收不动了(卡死、断网),直接断开;
 - 不看 clients[env]["online"]:心跳 5 秒判离线会抖动,连接本身还在就能用;
-- 旧版 agent 不认识 pod_exec,REPLY_WAIT 秒没有任何回应就提示升级 agent。
+- 旧版 agent 不认识 pod_exec,REPLY_WAIT 秒没有任何回应就提示升级 agent;
+- 节点终端临时 pod 的镜像取 master 环境变量 NODE_SHELL_IMAGE(可选),随 start 消息下发给 agent;
+  没配就不带,agent 用内置默认镜像,所以改镜像不需要动各集群的 agent。
 """
 
 import asyncio
 import base64
 import json
+import os
 import re
 import time
 import uuid
@@ -275,6 +278,11 @@ class PodExecRelay:
         start = {"type": "pod_exec", "action": "start", "kind": "node", "node_name": node, "shell": shell,
                  "cols": _query_size(query.get("cols"), 80, MAX_COLS),
                  "rows": _query_size(query.get("rows"), 24, MAX_ROWS)}
+        # 临时 pod 的镜像由 master 配置(kubedoor-config 的 NODE_SHELL_IMAGE),每次开终端随消息下发;
+        # 没配就不带,agent 用内置默认,这样升级 agent 只需要换镜像,不用改各集群 agent 的配置
+        image = os.environ.get("NODE_SHELL_IMAGE", "").strip()
+        if image:
+            start["image"] = image
         return await self._serve(request, env, start, f"node/{node}", "node.exec", {"shell": shell})
 
     def register_routes(self, app):

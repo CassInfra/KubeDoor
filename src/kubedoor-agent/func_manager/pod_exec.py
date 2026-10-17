@@ -2,7 +2,7 @@
 Pod / 节点终端(web shell):master 转来的会话,在 agent 上用 K8S exec(WebSocket,v4.channel.k8s.io)打开带 tty 的 shell
 
 master → agent:{"type": "pod_exec", "action": "start" | "stdin" | "resize" | "ack" | "stop", "session_id", ...}
-                start 带 "kind": "pod"(默认)或 "node"
+                start 带 "kind": "pod"(默认)或 "node";node 还可带 "image"(master 配置的临时 pod 镜像,没有就用内置默认)
 agent → master:{"type": "pod_exec", "event": "accepted" | "started" | "output" | "exit", "session_id", ...}
 
 - 输出按原始字节 base64 后放进 JSON(终端输出可能截在半个 UTF-8 字符上,也可能是二进制);
@@ -49,10 +49,12 @@ _SHELL_MISSING_HINTS = ("executable file not found", "no such file or directory"
 NO_SHELL_MESSAGE = "找不到可用的 shell(试过 {}),可能是 distroless 之类的精简镜像,或节点镜像缺少 nsenter"
 
 # 节点终端:临时 pod 的命名空间、容器名、镜像、存活时长(存活到期后容器自己退出,作为 agent 异常未清理时的兜底)
+# 默认镜像写在代码里随 agent 镜像走,不进各集群 agent 的配置;内网环境由 master 的 NODE_SHELL_IMAGE 在 start 消息里下发覆盖
 NODE_SHELL_NAMESPACE = "kubedoor"
 NODE_SHELL_CONTAINER = "shell"
 NODE_SHELL_LABEL = "kubedoor-node-shell"
-NODE_SHELL_IMAGE = os.environ.get("NODE_SHELL_IMAGE") or "registry.cn-shenzhen.aliyuncs.com/starsl/alpine:3"
+DEFAULT_NODE_SHELL_IMAGE = "registry.cn-shenzhen.aliyuncs.com/starsl/alpine:3"
+MAX_IMAGE_LEN = 512
 NODE_SHELL_TTL = int(os.environ.get("NODE_SHELL_TTL") or 86400)
 NODE_SHELL_READY_TIMEOUT = 120  # 等临时 pod 就绪(含首次拉镜像)的上限秒数
 # 进入宿主机 1 号进程的 mount/uts/ipc/net 命名空间;pid 不进,保留容器自身便于 exec 退出时清理
@@ -147,7 +149,7 @@ def resize_frame(cols, rows):
     return bytes([RESIZE_CHANNEL]) + json.dumps({"Width": cols, "Height": rows}).encode()
 
 
-def node_shell_pod_manifest(node_name, pod_name):
+def node_shell_pod_manifest(node_name, pod_name, image=DEFAULT_NODE_SHELL_IMAGE):
     """Lens 风格的节点终端临时 pod:privileged + hostPID,维持存活等待 exec 进来 nsenter"""
     return client.V1Pod(
         metadata=client.V1ObjectMeta(name=pod_name, labels={"app": NODE_SHELL_LABEL}),
@@ -162,7 +164,7 @@ def node_shell_pod_manifest(node_name, pod_name):
             containers=[
                 client.V1Container(
                     name=NODE_SHELL_CONTAINER,
-                    image=NODE_SHELL_IMAGE,
+                    image=image,
                     image_pull_policy="IfNotPresent",
                     # 容器自身只需维持存活;真正进宿主机由 exec 时的 nsenter 完成
                     command=["sleep", str(NODE_SHELL_TTL)],
@@ -224,9 +226,10 @@ class _NodeTarget:
 
     kind = "node"
 
-    def __init__(self, node, shell):
+    def __init__(self, node, shell, image=None):
         self.node = node
         self.shell = shell
+        self.image = image or DEFAULT_NODE_SHELL_IMAGE
         self.namespace = NODE_SHELL_NAMESPACE
         self.pod_name = f"{NODE_SHELL_LABEL}-{uuid.uuid4().hex[:12]}"
         self.container = NODE_SHELL_CONTAINER
@@ -234,9 +237,9 @@ class _NodeTarget:
 
     async def prepare(self, session):
         await session.notice(f"正在节点 {self.node} 上创建终端容器(首次拉取镜像可能较慢)...")
-        await session.manager.create_node_shell_pod(self.node, self.pod_name)
+        await session.manager.create_node_shell_pod(self.node, self.pod_name, self.image)
         self._created = True
-        await session.manager.wait_pod_running(self.namespace, self.pod_name, self.container)
+        await session.manager.wait_pod_running(self.namespace, self.pod_name, self.container, self.image)
         return [self.container]
 
     def commands(self):
@@ -433,12 +436,12 @@ class PodExecManager:
             return await ws_ctx
 
     # ------------------------------------------------------------------ 节点终端临时 pod
-    async def create_node_shell_pod(self, node_name, pod_name):
+    async def create_node_shell_pod(self, node_name, pod_name, image=DEFAULT_NODE_SHELL_IMAGE):
         await self.core_v1.create_namespaced_pod(
-            NODE_SHELL_NAMESPACE, node_shell_pod_manifest(node_name, pod_name), _request_timeout=15
+            NODE_SHELL_NAMESPACE, node_shell_pod_manifest(node_name, pod_name, image), _request_timeout=15
         )
 
-    async def wait_pod_running(self, namespace, pod_name, container):
+    async def wait_pod_running(self, namespace, pod_name, container, image=""):
         """等临时 pod 的容器进入 Running;拉镜像失败 / pod 失败时抛 ExecError"""
         loop = asyncio.get_running_loop()
         deadline = loop.time() + NODE_SHELL_READY_TIMEOUT
@@ -451,7 +454,8 @@ class PodExecManager:
             if phase in ("Failed", "Succeeded"):
                 raise ExecError(f"节点终端容器启动失败({phase})")
             if state is not None and state.waiting is not None and state.waiting.reason in _IMAGE_PULL_REASONS:
-                raise ExecError(f"拉取节点终端镜像失败({state.waiting.reason}),可把 NODE_SHELL_IMAGE 换成内网镜像")
+                raise ExecError(f"拉取节点终端镜像 {image} 失败({state.waiting.reason}),"
+                                "可在 master 的 kubedoor-config 里设置 NODE_SHELL_IMAGE 换成内网镜像")
             if loop.time() > deadline:
                 raise ExecError("创建节点终端容器超时(镜像可能还在拉取,请稍后重试)")
             await asyncio.sleep(0.5)
@@ -531,7 +535,9 @@ class PodExecManager:
             node = data.get("node_name")
             if not (isinstance(node, str) and node):
                 return None, "参数错误"
-            return _NodeTarget(node, shell), None
+            image = data.get("image")  # master 配置的节点终端镜像;没配就用内置默认
+            image = image.strip() if isinstance(image, str) and len(image) <= MAX_IMAGE_LEN else None
+            return _NodeTarget(node, shell, image), None
         if kind == "pod":
             namespace, pod, container = data.get("namespace"), data.get("pod_name"), data.get("container") or ""
             if not (isinstance(namespace, str) and namespace and isinstance(pod, str) and pod

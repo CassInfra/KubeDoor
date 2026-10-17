@@ -362,6 +362,7 @@ async def test_node_shell_creates_pod_execs_nsenter_and_deletes(pod_exec_module)
     assert manifest.spec.host_pid and manifest.spec.host_network
     assert manifest.spec.containers[0].security_context.privileged is True
     assert manifest.spec.containers[0].command == ["sleep", str(m.NODE_SHELL_TTL)]
+    assert manifest.spec.containers[0].image == m.DEFAULT_NODE_SHELL_IMAGE  # master 没配镜像,用 agent 内置默认
     assert manifest.spec.tolerations[0].operator == "Exists"
 
     # exec 命令带 nsenter 前缀,进入临时 pod 的 shell 容器
@@ -382,13 +383,34 @@ async def test_node_shell_creates_pod_execs_nsenter_and_deletes(pod_exec_module)
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("image,expected", [
+    ("registry.local/ops/alpine:3", "registry.local/ops/alpine:3"),  # master 配置的镜像随 start 消息下发
+    ("  registry.local/ops/alpine:3 ", "registry.local/ops/alpine:3"),
+    ("", None), ("   ", None), (123, None), (None, None), ("x" * 513, None),  # 不合法的一律回落到内置默认
+])
+async def test_node_shell_image_from_master(pod_exec_module, image, expected):
+    m = pod_exec_module
+    k8s = FakeK8sWs()
+    manager, core_v1, opened = make_node_manager(m, [k8s])
+    master = master_ws()
+    manager.handle(master, node_start(image=image))
+    await until(lambda: opened)
+    manifest = core_v1.create_namespaced_pod.await_args.args[1]
+    assert manifest.spec.containers[0].image == (expected or m.DEFAULT_NODE_SHELL_IMAGE)
+    k8s.finish({"status": "Success"})
+    await until(exited(master))
+
+
+@pytest.mark.asyncio
 async def test_node_shell_image_pull_failure_reports_and_cleans_up(pod_exec_module):
     m = pod_exec_module
     manager, core_v1, opened = make_node_manager(m, [], pod=waiting_pod("ImagePullBackOff"))
     master = master_ws()
-    manager.handle(master, node_start())
+    manager.handle(master, node_start(image="registry.local/ops/alpine:3"))
     await until(exited(master))
-    assert "ImagePullBackOff" in events(master)[-1]["message"]
+    message = events(master)[-1]["message"]
+    assert "ImagePullBackOff" in message
+    assert "registry.local/ops/alpine:3" in message and "NODE_SHELL_IMAGE" in message  # 提示拉的哪个镜像、去哪改
     assert opened == []  # 没就绪就不会去 exec
     await until(lambda: core_v1.delete_namespaced_pod.await_count == 1)  # 建了就要删
 

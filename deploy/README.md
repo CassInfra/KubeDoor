@@ -240,6 +240,8 @@ kubectl -n kubedoor rollout restart deploy/vmalert
 
 设为 `0` 表示不清理。
 
+节点终端(节点管理页的「终端」)会在该节点所在集群的 `kubedoor` 命名空间临时起一个特权 pod,默认镜像 `registry.cn-shenzhen.aliyuncs.com/starsl/alpine:3` 已内置在 agent 里。集群拉不到这个镜像时,在 `kubedoor-config` 里设置 `NODE_SHELL_IMAGE`(需含 `nsenter`,比如内网仓库里的 alpine)并重启 master,之后开终端时由 master 下发给 agent,不用改各集群的 agent。
+
 当然,改 `kubedoor.conf` 后重新跑 `./install.sh master` 也可以,是幂等的。但重跑会用模板覆盖上面手工 `kubectl edit` 过的 ConfigMap,想长期保留的改动要同时写进 `kubedoor.conf` 或 `deploy/manifests/` 下对应的模板;而且只改配置、镜像 tag 没变时 Pod 不会自动重启,仍要按上面的命令重启对应组件。
 
 ---

@@ -17,8 +17,6 @@ data:
   MSG_TOKEN: '__MSG_TOKEN__'
   # Java 服务 dump/jfr/jstack 的结果上传地址,留空则这些功能不可用
   OSS_URL: '__OSS_URL__'
-  # 节点终端(node shell)用的临时 pod 镜像,需含 nsenter(基础 alpine 的 busybox 自带);换内网镜像改这里
-  NODE_SHELL_IMAGE: 'registry.cn-shenzhen.aliyuncs.com/starsl/alpine:3'
 
 ---
 apiVersion: v1

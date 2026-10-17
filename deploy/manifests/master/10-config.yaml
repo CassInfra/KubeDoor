@@ -42,6 +42,10 @@ data:
   RETENTION_ALERTS_DAYS: "365"
   RETENTION_RESOURCES_DAYS: "365"
   RETENTION_AUDIT_DAYS: "180"
+  # 节点终端临时 pod 用的镜像(需含 nsenter),master 开终端时下发给 agent。
+  # 留空 = 用 agent 内置的默认镜像(registry.cn-shenzhen.aliyuncs.com/starsl/alpine:3);
+  # 集群拉不到时换成内网仓库里的镜像,改完重启 master 即可,不用动各集群的 agent
+  NODE_SHELL_IMAGE: ""
 
   # --- 登录与权限(账号、LDAP、集群授权都在 Web 的「系统管理」里配置)---
   # agent 连 master 必须带账号口令(MASTER_WS 里写 Agent 账号)。升级过渡期可临时设为 "false"

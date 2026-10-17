@@ -238,7 +238,8 @@ async def test_browser_websocket_rejections(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_node_exec_start_payload_and_audit(no_audit):
+async def test_node_exec_start_payload_and_audit(no_audit, monkeypatch):
+    monkeypatch.delenv("NODE_SHELL_IMAGE", raising=False)  # 没配镜像:start 里不带 image,agent 用内置默认
     ws = agent_ws()
     relay = relay_module.PodExecRelay({"prod": {"ws": ws}})
     app = web.Application()
@@ -260,6 +261,28 @@ async def test_node_exec_start_payload_and_audit(no_audit):
         await browser.close()
         await until(lambda: relay.sessions == {})
         assert agent_messages(ws)[-1] == {"type": "pod_exec", "action": "stop", "session_id": session_id}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("configured,expected", [
+    ("registry.local/ops/alpine:3", "registry.local/ops/alpine:3"),  # master 配置的镜像随 start 下发
+    ("  registry.local/ops/alpine:3\n", "registry.local/ops/alpine:3"),
+    ("", None), ("   ", None),  # 留空 = 不下发,agent 用内置默认
+])
+async def test_node_exec_passes_configured_image(monkeypatch, configured, expected):
+    monkeypatch.setenv("NODE_SHELL_IMAGE", configured)
+    ws = agent_ws()
+    relay = relay_module.PodExecRelay({"prod": {"ws": ws}})
+    app = web.Application()
+    relay.register_routes(app)
+    async with TestClient(TestServer(app)) as client:
+        browser = await client.ws_connect("/ws/node-exec?env=prod&node=10.0.0.1")
+        await until(lambda: agent_messages(ws))
+        start = agent_messages(ws)[0]
+        assert start.get("image") == expected
+        assert ("image" in start) is (expected is not None)
+        await browser.close()
+        await until(lambda: relay.sessions == {})
 
 
 @pytest.mark.asyncio
