@@ -12,3 +12,5 @@ huaweicloudsdkcore==3.1.165
 huaweicloudsdkswr==3.1.165
 aliyun-python-sdk-core==2.16.0
 aliyun-python-sdk-cr==4.1.2
+ldap3>=2.9.1
+cryptography

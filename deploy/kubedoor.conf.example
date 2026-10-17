@@ -81,17 +81,19 @@ PG_CMD_TIMEOUT="60"
 # Web 的 NodePort。留空=由 K8S 随机分配(30000-32767)
 WEB_NODEPORT=""
 
-# 登录账号,htpasswd 格式 "用户名:加密密码",一行一个。
-# 在 https://tool.lu/htpasswd/ 生成,加密方式选 Crypt。
-# 默认给了两个账号:
-#   kubedoor / kubedoor          —— 管理员(读写)
-#   Up4biLko1dNh / qCa22jDkfc9y  —— 预留给跨集群的 agent 连接 master 用
-# 其它账号默认是只读权限,只能读不能改。
-WEB_AUTH_USERS="kubedoor:a3rsHbfPnb4Ps
-Up4biLko1dNh:cUo3fhryKizac"
+# 登录与权限由 KubeDoor 自己管理(本地账号 / LDAP,按 K8S 集群授权),装好后在 Web 的
+# 「系统管理」里维护,不需要在这里配置账号。首次安装会自动创建两个内置账号:
+#   kubedoor      —— 内置超级管理员,出厂口令 kubedoor,首次登录必须修改;
+#                    只有它自己能改口令,不能被删除、禁用或改权限
+#   Up4biLko1dNh  —— 内置 Agent 账号,出厂口令 qCa22jDkfc9y,只能用来让 agent 连接 master,不能登录 Web
+# 想一开始就用自己的口令,填下面两项(只在首次创建账号时生效;之后请在 Web 上修改)。
+# 注意 Agent 账号的口令要同步写进各集群 agent 的 MASTER_WS。
+KUBEDOOR_INIT_ADMIN_PASSWORD=""
+KUBEDOOR_INIT_AGENT_PASSWORD=""
 
-# 上面哪些账号是读写权限(空格分隔)。没列出来的账号只能读,不能做任何变更操作。
-WEB_RW_USERS="kubedoor Up4biLko1dNh"
+# agent 连 master 是否必须带 Agent 账号口令(同集群、跨集群都一样)。
+# 从旧版升级时,同集群 agent 的 MASTER_WS 原来不带口令,可先设 false 过渡,改好后再改回 true
+AGENT_AUTH_REQUIRED="true"
 
 # KubeDoor Web 的外部访问地址,形如 http://<节点IP>:<Web 的 NodePort>
 # 填了以后 IM 告警通知里的【屏蔽】按钮会直接跳到 KubeDoor 的屏蔽页并预填条件
@@ -117,7 +119,8 @@ ENABLE_GRAFANA="true"
 GRAFANA_ADMIN_USER="admin"
 GRAFANA_ADMIN_PASSWORD="admin"
 
-# 外部 MCP 接口（/mcp、/sse），供 Claude Desktop、Cursor 等其他 AI 客户端接入，复用 Web 登录账号鉴权。
+# 外部 MCP 接口（/mcp、/sse），供 Claude Desktop、Cursor 等其他 AI 客户端接入，
+# 用 Web 账号的 Basic 认证（请求头 Authorization: Basic base64(账号:口令)），按该账号的集群权限执行。
 # 默认开启；设为 false 只关闭对外的 MCP 入口，不影响网页里的 AI 助手。
 ENABLE_MCP="true"
 
@@ -201,10 +204,11 @@ REGISTRY_SECRET_JSON='{
 # 每个集群必须唯一,只能用字母/数字/下划线/中划线。
 K8S_NAME=""         # 必填
 
-# agent 连 master 的地址:
-#   同一个 K8S 集群:ws://kubedoor-master.kubedoor        (走 service,免认证)
-#   跨集群:ws://Up4biLko1dNh:qCa22jDkfc9y@<web外部IP>:<NodePort>
-MASTER_WS="ws://kubedoor-master.kubedoor"
+# agent 连 master 的地址,必须带 Agent 账号口令(master 端在「系统管理」里可以改这个账号的口令):
+#   同一个 K8S 集群:ws://Up4biLko1dNh:<口令>@kubedoor-master.kubedoor   (走 service)
+#   跨集群:ws://Up4biLko1dNh:<口令>@<web外部IP>:<NodePort>
+# 口令里有 @ : / 等字符时要做 URL 编码(如 @ 写成 %40)
+MASTER_WS="ws://Up4biLko1dNh:qCa22jDkfc9y@kubedoor-master.kubedoor"
 
 # Java 服务做 dump / jfr / jstack 时,结果文件上传到的对象存储地址。
 # 暂时没有可以留空,装完再改 kubedoor-agent-config 这个 ConfigMap。

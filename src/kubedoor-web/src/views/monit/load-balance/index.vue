@@ -23,6 +23,7 @@
               :value="item"
             />
           </el-select>
+          <ClusterPermTag :env="searchForm.env" />
         </el-form-item>
 
         <el-form-item>

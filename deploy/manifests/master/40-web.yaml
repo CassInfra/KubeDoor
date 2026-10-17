@@ -1,20 +1,11 @@
-# KubeDoor Web 控制台:nginx 提供静态页面 + 反向代理到 master / alarm / grafana / ai
+# KubeDoor Web 控制台:nginx 提供静态页面,并把请求转给 master / ai / grafana / alarm
 #
-# 权限模型:
-#   nginx basic auth 认证通过后,按用户名映射出 read / rw 两种权限($user_permission),
-#   只读用户只能走下面显式列出的查询类接口,其余 /api/ 一律 403。
-apiVersion: v1
-kind: Secret
-metadata:
-  name: nginx-auth
-  namespace: __NAMESPACE__
-  labels:
-    app: kubedoor-web
-type: Opaque
-data:
-  user.passwd: __WEB_AUTH_B64__
-
----
+# 登录和权限都由 kubedoor-master 判断,nginx 自己不做认证:
+#   /api/*、/ws*                      直接转给 master,由 master 校验登录会话 / Agent 账号
+#   AI 助手、MCP、Grafana、自定义告警   不经过 master。转发前先用 auth_request 子请求问 master
+#                                     「这是谁、有没有权限」,再把 master 回的身份写进请求头,
+#                                     客户端自己带的同名请求头一律被覆盖
+# 改了这里的配置重跑 install.sh 即可:Pod 模板上有配置摘要注解,配置一变就会滚动更新
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -28,7 +19,7 @@ data:
     worker_processes  auto;
 
     error_log  /var/log/nginx/error.log notice;
-    pid        /var/run/nginx.pid;
+    pid        /run/nginx.pid;
 
     events {
         worker_connections  1024;
@@ -37,13 +28,22 @@ data:
     http {
         include       /etc/nginx/mime.types;
         default_type  application/octet-stream;
+        sendfile      on;
+        keepalive_timeout  7200;
+        client_max_body_size 50m;
+
         map "$time_iso8601 # $msec" $time_iso8601_ms { "~(^[^+]+)(\+[0-9:]+) # \d+\.(\d+)$" $1.$3$2; }
+        # 登录、改密、账号与 LDAP 管理的请求体里有明文口令,不进日志
+        map $uri $kd_log_body {
+            ~^/api/(auth|admin)/  "";
+            default               $request_body;
+        }
         log_format main
             '{"timestamp":"$time_iso8601_ms",'
             '"server_ip":"$server_addr",'
             '"remote_ip":"$remote_addr",'
             '"xff":"$http_x_forwarded_for",'
-            '"remote_user":"$remote_user",'
+            '"user":"$kd_user$upstream_http_x_kubedoor_user",'
             '"domain":"$host",'
             '"url":"$request_uri",'
             '"referer":"$http_referer",'
@@ -56,221 +56,141 @@ data:
             '"protocol":"$server_protocol",'
             '"upstreamhost":"$upstream_addr",'
             '"http_user_agent":"$http_user_agent",'
-            '"【body】": "$request_body"'
+            '"【body】": "$kd_log_body"'
             '}';
-
         access_log  /var/log/nginx/access.log  main;
-        # AI requests carry provider keys and uploaded kubeconfigs. Never log
-        # their body, headers, or query string, including on failed requests.
+        # AI 请求里有模型密钥和上传的 kubeconfig:不记请求体、请求头和查询参数
         log_format ai_safe escape=json
-            '{"timestamp":"$time_iso8601","remote_user":"$remote_user",'
+            '{"timestamp":"$time_iso8601","user":"$kd_user",'
             '"method":"$request_method","path":"$uri","status":"$status"}';
 
-        sendfile        on;
-        keepalive_timeout  7200;
-        client_max_body_size 50m;
-
-        include /etc/nginx/conf.d/*.conf;
-    }
-
-  default.conf: |
-    map $http_upgrade $connection_upgrade {
-        default upgrade;
-        ''      close;
-    }
-
-    # 用户名 -> 权限。没列出来的账号一律只读。
-    map $remote_user $user_permission {
-        default "read";
-        __WEB_RW_USER_MAP__
-    }
-
-    auth_basic "KubeDoor Login";
-    auth_basic_user_file /etc/nginx/user.passwd;
-
-    upstream kubedoor_master { server kubedoor-master.__NAMESPACE__:80; }
-    upstream kubedoor_alarm  { server kubedoor-alarm.__NAMESPACE__:80;  }
-
-    server {
-        listen 80;
-
-        # Internal bridges require a service token and must never be public.
-        location ^~ /api/ai/internal/ {
-            access_log /var/log/nginx/access.log ai_safe;
-            return 404;
+        map $http_upgrade $connection_upgrade {
+            default upgrade;
+            ''      close;
         }
 
-        location ^~ /api/ai/ {
-            include /etc/nginx/ai-security/gateway.conf;
-            proxy_set_header X-User-Name $remote_user;
-            proxy_set_header X-User-Permission $user_permission;
-            proxy_http_version 1.1;
-            proxy_set_header Connection "";
-            proxy_read_timeout 3600;
-            proxy_buffering off;
-            proxy_cache off;
-            client_max_body_size 2m;
-            access_log /var/log/nginx/access.log ai_safe;
-            proxy_pass http://kubedoor-ai.__NAMESPACE__:8000;
-        }
+        upstream kubedoor_master { server kubedoor-master.__NAMESPACE__:80; }
 
-        # ---------- 静态页面(前端是 hash 路由,不需要 try_files) ----------
-        location / {
-            root /www/dist;
-            index index.html;
-        }
+        server {
+            listen 80;
 
-        # ---------- Grafana 看板 ----------
-        # BEGIN-GRAFANA
-        location /grafana/ {
-            proxy_set_header Host $host;
-            proxy_pass http://kubedoor-dash.__NAMESPACE__:3000;
-        }
+            # 访问日志里的用户名:走 auth_request 的请求取子请求带回的,转给 master 的请求取 master 的响应头
+            set $kd_user "";
+            # auth_request 子请求带回的身份,下面用了 auth_request 的 location 都会填上这几个变量
+            auth_request_set $kd_user         $upstream_http_x_kubedoor_user;
+            auth_request_set $kd_role         $upstream_http_x_kubedoor_role;
+            auth_request_set $kd_clusters     $upstream_http_x_kubedoor_clusters;
+            auth_request_set $kd_grafana_role $upstream_http_x_kubedoor_grafana_role;
 
-        location /grafana/api/live/ {
-            proxy_http_version 1.1;
-            proxy_set_header Upgrade $http_upgrade;
-            proxy_set_header Connection $connection_upgrade;
-            proxy_set_header Host $host;
-            proxy_pass http://kubedoor-dash.__NAMESPACE__:3000;
-        }
-        # END-GRAFANA
-
-        # ---------- 只读用户也放行的查询类接口 ----------
-        # /api/db/* 是参数化的数据库 REST 接口(已替代早期直传 SQL 的 /api/sql)。
-        # 这里白名单的都是纯查询,写操作(add/edit/delete/operate/revoke 等)
-        # 不在名单里,会落到下面的 location /api/ 被拦截。
-        location ~ ^/api/db/(res/(envs|namespaces|deployments|max_day|list|collection)|agent/show_add_label|alert/(envs|names|total|detail|detail_total)|silence/(list|label_values|preview))$ {
-            proxy_read_timeout 300;
-            proxy_set_header X-User-Name $remote_user;
-            proxy_set_header X-User-Permission $user_permission;
-            proxy_pass http://kubedoor_master;
-        }
-
-        # 实时指标(集群概览、节点排名、工作负载监控)
-        location ~ ^/api/prom_ {
-            proxy_read_timeout 300;
-            proxy_set_header X-User-Name $remote_user;
-            proxy_set_header X-User-Permission $user_permission;
-            proxy_pass http://kubedoor_master;
-        }
-
-        # TOP10 / 告警趋势统计
-        location ~ ^/api/stats/ {
-            proxy_read_timeout 300;
-            proxy_pass http://kubedoor_master;
-        }
-
-        location /api/events {
-            proxy_read_timeout 300;
-            proxy_pass http://kubedoor_master;
-        }
-
-        location /api/image/tags {
-            proxy_read_timeout 300;
-            proxy_pass http://kubedoor_master;
-        }
-
-        location /api/get_dpm_pods {
-            proxy_read_timeout 300;
-            proxy_pass http://kubedoor_master;
-        }
-
-        location /api/agent_names {
-            proxy_read_timeout 300;
-            proxy_pass http://kubedoor_master;
-        }
-
-        location /api/agent/pods {
-            proxy_read_timeout 300;
-            proxy_pass http://kubedoor_master;
-        }
-
-        location /api/agent/namespaces {
-            proxy_read_timeout 300;
-            proxy_pass http://kubedoor_master;
-        }
-
-        # ---------- 自定义告警投递(kubedoor-alarm) ----------
-        location /api/custom_alert {
-            if ($user_permission = "read") {
-                return 403;
+            # ---------- 静态页面(前端是 hash 路由,不需要 try_files;登录页不需要认证) ----------
+            location / {
+                root /www/dist;
             }
-            proxy_read_timeout 60;
-            proxy_pass http://kubedoor_alarm;
-        }
 
-        # ---------- WebSocket ----------
-        # Pod 日志流:只读用户也能看日志
-        location /ws/pod-logs {
-            proxy_http_version 1.1;
-            proxy_set_header Upgrade $http_upgrade;
-            proxy_set_header Connection $connection_upgrade;
-            proxy_set_header Host $host;
-            proxy_read_timeout 3600;
-            proxy_pass http://kubedoor_master;
-        }
-
-        # Deployment/Pod 实时状态推送:只读数据,只读用户也放行(不加这段会落到下面 rw-only 的 /ws)
-        location /ws/workload-status {
-            proxy_http_version 1.1;
-            proxy_set_header Upgrade $http_upgrade;
-            proxy_set_header Connection $connection_upgrade;
-            proxy_set_header Host $host;
-            proxy_read_timeout 3600;
-            proxy_pass http://kubedoor_master;
-        }
-
-        # agent 注册通道:必须 rw(跨集群的 agent 用预置账号连进来)
-        location /ws {
-            if ($user_permission = "read") {
-                return 403;
+            # ---------- 接口和 WebSocket(Pod 日志、实时状态、agent 注册):直接转给 master ----------
+            location ~ ^/(api|ws)(/|$) {
+                proxy_http_version 1.1;
+                proxy_set_header Upgrade $http_upgrade;
+                proxy_set_header Connection $connection_upgrade;
+                proxy_set_header Host $host;
+                proxy_set_header X-Real-IP $remote_addr;
+                proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+                proxy_set_header X-Forwarded-Proto $scheme;
+                # 外部请求不能带内部 token 冒充集群内的服务
+                proxy_set_header X-Kubedoor-Token "";
+                proxy_read_timeout 3600;
+                proxy_pass http://kubedoor_master;
             }
-            proxy_http_version 1.1;
-            proxy_set_header Upgrade $http_upgrade;
-            proxy_set_header Connection $connection_upgrade;
-            proxy_set_header Host $host;
-            proxy_read_timeout 3600;
-            proxy_pass http://kubedoor_master;
-        }
 
-        # ---------- 改镜像:权限由 master 按 UPDATE_IMAGE 配置二次校验 ----------
-        location /api/update-image {
-            proxy_set_header X-User-Name $remote_user;
-            proxy_set_header X-User-Permission $user_permission;
-            proxy_read_timeout 300;
-            proxy_pass http://kubedoor_master;
-        }
-
-        # ---------- 其余接口一律需要 rw ----------
-        location /api/ {
-            if ($user_permission = "read") {
-                return 403;
+            # ---------- 鉴权子请求:问 master 当前用户是谁、有没有权限,只能 nginx 内部调用 ----------
+            # session 浏览器登录会话;mcp 会话或 Basic 认证;grafana 能看到全部集群的登录会话;alert Agent / 全局读写账号
+            location ~ ^/_kd_auth/(session|mcp|grafana|alert)$ {
+                internal;
+                proxy_pass http://kubedoor_master/api/auth/verify?for=$1;
+                proxy_pass_request_body off;
+                proxy_set_header Content-Length "";
+                proxy_set_header X-Kubedoor-Token "";
+                proxy_set_header X-Real-IP $remote_addr;
+                proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+                # 响应头里带着各集群的权限,集群多时会超过默认的 4k;
+                # 调大 proxy_buffer_size 必须同时设 busy_buffers,否则默认值(它的 2 倍)超出上限,nginx 起不来
+                proxy_buffer_size 16k;
+                proxy_busy_buffers_size 16k;
             }
-            proxy_read_timeout 600;
-            proxy_set_header X-User-Name $remote_user;
-            proxy_set_header X-User-Permission $user_permission;
-            proxy_pass http://kubedoor_master;
-        }
 
-        # ---------- MCP(SSE 长连接) ----------
-        # BEGIN-MCP
-        location ~ ^/(mcp|sse|messages)(/|$) {
-            include /etc/nginx/ai-security/gateway.conf;
-            proxy_set_header X-User-Name $remote_user;
-            proxy_set_header X-User-Permission $user_permission;
-            proxy_http_version 1.1;
-            proxy_set_header Connection "";
-            proxy_set_header X-Real-IP $remote_addr;
-            proxy_set_header Host $host;
-            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-            proxy_read_timeout 86400s;
-            proxy_buffering off;
-            proxy_cache off;
-            access_log /var/log/nginx/access.log ai_safe;
-            proxy_pass http://kubedoor-ai.__NAMESPACE__:8000;
+            # ---------- AI 助手:登录会话。AI 服务的内部接口只给集群内服务用,对外一律 404 ----------
+            location ^~ /api/ai/internal/ {
+                access_log /var/log/nginx/access.log ai_safe;
+                return 404;
+            }
+            location ^~ /api/ai/ {
+                auth_request /_kd_auth/session;
+                # 内部 token:AI 服务凭它才信任下面这几个身份头
+                include /etc/nginx/ai-security/gateway.conf;
+                proxy_set_header X-User-Name $kd_user;
+                proxy_set_header X-User-Permission $kd_role;
+                proxy_set_header X-User-Clusters $kd_clusters;
+                proxy_set_header Cookie "";
+                proxy_set_header Authorization "";
+                proxy_http_version 1.1;
+                proxy_set_header Connection "";
+                proxy_buffering off;
+                proxy_read_timeout 3600;
+                client_max_body_size 2m;
+                access_log /var/log/nginx/access.log ai_safe;
+                proxy_pass http://kubedoor-ai.__NAMESPACE__:8000;
+            }
+
+            # BEGIN-MCP
+            # ---------- 外部 MCP(Claude Desktop、Cursor 等):KubeDoor 账号的 Basic 认证,SSE 长连接 ----------
+            location ~ ^/(mcp|sse|messages)(/|$) {
+                auth_request /_kd_auth/mcp;
+                include /etc/nginx/ai-security/gateway.conf;
+                proxy_set_header X-User-Name $kd_user;
+                proxy_set_header X-User-Permission $kd_role;
+                proxy_set_header X-User-Clusters $kd_clusters;
+                proxy_set_header Cookie "";
+                proxy_set_header Authorization "";
+                proxy_set_header Host $host;
+                proxy_set_header X-Real-IP $remote_addr;
+                proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+                proxy_http_version 1.1;
+                proxy_set_header Connection "";
+                proxy_buffering off;
+                proxy_read_timeout 86400s;
+                access_log /var/log/nginx/access.log ai_safe;
+                proxy_pass http://kubedoor-ai.__NAMESPACE__:8000;
+            }
+            # END-MCP
+
+            # BEGIN-GRAFANA
+            # ---------- Grafana 看板(含 Grafana Live 的 WebSocket):auth proxy,KubeDoor 管理员是 Admin,其他人是 Viewer ----------
+            location /grafana/ {
+                auth_request /_kd_auth/grafana;
+                # 没登录直接打开看板时跳到登录页
+                error_page 401 = @kd_login;
+                proxy_http_version 1.1;
+                proxy_set_header Upgrade $http_upgrade;
+                proxy_set_header Connection $connection_upgrade;
+                proxy_set_header Host $host;
+                proxy_set_header X-WEBAUTH-USER $kd_user;
+                proxy_set_header X-WEBAUTH-ROLE $kd_grafana_role;
+                proxy_pass http://kubedoor-dash.__NAMESPACE__:3000;
+            }
+            location @kd_login {
+                return 302 /#/login?redirect=$uri;
+            }
+            # END-GRAFANA
+
+            # ---------- 自定义告警投递(kubedoor-alarm):Agent 账号或全局读写账号的 Basic 认证 ----------
+            location = /api/custom_alert {
+                auth_request /_kd_auth/alert;
+                proxy_set_header Authorization "";
+                proxy_set_header Cookie "";
+                proxy_set_header X-Real-IP $remote_addr;
+                proxy_pass http://kubedoor-alarm.__NAMESPACE__:80;
+            }
         }
-        # END-MCP
     }
 
 ---
@@ -291,6 +211,9 @@ spec:
     metadata:
       labels:
         app: kubedoor-web
+      annotations:
+        # 安装脚本算的配置摘要:配置一变就滚动更新(subPath 挂载的文件不会随 ConfigMap 更新,nginx 也不会自己重载)
+        checksum/config: '__CONFIG_HASH_WEB__'
     spec:
       volumes:
         - name: ai-security
@@ -299,9 +222,6 @@ spec:
             items:
               - key: gateway.conf
                 path: gateway.conf
-        - name: nginx-auth
-          secret:
-            secretName: nginx-auth
         - name: nginx-config
           configMap:
             name: nginx-config
@@ -326,15 +246,9 @@ spec:
             - name: ai-security
               mountPath: /etc/nginx/ai-security
               readOnly: true
-            - name: nginx-auth
-              mountPath: /etc/nginx/user.passwd
-              subPath: user.passwd
             - name: nginx-config
               mountPath: /etc/nginx/nginx.conf
               subPath: nginx.conf
-            - name: nginx-config
-              mountPath: /etc/nginx/conf.d/default.conf
-              subPath: default.conf
           livenessProbe:
             tcpSocket:
               port: 80

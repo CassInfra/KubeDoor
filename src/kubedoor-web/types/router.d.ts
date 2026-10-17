@@ -98,6 +98,8 @@ declare global {
       showLink?: boolean;
       /** 菜单升序排序，值越高排的越后（只针对顶级路由）`可选` */
       rank?: number;
+      /** 只对这些全局角色显示(如 ["admin"]),不写表示所有登录用户可见 `可选` */
+      roles?: Array<string>;
     };
     /** 子路由配置项 */
     children?: Array<RouteChildrenConfigsTable>;

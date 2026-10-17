@@ -221,6 +221,7 @@ class Gateway:
         self.http = http or httpx.AsyncClient(timeout=httpx.Timeout(330, connect=10), follow_redirects=False)
 
     async def master(self, identity, method, path, params=None, body=None, allow_failure=False):
+        # master 按 X-User-Name 从库里重新计算该用户的集群权限,不采信这里带的权限
         headers = {"X-Kubedoor-Token": self.token, "X-User-Name": identity.username, "X-User-Permission": identity.permission}
         try:
             response = await self.http.request(method, self.master_url + path, params=params, json=body, headers=headers)
@@ -340,7 +341,7 @@ class Gateway:
                 raise AIError("image_tag 不能为空")
         guard_scope(scope, operation, args, read_only)
         if not read_only:
-            ctx.identity.require_write()
+            ctx.identity.require_write(scope["env"])
             unknown = await self.store.one("SELECT id FROM kubedoor_ai_actions WHERE run_id=$1::uuid AND state='unknown' AND read_only=false LIMIT 1", ctx.run["id"])
             if unknown:
                 raise AIError("本轮已有写入结果未知，请查询实际状态并在新一轮重新提出操作，不能切换来源盲目重试", 409, "outcome_unknown")
@@ -380,7 +381,7 @@ class Gateway:
     async def dispatch(self, ctx, action):
         await self.check_cancel(ctx)
         if not action["read_only"]:
-            ctx.identity.require_write()
+            ctx.identity.require_write(ctx.run["scope"]["env"])
             valid = await self.store.one("SELECT id FROM kubedoor_ai_actions WHERE id=$1::uuid AND expires_at>now()", action["id"])
             if not valid:
                 raise AIError("批准已过期，请重新生成操作", 409, "approval_expired")

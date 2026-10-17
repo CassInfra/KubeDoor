@@ -8,7 +8,9 @@ export default {
   meta: {
     icon: "ep:setting",
     title: $t("menus.resourceWorkbench"),
-    rank: 60
+    rank: 60,
+    // Agent 管理只对管理员开放
+    roles: ["admin"]
   },
   children: [
     {
@@ -17,7 +19,8 @@ export default {
       component: () => import("@/views/workbench/index.vue"),
       meta: {
         title: $t("menus.resourceWorkbench"),
-        showLink: VITE_HIDE_HOME === "true" ? false : true
+        showLink: VITE_HIDE_HOME === "true" ? false : true,
+        roles: ["admin"]
       }
     }
   ]

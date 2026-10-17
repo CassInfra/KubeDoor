@@ -196,7 +196,6 @@ validate_master() {
     require_var PG_DATABASE
     require_var PROM_K8S_TAG_KEY
     require_var IMAGE_REPO
-    require_var WEB_AUTH_USERS "Web 登录账号,htpasswd 格式"
 
     [[ "$PROM_K8S_TAG_KEY" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] \
         || die "PROM_K8S_TAG_KEY 只能是字母数字下划线,当前值:$PROM_K8S_TAG_KEY"
@@ -208,7 +207,17 @@ validate_master() {
         ALERTMANAGER_EXTURL KUBEDOOR_EXTURL STORAGE_CLASS \
         VM_USER VM_PASSWORD VM_RETENTION VM_STORAGE \
         GRAFANA_ADMIN_USER GRAFANA_ADMIN_PASSWORD \
+        KUBEDOOR_INIT_ADMIN_PASSWORD KUBEDOOR_INIT_AGENT_PASSWORD AGENT_AUTH_REQUIRED \
         IMAGE_GRAFANA IMAGE_VICTORIA_METRICS IMAGE_VMALERT IMAGE_ALERTMANAGER IMAGE_BUSYBOX_CURL
+
+    case "${AGENT_AUTH_REQUIRED:-true}" in
+        true|false) ;;
+        *) die "AGENT_AUTH_REQUIRED 只能是 true 或 false,当前值:$AGENT_AUTH_REQUIRED" ;;
+    esac
+    # 旧版 nginx basic auth 的账号配置已经不用了,账号和权限改在 Web 的「系统管理」里维护
+    if [[ -n "${WEB_AUTH_USERS:-}" || -n "${WEB_RW_USERS:-}" ]]; then
+        warn "WEB_AUTH_USERS / WEB_RW_USERS 已废弃(不再生效):登录账号、LDAP、集群权限都在 Web 的「系统管理」里配置"
+    fi
 
     if [[ "${ENABLE_VICTORIA_METRICS:-true}" != "true" ]]; then
         require_var PROM_URL "ENABLE_VICTORIA_METRICS=false 时必须填已有时序库的地址"
@@ -227,6 +236,11 @@ validate_agent() {
 
     [[ "$K8S_NAME" =~ ^[A-Za-z0-9_-]+$ ]] \
         || die "K8S_NAME 只能是字母数字下划线中划线,当前值:$K8S_NAME"
+    # master 默认要求 agent 带账号口令连接(同集群也一样)
+    if [[ "$MASTER_WS" != *@* ]]; then
+        warn "MASTER_WS 里没有带账号口令,master 默认会拒绝连接。请写成 ws://<Agent账号>:<口令>@<地址>,"
+        warn "    例如 ws://Up4biLko1dNh:<口令>@kubedoor-master.${NAMESPACE};或在 master 端临时设 AGENT_AUTH_REQUIRED=false"
+    fi
 
     check_no_quote NAMESPACE IMAGE_REPO PROM_K8S_TAG_KEY TAG_AGENT \
         K8S_NAME MASTER_WS OSS_URL MSG_TYPE MSG_TOKEN \
@@ -348,16 +362,10 @@ build_master_vars() {
     VARS[UPDATE_IMAGE_JSON]="$(indent_block '    ' "${UPDATE_IMAGE_JSON:-{\}}")"
     VARS[REGISTRY_SECRET_JSON]="$(indent_block '    ' "${REGISTRY_SECRET_JSON:-{\}}")"
 
-    # Web 登录凭据
-    VARS[WEB_AUTH_B64]="$(printf '%s' "$WEB_AUTH_USERS" | base64 | tr -d '\n')"
-
-    # 读写权限映射:取 htpasswd 每行的用户名,只有 WEB_RW_USERS 里列出的才是 rw
-    local rw_users="${WEB_RW_USERS:-kubedoor Up4biLko1dNh}"
-    local map_lines="" u
-    for u in $rw_users; do
-        map_lines+="\"${u}\" \"rw\";"$'\n'
-    done
-    VARS[WEB_RW_USER_MAP]="$(indent_block '        ' "${map_lines%$'\n'}")"
+    # 登录与权限:内置账号的初始口令(只在首次建账号时用,留空=出厂口令)、agent 是否必须认证
+    VARS[KUBEDOOR_INIT_ADMIN_PASSWORD]="${KUBEDOOR_INIT_ADMIN_PASSWORD:-}"
+    VARS[KUBEDOOR_INIT_AGENT_PASSWORD]="${KUBEDOOR_INIT_AGENT_PASSWORD:-}"
+    VARS[AGENT_AUTH_REQUIRED]="${AGENT_AUTH_REQUIRED:-true}"
 
     if [[ -n "${WEB_NODEPORT:-}" ]]; then
         VARS[WEB_NODEPORT_LINE]="      nodePort: ${WEB_NODEPORT}"
@@ -403,6 +411,24 @@ build_master_vars() {
         done
     fi
     VARS[GRAFANA_DASH_SOURCES]="$(indent_block '              ' "${src%$'\n'}")"
+
+    # 配置摘要,写进 Pod 模板的 checksum/config 注解:配置变了,重跑安装脚本时对应组件自动滚动更新。
+    # subPath 挂载的配置文件不会随 ConfigMap 更新,envFrom 的环境变量和启动时加载的告警规则也要重启才生效。
+    # 必须放在最后算:用到的占位符都要先有值
+    local d="$MANIFEST_DIR/master"
+    VARS[CONFIG_HASH_ENV]="$(render_file "$d/10-config.yaml" | content_hash)"
+    VARS[CONFIG_HASH_MASTER]="$({ render_file "$d/10-config.yaml"; render_file "$d/alert_rules.json"; } | content_hash)"
+    VARS[CONFIG_HASH_WEB]="$(render_file "$d/40-web.yaml" | content_hash)"
+    VARS[CONFIG_HASH_GRAFANA]="$(render_file "$d/35-grafana.yaml" | content_hash)"
+}
+
+# 内容摘要,只用来判断配置有没有变。去掉 \r:Windows 上检出的 CRLF 文件和 LF 文件算出来一样
+content_hash() {
+    if command -v sha256sum >/dev/null 2>&1; then
+        tr -d '\r' | sha256sum | cut -c1-16
+    else
+        tr -d '\r' | shasum -a 256 | cut -c1-16
+    fi
 }
 
 # 看板文件 -> ConfigMap 名字。KubeDoor-Dash.json -> kubedoor-dash-dash
@@ -596,6 +622,8 @@ install_master() {
     fi
 
     master_manifests | apply_manifests
+    # 旧版 nginx basic auth 的账号文件,认证改由 master 负责后不再使用
+    kc -n "$NAMESPACE" delete secret nginx-auth --ignore-not-found >/dev/null 2>&1 || true
 
     title "等待组件就绪"
     wait_rollout deploy/kubedoor-master 240s
@@ -663,10 +691,16 @@ print_master_access() {
     ip="$(node_ip)"
     port="$(svc_nodeport kubedoor-web)"
 
+    local agent_pass="${KUBEDOOR_INIT_AGENT_PASSWORD:-qCa22jDkfc9y}"
     title "控制端安装完成"
     printf '  Web 控制台 : %s\n' "${C_BLD}http://${ip}:${port:-<NodePort>}${C_RST}"
-    printf '  默认账号   : kubedoor / kubedoor(读写)\n'
-    printf '  其它账号   : 默认只读,可在 kubedoor.conf 的 WEB_AUTH_USERS / WEB_RW_USERS 里调整\n'
+    if [[ -n "${KUBEDOOR_INIT_ADMIN_PASSWORD:-}" ]]; then
+        printf '  管理员账号 : kubedoor / <KUBEDOOR_INIT_ADMIN_PASSWORD>\n'
+    else
+        printf '  管理员账号 : kubedoor / kubedoor(首次登录必须修改口令)\n'
+    fi
+    printf '  其它账号   : 在 Web 的「系统管理 → 用户管理」里添加本地账号或配置 LDAP,按集群分配权限\n'
+    printf '               (内置账号只在首次安装时创建,之后的口令以 Web 上修改的为准)\n'
     if [[ "${ENABLE_GRAFANA:-true}" == "true" ]]; then
         printf '  Grafana    : http://%s:%s/grafana/\n' "$ip" "${port:-<NodePort>}"
     fi
@@ -679,9 +713,9 @@ print_master_access() {
         printf '    REMOTE_WRITE_URL="http://%s:%s@%s:%s/api/v1/write"\n' \
             "${VM_USER}" "${VM_PASSWORD}" "$ip" "$vmport"
     fi
-    printf '\n  下一步:到各个业务集群上执行 ./install.sh agent\n'
-    printf '    同集群   MASTER_WS="ws://kubedoor-master.%s"\n' "$NAMESPACE"
-    printf '    跨集群   MASTER_WS="ws://Up4biLko1dNh:qCa22jDkfc9y@%s:%s"\n\n' "$ip" "${port:-<NodePort>}"
+    printf '\n  下一步:到各个业务集群上执行 ./install.sh agent(agent 用内置 Agent 账号 Up4biLko1dNh 连接)\n'
+    printf '    同集群   MASTER_WS="ws://Up4biLko1dNh:%s@kubedoor-master.%s"\n' "$agent_pass" "$NAMESPACE"
+    printf '    跨集群   MASTER_WS="ws://Up4biLko1dNh:%s@%s:%s"\n\n' "$agent_pass" "$ip" "${port:-<NodePort>}"
 }
 
 print_agent_access() {
@@ -689,7 +723,7 @@ print_agent_access() {
     printf '  集群名字  : %s\n' "$K8S_NAME"
     printf '  连接状态  : kubectl -n %s logs -l app=kubedoor-agent --tail=30\n' "$NAMESPACE"
     printf '\n  到 Web 控制台的「agent 管理」里应该能看到 %s 已上线。\n' "$K8S_NAME"
-    printf '  没看到的话检查 MASTER_WS 是否可达、跨集群时账号密码是否正确。\n\n'
+    printf '  没看到的话检查 MASTER_WS 是否可达、里面的 Agent 账号口令是否正确(master 日志里会有认证失败记录)。\n\n'
 }
 
 # ---------------------------------------------------------------------------

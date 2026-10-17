@@ -10,10 +10,10 @@ import { useTranslationLang } from "../../hooks/useTranslationLang";
 import { usePermissionStoreHook } from "@/store/modules/permission";
 import LaySidebarItem from "../lay-sidebar/components/SidebarItem.vue";
 import LaySidebarFullScreen from "../lay-sidebar/components/SidebarFullScreen.vue";
+import LayUserMenu from "../lay-user/index.vue";
 
 import GlobalizationIcon from "@/assets/svg/globalization.svg?component";
 import AccountSettingsIcon from "@iconify-icons/ri/user-settings-line";
-import LogoutCircleRLine from "@iconify-icons/ri/logout-circle-r-line";
 import Setting from "@iconify-icons/ri/settings-3-line";
 import Check from "@iconify-icons/ep/check";
 
@@ -28,13 +28,9 @@ const { t, route, locale, translationCh, translationEn } =
   useTranslationLang(menuRef);
 const {
   title,
-  logout,
   onPanel,
   getLogo,
-  username,
-  userAvatar,
   backTopMenu,
-  avatarsStyle,
   getDropdownItemStyle,
   getDropdownItemClass
 } = useNav();
@@ -114,24 +110,8 @@ onMounted(() => {
       <LaySidebarFullScreen id="full-screen" />
       <!-- 消息通知 -->
       <LayNotice id="header-notice" />
-      <!-- 退出登录 -->
-      <el-dropdown trigger="click">
-        <span class="el-dropdown-link navbar-bg-hover">
-          <img :src="userAvatar" :style="avatarsStyle" />
-          <p v-if="username" class="dark:text-white">{{ username }}</p>
-        </span>
-        <template #dropdown>
-          <el-dropdown-menu class="logout">
-            <el-dropdown-item @click="logout">
-              <IconifyIconOffline
-                :icon="LogoutCircleRLine"
-                style="margin: 5px"
-              />
-              {{ t("buttons.pureLoginOut") }}
-            </el-dropdown-item>
-          </el-dropdown-menu>
-        </template>
-      </el-dropdown>
+      <!-- 当前用户:修改口令 / 退出登录 -->
+      <LayUserMenu />
       <span
         class="set-icon navbar-bg-hover"
         :title="t('buttons.pureOpenSystemSet')"

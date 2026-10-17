@@ -204,8 +204,12 @@ DeepAgents 加载仓库内 `skills/kubedoor-k8s`，Skills 文件只读；会话�
 | `PORT` | 服务端口，默认 `8000` |
 
 所有浏览器、Skills、工具与 MCP 入口由可信 nginx 注入 `X-Kubedoor-Token`、
-`X-User-Name` 和 `X-User-Permission`（`read`/`rw`）。代理不得记录包含模型 key
-或 kubeconfig 的请求 body。缺少有效加密密钥、内部令牌或数据库连接时启动失败；
+`X-User-Name`、`X-User-Permission`（全局角色 `admin`/`rw`/`read`/`none`）和
+`X-User-Clusters`（单独授权的集群 JSON，如 `{"prod":"rw","test":"none"}`）。这些值来自
+nginx 对 master `/api/auth/verify` 的 `auth_request` 子请求，客户端自带的同名头会被覆盖。
+某个集群的有效权限：管理员读写；有单独授权按授权；否则按全局角色。写操作与批准按会话所选集群校验，
+共享记忆按全局角色校验，kubeconfig 管理仅限管理员。调用 master 时 master 会按用户名重新计算权限，
+不采信 `X-User-Permission`。代理不得记录包含模型 key 或 kubeconfig 的请求 body。缺少有效加密密钥、内部令牌或数据库连接时启动失败；
 启动会幂等创建 `kubedoor_ai_*` 表并初始化 PostgreSQL checkpointer。
 
 本服务是必装组件，安装控制端时总会部署；`deploy/kubedoor.conf` 的 `ENABLE_MCP`

@@ -3,8 +3,9 @@
 #   KubeDoor-K8S   -> Prometheus(集群/工作负载监控)
 #   KubeDoor-Node  -> Prometheus(节点监控)
 #
-# Grafana 自身不暴露 NodePort,统一通过 kubedoor-web 的 /grafana/ 访问,
-# 由 web 的 basic auth 把关;因此这里开了匿名 Admin。
+# Grafana 自身不暴露 NodePort,统一通过 kubedoor-web 的 /grafana/ 访问。
+# 登录由 KubeDoor 负责:nginx 用 auth_request 问 master 校验登录会话,再以 auth proxy 方式
+# 把用户名和角色传给 Grafana —— KubeDoor 管理员是 Grafana Admin,其他人是 Viewer(不再开匿名访问)。
 apiVersion: v1
 kind: Secret
 metadata:
@@ -74,14 +75,19 @@ data:
     reporting_enabled = false
     [auth]
     disable_login_form = false
-    disable_signout_menu = false
+    disable_signout_menu = true
     [auth.basic]
     enabled = false
     [auth.anonymous]
+    enabled = false
+    [auth.proxy]
     enabled = true
-    hide_version = true
-    org_name = Main Org.
-    org_role = Admin
+    header_name = X-WEBAUTH-USER
+    header_property = username
+    auto_sign_up = true
+    sync_ttl = 1
+    headers = Role:X-WEBAUTH-ROLE
+    enable_login_token = false
     [database]
     type = sqlite3
     [grafana_net]
@@ -117,9 +123,10 @@ data:
     [snapshots]
     external_enabled = false
     [users]
-    allow_org_create = true
-    allow_sign_up = true
-    auto_assign_org_role = Admin
+    # 用户由 auth proxy 自动创建,角色以 X-WEBAUTH-ROLE 为准;兜底只给 Viewer
+    allow_org_create = false
+    allow_sign_up = false
+    auto_assign_org_role = Viewer
     default_language = zh-Hans
     home_page = /grafana/d/KubeDoor
 
@@ -144,6 +151,9 @@ spec:
       labels:
         app.kubernetes.io/name: grafana
         app.kubernetes.io/instance: kubedoor
+      annotations:
+        # 安装脚本算的配置摘要:grafana.ini、数据源一变就滚动更新(Grafana 只在启动时读取)
+        checksum/config: '__CONFIG_HASH_GRAFANA__'
     spec:
       volumes:
         - name: grafana-config

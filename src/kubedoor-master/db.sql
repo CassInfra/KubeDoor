@@ -14,6 +14,8 @@
 --      - k8s_events         : 按 lasttimestamp  保留 90 天
 --   3. 配置/管控表:k8s_agent_status / k8s_res_control / alert_silences
 --      Istio 路由表:vs_global / vs_http_routes / k8s_cluster
+--   4. 账号与权限:auth_users / auth_user_clusters / auth_sessions / auth_settings,
+--      操作审计 audit_logs(按 ts 保留 180 天,RETENTION_AUDIT_DAYS 可调)
 --
 -- 时区:统一使用 timestamptz(UTC 存储),应用层按 Asia/Shanghai 展示。
 -- =============================================================================
@@ -311,3 +313,83 @@ CREATE INDEX IF NOT EXISTS idx_alert_silences_created
 DROP TRIGGER IF EXISTS trg_alert_silences_updated ON alert_silences;
 CREATE TRIGGER trg_alert_silences_updated BEFORE UPDATE ON alert_silences
     FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+
+-- =============================================================================
+-- 10. 账号与权限(详见 auth/README.md)
+--
+--   auth_users          本地 / LDAP 账号与全局权限 role:
+--                         admin 管理员 / rw 读写 / read 只读 / none 无 / agent 仅供 agent 连接
+--   auth_user_clusters  按集群单独授权(rw / read / none),优先于全局权限;管理员和 Agent 账号没有
+--   auth_sessions       登录会话。只存 token 的 SHA-256,token 本身只在浏览器 Cookie 里
+--   auth_settings       认证相关设置(LDAP 配置等,JSON;LDAP 绑定密码加密存储)
+-- =============================================================================
+CREATE TABLE IF NOT EXISTS auth_users (
+    id                   serial PRIMARY KEY,
+    username             text        NOT NULL,
+    source               text        NOT NULL DEFAULT 'local',
+    role                 text        NOT NULL DEFAULT 'read',
+    password_hash        text,                                -- 仅本地账号(scrypt)
+    display_name         text        NOT NULL DEFAULT '',
+    email                text        NOT NULL DEFAULT '',
+    enabled              boolean     NOT NULL DEFAULT true,
+    builtin              boolean     NOT NULL DEFAULT false,  -- 内置账号不能删除
+    must_change_password boolean     NOT NULL DEFAULT false,  -- 下次登录必须先改口令
+    password_default     boolean     NOT NULL DEFAULT false,  -- 仍在使用出厂口令
+    password_changed_at  timestamptz,
+    last_login_at        timestamptz,
+    last_login_ip        text        NOT NULL DEFAULT '',
+    comment              text        NOT NULL DEFAULT '',
+    created_at           timestamptz NOT NULL DEFAULT now(),
+    updated_at           timestamptz NOT NULL DEFAULT now(),
+    CONSTRAINT ck_auth_users_source CHECK (source IN ('local', 'ldap')),
+    CONSTRAINT ck_auth_users_role CHECK (role IN ('admin', 'rw', 'read', 'none', 'agent'))
+);
+-- 用户名不区分大小写唯一
+CREATE UNIQUE INDEX IF NOT EXISTS uq_auth_users_username ON auth_users (lower(username));
+
+CREATE TABLE IF NOT EXISTS auth_user_clusters (
+    user_id    integer     NOT NULL REFERENCES auth_users(id) ON DELETE CASCADE,
+    env        text        NOT NULL,
+    permission text        NOT NULL,
+    updated_by text        NOT NULL DEFAULT '',
+    updated_at timestamptz NOT NULL DEFAULT now(),
+    PRIMARY KEY (user_id, env),
+    CONSTRAINT ck_auth_user_clusters_perm CHECK (permission IN ('rw', 'read', 'none'))
+);
+
+CREATE TABLE IF NOT EXISTS auth_sessions (
+    token_hash   text        PRIMARY KEY,
+    user_id      integer     NOT NULL REFERENCES auth_users(id) ON DELETE CASCADE,
+    created_at   timestamptz NOT NULL DEFAULT now(),
+    last_seen_at timestamptz NOT NULL DEFAULT now(),
+    expires_at   timestamptz NOT NULL,
+    remember     boolean     NOT NULL DEFAULT false,
+    ip           text        NOT NULL DEFAULT '',
+    user_agent   text        NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_auth_sessions_user ON auth_sessions (user_id);
+CREATE INDEX IF NOT EXISTS idx_auth_sessions_expires ON auth_sessions (expires_at);
+
+CREATE TABLE IF NOT EXISTS auth_settings (
+    key        text        PRIMARY KEY,
+    value      jsonb       NOT NULL,
+    updated_by text        NOT NULL DEFAULT '',
+    updated_at timestamptz NOT NULL DEFAULT now()
+);
+
+-- =============================================================================
+-- 11. audit_logs —— 操作审计:登录、账号与权限变更、所有写操作(只追加,按 ts 过期清理)
+-- =============================================================================
+CREATE TABLE IF NOT EXISTS audit_logs (
+    id       bigserial   PRIMARY KEY,
+    ts       timestamptz NOT NULL DEFAULT now(),
+    username text        NOT NULL DEFAULT '',
+    action   text        NOT NULL,
+    env      text        NOT NULL DEFAULT '',
+    target   text        NOT NULL DEFAULT '',
+    detail   jsonb,
+    ip       text        NOT NULL DEFAULT '',
+    success  boolean     NOT NULL DEFAULT true
+);
+CREATE INDEX IF NOT EXISTS idx_audit_logs_ts ON audit_logs (ts DESC);
+CREATE INDEX IF NOT EXISTS idx_audit_logs_user_ts ON audit_logs (lower(username), ts DESC);

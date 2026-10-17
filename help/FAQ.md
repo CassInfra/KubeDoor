@@ -177,7 +177,7 @@ Web 里的 nginx 启动时要解析配置中引用的 Service（`kubedoor-master
 | `kubedoor-master-file-cfg`（K8S 事件告警规则） | `deploy/kubedoor-master` |
 | `vmalert-config`（指标告警规则和阈值） | `deploy/vmalert` |
 | `alertmanager-config`（告警路由、通知地址） | `deploy/alertmanager` |
-| `nginx-config`、Secret `nginx-auth`（Web 登录账号） | `deploy/kubedoor-web` |
+| `nginx-config` | `deploy/kubedoor-web` |
 | `kubedoor-grafana-config`（看板数据源的数据库、时序库地址） | `deploy/kubedoor-dash` |
 | 集群端 `kubedoor-agent-config`（`KUBEDOOR_MASTER`、`MSG_TOKEN`、`OSS_URL` 等） | `deploy/kubedoor-agent`（在该业务集群执行） |
 | 集群端 `vmagent-config`（抓取任务） | `deploy/vmagent`（在该业务集群执行） |
@@ -234,16 +234,18 @@ kubectl -n kubedoor logs deploy/kubedoor-agent --tail=50
 
 | 部署方式 | `MASTER_WS` 写法 |
 |---|---|
-| 与控制端在同一个集群 | `ws://kubedoor-master.kubedoor`（走 Service，不需要账号） |
-| 跨集群 | `ws://<读写账号>:<密码>@<控制端节点IP>:<Web NodePort>`（经 Web 的 nginx，需要 basic auth） |
-| Web 前加了 HTTPS | `wss://<读写账号>:<密码>@<域名>`（agent 不校验证书） |
+| 与控制端在同一个集群 | `ws://<Agent账号>:<口令>@kubedoor-master.kubedoor`（走 Service） |
+| 跨集群 | `ws://<Agent账号>:<口令>@<控制端节点IP>:<Web NodePort>`（经 Web 的 nginx） |
+| Web 前加了 HTTPS | `wss://<Agent账号>:<口令>@<域名>`（agent 不校验证书） |
 
-- 地址后面不要带 `/ws` 之类的路径，agent 会自己拼上 `/ws?env=…`。
-- 跨集群用的账号必须在 `WEB_RW_USERS` 里，nginx 对只读账号访问 `/ws` 直接返回 403。装控制端时脚本会打印同集群、跨集群两种 `MASTER_WS` 示例。密码里尽量不要有 `@`、`:`、`/` 等 URL 特殊字符。
-- 在业务集群的任一节点上用 curl 验证网络和账号：返回 `400` 表示网络和账号都没问题，`401` 是账号或密码错误，`403` 是只读账号，超时或拒绝连接说明网络、NodePort 不通。
+- agent 一律要带账号口令（同集群也一样），由 master 校验。内置 Agent 账号是 `Up4biLko1dNh`（出厂口令 `qCa22jDkfc9y`），也可以在「系统管理 → 用户与权限」里另建全局权限为「Agent 账号」的本地账号，给不同集群用不同口令。普通 Web 账号不能注册 agent。
+- 从旧版升级、同集群 agent 还没改地址时，可以临时在 `kubedoor.conf` 设 `AGENT_AUTH_REQUIRED="false"`（或改 `kubedoor-config` 后重启 master）过渡。
+- 地址后面不要带 `/ws` 之类的路径，agent 会自己拼上 `/ws?env=…`。口令里有 `@`、`:`、`/` 等 URL 特殊字符时要做 URL 编码（如 `@` 写成 `%40`）。
+- 口令错误时 master 日志里有 `[鉴权] 拒绝 agent 连接 …`；连续输错 5 次会锁 15 分钟。
+- 在业务集群的任一节点上用 curl 验证网络和账号：返回 `400` 表示网络和账号都没问题，`401` 是没带账号或口令错误，`403` 是这个账号不是 Agent 账号，`429` 是输错太多次被临时锁定，超时或拒绝连接说明网络、NodePort 不通。
 
   ```bash
-  curl -s -o /dev/null -w '%{http_code}\n' -u '<读写账号>:<密码>' http://<控制端节点IP>:<Web NodePort>/ws
+  curl -s -o /dev/null -w '%{http_code}\n' -u '<Agent账号>:<口令>' http://<控制端节点IP>:<Web NodePort>/ws
   ```
 
 - 每个集群的 `K8S_NAME` 必须唯一：同名集群已经在线时，后连上来的会被 master 拒绝（日志里能看到 409）。
@@ -565,45 +567,46 @@ kubectl -n kubedoor rollout restart deploy/kubedoor-web
 
 ## 账号与权限
 
-### Q：只读账号和读写账号有什么区别？为什么提示「403: 权限不足」？
+### Q：账号和权限是怎么管理的？为什么提示没有权限？
 
-Web 用 nginx 的 basic auth 登录。`WEB_AUTH_USERS` 里的账号，列在 `WEB_RW_USERS` 中的是读写账号，其余都是只读账号。除 AI 相关功能外，界面不会按账号隐藏按钮，只读账号执行变更操作时会提示「403: 权限不足」。
+登录、账号、权限都由 KubeDoor 自己管理（nginx 不再做认证），在 Web 的「系统管理」里配置，改完立即生效：
 
-- 只读账号可以查看「K8S资源总览」「Deployment」「Pod」、告警与事件页面、「告警屏蔽」列表、「高峰资源」下的各页和 Grafana 看板。
-- 打开「Service」「Ingress」「ConfigMap」「StatefulSet」「DaemonSet」「节点管理」「节点均衡」「Agent管理」「ISTIO管理」等页面也会 403（这些接口不在只读白名单里）。
-- 例外：「更新」镜像由 master 按 `UPDATE_IMAGE` 判断，见 [K8S微服务镜像更新配置说明](K8S微服务镜像更新配置说明.md)。
-- AI 助手：只读账号可以对话和查询，不能执行或批准变更（「当前账号只读，不能批准修改」）。注意 AI 能读到的集群信息比经典页面多（例如资源 YAML、ConfigMap、重启前日志），分配只读账号时要考虑这一点。
-- 跨集群 agent 连接 master 用的账号必须是读写账号。
+- **账号**：本地账号，以及 LDAP 账号（「系统管理 → LDAP 设置」配置并测试，首次登录自动开通）。登录时先匹配本地账号，本地没有再走 LDAP。
+- **全局权限**：管理员 / 读写 / 只读（默认）/ 无。「无」表示默认看不到任何集群，只能访问单独授权的集群。
+- **集群授权**：在「用户与权限」里给用户指定某个集群「读写 / 只读 / 无」，**优先于全局权限**；没有单独授权的集群按全局权限兜底。设为「无」的集群在下拉框、告警、事件、AI 助手里都看不到。
+- 选中只读集群时，集群下拉框旁会显示「只读」；执行修改操作会提示「当前账号对集群 xxx 只有只读权限」。
+- 「Agent管理」和「系统管理」只有管理员能看到。读写账号可以做所有集群操作，但不能管理用户、LDAP 和 Agent。
+- 例外：「更新」镜像对只读账号也可能放行，由 master 按 `UPDATE_IMAGE` 判断，见 [K8S微服务镜像更新配置说明](K8S微服务镜像更新配置说明.md)。
+- 查看 Secret 的 YAML 需要该集群的读写权限。
+- AI 助手：按会话所选集群判断，只读集群可以对话和查询，不能执行或批准变更；AI 的共享记忆属于全局资源，要全局读写才能编辑。
+- 所有登录、账号与权限变更、写操作（含越权被拒）都记在「系统管理 → 操作审计」。
 
-要把账号改成读写，把用户名加入 `WEB_RW_USERS`（空格分隔），然后执行：
+### Q：怎么添加账号、改口令？忘了口令怎么办？
 
-```bash
-./install.sh master
-kubectl -n kubedoor rollout restart deploy/kubedoor-web
-```
-
-### Q：怎么添加、修改登录账号？默认账号要改吗？
-
-- `WEB_AUTH_USERS` 是 htpasswd 格式，一行一个 `用户名:加密密码`。可以在 <https://tool.lu/htpasswd/> 选 Crypt 生成；Crypt 只认密码的前 8 位，密码更长时建议用 apr1 格式：执行 `openssl passwd -apr1 '<密码>'`，把输出写成 `用户名:<输出>`。apr1 的结果里有 `$`，而 `kubedoor.conf` 是按 shell 脚本加载的，这时要把 `WEB_AUTH_USERS` 的值改用单引号包起来（或把每个 `$` 写成 `\$`），否则 `$` 后面的内容会被当成变量吞掉。
-- 出厂有两个读写账号：管理员 `kubedoor`，以及一个预留给跨集群 agent 连接 master 的账号（初始密码见 `kubedoor.conf` 的注释）。两者的密码都是公开的默认值，**上线前务必修改**。
-- 改了 agent 预留账号的密码后，要同步修改各业务集群的 `MASTER_WS`（集群里是 `kubedoor-agent-config` 的 `KUBEDOOR_MASTER`）并重启 agent；该账号要保留在 `WEB_RW_USERS` 里。
-- 修改后重跑 `./install.sh master`，再执行 `kubectl -n kubedoor rollout restart deploy/kubedoor-web`（账号文件以 subPath 方式挂载，不会自动更新）。
+- 管理员在「系统管理 → 用户与权限」里新建本地账号或添加 LDAP 账号、改全局权限、分配集群权限、重置口令、禁用或强制下线。管理员代设或重置的口令，用户首次登录必须自己修改。
+- 每个人在右上角的用户菜单里「修改口令」（只有本地账号可以；LDAP 账号的口令在 LDAP 里改）。改完其它终端的登录会自动退出。
+- 内置超级管理员 `kubedoor`（出厂口令 `kubedoor`，首次登录强制修改）只能由它自己改口令，任何人都不能删除、禁用它或改它的权限。
+- 内置 Agent 账号 `Up4biLko1dNh` 改了口令后，要同步修改各业务集群的 `MASTER_WS`（集群里是 `kubedoor-agent-config` 的 `KUBEDOOR_MASTER`）并重启 agent。
+- 忘了口令（包括 `kubedoor`）：在 master 容器里执行 `kubectl -n kubedoor exec -it deploy/kubedoor-master -- python3 -m auth.reset_password <用户名>`，按提示输入新口令。
+- 同一账号同一来源连续输错 5 次会锁定 15 分钟（`AUTH_LOGIN_MAX_FAILURES` / `AUTH_LOCK_MINUTES`）。
 
 ### Q：Grafana 怎么访问？只读账号在 Grafana 里有什么权限？
 
-- Grafana（kubedoor-dash）不单独暴露端口，只能经 Web 访问：`http://<节点IP>:<Web NodePort>/grafana/`；「高峰资源看板📊」「K8S监控看板📊」「节点监控看板📊」三个菜单也是内嵌它。登录 Web 后不需要再登录 Grafana。
-- Grafana 开启了匿名访问且角色是 Admin（由 Web 的 basic auth 把关），所以**任何能登录 Web 的账号（包括只读账号）在 Grafana 里都是管理员**：可以修改看板，也可以在 Explore 里用 KubeDoor-Postgres 数据源（连接账号就是 `PG_USER`）执行任意 SQL。对此敏感时，可以在模板 `deploy/manifests/master/35-grafana.yaml` 的 `grafana.ini` 里把 `[auth.anonymous]` 的 `org_role` 和 `[users]` 的 `auto_assign_org_role` 都改为 `Viewer`，重跑 `./install.sh master` 后执行 `kubectl -n kubedoor rollout restart deploy/kubedoor-dash`。
+- Grafana（kubedoor-dash）不单独暴露端口，只能经 Web 访问：`http://<节点IP>:<Web NodePort>/grafana/`；「高峰资源看板📊」「K8S监控看板📊」「节点监控看板📊」三个菜单也是内嵌它。登录 Web 后不需要再登录 Grafana，没登录直接打开会跳到 Web 的登录页。
+- Grafana 用 auth proxy 方式接入 KubeDoor 的登录：**KubeDoor 管理员在 Grafana 里是 Admin，其他账号都是 Viewer**（只能看看板，不能改看板）。
+- Grafana 看板做不到按集群隔离，所以**只对能看到全部集群的账号开放**：对任何集群设了「无」的账号看不到这三个看板菜单，直接打开 `/grafana/` 会返回 403。
+- Grafana 的 PostgreSQL 数据源用的是 `PG_USER`，Viewer 也能借数据源查询库里的数据（本地账号口令哈希加了 pepper、LDAP 绑定口令加密存储，拿到也用不了）。对此敏感时，给 Grafana 单独建一个只读 PG 账号，只授权看板用到的 `k8s_*` 表。
 - 在 Grafana 页面上改的看板，Pod 重启后会丢失（看板由 ConfigMap 下发）；要长期修改请改 `deploy/dashboards/*.json` 后重跑 `./install.sh master`。
 
 ### Q：生产环境需要 HTTPS 吗？
 
-建议加。Web、Grafana、AI 助手和外部 MCP 都走同一个 NodePort，默认是 HTTP + basic auth：账号密码、AI 请求里带的模型 API Key、工具输出都在网络上明文传输；跨集群 agent 用 `ws://` 时，读写账号的密码也写在地址里。
+建议加。Web、Grafana、AI 助手和外部 MCP 都走同一个 NodePort，默认是 HTTP：登录口令、会话 Cookie、AI 请求里带的模型 API Key、工具输出都在网络上明文传输；跨集群 agent 用 `ws://` 时，Agent 账号的口令也写在地址里。TLS 在 nginx 前面的负载均衡上终结时，把 `kubedoor-config` 的 `AUTH_COOKIE_SECURE` 设为 `"true"`，让会话 Cookie 只走 HTTPS。
 
 KubeDoor 不提供 Ingress 模板，请在 `kubedoor-web` 这个 Service 前放自己的 Ingress 或负载均衡来终止 TLS，并注意：
 
 - 要支持 WebSocket 升级：`/ws`（agent 连接）、`/ws/pod-logs`、`/ws/workload-status`、`/grafana/api/live/`。
 - AI 对话（`/api/ai/`）和 MCP（`/mcp`、`/sse`）是流式长连接：关闭响应缓冲，把读超时调长（Web 自带的 nginx 分别是 1 小时和 24 小时）。
-- 换成 HTTPS 地址后：跨集群 agent 的 `MASTER_WS` 改为 `wss://<读写账号>:<密码>@<域名>`；`KUBEDOOR_EXTURL`（IM 告警里【屏蔽】链接的地址）也改成 HTTPS 地址。
+- 换成 HTTPS 地址后：跨集群 agent 的 `MASTER_WS` 改为 `wss://<Agent账号>:<口令>@<域名>`；`KUBEDOOR_EXTURL`（IM 告警里【屏蔽】链接的地址）也改成 HTTPS 地址。
 - 跨集群 vmagent 远程写走的是控制端 VictoriaMetrics 的 NodePort（HTTP + basic auth），同样建议只在内网开放或经 TLS 暴露。
 
 ---

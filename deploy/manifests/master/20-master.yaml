@@ -1,3 +1,19 @@
+# 内置账号的初始口令,只在 master 首次启动建账号时使用;留空用出厂口令
+# (kubedoor / kubedoor,首次登录强制改密;Agent 账号 Up4biLko1dNh / qCa22jDkfc9y)。
+# 账号建好后改口令请到 Web 页面操作,改这里不会生效。
+apiVersion: v1
+kind: Secret
+metadata:
+  name: kubedoor-auth-init
+  namespace: __NAMESPACE__
+  labels:
+    app: kubedoor-master
+type: Opaque
+stringData:
+  KUBEDOOR_INIT_ADMIN_PASSWORD: '__KUBEDOOR_INIT_ADMIN_PASSWORD__'
+  KUBEDOOR_INIT_AGENT_PASSWORD: '__KUBEDOOR_INIT_AGENT_PASSWORD__'
+
+---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -19,6 +35,9 @@ spec:
     metadata:
       labels:
         app: kubedoor-master
+      annotations:
+        # 安装脚本算的配置摘要(kubedoor-config + 告警规则):配置一变就重启,环境变量和告警规则都只在启动时读取
+        checksum/config: '__CONFIG_HASH_MASTER__'
     spec:
       containers:
         - name: kubedoor-master
@@ -27,6 +46,8 @@ spec:
           envFrom:
             - configMapRef:
                 name: kubedoor-config
+            - secretRef:
+                name: kubedoor-auth-init
           env:
             - name: TZ
               value: Asia/Shanghai
@@ -35,6 +56,12 @@ spec:
                 secretKeyRef:
                   name: kubedoor-ai-security
                   key: AI_INTERNAL_TOKEN
+            # LDAP 绑定密码等敏感配置入库前用它加密(与 AI 的 kubeconfig 加密共用一个密钥)
+            - name: AI_ENCRYPTION_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: kubedoor-ai-security
+                  key: AI_ENCRYPTION_KEY
           ports:
             - name: http
               containerPort: 80
@@ -120,10 +147,19 @@ spec:
             - name: kubedoor-collect
               image: '__IMAGE_BUSYBOX_CURL__'
               imagePullPolicy: Always
+              # master 的接口都要认证,集群内部任务用内部 token(系统身份)调用
+              env:
+                - name: AI_INTERNAL_TOKEN
+                  valueFrom:
+                    secretKeyRef:
+                      name: kubedoor-ai-security
+                      key: AI_INTERNAL_TOKEN
               command:
                 - /bin/sh
                 - -c
-                - curl -sf --max-time 1800 'http://kubedoor-master.__NAMESPACE__/api/cron_peak_data'
+                - >-
+                  curl -sf --max-time 1800 -H "X-Kubedoor-Token: ${AI_INTERNAL_TOKEN}"
+                  'http://kubedoor-master.__NAMESPACE__/api/cron_peak_data'
               resources:
                 limits:
                   cpu: 200m

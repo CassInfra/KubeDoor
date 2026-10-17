@@ -12,6 +12,7 @@ from typing import Any, List, Sequence
 from aiohttp import web
 from loguru import logger
 
+from auth import env_condition, principal_of
 from k8s_event import get_pg_event_client
 
 
@@ -37,7 +38,7 @@ async def _run_query(sql: str, params: List[Any]) -> List[Sequence[Any]]:
     return await loop.run_in_executor(None, lambda: client.pool.execute_query(sql, params or None))
 
 
-def _build_exception_events_sql(env: str | None) -> tuple[str, List[Any], List[str]]:
+def _build_exception_events_sql(env: str | None, principal=None) -> tuple[str, List[Any], List[str]]:
     # k8s_events 以 (eventuid, k8s) 唯一,每个事件只有一行;
     # 下面的 row_number() 按 eventuid 取最新一条只是兜底
     params: List[Any] = []
@@ -45,6 +46,11 @@ def _build_exception_events_sql(env: str | None) -> tuple[str, List[Any], List[s
     if env:
         params.append(env)
         env_filter = f"                AND k8s = ${len(params)}\n"
+    if principal is not None:
+        # 只统计当前用户能看到的集群(选了集群时鉴权已校验,这里兜底)
+        visible = env_condition(principal, 'k8s', params)
+        if visible:
+            env_filter += f"                AND {visible}\n"
     sql = f"""
     SELECT
         k8s AS env,
@@ -103,12 +109,17 @@ def _build_exception_events_sql(env: str | None) -> tuple[str, List[Any], List[s
     return sql, params, columns
 
 
-def _build_pod_alerts_sql(env: str | None) -> tuple[str, List[Any], List[str]]:
+def _build_pod_alerts_sql(env: str | None, principal=None) -> tuple[str, List[Any], List[str]]:
     params: List[Any] = []
     env_filter = ""
     if env:
         params.append(env)
         env_filter = f"            AND env = ${len(params)}\n"
+    if principal is not None:
+        # 只统计当前用户能看到的集群(选了集群时鉴权已校验,这里兜底)
+        visible = env_condition(principal, 'env', params)
+        if visible:
+            env_filter += f"            AND {visible}\n"
     sql = f"""
     SELECT
         env,
@@ -144,12 +155,17 @@ def _build_pod_alerts_sql(env: str | None) -> tuple[str, List[Any], List[str]]:
     return sql, params, columns
 
 
-def _build_alert_daily_sql(env: str | None) -> tuple[str, List[Any], List[str]]:
+def _build_alert_daily_sql(env: str | None, principal=None) -> tuple[str, List[Any], List[str]]:
     params: List[Any] = []
     env_filter = ""
     if env:
         params.append(env)
         env_filter = f"        AND env = ${len(params)}\n"
+    if principal is not None:
+        # 只统计当前用户能看到的集群(选了集群时鉴权已校验,这里兜底)
+        visible = env_condition(principal, 'env', params)
+        if visible:
+            env_filter += f"        AND {visible}\n"
     # 按 start_time::date 分组,星期几也要从这个分组表达式上取,否则 PG 会报 GroupingError
     sql = f"""
     SELECT
@@ -180,7 +196,7 @@ def _build_alert_daily_sql(env: str | None) -> tuple[str, List[Any], List[str]]:
 
 async def top10_events_handler(request: web.Request) -> web.Response:
     env = request.query.get("env")
-    sql, params, columns = _build_exception_events_sql(env)
+    sql, params, columns = _build_exception_events_sql(env, principal_of(request))
     try:
         rows = await _run_query(sql, params)
         data = _rows_to_dicts(rows, columns)
@@ -192,7 +208,7 @@ async def top10_events_handler(request: web.Request) -> web.Response:
 
 async def top10_pod_alerts_handler(request: web.Request) -> web.Response:
     env = request.query.get("env")
-    sql, params, columns = _build_pod_alerts_sql(env)
+    sql, params, columns = _build_pod_alerts_sql(env, principal_of(request))
     try:
         rows = await _run_query(sql, params)
         data = _rows_to_dicts(rows, columns)
@@ -204,7 +220,7 @@ async def top10_pod_alerts_handler(request: web.Request) -> web.Response:
 
 async def alert_daily_stats_handler(request: web.Request) -> web.Response:
     env = request.query.get("env")
-    sql, params, columns = _build_alert_daily_sql(env)
+    sql, params, columns = _build_alert_daily_sql(env, principal_of(request))
     try:
         rows = await _run_query(sql, params)
         data = _rows_to_dicts(rows, columns)

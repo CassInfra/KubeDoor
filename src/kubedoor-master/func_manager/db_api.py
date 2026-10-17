@@ -16,6 +16,7 @@ from aiohttp import web
 from loguru import logger
 
 import utils
+from auth import env_condition, principal_of
 from jvm_config import normalize_rolling_update_value
 from db import pg_fetch, pg_fetchval, pg_execute, pg_execute_transaction
 
@@ -189,9 +190,24 @@ async def _ensure_pod_count_fallback(env, namespace, deployment):
         raise _pod_count_error('该服务还没有采集到高峰期数据，指定Pod 不能为 -1，请填写 Pod 数(0 表示暂不启动)')
 
 
+def _visible_where(request, column, params, where=None):
+    """按当前用户能看到的集群追加过滤条件(全部可见时不加)。"""
+    where = [] if where is None else where
+    condition = env_condition(principal_of(request), column, params)
+    if condition:
+        where.append(condition)
+    return where
+
+
+def _where_sql(where):
+    return (" WHERE " + " AND ".join(where)) if where else ""
+
+
 async def res_envs(request):
-    """distinct env(资源管控表)"""
-    rows = await pg_fetch("SELECT DISTINCT env FROM k8s_res_control ORDER BY env")
+    """distinct env(资源管控表),只返回当前用户能看到的集群"""
+    params = []
+    where = _visible_where(request, 'env', params)
+    rows = await pg_fetch(f"SELECT DISTINCT env FROM k8s_res_control{_where_sql(where)} ORDER BY env", *params)
     return _table_response(rows, ['env'])
 
 
@@ -237,6 +253,8 @@ async def res_list(request):
         where.append(add("deployment = ?", q.get('deployment')))
     if q.get('env'):
         where.append(add("env = ?", q.get('env')))
+    # 带了集群参数也叠加一层可见集群过滤(参数已在鉴权时校验,这里兜底)
+    _visible_where(request, 'env', params, where)
     if q.get('keyword'):
         kw = f"%{q.get('keyword')}%"
         params.append(kw)
@@ -475,12 +493,17 @@ ALERT_COLUMNS = [
 
 
 async def alert_envs(request):
-    rows = await pg_fetch("SELECT DISTINCT env FROM k8s_pod_alert_days ORDER BY env")
+    params = []
+    where = _visible_where(request, 'env', params)
+    rows = await pg_fetch(f"SELECT DISTINCT env FROM k8s_pod_alert_days{_where_sql(where)} ORDER BY env", *params)
     return _table_response(rows, ['env'])
 
 
 async def alert_names(request):
-    rows = await pg_fetch("SELECT DISTINCT alert_name FROM k8s_pod_alert_days ORDER BY alert_name")
+    params = []
+    where = _visible_where(request, 'env', params)
+    rows = await pg_fetch(
+        f"SELECT DISTINCT alert_name FROM k8s_pod_alert_days{_where_sql(where)} ORDER BY alert_name", *params)
     return _table_response(rows, ['alert_name'])
 
 
@@ -530,6 +553,7 @@ async def alert_total(request):
     if q.get('env'):
         params.append(q['env'])
         where.append(f"env = ${len(params)}")
+    _visible_where(request, 'env', params, where)
     if q.get('startTime'):
         params.append(datetime.fromisoformat(q['startTime']))
         where.append(f"start_time >= ${len(params)}")
@@ -554,6 +578,7 @@ async def alert_detail(request):
     q = await request.json()
     params = []
     where = _alert_filters(q, params)
+    _visible_where(request, 'env', params, where)
     where_clause = ("WHERE " + " AND ".join(where)) if where else ""
     page = int(q.get('page', 1))
     page_size = int(q.get('pageSize', 20))
@@ -573,6 +598,7 @@ async def alert_detail_total(request):
     q = await request.json()
     params = []
     where = _alert_filters(q, params)
+    _visible_where(request, 'env', params, where)
     where_clause = ("WHERE " + " AND ".join(where)) if where else ""
     sql = f"SELECT COUNT(*) AS total FROM k8s_pod_alert_days {where_clause}"
     rows = await pg_fetch(sql, *params)

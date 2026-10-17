@@ -3,10 +3,14 @@
 The browser never reaches these endpoints: nginx rejects /api/ai/internal/.
 Tool execution travels over the existing authenticated agent WebSocket, rather
 than exposing an additional privileged HTTP listener in each managed cluster.
+
+The auth middleware verifies the internal token and loads the acting user named
+by X-User-Name from the database. Cluster permissions are always evaluated here
+from that user record; the X-User-Permission header sent by the AI service is
+ignored.
 """
 
 import asyncio
-import hmac
 import json
 import os
 import re
@@ -18,17 +22,21 @@ from urllib.parse import unquote, urlsplit, urlunsplit
 import aiohttp
 from aiohttp import web
 
+from auth import audit
+from auth.context import client_ip
+
 
 def authorize(request):
-    expected = os.environ.get("AI_INTERNAL_TOKEN", "")
-    supplied = request.headers.get("X-Kubedoor-Token", "")
-    if not expected or not hmac.compare_digest(expected, supplied):
-        raise web.HTTPUnauthorized(text="AI 内部接口认证失败")
-    username = request.headers.get("X-User-Name", "")
-    permission = request.headers.get("X-User-Permission", "")
-    if not username or permission not in ("read", "rw"):
+    """Return the acting user resolved by the auth middleware (internal token + X-User-Name)."""
+    principal = request.get("principal")
+    if principal is None or principal.via != "internal" or not principal.is_human:
         raise web.HTTPForbidden(text="缺少可信用户身份")
-    return username, permission
+    return principal
+
+
+def require_cluster(principal, env):
+    if not principal.can_read(env):
+        raise web.HTTPForbidden(text=f"没有集群 {env} 的访问权限")
 
 
 def _timestamp(value):
@@ -103,20 +111,26 @@ async def agent_rpc(clients, env, payload, timeout=130):
 
 def register_routes(app, clients, utils):
     async def bootstrap(request):
-        username, permission = authorize(request)
+        principal = authorize(request)
         envs = sorted(set(await utils.get_k8s_names()) | set(clients))
         return web.json_response({
             "enabled": True,
-            "username": username, "permission": permission,
+            "username": principal.username, "permission": principal.role, "role": principal.role,
+            "default_permission": principal.default_permission,
+            "cluster_permissions": dict(principal.clusters),
+            # "none" clusters are invisible to this user everywhere, including the AI assistant.
             "clusters": [{"env": env, "online": bool(clients.get(env, {}).get("online")),
                           "ai_tools": bool(clients.get(env, {}).get("ai_tools")),
-                          "ver": clients.get(env, {}).get("ver", "")} for env in envs],
+                          "ver": clients.get(env, {}).get("ver", ""),
+                          "permission": principal.permission(env)}
+                         for env in envs if principal.can_read(env)],
             "prom_type": utils.PROM_TYPE, "prom_label_key": utils.PROM_K8S_TAG_KEY,
         })
 
     async def execute(request):
-        username, permission = authorize(request)
+        principal = authorize(request)
         env = request.query.get("env", "")
+        require_cluster(principal, env)
         body = await request.json()
         if not isinstance(body, dict) or body.get("phase", "execute") not in ("prepare", "execute"):
             raise web.HTTPBadRequest(text="无效执行阶段")
@@ -126,32 +140,41 @@ def register_routes(app, clients, utils):
             raise web.HTTPBadRequest(text="arguments 必须为对象")
         if clients.get(env, {}).get("online") and not clients[env].get("ai_tools"):
             raise web.HTTPNotImplemented(text="此 Agent 版本不支持通用 AI 工具，请升级 Agent 或上传 kubeconfig；现有数据接口仍可查询")
-        if permission != "rw" and body.get("approved"):
-            raise web.HTTPForbidden(text="只读用户不能批准集群修改")
+        writable = principal.can_write(env)
+        if not writable and body.get("approved"):
+            raise web.HTTPForbidden(text=f"当前账号对集群 {env} 只有只读权限，不能批准集群修改")
         timeout = min(max(float(body.get("timeout", 120)), 1), 300)
+        approved_write = body.get("approved") is True and body.get("phase", "execute") == "execute"
         result = await agent_rpc(clients, env, {
             "phase": body.get("phase", "execute"), "operation": body["operation"],
             "arguments": body.get("arguments", {}), "call_id": body.get("call_id", ""),
             "approved": body.get("approved") is True, "timeout": timeout,
-            "username": username, "permission": permission,
+            "username": principal.username, "permission": "rw" if writable else "read",
         }, timeout=timeout + 10)
+        if approved_write:
+            audit.record_bg(principal.username, "ai.agent_execute", env=env, target=str(body["operation"]),
+                            ip=client_ip(request), success=bool(isinstance(result, dict) and result.get("success", True)),
+                            detail={"call_id": str(body.get("call_id", ""))[:160]})
         return web.json_response(result)
 
     async def cancel(request):
-        username, permission = authorize(request)
+        principal = authorize(request)
+        env = request.query.get("env", "")
+        require_cluster(principal, env)
         body = await request.json()
-        result = await agent_rpc(clients, request.query.get("env", ""), {
+        result = await agent_rpc(clients, env, {
             "phase": "cancel", "call_id": body.get("call_id", ""),
-            "username": username, "permission": permission,
+            "username": principal.username, "permission": "rw" if principal.can_write(env) else "read",
         }, timeout=10)
         return web.json_response(result)
 
     async def metrics(request):
-        authorize(request)
+        principal = authorize(request)
         body = await request.json()
         envs = set(await utils.get_k8s_names()) | set(clients)
         if body.get("env") not in envs:
             raise web.HTTPBadRequest(text="未知 K8S 集群")
+        require_cluster(principal, body["env"])
         if "victoria" not in (utils.PROM_TYPE or "").lower():
             raise web.HTTPNotImplemented(text="自由指标查询需要 VictoriaMetrics；现有 Prometheus 指标接口仍可使用")
         if not utils.PROM_URL:

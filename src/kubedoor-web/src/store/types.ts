@@ -44,4 +44,21 @@ export type userType = {
   permissions?: Array<string>;
   isRemembered?: boolean;
   loginDay?: number;
+  /** 是否已从后端拉取过当前用户 */
+  loaded?: boolean;
+  /** 全局角色:admin / rw / read / none */
+  role?: string;
+  roleLabel?: string;
+  /** 账号来源:local / ldap */
+  source?: string;
+  isAdmin?: boolean;
+  builtin?: boolean;
+  /** 没有单独授权的集群的权限 */
+  defaultPermission?: string;
+  /** 单独授权的集群 */
+  clusters?: Record<string, string>;
+  /** 已知集群的有效权限 */
+  clusterPermissions?: Record<string, string>;
+  mustChangePassword?: boolean;
+  canChangePassword?: boolean;
 };

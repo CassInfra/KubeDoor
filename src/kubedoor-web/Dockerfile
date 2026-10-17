@@ -11,6 +11,7 @@ RUN pnpm install --frozen-lockfile --reporter=append-only --registry=https://reg
 COPY . .
 RUN pnpm run build
 
-FROM registry.cn-shenzhen.aliyuncs.com/starsl/nginx-ldap:1.27-alpine
+# 官方 nginx 镜像(自带 auth_request 模块);nginx 配置由部署时的 ConfigMap nginx-config 挂载
+FROM registry.cn-shenzhen.aliyuncs.com/starsl/nginx:alpine
 WORKDIR /www
 COPY --from=builder /kubedoor-web/dist dist/

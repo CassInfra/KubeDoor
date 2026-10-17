@@ -5,9 +5,10 @@ import json
 import os
 import re
 import yaml
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
-from typing import Any
+from types import MappingProxyType
+from typing import Any, Mapping
 from urllib.parse import urlsplit, urlunsplit
 
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
@@ -34,14 +35,46 @@ class AIError(Exception):
         self.details = details
 
 
+ROLES = ("admin", "rw", "read", "none")
+CLUSTER_PERMISSIONS = ("rw", "read", "none")
+
+
 @dataclass(frozen=True)
 class Identity:
+    """KubeDoor 登录用户。permission 是全局角色(admin/rw/read/none),clusters 是单独授权的集群。
+
+    某个集群的有效权限:管理员一律读写;有单独授权按授权;否则按全局角色兜底(与 master 的规则一致)。
+    """
     username: str
     permission: str
+    clusters: Mapping[str, str] = field(default_factory=lambda: MappingProxyType({}))
 
-    def require_write(self) -> None:
-        if self.permission != "rw":
-            raise AIError("当前用户只有查询权限", 403, "permission_denied")
+    @property
+    def is_admin(self) -> bool:
+        return self.permission == "admin"
+
+    def permission_for(self, env: str) -> str:
+        if self.permission == "admin":
+            return "rw"
+        if env in self.clusters:
+            return self.clusters[env]
+        return self.permission if self.permission in ("rw", "read") else "none"
+
+    def can_read(self, env: str) -> bool:
+        return self.permission_for(env) in ("read", "rw")
+
+    def require_write(self, env: str | None = None) -> None:
+        """env 为空时检查全局读写(与集群无关的资源,如共享记忆)。"""
+        if env is None:
+            if self.permission not in ("admin", "rw"):
+                raise AIError("当前用户没有全局读写权限", 403, "permission_denied")
+            return
+        if self.permission_for(env) != "rw":
+            raise AIError(f"当前用户对集群 {env} 只有查询权限", 403, "permission_denied")
+
+    def require_admin(self) -> None:
+        if not self.is_admin:
+            raise AIError("需要 KubeDoor 管理员权限", 403, "permission_denied")
 
 
 def authenticate(headers: Any, expected_token: str) -> Identity:
@@ -50,9 +83,16 @@ def authenticate(headers: Any, expected_token: str) -> Identity:
         raise AIError("内部访问令牌无效", 401, "unauthorized")
     username = headers.get("x-user-name", "").strip()
     permission = headers.get("x-user-permission", "")
-    if not username or len(username) > 200 or permission not in ("read", "rw"):
+    if not username or len(username) > 200 or permission not in ROLES:
         raise AIError("缺少可信用户身份", 401, "unauthorized")
-    return Identity(username, permission)
+    try:
+        clusters = json.loads(headers.get("x-user-clusters", "") or "{}")
+    except ValueError:
+        clusters = None
+    if (not isinstance(clusters, dict) or len(clusters) > 5000
+            or any(not isinstance(k, str) or v not in CLUSTER_PERMISSIONS for k, v in clusters.items())):
+        raise AIError("集群权限格式无效", 401, "unauthorized")
+    return Identity(username, permission, MappingProxyType({} if permission == "admin" else clusters))
 
 
 @dataclass(frozen=True)

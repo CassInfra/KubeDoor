@@ -9,7 +9,7 @@ metadata:
   labels:
     app: kubedoor-agent
 data:
-  # master 的 WebSocket 地址。跨集群时要带 basic auth 账号密码
+  # master 的 WebSocket 地址,要带 Agent 账号口令:ws://<账号>:<口令>@<地址>(同集群、跨集群都一样)
   KUBEDOOR_MASTER: '__MASTER_WS__'
   # 本集群的名字,必须和指标里 <PROM_K8S_TAG_KEY> 标签的值一致
   PROM_K8S_TAG_VALUE: '__K8S_NAME__'

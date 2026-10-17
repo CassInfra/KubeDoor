@@ -22,6 +22,8 @@ export interface AICluster {
   env: string;
   online: boolean;
   configured: boolean;
+  /** 当前用户对该集群的有效权限:rw 读写 / read 只读(看不到的集群不会返回) */
+  permission?: "rw" | "read";
   context?: string;
   test_status?: string;
 }
@@ -35,6 +37,7 @@ export interface AISkill {
 export interface AIBootstrap {
   enabled: boolean;
   username: string;
+  /** 全局角色:admin / rw / read / none */
   permission: string;
   clusters: AICluster[];
   skills: AISkill[];
@@ -149,6 +152,10 @@ const itemPath = (id: string) => encodeURIComponent(id);
 
 async function assertResponse(response: Response): Promise<void> {
   if (response.ok) return;
+  // nginx 用 master 校验登录会话,会话失效时这里收到 401:通知全局回登录页(见 utils/http)
+  if (response.status === 401) {
+    window.dispatchEvent?.(new CustomEvent("kubedoor:unauthorized"));
+  }
   let detail = "";
   let code: string | undefined;
   try {

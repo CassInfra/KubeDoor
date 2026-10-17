@@ -1,12 +1,10 @@
 <script setup lang="ts">
 import { useI18n } from "vue-i18n";
 import Motion from "./utils/motion";
-import { useRouter } from "vue-router";
+import { useRoute, useRouter } from "vue-router";
 import { message } from "@/utils/message";
-import { loginRules } from "./utils/rule";
 import { useNav } from "@/layout/hooks/useNav";
-import type { FormInstance } from "element-plus";
-import { $t, transformI18n } from "@/plugins/i18n";
+import type { FormInstance, FormRules } from "element-plus";
 import { useLayout } from "@/layout/hooks/useLayout";
 import { useUserStoreHook } from "@/store/modules/user";
 import { initRouter, getTopMenu } from "@/router/utils";
@@ -27,8 +25,10 @@ defineOptions({
   name: "Login"
 });
 const router = useRouter();
+const route = useRoute();
 const loading = ref(false);
 const ruleFormRef = ref<FormInstance>();
+const errorMessage = ref("");
 
 const { initStorage } = useLayout();
 initStorage();
@@ -40,32 +40,58 @@ const { title, getDropdownItemStyle, getDropdownItemClass } = useNav();
 const { locale, translationCh, translationEn } = useTranslationLang();
 
 const ruleForm = reactive({
-  username: "admin",
-  password: "admin123"
+  username: "",
+  password: "",
+  remember: false
 });
 
+const rules: FormRules = {
+  username: [{ required: true, message: "请输入账号", trigger: "blur" }],
+  password: [{ required: true, message: "请输入口令", trigger: "blur" }]
+};
+
+/** 登录后去哪:优先回到登录前要访问的页面(含 Grafana 看板这类非前端路由) */
+async function goAfterLogin() {
+  const redirect =
+    typeof route.query.redirect === "string" ? route.query.redirect : "";
+  if (redirect.startsWith("/grafana/")) {
+    window.location.href = redirect;
+    return;
+  }
+  await initRouter();
+  if (redirect.startsWith("/") && !redirect.startsWith("/login")) {
+    await router.push(redirect);
+  } else {
+    await router.push(getTopMenu(true).path);
+  }
+}
+
 const onLogin = async (formEl: FormInstance | undefined) => {
-  if (!formEl) return;
-  await formEl.validate((valid, fields) => {
-    if (valid) {
-      loading.value = true;
-      useUserStoreHook()
-        .loginByUsername({ username: ruleForm.username, password: "admin123" })
-        .then(res => {
-          if (res.success) {
-            // 获取后端路由
-            return initRouter().then(() => {
-              router.push(getTopMenu(true).path).then(() => {
-                message(t("login.pureLoginSuccess"), { type: "success" });
-              });
-            });
-          } else {
-            message(t("login.pureLoginFail"), { type: "error" });
-          }
-        })
-        .finally(() => (loading.value = false));
+  if (!formEl || loading.value) return;
+  const valid = await formEl.validate().catch(() => false);
+  if (!valid) return;
+  loading.value = true;
+  errorMessage.value = "";
+  try {
+    const res = await useUserStoreHook().loginByUsername({
+      username: ruleForm.username.trim(),
+      password: ruleForm.password,
+      remember: ruleForm.remember
+    });
+    if (!res?.success) {
+      errorMessage.value = res?.message || t("login.pureLoginFail");
+      return;
     }
-  });
+    message(t("login.pureLoginSuccess"), { type: "success" });
+    await goAfterLogin();
+  } catch (error: any) {
+    const data = error?.response?.data;
+    errorMessage.value =
+      data?.message || data?.error || t("login.pureLoginFail");
+    ruleForm.password = "";
+  } finally {
+    loading.value = false;
+  }
 };
 
 /** 使用公共函数，避免`removeEventListener`失效 */
@@ -75,8 +101,15 @@ function onkeypress({ code }: KeyboardEvent) {
   }
 }
 
-onMounted(() => {
+onMounted(async () => {
   window.document.addEventListener("keypress", onkeypress);
+  // 已经登录(比如从 Grafana 被重定向过来)就直接跳走
+  try {
+    await useUserStoreHook().fetchMe();
+    await goAfterLogin();
+  } catch {
+    // 未登录,停留在登录页
+  }
 });
 
 onBeforeUnmount(() => {
@@ -144,24 +177,18 @@ onBeforeUnmount(() => {
           <el-form
             ref="ruleFormRef"
             :model="ruleForm"
-            :rules="loginRules"
+            :rules="rules"
             size="large"
           >
             <Motion :delay="100">
-              <el-form-item
-                :rules="[
-                  {
-                    required: true,
-                    message: transformI18n($t('login.pureUsernameReg')),
-                    trigger: 'blur'
-                  }
-                ]"
-                prop="username"
-              >
+              <el-form-item prop="username">
                 <el-input
                   v-model="ruleForm.username"
                   clearable
-                  :placeholder="t('login.pureUsername')"
+                  autocomplete="username"
+                  :placeholder="
+                    t('login.pureUsername') + '(本地账号或 LDAP 账号)'
+                  "
                   :prefix-icon="useRenderIcon(User)"
                 />
               </el-form-item>
@@ -173,10 +200,27 @@ onBeforeUnmount(() => {
                   v-model="ruleForm.password"
                   clearable
                   show-password
+                  autocomplete="current-password"
                   :placeholder="t('login.purePassword')"
                   :prefix-icon="useRenderIcon(Lock)"
                 />
               </el-form-item>
+            </Motion>
+
+            <Motion :delay="200">
+              <div class="flex justify-between items-center w-full">
+                <el-checkbox v-model="ruleForm.remember">
+                  7 天内免登录
+                </el-checkbox>
+              </div>
+              <el-alert
+                v-if="errorMessage"
+                class="mt-2"
+                :title="errorMessage"
+                type="error"
+                show-icon
+                :closable="false"
+              />
             </Motion>
 
             <Motion :delay="250">

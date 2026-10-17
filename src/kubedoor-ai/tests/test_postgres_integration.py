@@ -201,7 +201,7 @@ def test_postgres_interrupt_exact_approval_and_mcp_transports(harness):
         async with Client(StreamableHttpTransport(h.url + "/mcp", headers=h.headers)) as client:
             pending_result = await client.call_tool("scale_deployment", {"namespace": "team", "deployment": "mcp-app", "replicas": 2, "k8s": "cluster-a"})
             value = pending_result.data
-            assert value["pending"] and "/#/workbench/index?ai_session=" in value["browserlink"]
+            assert value["pending"] and "/#/monit/overview?ai_session=" in value["browserlink"]
             reject = await h.http.post(f"/api/ai/runs/{value['run_id']}/decisions", json={"action_id": value["action_id"], "decision": "reject"})
             assert reject.status_code == 200, reject.text
             assert len([call for call in h.upstream if call[1] == "/api/scale"]) == 1
@@ -253,13 +253,16 @@ def test_encrypted_kubeconfig_upload_test_resources_and_failed_replace(harness):
     async def verify():
         candidate = {"content": json.dumps(config), "context": "test"}
         reader = {**h.headers, "X-User-Permission": "read"}
+        admin = {**h.headers, "X-User-Permission": "admin"}
         assert (await h.http.post("/api/ai/connections/parse", json=candidate, headers=reader)).status_code == 403
-        parsed = await h.http.post("/api/ai/connections/parse", json=candidate)
+        # kubeconfig 直连属于集群接入配置,读写用户也不能改,只有管理员可以
+        assert (await h.http.post("/api/ai/connections/parse", json=candidate)).status_code == 403
+        parsed = await h.http.post("/api/ai/connections/parse", json=candidate, headers=admin)
         assert parsed.status_code == 200 and parsed.json()["current_context"] == "test"
-        tested = await h.http.post("/api/ai/connections/cluster-a/test", json=candidate)
+        tested = await h.http.post("/api/ai/connections/cluster-a/test", json=candidate, headers=admin)
         assert tested.status_code == 200, tested.text
         assert tested.json()["data"]["identity_status"] == "verified"
-        saved = await h.http.put("/api/ai/connections/cluster-a", json=candidate)
+        saved = await h.http.put("/api/ai/connections/cluster-a", json=candidate, headers=admin)
         assert saved.status_code == 200, saved.text
         row = await h.service.store.connection("cluster-a")
         assert b"isolated-kube-token" not in row["encrypted_config"]
@@ -267,7 +270,7 @@ def test_encrypted_kubeconfig_upload_test_resources_and_failed_replace(harness):
         assert encrypted["users"][0]["user"]["token"] == "isolated-kube-token"
         listing = await h.http.get("/api/ai/connections")
         assert "isolated-kube-token" not in listing.text and "encrypted_config" not in listing.text
-        failed = await h.http.put("/api/ai/connections/cluster-a", json={"content": "invalid", "context": "test"})
+        failed = await h.http.put("/api/ai/connections/cluster-a", json={"content": "invalid", "context": "test"}, headers=admin)
         assert failed.status_code == 400
         assert (await h.service.store.connection("cluster-a"))["revision"] == row["revision"]
         context = RunContext({"scope": {"env": "cluster-a"}}, Identity(h.username, "rw"))
@@ -281,7 +284,7 @@ def test_encrypted_kubeconfig_upload_test_resources_and_failed_replace(harness):
         assert namespaces.json()["items"] == [{"name": "team"}]
         assert namespaces.json()["source"] == "direct"
         assert (await h.http.delete("/api/ai/connections/cluster-a", headers=reader)).status_code == 403
-        assert (await h.http.delete("/api/ai/connections/cluster-a")).status_code == 200
+        assert (await h.http.delete("/api/ai/connections/cluster-a", headers=admin)).status_code == 200
         assert await h.service.store.connection("cluster-a") is None
 
     try:

@@ -21,7 +21,9 @@ from datetime import datetime, timezone
 from aiohttp import web
 from loguru import logger
 
-from db import pg_fetch, pg_fetchrow, pg_fetchval, pg_execute
+from auth import env_condition, principal_of
+from auth.policy import silence_visible
+from db import pg_fetch, pg_fetchrow, pg_execute
 
 VALID_OPS = ('=', '!=', '=~', '!~')
 
@@ -134,13 +136,18 @@ def _remaining_seconds(row, now):
     return max(0, int(delta))
 
 
-def _serialize(row, now):
+def _matchers(row):
     matchers = row['matchers']
     if isinstance(matchers, str):
         try:
             matchers = json.loads(matchers)
         except ValueError:
             matchers = []
+    return matchers if isinstance(matchers, list) else []
+
+
+def _serialize(row, now):
+    matchers = _matchers(row)
     return {
         'id': row['id'],
         'matchers': matchers,
@@ -157,6 +164,14 @@ def _serialize(row, now):
         'status': row['status'],
         'remaining_seconds': _remaining_seconds(row, now),
     }
+
+
+def _operator(request, fallback=None):
+    """操作人取登录身份,不信任前端传的 created_by / revoked_by(没有登录身份的内部调用才用传入值)。"""
+    principal = principal_of(request)
+    if principal.username and principal.via != 'system':
+        return principal.username
+    return str(fallback or '').strip()
 
 
 def _error(message, status=400):
@@ -179,20 +194,19 @@ async def silence_list(request):
 
     query: status(active/pending/expired/revoked/all) keyword page pageSize
     响应同时带回各状态计数,供页面顶部标签页直接使用,省一次请求。
+    只返回当前用户能看到的规则:没有限定集群的全局规则所有人可见,限定了集群的按集群可见性过滤。
+    规则表很小,可见性按 matchers 在内存里判断,统计和分页也在内存里做。
     """
     q = request.query
     status = (q.get('status') or 'all').strip()
     keyword = (q.get('keyword') or '').strip()
     page = max(1, int(q.get('page') or 1))
     page_size = min(200, max(1, int(q.get('pageSize') or 20)))
+    if status and status != 'all' and status not in ('active', 'pending', 'expired', 'revoked'):
+        return _error(f'状态取值非法: {status}')
 
     params = []
     where = []
-    if status and status != 'all':
-        if status not in ('active', 'pending', 'expired', 'revoked'):
-            return _error(f'状态取值非法: {status}')
-        params.append(status)
-        where.append(f"({STATUS_SQL.strip()}) = ${len(params)}")
     if keyword:
         params.append(f'%{keyword}%')
         placeholder = f'${len(params)}'
@@ -208,51 +222,30 @@ async def silence_list(request):
         where.append(f'({conds})')
     where_clause = ('WHERE ' + ' AND '.join(where)) if where else ''
 
-    params.append(page_size)
-    limit_p = f'${len(params)}'
-    params.append((page - 1) * page_size)
-    offset_p = f'${len(params)}'
-
     rows = await pg_fetch(
         f"SELECT {SELECT_COLUMNS} FROM alert_silences {where_clause} "
-        # 生效中的排最前,其次待生效,最后过期/解除;同组内按结束时间近的优先
+        # 生效中的排最前,其次待生效,最后过期/解除;同组内按创建时间新的优先
         f"ORDER BY CASE ({STATUS_SQL.strip()}) "
         f"  WHEN 'active' THEN 0 WHEN 'pending' THEN 1 WHEN 'expired' THEN 2 ELSE 3 END, "
-        f"created_at DESC LIMIT {limit_p} OFFSET {offset_p}",
+        f"created_at DESC",
         *params,
     )
+    principal = principal_of(request)
+    visible = [r for r in rows if silence_visible(principal, _matchers(r))]
 
-    count_row = await pg_fetchrow(
-        f"SELECT count(*) AS total, "
-        f"count(*) FILTER (WHERE ({STATUS_SQL.strip()}) = 'active')  AS active, "
-        f"count(*) FILTER (WHERE ({STATUS_SQL.strip()}) = 'pending') AS pending, "
-        f"count(*) FILTER (WHERE ({STATUS_SQL.strip()}) = 'expired') AS expired, "
-        f"count(*) FILTER (WHERE ({STATUS_SQL.strip()}) = 'revoked') AS revoked "
-        f"FROM alert_silences"
-    )
+    stats = {'total': len(visible), 'active': 0, 'pending': 0, 'expired': 0, 'revoked': 0}
+    for row in visible:
+        stats[row['status']] = stats.get(row['status'], 0) + 1
+    if status and status != 'all':
+        visible = [r for r in visible if r['status'] == status]
+    page_rows = visible[(page - 1) * page_size: page * page_size]
 
     now = datetime.now(timezone.utc)
-    stats = {
-        'total': count_row['total'],
-        'active': count_row['active'],
-        'pending': count_row['pending'],
-        'expired': count_row['expired'],
-        'revoked': count_row['revoked'],
-    }
-    # 分页总数:无筛选时直接用 stats,有筛选时按同样的 where 再数一次
-    # (params 末尾两个是 limit/offset,计数时要去掉)
-    if where_clause:
-        filtered_total = await pg_fetchval(
-            f"SELECT count(*) FROM alert_silences {where_clause}", *params[:-2]
-        )
-    else:
-        filtered_total = stats['total']
-
     return web.json_response(
         {
             'success': True,
-            'data': [_serialize(r, now) for r in rows],
-            'total': filtered_total,
+            'data': [_serialize(r, now) for r in page_rows],
+            'total': len(visible),
             'stats': stats,
         }
     )
@@ -266,10 +259,14 @@ async def silence_label_values(request):
         # 自定义标签没有历史值可提示,返回空列表而不是报错(前端仍可自由输入)
         return web.json_response({'success': True, 'data': []})
     limit = min(500, max(1, int(request.query.get('limit') or 200)))
+    params = []
+    visible = env_condition(principal_of(request), 'env', params)
+    visible_sql = f'AND {visible} ' if visible else ''
     rows = await pg_fetch(
         f"SELECT DISTINCT {column} AS v FROM k8s_pod_alert_days "
-        f"WHERE {column} <> '' AND start_time >= now() - INTERVAL '30 days' "
-        f"ORDER BY v LIMIT {limit}"
+        f"WHERE {column} <> '' AND start_time >= now() - INTERVAL '30 days' {visible_sql}"
+        f"ORDER BY v LIMIT {limit}",
+        *params,
     )
     return web.json_response({'success': True, 'data': [r['v'] for r in rows]})
 
@@ -309,6 +306,10 @@ async def silence_preview(request):
             conditions.append(f"{column} !~ ('^(?:' || {placeholder} || ')$')")
 
     where = [f"start_time >= now() - INTERVAL '{days} days'"] + conditions
+    # 预览只统计当前用户能看到的集群
+    visible = env_condition(principal_of(request), 'env', params)
+    if visible:
+        where.append(visible)
     where_clause = ' AND '.join(where)
 
     try:
@@ -372,7 +373,7 @@ async def silence_add(request):
         starts_at,
         ends_at,
         str(d.get('comment') or '').strip(),
-        str(d.get('created_by') or '').strip(),
+        _operator(request, d.get('created_by')),
     )
     logger.info(f'新建告警屏蔽规则 #{row["id"]}: {matchers} 至 {ends_at or "长期"}')
     return web.json_response({'success': True, 'msg': '屏蔽规则已创建', 'id': row['id']})
@@ -401,7 +402,7 @@ async def silence_edit(request):
         starts_at,
         ends_at,
         str(d.get('comment') or '').strip(),
-        str(d.get('created_by') or '').strip(),
+        _operator(request, d.get('created_by')),
         int(silence_id),
     )
     if _affected(result) == 0:
@@ -419,7 +420,7 @@ async def silence_revoke(request):
     result = await pg_execute(
         "UPDATE alert_silences SET revoked_at = now(), revoked_by = $1 "
         "WHERE id = $2 AND revoked_at IS NULL",
-        str(d.get('revoked_by') or '').strip(),
+        _operator(request, d.get('revoked_by')),
         int(silence_id),
     )
     if _affected(result) == 0:

@@ -73,12 +73,11 @@ def create_app(service=None, token=None):
                 result = await svc.bootstrap(identity)
             elif endpoint == "resources":
                 result = await svc.resources(identity, request.query_params)
-            elif endpoint == "connections-summary":
-                result = {"connections": await svc.store.summaries()}
-            elif endpoint == "connections":
-                result = {"connections": await svc.store.summaries()}
+            elif endpoint in ("connections-summary", "connections"):
+                result = {"connections": [row for row in await svc.store.summaries() if identity.can_read(row["env"])]}
             elif endpoint == "parse":
-                identity.require_write()
+                # kubeconfig 直连属于集群接入配置,与 Agent 管理一样只有管理员能改
+                identity.require_admin()
                 data = await body(request)
                 parsed = await svc.parse_connection(data.get("content"), data.get("context"))
                 result = {"contexts": parsed.get("contexts", []), "current_context": parsed.get("context"), "requires_context": parsed.get("requires_context", False)}
@@ -87,7 +86,7 @@ def create_app(service=None, token=None):
                 tested, _, _ = await svc.test_connection(identity, env, data)
                 return JSONResponse(redact(tested), status_code=200 if tested.get("success", True) else 422)
             elif endpoint == "connection":
-                identity.require_write()
+                identity.require_admin()
                 if request.method == "DELETE":
                     await svc.store.execute("DELETE FROM kubedoor_ai_connections WHERE env=$1", env)
                     result = {"success": True}

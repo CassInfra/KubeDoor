@@ -111,7 +111,7 @@ K8S资源总览：多集群资源、风险节点、今日异常告警与事件�
 - **集群端**（`./install.sh agent`）：kubedoor-agent，以及可选的vmagent、kube-state-metrics、node-exporter。agent**主动**通过WebSocket连接控制端，业务集群无需开放入站端口；同集群直连master的Service，跨集群经Web入口并使用读写账号认证。
 - **PostgreSQL 18是唯一数据库**：用docker compose独立部署在K8S外，也可用现成的PG（无需扩展），保存管控配置、高峰期资源、K8S事件、告警记录、屏蔽规则、Istio路由以及AI会话、审批与记忆。
 - **监控栈可选**：使用内置VictoriaMetrics单机版，或接入已有的Prometheus/VictoriaMetrics；各集群指标用标签`<PROM_K8S_TAG_KEY>=<K8S_NAME>`区分。
-- **统一入口**：Web、Grafana、AI助手和MCP共用kubedoor-web的一个NodePort，nginx basic auth登录，账号分读写与只读。
+- **统一入口**：Web、Grafana、AI助手和MCP共用kubedoor-web的一个NodePort；登录与权限由master统一管理（本地账号/LDAP，按K8S集群授权）。
 - **AI必装、MCP默认开放**：kubedoor-ai随控制端安装；外部MCP入口（`/mcp`、`/sse`）可用`ENABLE_MCP="false"`关闭，不影响网页里的AI助手。
 
 ---
@@ -150,7 +150,7 @@ K8S资源总览：多集群资源、风险节点、今日异常告警与事件�
 #### 🔗接入外部MCP客户端
 
 - **地址**：`http(s)://<KubeDoor 地址>/mcp`（Streamable HTTP，推荐）；只支持SSE的客户端用`/sse`。`<KubeDoor 地址>`就是Web入口，如`<节点IP>:<Web NodePort>`。
-- **鉴权**：复用Web的basic auth账号，请求头`Authorization: Basic <base64(用户名:密码)>`；只读账号只能调用只读工具。
+- **鉴权**：复用Web账号（本地或LDAP），请求头`Authorization: Basic <base64(用户名:密码)>`；按该账号的集群权限执行，只读集群只能调用只读工具，「无」权限的集群不可见。
 - **工具**：保留1.x的16个工具名（如`get_k8s_list`、`get_pods_logs`、`scale_deployment`、`get_pod_jvm_dump`）+ 统一工具`kubedoor_tool` + Skill资源`skills://kubedoor-k8s`。
 - **变更不会直接执行**：写操作和需进入Pod执行的JVM诊断会返回`pending`和`browserlink`（相对路径），用**同一账号**登录Web打开即可审批；执行结果不会回推给MCP客户端，请再次查询核验。
 - **关闭外部入口**：`kubedoor.conf`中设置`ENABLE_MCP="false"`。
@@ -363,12 +363,14 @@ AI 助手：
 
 ### 9. 🔐平台与权限
 
-**一个入口、两种权限：Web、Grafana、AI助手和MCP共用一个NodePort，按账号区分读写与只读。**
+**一个入口、按集群授权：Web、Grafana、AI助手和MCP共用一个NodePort，登录与权限由KubeDoor自己管理。**
 
-- 🚪统一入口：kubedoor-web的nginx负责basic auth登录，并反向代理master、kubedoor-ai与Grafana（`/grafana/`）。
-- 👥读写与只读：`WEB_RW_USERS`中的账号为读写，其余为只读；只读账号调用查询白名单以外的接口会返回403（内嵌Grafana为匿名Admin，不受此限制）；镜像更新可通过`UPDATE_IMAGE_JSON`按集群、时间段、账号向只读账号开放。
+- 🚪统一入口：kubedoor-web的nginx只做反向代理，登录、会话和权限校验都在master；AI助手、MCP、Grafana（`/grafana/`）通过nginx `auth_request`交给master判定。
+- 👤账号：本地账号 + LDAP（Web上配置并可一键测试，首次登录自动开通）；内置超级管理员`kubedoor`只能由自己改口令，不能被删除或改权限。
+- 👥权限：全局权限分「管理员 / 读写 / 只读（默认） / 无」，再按用户×K8S集群单独授权「读写 / 只读 / 无」，单独授权优先、全局权限兜底；「无」权限的集群在所有页面、告警和AI助手中都不可见。AI助手与MCP按目标集群判断能否执行和批准修改。镜像更新仍可通过`UPDATE_IMAGE_JSON`按集群、时间段、账号向只读账号开放。
+- 🧾操作审计：登录、账号与权限变更、所有写操作（含越权被拒）都可在「系统管理 → 操作审计」查询。
 - 🛰多集群接入：agent首次连接自动登记；「Agent管理」查看在线状态、心跳和版本，「更新」可一键升级agent镜像，并集中配置采集、准入控制与「AI Kubeconfig」。
-- 📝操作留痕：nginx以JSON格式记录访问日志（含登录用户与请求体）；运维操作由agent推送IM；AI的会话、审批与工具调用写入PostgreSQL。
+- 📝操作留痕：nginx以JSON格式记录访问日志（含登录用户与请求体）；master记录操作审计；运维操作由agent推送IM；AI的会话、审批与工具调用写入PostgreSQL。
 - 🧹数据自动清理【2.0】：K8S事件保留90天，告警记录与高峰快照保留365天，master每天分批清理，可在`kubedoor-config`中调整（`0`表示不清理）。
 - 🌗界面：简体中文/English（部分页面翻译）、浅色/深色/自动主题，适配移动端。
 
@@ -438,10 +440,9 @@ vi kubedoor.conf        # 改 K8S_NAME 和 MASTER_WS（换机器执行时先 cp 
 
 #### 访问Web
 
-- 浏览器打开安装脚本打印的`http://<节点IP>:<NodePort>`，默认账号`kubedoor` / `kubedoor`（读写）。
-- ⚠️ 请尽快修改默认口令（最好在第②步安装前就改好）：`WEB_AUTH_USERS`（htpasswd格式）预置了两个读写账号，其中一个供跨集群agent连接使用，两个都要改。安装后再改时：
-  - 控制端：重新执行`./install.sh master`，再执行`kubectl -n kubedoor rollout restart deploy/kubedoor-web`使新账号生效；
-  - 跨集群agent：同步修改`MASTER_WS`中的账号密码，重新执行`./install.sh agent`，再执行`kubectl -n kubedoor rollout restart deploy/kubedoor-agent`。
+- 浏览器打开安装脚本打印的`http://<节点IP>:<NodePort>`，内置管理员账号`kubedoor` / `kubedoor`，首次登录会强制修改口令。
+- 在「系统管理 → 用户与权限」添加账号、按集群授权，在「LDAP 设置」接入LDAP。
+- ⚠️ 内置Agent账号`Up4biLko1dNh`（出厂口令`qCa22jDkfc9y`）供agent连接master，请在「用户与权限」里重置口令，并同步修改各集群agent的`MASTER_WS`（同集群、跨集群都要带账号口令），重新执行`./install.sh agent`后执行`kubectl -n kubedoor rollout restart deploy/kubedoor-agent`。
 
 #### 首次使用
 
@@ -453,7 +454,7 @@ vi kubedoor.conf        # 改 K8S_NAME 和 MASTER_WS（换机器执行时先 cp 
 
 #### 生产环境提示
 
-- 🔒Web与MCP默认是HTTP + basic auth，生产环境建议在Web前加HTTPS（Ingress/LB需支持WebSocket）。
+- 🔒Web与MCP默认是HTTP，生产环境建议在Web前加HTTPS（Ingress/LB需支持WebSocket）；TLS在nginx前面终结时把`kubedoor-config`的`AUTH_COOKIE_SECURE`设为`"true"`。
 - 🚧准入控制为fail-closed，agent或master不可用时Deployment变更会被拒绝；应急执行`kubectl delete mutatingwebhookconfiguration kubedoor-admis-configuration`。卸载或重装agent前，先在「Agent管理」关闭「准入控制」。
 - 💾请把PostgreSQL数据、`kubedoor.conf`和`kubedoor.conf.ai-secrets`（与Secret `kubedoor-ai-security`一致）一起备份；更换AI加密密钥会使已保存的kubeconfig无法解密。
 - 📌`NAMESPACE`请保持默认的`kubedoor`，准入控制、定时任务等功能依赖这个命名空间。
@@ -486,6 +487,8 @@ vi kubedoor.conf        # 改 K8S_NAME 和 MASTER_WS（换机器执行时先 cp 
 6. 首次安装2.1时脚本会生成`kubedoor.conf.ai-secrets`，请与PostgreSQL数据一起备份。
 
 > 2.x内部升级：master与kubedoor-ai采用Recreate策略，升级期间AI/MCP短暂不可用，开启了准入控制的集群在master重启期间Deployment变更会被拒绝，建议低峰期操作。nginx配置以subPath挂载，若Web镜像标签未变，需执行`kubectl -n kubedoor rollout restart deploy/kubedoor-web`让新配置生效。
+>
+> 从nginx basic auth的版本升级：原`WEB_AUTH_USERS`/`WEB_RW_USERS`不再生效，账号改到Web的「系统管理」里维护；agent一律要带Agent账号口令，同集群agent的`MASTER_WS`也要改成`ws://Up4biLko1dNh:<口令>@kubedoor-master.kubedoor`（可先设`AGENT_AUTH_REQUIRED="false"`过渡）。详见[部署说明](deploy/README.md#账号与权限)。
 
 ---
 

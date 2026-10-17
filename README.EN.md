@@ -113,7 +113,7 @@ K8S Resource Overview: multi-cluster resources, at-risk nodes, and today's abnor
 - **Cluster side** (`./install.sh agent`): kubedoor-agent, plus optional vmagent, kube-state-metrics and node-exporter. The agent **initiates** the WebSocket connection to the control plane, so workload clusters need no inbound ports; in the same cluster it connects directly to the master Service, while across clusters it goes through the Web entry point and authenticates with a read-write account.
 - **PostgreSQL 18 is the only database**: deployed standalone outside K8S with docker compose, or use an existing PostgreSQL (no extensions needed). It stores control settings, peak-hour resource data, K8S events, alert records, silence rules, Istio routes, and AI sessions, approvals and memories.
 - **Optional monitoring stack**: use the bundled single-node VictoriaMetrics, or connect an existing Prometheus/VictoriaMetrics; each cluster's metrics are distinguished by the label `<PROM_K8S_TAG_KEY>=<K8S_NAME>`.
-- **Single entry point**: the Web UI, Grafana, the AI assistant and MCP share one kubedoor-web NodePort; login uses nginx basic auth, and accounts are either read-write or read-only.
+- **Single entry point**: the Web UI, Grafana, the AI assistant and MCP share one kubedoor-web NodePort; login and permissions are managed by the master (local accounts / LDAP, granted per K8S cluster).
 - **AI always installed, MCP on by default**: kubedoor-ai is installed with the control plane; the external MCP endpoints (`/mcp`, `/sse`) can be turned off with `ENABLE_MCP="false"`, which does not affect the AI assistant in the Web UI.
 
 ---
@@ -154,7 +154,7 @@ K8S Resource Overview: multi-cluster resources, at-risk nodes, and today's abnor
 #### 🔗Connecting External MCP Clients
 
 - **URL**: `http(s)://<KubeDoor address>/mcp` (Streamable HTTP, recommended); clients that only support SSE use `/sse`. `<KubeDoor address>` is the Web entry point, e.g. `<node IP>:<Web NodePort>`.
-- **Authentication**: reuses the Web basic auth accounts via the request header `Authorization: Basic <base64(username:password)>`; read-only accounts can only call read-only tools.
+- **Authentication**: reuses the Web accounts (local or LDAP) via the request header `Authorization: Basic <base64(username:password)>`; tools run with that account's per-cluster permissions: read-only clusters allow read-only tools only, and clusters with no access are invisible.
 - **Tools**: the 16 tool names from 1.x are kept (e.g. `get_k8s_list`, `get_pods_logs`, `scale_deployment`, `get_pod_jvm_dump`) + the unified tool `kubedoor_tool` + the Skill resource `skills://kubedoor-k8s`.
 - **Changes never run directly**: write operations, and JVM diagnostics that have to run inside a Pod, return `pending` and a `browserlink` (relative path); log in to the Web UI with the **same account** and open it to approve. Results are not pushed back to the MCP client, so query again to verify.
 - **Turning off the external endpoints**: set `ENABLE_MCP="false"` in `kubedoor.conf`.
@@ -367,12 +367,14 @@ Peak resource dashboard (Grafana): global peak-hour resource statistics with a T
 
 ### 9. 🔐Platform and Permissions
 
-**One entry point, two permission levels: the Web UI, Grafana, the AI assistant and MCP share one NodePort, and each account is either read-write or read-only.**
+**One entry point, per-cluster permissions: the Web UI, Grafana, the AI assistant and MCP share one NodePort, and KubeDoor manages its own accounts and permissions.**
 
-- 🚪Single entry point: nginx in kubedoor-web handles basic auth login and reverse-proxies the master, kubedoor-ai and Grafana (`/grafana/`).
-- 👥Read-write and read-only: accounts listed in `WEB_RW_USERS` are read-write, all others are read-only; read-only accounts get a 403 when calling any API outside the query whitelist (the embedded Grafana runs as anonymous Admin and is not subject to this restriction); image updates can be opened to read-only accounts by cluster, time window and account via `UPDATE_IMAGE_JSON`.
+- 🚪Single entry point: nginx in kubedoor-web only reverse-proxies; login, sessions and permission checks live in the master, and the AI assistant, MCP and Grafana (`/grafana/`) are authorized by the master through nginx `auth_request`.
+- 👤Accounts: local accounts plus LDAP (configured and tested in the Web UI, auto-provisioned on first login); the built-in super admin `kubedoor` can only change its own password and cannot be deleted or have its role changed.
+- 👥Permissions: a global role (Admin / Read-write / Read-only (default) / None) plus per-user, per-cluster grants (Read-write / Read-only / None); cluster grants take precedence and the global role is the fallback. Clusters with "None" are hidden everywhere, including alerts and the AI assistant, and the AI assistant and MCP check the target cluster before executing or approving changes. Image updates can still be opened to read-only accounts by cluster, time window and account via `UPDATE_IMAGE_JSON`.
+- 🧾Audit log: logins, account and permission changes, and every write operation (including denied attempts) can be searched under 「系统管理 → 操作审计」.
 - 🛰Multi-cluster onboarding: an agent registers itself on its first connection; 「Agent管理」 shows online status, heartbeat and version, 「更新」 (Update) upgrades the agent image with one click, and collection, admission control and 「AI Kubeconfig」 are all configured there.
-- 📝Audit trail: nginx writes access logs in JSON format (including the logged-in user and the request body); operations are pushed to IM by the agent; AI sessions, approvals and tool calls are written to PostgreSQL.
+- 📝Audit trail: nginx writes access logs in JSON format (including the logged-in user and the request body); the master keeps an operation audit log; operations are pushed to IM by the agent; AI sessions, approvals and tool calls are written to PostgreSQL.
 - 🧹Automatic data cleanup [2.0]: K8S events are kept for 90 days, alert records and peak snapshots for 365 days; the master purges expired data in batches once a day, adjustable in the `kubedoor-config` ConfigMap (`0` means never purge).
 - 🌗UI: Simplified Chinese / English (partially translated), light/dark/auto themes, mobile-friendly.
 
@@ -442,10 +444,9 @@ vi kubedoor.conf        # set K8S_NAME and MASTER_WS (on another machine, cp kub
 
 #### Accessing the Web UI
 
-- Open the `http://<node IP>:<NodePort>` printed by the install script in your browser; the default account is `kubedoor` / `kubedoor` (read-write).
-- ⚠️ Change the default passwords as soon as possible (ideally before the installation in step ②): `WEB_AUTH_USERS` (htpasswd format) comes with two preset read-write accounts, one of which is used by cross-cluster agents to connect; change both. To change them after installation:
-  - Control plane: re-run `./install.sh master`, then run `kubectl -n kubedoor rollout restart deploy/kubedoor-web` so that the new accounts take effect;
-  - Cross-cluster agents: update the credentials in `MASTER_WS` accordingly, re-run `./install.sh agent`, then run `kubectl -n kubedoor rollout restart deploy/kubedoor-agent`.
+- Open the `http://<node IP>:<NodePort>` printed by the install script in your browser; the built-in admin account is `kubedoor` / `kubedoor`, and you must change the password on first login.
+- Add accounts and grant per-cluster permissions under 「系统管理 → 用户与权限」, and connect LDAP under 「LDAP 设置」.
+- ⚠️ The built-in agent account `Up4biLko1dNh` (factory password `qCa22jDkfc9y`) is what agents use to connect to the master; reset its password under 「用户与权限」, then update `MASTER_WS` of every agent (same-cluster and cross-cluster agents both need the credentials), re-run `./install.sh agent` and run `kubectl -n kubedoor rollout restart deploy/kubedoor-agent`.
 
 #### First Steps
 
@@ -457,7 +458,7 @@ vi kubedoor.conf        # set K8S_NAME and MASTER_WS (on another machine, cp kub
 
 #### Production Tips
 
-- 🔒The Web UI and MCP use HTTP + basic auth by default; in production, put HTTPS in front of the Web UI (the Ingress/LB must support WebSocket).
+- 🔒The Web UI and MCP use plain HTTP by default; in production, put HTTPS in front of the Web UI (the Ingress/LB must support WebSocket), and set `AUTH_COOKIE_SECURE` to `"true"` in `kubedoor-config` when TLS terminates in front of nginx.
 - 🚧Admission control is fail-closed: Deployment changes are rejected while the agent or master is unavailable; in an emergency, run `kubectl delete mutatingwebhookconfiguration kubedoor-admis-configuration`. Before uninstalling or reinstalling an agent, turn off 「准入控制」 in 「Agent管理」 first.
 - 💾Back up the PostgreSQL data together with `kubedoor.conf` and `kubedoor.conf.ai-secrets` (its contents match the Secret `kubedoor-ai-security`); changing the AI encryption key makes saved kubeconfigs impossible to decrypt.
 - 📌Keep `NAMESPACE` at its default value `kubedoor`; admission control, scheduled tasks and other features depend on this namespace.
@@ -490,6 +491,8 @@ vi kubedoor.conf        # set K8S_NAME and MASTER_WS (on another machine, cp kub
 6. The first 2.1 installation generates `kubedoor.conf.ai-secrets`; back it up together with the PostgreSQL data.
 
 > Upgrades within 2.x: master and kubedoor-ai use the Recreate strategy, so the AI assistant and MCP are briefly unavailable during an upgrade, and in clusters with admission control enabled, Deployment changes are rejected while the master restarts; upgrade during off-peak hours. The nginx config is mounted via subPath, so if the Web image tag has not changed, run `kubectl -n kubedoor rollout restart deploy/kubedoor-web` for the new config to take effect.
+>
+> Upgrading from the nginx basic auth versions: `WEB_AUTH_USERS`/`WEB_RW_USERS` no longer take effect, accounts are maintained under 「系统管理」 in the Web UI; every agent must now send the agent account credentials, so change same-cluster agents' `MASTER_WS` to `ws://Up4biLko1dNh:<password>@kubedoor-master.kubedoor` as well (you can set `AGENT_AUTH_REQUIRED="false"` temporarily during the migration). See the [deployment guide](deploy/README.md#账号与权限).
 
 ---
 

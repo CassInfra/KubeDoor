@@ -179,6 +179,7 @@ watch(
               :value="item[0]"
             />
           </el-select>
+          <ClusterPermTag :env="queryForm.env" />
         </el-form-item>
         <el-form-item
           :label="transformI18n('resource.column.namespace')"

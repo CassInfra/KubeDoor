@@ -260,9 +260,10 @@ const timestamp = (value?: string) => {
         <span class="ai-badge">AI</span>
         <span class="ai-title">KubeDoor 助手</span>
         <el-tag
-          v-if="ai.bootstrap?.permission === 'read'"
+          v-if="ai.scope.env && !ai.writable"
           size="small"
           effect="plain"
+          :title="`当前账号对集群 ${ai.scope.env} 只有只读权限,只能查询,不能批准修改`"
           >只读</el-tag
         >
         <span v-if="ai.bootstrap?.username" class="ai-owner">{{
@@ -374,7 +375,7 @@ const timestamp = (value?: string) => {
                 :title="
                   ai.writable
                     ? '勾选后自动批准工具操作；取消勾选后恢复逐次确认。'
-                    : '当前账号只读，不能批准执行。'
+                    : '当前账号对所选集群只读，不能批准执行。'
                 "
                 >自动批准执行</el-checkbox
               >
@@ -591,7 +592,7 @@ const timestamp = (value?: string) => {
     <AIMemoryDialog
       v-model="memoryVisible"
       :selected="ai.selectedMemories"
-      :writable="ai.writable"
+      :writable="ai.globalWritable"
       :busy="ai.busy || !ai.sessionReady"
       :owner="ai.bootstrap?.username || ''"
       :secret="ai.provider.api_key"
@@ -601,7 +602,7 @@ const timestamp = (value?: string) => {
     <AIMemoryEditor
       v-model="memoryEditorVisible"
       :draft="memoryDraft"
-      :writable="ai.writable"
+      :writable="ai.globalWritable"
       :owner="ai.bootstrap?.username || ''"
       :secret="ai.provider.api_key"
       @saved="ElMessage.success('记忆已保存，可通过引入记忆选择。')"

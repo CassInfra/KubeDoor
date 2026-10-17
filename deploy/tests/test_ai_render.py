@@ -33,7 +33,6 @@ def setup_config(tmp_path, mcp, extra=()):
         "TAG_AI=rename-test",
         "PG_HOST=pg.example.invalid", "PG_PORT=5432", "PG_USER=tester",
         "PG_PASSWORD=test-password", "PG_DATABASE=test", "PROM_K8S_TAG_KEY=k8s",
-        "WEB_AUTH_USERS='tester:$apr1$local$unused'", "WEB_RW_USERS=tester",
         "ENABLE_GRAFANA=false", "ENABLE_VICTORIA_METRICS=false",
         "ENABLE_VMALERT=false", "ENABLE_ALERTMANAGER=false",
         "PROM_URL=http://metrics.example.invalid", "PROM_TYPE=Victoria-Metrics-Single",
@@ -75,7 +74,7 @@ def test_ai_always_rendered_and_mcp_toggle(tmp_path, mcp, extra):
     assert (output / "30-ai.yaml").exists()
     assert not (output / "30-mcp.yaml").exists()
     web = next(doc for doc in documents if doc["kind"] == "ConfigMap" and doc["metadata"]["name"] == "nginx-config")
-    proxy = web["data"]["default.conf"]
+    proxy = web["data"]["nginx.conf"]
     assert 'location ^~ /api/ai/ {' in proxy
     assert ('location ~ ^/(mcp|sse|messages)' in proxy) == expect_mcp
     assert "proxy_pass http://kubedoor-ai.ai-render-test:8000;" in proxy

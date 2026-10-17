@@ -35,7 +35,9 @@ export default {
       component: () => import("@/views/statistics/index.vue"),
       meta: {
         title: $t("menus.resourceStatistics"),
-        icon: "ep:pie-chart"
+        icon: "ep:pie-chart",
+        // Grafana 看板做不到按集群隔离,只给能看到全部集群的账号(后端 nginx 同样拦截)
+        roles: ["all-clusters"]
       }
     }
   ]

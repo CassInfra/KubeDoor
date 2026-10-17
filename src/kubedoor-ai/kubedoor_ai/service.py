@@ -165,8 +165,12 @@ class Service:
         merged = {row["env"]: {**row, **summaries.get(row["env"], {}), "configured": row["env"] in summaries} for row in clusters}
         for env, summary in summaries.items():
             merged.setdefault(env, {**summary, "online": False, "ai_tools": False})
+        # 对当前用户为「无」权限的集群完全不可见;permission 为该集群的有效权限,前端据此决定能否批准修改
+        visible = [{**row, "permission": identity.permission_for(row["env"])}
+                   for row in merged.values() if identity.can_read(row["env"])]
         return {"enabled": True, "username": identity.username, "permission": identity.permission,
-                "clusters": sorted(merged.values(), key=lambda r: r["env"]), "skills": SKILLS}
+                "role": identity.permission, "is_admin": identity.is_admin,
+                "clusters": sorted(visible, key=lambda r: r["env"]), "skills": SKILLS}
 
     async def ensure_env(self, identity, env):
         cluster = next((r for r in (await self.bootstrap(identity))["clusters"] if r["env"] == env), None)
@@ -276,7 +280,7 @@ class Service:
         # system prompt or a separate run-level memory snapshot.
         memories = await self.memory_library.resolve([] if memory_ids is None else memory_ids)
         try:
-            run = await self.store.one("INSERT INTO kubedoor_ai_runs(id,session_id,username,permission,status,scope,origin,skill_ids,idempotency_key) VALUES($1::uuid,$2::uuid,$3,$4,'running',$5,$6,$7,$8) RETURNING *", str(uuid.uuid4()), session_id, identity.username, identity.permission, scope, origin, skills, key)
+            run = await self.store.one("INSERT INTO kubedoor_ai_runs(id,session_id,username,permission,status,scope,origin,skill_ids,idempotency_key) VALUES($1::uuid,$2::uuid,$3,$4,'running',$5,$6,$7,$8) RETURNING *", str(uuid.uuid4()), session_id, identity.username, identity.permission_for(scope["env"]), scope, origin, skills, key)
         except asyncpg.UniqueViolationError:
             if key:
                 existing = await self.store.one("SELECT * FROM kubedoor_ai_runs WHERE session_id=$1::uuid AND idempotency_key=$2", session_id, key)
@@ -316,7 +320,7 @@ class Service:
 
     async def decision(self, identity, rid, body):
         run = await self.store.run(rid, identity)
-        identity.require_write()
+        identity.require_write(run["scope"]["env"])
         decision, action_id = body.get("decision"), body.get("action_id")
         if decision not in ("approve", "reject") or not action_id:
             raise AIError("请提供 action_id 和 approve/reject")
@@ -388,7 +392,7 @@ class Service:
 
     async def test_connection(self, identity, env, body):
         from kubedoor_tools import KubernetesExecutor
-        identity.require_write()
+        identity.require_admin()
         await self.ensure_env(identity, env)
         if body.get("content") is not None:
             parsed = await self.parse_connection(body["content"], body.get("context"))
@@ -505,7 +509,7 @@ class Service:
             await self.store.event(run["id"], "approval", pending.action)
             await self.store.status(run["id"], "waiting_approval")
             return {"success": False, "pending": True, "action_id": pending.action["action_id"], "run_id": run["id"], "session_id": session["id"], "preview": pending.action,
-                    "browserlink": f"/#/workbench/index?ai_session={session['id']}&ai_run={run['id']}"}
+                    "browserlink": f"/#/monit/overview?ai_session={session['id']}&ai_run={run['id']}"}
         except Exception:
             await self.store.status(run["id"], "failed")
             await self.store.event(run["id"], "done", {"status": "failed"})

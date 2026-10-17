@@ -82,7 +82,7 @@ vi kubedoor.conf        # 改 PG_HOST / PG_PASSWORD / MSG_TOKEN 等
 
 `PG_HOST` 要填 **K8S 里的 Pod 能访问到的地址**,通常是数据库宿主机的内网 IP。填 `127.0.0.1` 脚本会直接拒绝,因为那是 Pod 自己的回环地址。
 
-装完会打印 Web 控制台地址和默认账号(`kubedoor` / `kubedoor`),上线前记得改掉,见[安全建议](#安全建议)。
+装完会打印 Web 控制台地址和内置管理员账号(`kubedoor` / `kubedoor`),首次登录会强制修改口令。之后在 Web 的「系统管理」里添加账号、配置 LDAP、按集群分配权限,见[账号与权限](#账号与权限)。
 
 ### 第三步:装集群端
 
@@ -94,7 +94,7 @@ vi kubedoor.conf        # 改 K8S_NAME 和 MASTER_WS(换一台机器执行时,�
 ```
 
 - `K8S_NAME` 是这个集群的唯一标识,会作为指标标签出现在 Web 上,每个集群必须不同。
-- `MASTER_WS` 同集群填 `ws://kubedoor-master.kubedoor`;跨集群填 `ws://<账号>:<口令>@<控制端节点IP>:<Web的NodePort>`,账号必须是 `WEB_RW_USERS` 里的读写账号。出厂预置了一个给 agent 用的读写账号 `Up4biLko1dNh`,装控制端时脚本会按它的出厂口令把这一行打印出来;改过口令(见[安全建议](#安全建议))就换成新的。
+- `MASTER_WS` 必须带 Agent 账号口令:同集群填 `ws://Up4biLko1dNh:<口令>@kubedoor-master.kubedoor`,跨集群填 `ws://Up4biLko1dNh:<口令>@<控制端节点IP>:<Web的NodePort>`。`Up4biLko1dNh` 是内置的 Agent 账号(出厂口令 `qCa22jDkfc9y`),只能用来连 agent、不能登录 Web;装控制端时脚本会把两种写法打印出来。在 Web 上改过它的口令,就要同步改这里。
 - 跨集群时还要把 `REMOTE_WRITE_URL` 改成控制端 VictoriaMetrics 的外部地址(装控制端时脚本会把这行打印出来,直接抄)。
 
 几十秒后在 Web 控制台的"Agent管理"里就能看到这个集群上线了。
@@ -151,7 +151,7 @@ ENABLE_MCP="true"      # 外部 MCP 协议接口,默认开启
 
 `ENABLE_MCP` 只控制 Web 是否对外开放 `/mcp`、`/sse`、`/messages` 代理;设为 `false` 时网页里的 AI 助手不受影响。
 
-外部 MCP 客户端连 `http://<节点IP>:<Web的NodePort>/mcp`(Streamable HTTP,`/sse` 仍兼容),用 Web 的登录账号做 basic auth,详见 [AI 助手说明](../docs/ai-assistant.md)。
+外部 MCP 客户端连 `http://<节点IP>:<Web的NodePort>/mcp`(Streamable HTTP,`/sse` 仍兼容),请求头带 Web 账号的 Basic 认证(`Authorization: Basic base64(账号:口令)`,本地账号和 LDAP 账号都可以),工具按该账号的集群权限执行,详见 [AI 助手说明](../docs/ai-assistant.md)。
 
 `src/kubedoor-tools` 是共享 Python 库,不是独立服务。构建 `kubedoor-agent` 和 `kubedoor-ai` 镜像时会把它安装进镜像,并通过 `tools/install-ai-tools.sh` 安装 kubectl、istioctl 和 yq;jq、curl、dig、openssl、rg 等诊断工具由镜像的系统包管理器安装。
 
@@ -174,16 +174,46 @@ ENABLE_MCP="false"
 
 例外:agent 建的定时/周期任务用的镜像 `registry.cn-shenzhen.aliyuncs.com/starsl/busybox-curl` 写死在代码里,不受 `IMAGE_BUSYBOX_CURL` 控制,要让各集群节点能拉到这个镜像(比如在容器运行时里把这个仓库地址映射到内网仓库)。
 
-### 调整登录账号
+### 账号与权限
 
-`WEB_AUTH_USERS` 是 htpasswd 格式,一行一个账号,到 <https://tool.lu/htpasswd/> 生成(加密方式选 **Crypt**)。Crypt 只认密码的前 8 位,密码更长时用 `openssl passwd -apr1 '<密码>'` 生成 apr1 格式,写成 `用户名:<输出>`;apr1 的结果里有 `$`,而 `kubedoor.conf` 是按 shell 脚本加载的,这时 `WEB_AUTH_USERS` 的值要改用单引号包起来(或把每个 `$` 写成 `\$`)。
-`WEB_RW_USERS` 里列出的账号是读写权限,其余账号只能读,所有变更类接口会被 nginx 挡掉返回 403。例外是改镜像:这个接口对只读账号也放行,由 master 按 `UPDATE_IMAGE_JSON` 里的集群、时段和账号白名单决定是否允许,见[镜像更新配置说明](../help/K8S微服务镜像更新配置说明.md)。
+登录、账号和权限都由 KubeDoor 自己管理(nginx 不再做认证),在 Web 的「系统管理」里配置,改完立即生效,不用重启:
+
+- **账号来源**:本地账号和 LDAP 账号。登录时先匹配本地账号,本地没有再走 LDAP;LDAP 用户首次登录自动开通(默认全局权限「只读」,可在「LDAP 设置」里改成「无」或关闭自动开通)。
+- **全局权限**(没有单独授权的集群按它兜底):
+  | 全局权限 | 能做什么 |
+  |---|---|
+  | 管理员 | 所有集群读写,并且能管理用户、LDAP、Agent;不能再单独指定集群权限 |
+  | 读写 | 所有集群读写(K8S 操作、数据库写入、AI 助手执行修改),不能管理用户和 Agent |
+  | 只读(默认) | 所有集群只读,不能修改 K8S 和数据库,AI 助手也只能查询 |
+  | 无 | 默认看不到任何集群,只能访问单独授权的集群;新接入的集群也不会自动可见 |
+- **集群授权**:给某个用户指定某个集群「读写 / 只读 / 无」,**优先于全局权限**。例如全局只读 + A 集群读写 = A 集群读写、其它集群只读;设成「无」的集群在所有页面、下拉框、告警和 AI 助手里都看不到。
+- **内置账号**:`kubedoor` 是内置超级管理员,只有它自己登录后能改口令,不能被删除、禁用、改权限或重置口令;`Up4biLko1dNh` 是内置 Agent 账号,只能用于 agent 连接 master,管理员可以重置它的口令(要同步改各集群 agent 的 `MASTER_WS`)。
+- 首次安装想直接用自己的口令,在 `kubedoor.conf` 里填 `KUBEDOOR_INIT_ADMIN_PASSWORD` / `KUBEDOOR_INIT_AGENT_PASSWORD`(只在首次建账号时生效)。
+- 改镜像有个例外:只读用户在 `UPDATE_IMAGE_JSON` 配置的集群、时段和账号白名单内也可以改镜像,见[镜像更新配置说明](../help/K8S微服务镜像更新配置说明.md)。
+- 查看 Secret 内容需要该集群的读写权限(和 K8S 内置的 view 角色一样,只读不含 Secret)。
+- Grafana 看板做不到按集群隔离,所以**只对能看到全部集群的账号开放**(对任何集群设了「无」的账号看不到三个看板菜单,直接访问 `/grafana/` 返回 403);KubeDoor 管理员在 Grafana 里是 Admin,其他人是 Viewer。Grafana 的 PostgreSQL 数据源用的是 `PG_USER`,Viewer 也能借数据源查询库里的数据;对此敏感时可以给 Grafana 单独建一个只读 PG 账号(只授权看板用到的 `k8s_*` 表),改 `deploy/manifests/master/35-grafana.yaml` 里的数据源账号。
+- 本地账号的口令用 scrypt 哈希并加了 pepper(由 `AI_ENCRYPTION_KEY` 派生,不在数据库里),LDAP 绑定口令也用这个密钥加密存储:数据库泄露也无法离线破解口令。**`AI_ENCRYPTION_KEY` 要和数据库一起备份**,丢了本地账号的口令就对不上了,只能用下面的命令重置。
+- 登录、账号与权限变更、所有写操作(含越权被拒)都记在「系统管理 → 操作审计」里,默认保留 180 天(`RETENTION_AUDIT_DAYS`)。
+- 登录有效期:不勾「7 天内免登录」时 12 小时、空闲 4 小时自动退出;勾选时 7 天。同一账号 + 来源 IP 连续 5 次口令错误锁定 15 分钟。这些参数都在 `kubedoor-config` 里(`AUTH_*`)。
+- 忘了口令(包括 `kubedoor`):在 master 容器里用命令行重置,重置后下次登录要先改口令:
+  ```bash
+  kubectl -n kubedoor exec -it deploy/kubedoor-master -- python3 -m auth.reset_password kubedoor
+  ```
+
+**从 nginx basic auth 的旧版升级:**
+
+1. `kubedoor.conf` 里的 `WEB_AUTH_USERS` / `WEB_RW_USERS` 不再生效(安装时会提示),原来的读写账号请到「用户与权限」里重新建,或接入 LDAP 后按需授权。内置的 `kubedoor` 和 `Up4biLko1dNh` 会自动创建,口令沿用旧版的出厂值,已经部署的跨集群 agent 不用改。
+2. agent 现在**一律要带账号口令**(同集群也一样)。同集群 agent 原来写的 `ws://kubedoor-master.kubedoor` 要改成 `ws://Up4biLko1dNh:<口令>@kubedoor-master.kubedoor`,重跑 `./install.sh agent` 并重启 agent。来不及一起改时,可以先在 `kubedoor.conf` 里设 `AGENT_AUTH_REQUIRED="false"` 过渡,全部改完再改回 `true` 并重跑 `./install.sh master`(配置变了 master 会自动重启)。
+3. nginx 配置随 `./install.sh master` 一起更新,不用手动改:集群里的 `nginx-config` 会被模板 `deploy/manifests/master/40-web.yaml` 覆盖(以前手工改过的也一样),web 自动滚动更新用上新配置。新配置里没有 `auth_basic` / `auth_ldap` 和读写映射,`/api/`、`/ws` 直接转给 master;AI 助手、MCP、Grafana、自定义告警用 `auth_request` 问 master 的 `/api/auth/verify`。web 镜像的底包从自编译的 nginx-ldap 换成了官方 `nginx:alpine`(自带 `ngx_http_auth_request_module`),**web 镜像要重新构建**。自己另外维护 nginx 的,照这个文件里的 `server` 段改。
+4. Grafana 改成了 auth proxy:KubeDoor 管理员在 Grafana 里是 Admin,其他人是 Viewer,不再是匿名 Admin;并且只对能看到全部集群的账号开放。
 
 ---
 
 ## 改配置
 
-装完以后想改参数,不用重跑安装脚本:
+改 `kubedoor.conf` 后重跑 `./install.sh master` 即可:master、alarm、ai、web、Grafana 的 Pod 模板上有配置摘要注解(`checksum/config`),哪个组件的配置变了就自动滚动更新哪个,没变的不会重启。直接在集群里 `kubectl edit` 的改动,下次重跑安装脚本时会被模板覆盖。
+
+临时改参数也可以不重跑安装脚本:
 
 ```bash
 # 改环境变量类配置(数据库、通知、时序库地址...)
@@ -206,6 +236,7 @@ kubectl -n kubedoor rollout restart deploy/vmalert
 | `RETENTION_EVENTS_DAYS` | K8S 事件 `k8s_events` | 90 天 |
 | `RETENTION_ALERTS_DAYS` | 告警记录 `k8s_pod_alert_days` | 365 天 |
 | `RETENTION_RESOURCES_DAYS` | 高峰期资源快照 `k8s_resources` | 365 天 |
+| `RETENTION_AUDIT_DAYS` | 操作审计 `audit_logs` | 180 天 |
 
 设为 `0` 表示不清理。
 
@@ -215,8 +246,8 @@ kubectl -n kubedoor rollout restart deploy/vmalert
 
 ## 安全建议
 
-- **上线前改掉默认账号口令。** `WEB_AUTH_USERS` 出厂带两个读写账号:Web 登录用的 `kubedoor`(口令也是 `kubedoor`)和跨集群 agent 用的 `Up4biLko1dNh`,口令都是公开的默认值。按[调整登录账号](#调整登录账号)重新生成这两行(或换成自己的账号并同步改 `WEB_RW_USERS`),重跑 `./install.sh master` 后执行 `kubectl -n kubedoor rollout restart deploy/kubedoor-web`(账号文件是 subPath 挂载,不重启不生效)。跨集群的 agent 要同步改 `MASTER_WS` 里的口令,重跑 `./install.sh agent` 后执行 `kubectl -n kubedoor rollout restart deploy/kubedoor-agent`。
-- **生产环境在 Web 前面加 HTTPS。** Web(包括 AI 助手、外部 MCP、Grafana)默认是 HTTP + basic auth,账号口令明文传输。脚本不带 Ingress,请自己用 Ingress 或负载均衡终结 TLS;`/ws` 开头的几个路径是 WebSocket,AI 助手和 MCP 是长连接,代理要支持 Upgrade 并放宽读超时。跨集群 agent 的 `MASTER_WS` 同样带着读写账号,加了 HTTPS 后改用 `wss://`。
+- **上线前改掉内置账号的出厂口令。** `kubedoor`(出厂口令 `kubedoor`)首次登录会被强制改密;内置 Agent 账号 `Up4biLko1dNh` 的出厂口令 `qCa22jDkfc9y` 是公开的,请在「系统管理 → 用户与权限」里重置,再同步改各集群 agent 的 `MASTER_WS`,重跑 `./install.sh agent` 后执行 `kubectl -n kubedoor rollout restart deploy/kubedoor-agent`。还在用出厂口令的账号在用户列表里会标「出厂口令」。
+- **生产环境在 Web 前面加 HTTPS。** 默认是 HTTP,登录口令、会话 Cookie、AI 请求里的模型 Key 都是明文传输。脚本不带 Ingress,请自己用 Ingress 或负载均衡终结 TLS;`/ws` 开头的几个路径是 WebSocket,AI 助手和 MCP 是长连接,代理要支持 Upgrade 并放宽读超时。TLS 在 nginx 前面的负载均衡上终结时,把 `kubedoor-config` 的 `AUTH_COOKIE_SECURE` 设为 `"true"`,让会话 Cookie 只走 HTTPS。跨集群 agent 的 `MASTER_WS` 带着 Agent 账号口令,加了 HTTPS 后改用 `wss://`。
 - **准入控制是 fail-closed 的。** 某个集群在 Web 上开了"准入控制"后,只要 agent、master 或数据库有一个不可用(包括升级重启期间),这个集群里没打 `kubedoor-ignore` 标签的命名空间(默认只有 `kube-system`、`kubedoor` 打了),Deployment 的创建、更新、扩缩容都会被拒绝。紧急情况下先删掉 webhook 恢复发布,事后再到 Web 上把"准入控制"关掉,让状态同步:
   ```bash
   kubectl delete mutatingwebhookconfiguration kubedoor-admis-configuration
@@ -232,7 +263,7 @@ kubectl -n kubedoor rollout restart deploy/vmalert
 ```bash
 kubectl -n kubedoor logs -l app=kubedoor-agent --tail=50
 ```
-重点看 `MASTER_WS` 地址通不通。跨集群时要走 Web 的 NodePort 并带上 basic auth 账号密码,而且必须是读写账号,漏了账号或用了只读账号都会被 nginx 拦在门外。
+重点看 `MASTER_WS` 地址通不通、里面的 Agent 账号口令对不对。口令错误或没带账号时 master 日志里会有 `[鉴权] 拒绝 agent 连接` 的提示;连续输错 5 次会锁 15 分钟,改对后等锁定过期即可。只有 Agent 账号(或管理员账号)能注册 agent,普通 Web 账号会被拒绝。
 
 **master 起不来**
 
@@ -283,7 +314,7 @@ nginx 启动时要解析上游 service 的域名。如果是刚部署的瞬间 s
 | 注入给 master 的变量 | `CK_*` / `DB_*` | `PG_*` |
 | Grafana 数据源 | ClickHouse 插件 + Prometheus | PostgreSQL(内置)+ Prometheus,不再需要装插件 |
 | 部署方式 | `helm install` | `./install.sh master` |
-| MCP 暴露 | NodePort 直连,无认证 | ClusterIP,统一走 Web 的 basic auth |
+| MCP 暴露 | NodePort 直连,无认证 | ClusterIP,经 Web 由 master 校验账号(Basic 认证)并按集群授权 |
 
 旧版 Helm chart 注入的还是 `CK_*` 变量,而现在的代码只读 `PG_*`,**用旧 chart 装出来的 master 连不上数据库**,不要混用。
 

@@ -3,13 +3,14 @@
 """
 过期数据清理
 
-三张只追加的大表按时间列保留固定天数。master 启动后先等一会儿,之后每 24 小时
+只追加的大表按时间列保留固定天数,顺带清掉过期的登录会话。master 启动后先等一会儿,之后每 24 小时
 清理一轮。按批删除,每批之间稍作停顿,避免一次删太多行长时间占锁、超过语句超时。
 
 保留天数可用环境变量调整,设为 0 表示不清理该表:
   RETENTION_EVENTS_DAYS     k8s_events          默认 90
   RETENTION_ALERTS_DAYS     k8s_pod_alert_days  默认 365
   RETENTION_RESOURCES_DAYS  k8s_resources       默认 365
+  RETENTION_AUDIT_DAYS      audit_logs          默认 180
 """
 
 import os
@@ -24,6 +25,7 @@ RETENTION_RULES = [
     ('k8s_events', 'lasttimestamp', int(os.environ.get('RETENTION_EVENTS_DAYS', '90'))),
     ('k8s_pod_alert_days', 'start_time', int(os.environ.get('RETENTION_ALERTS_DAYS', '365'))),
     ('k8s_resources', 'date', int(os.environ.get('RETENTION_RESOURCES_DAYS', '365'))),
+    ('audit_logs', 'ts', int(os.environ.get('RETENTION_AUDIT_DAYS', '180'))),
 ]
 
 BATCH_SIZE = 5000
@@ -61,6 +63,12 @@ async def purge_expired() -> None:
                 logger.info(f"🧹过期数据清理:{table} 删除 {deleted} 行({ts_column} 早于 {days} 天前)")
         except Exception as e:
             logger.error(f"过期数据清理失败 {table}: {e}")
+    try:
+        from auth.store import store
+
+        await store.cleanup_sessions()
+    except Exception as e:
+        logger.error(f"清理过期登录会话失败: {e}")
 
 
 async def retention_loop() -> None:

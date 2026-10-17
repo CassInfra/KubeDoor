@@ -61,7 +61,24 @@ export const useAIStore = defineStore("kubedoor-ai", () => {
   const streamError = ref("");
   const streamState = ref("idle");
   const lastSeq = ref(0);
-  const writable = computed(() => bootstrap.value?.permission === "rw");
+  /** 当前用户对某个集群的权限(管理员一律读写;看不到的集群不在 bootstrap 里) */
+  const clusterPermission = (env?: string) => {
+    const global = bootstrap.value?.permission;
+    if (global === "admin") return "rw";
+    const cluster = bootstrap.value?.clusters.find(item => item.env === env);
+    if (!cluster) return "none";
+    // 旧版 AI 服务不返回集群级权限,按全局权限处理
+    return cluster.permission ?? (global === "rw" ? "rw" : "read");
+  };
+  /** 能否批准当前会话所在集群的修改操作 */
+  const writable = computed(
+    () =>
+      clusterPermission(activeRun.value?.scope?.env || scope.value.env) === "rw"
+  );
+  /** 与集群无关的写操作(共享记忆)只看全局权限 */
+  const globalWritable = computed(() =>
+    ["admin", "rw"].includes(bootstrap.value?.permission ?? "")
+  );
   const configured = computed(
     () => !!provider.value.base_url.trim() && !!provider.value.model.trim()
   );
@@ -1139,6 +1156,8 @@ export const useAIStore = defineStore("kubedoor-ai", () => {
     streamState,
     lastSeq,
     writable,
+    globalWritable,
+    clusterPermission,
     autoApprove,
     configured,
     busy,

@@ -47,6 +47,10 @@ import { Perms } from "@/components/RePerms";
 app.component("Auth", Auth);
 app.component("Perms", Perms);
 
+// 全局注册集群权限提示(集群选择框旁显示「只读」)
+import ClusterPermTag from "@/components/ClusterPermTag.vue";
+app.component("ClusterPermTag", ClusterPermTag);
+
 // 全局注册vue-tippy
 import "tippy.js/dist/tippy.css";
 import "tippy.js/themes/light.css";

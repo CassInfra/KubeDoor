@@ -120,7 +120,7 @@
                     size="small"
                     link
                     type="primary"
-                    :disabled="!aiAvailable || aiPermission !== 'rw'"
+                    :disabled="!aiAvailable || aiPermission !== 'admin'"
                     @click="manageConnection(scope.row.key)"
                   >
                     {{
@@ -444,7 +444,8 @@ async function refreshConnections() {
   }
 }
 function manageConnection(env: string) {
-  if (aiPermission.value !== "rw") return;
+  // kubeconfig 直连属于集群接入配置,只有管理员能改(后端同样校验)
+  if (aiPermission.value !== "admin") return;
   connectionEnv.value = env;
   connectionDialogMounted.value = true;
   connectionDialogVisible.value = true;
@@ -453,9 +454,9 @@ function connectionSummary(env: string) {
   const connection = connections.value[env];
   if (!aiAvailable.value) return "AI 服务未启用或无法连接";
   if (!connection?.configured)
-    return aiPermission.value === "rw"
+    return aiPermission.value === "admin"
       ? "上传 YAML / JSON Kubeconfig 并测试连接"
-      : "只有写权限账号可以管理共享配置";
+      : "只有管理员可以管理共享配置";
   return `context: ${connection.context || ""}；测试: ${connection.test_status || "未测试"} ${connection.tested_at || ""}`;
 }
 

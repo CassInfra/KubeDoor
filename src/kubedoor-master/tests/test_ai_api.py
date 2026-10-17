@@ -5,14 +5,39 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
+import sys
+from types import MappingProxyType
+
 import pytest
 from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from auth import middleware as auth_middleware  # noqa: E402
+from auth.principal import Principal  # noqa: E402
 
 spec = importlib.util.spec_from_file_location("ai_api", Path(__file__).parents[1] / "func_manager" / "ai_api.py")
 ai_api = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(ai_api)
+
+USERS = {
+    "viewer": Principal("viewer", "read", user_id=1, via="internal"),
+    "reader": Principal("reader", "read", user_id=2, via="internal"),
+    "limited": Principal("limited", "none", user_id=3, via="internal",
+                         clusters=MappingProxyType({"prod": "rw", "staging": "read"})),
+}
+
+
+def internal_app(monkeypatch, clients, utils):
+    """真实的认证中间件 + 假的用户库:按 X-User-Name 返回预置身份。"""
+    async def principal_by_name(username, via):
+        return USERS.get(username)
+
+    monkeypatch.setattr(auth_middleware.store, "principal_by_name", principal_by_name)
+    app = web.Application(middlewares=[auth_middleware.create_middleware()])
+    ai_api.register_routes(app, clients, utils)
+    return app
 
 
 def test_metrics_scope_cannot_be_overridden_and_tenant_url_is_not_rewritten():
@@ -39,18 +64,63 @@ def test_metrics_invalid_or_unbounded_range_is_rejected(updates):
 async def test_internal_routes_require_service_token_and_user_identity(monkeypatch):
     monkeypatch.setenv("AI_INTERNAL_TOKEN", "secret-test-token")
     utils = SimpleNamespace(get_k8s_names=AsyncMock(return_value=["offline"]), PROM_TYPE="Victoria-Metrics-Cluster", PROM_K8S_TAG_KEY="origin_prometheus")
-    app = web.Application()
-    ai_api.register_routes(app, {"online": {"online": True, "ver": "2"}}, utils)
+    app = internal_app(monkeypatch, {"online": {"online": True, "ver": "2"}}, utils)
     async with TestClient(TestServer(app)) as client:
         assert (await client.get("/api/ai/internal/bootstrap")).status == 401
+        assert (await client.get("/api/ai/internal/bootstrap", headers={"X-Kubedoor-Token": "wrong"})).status == 401
+        # 有 token 没有用户身份(系统调用)不能代表用户使用 AI 桥
         assert (await client.get("/api/ai/internal/bootstrap", headers={"X-Kubedoor-Token": "secret-test-token"})).status == 403
+        # 用户不存在或已禁用
+        assert (await client.get("/api/ai/internal/bootstrap", headers={
+            "X-Kubedoor-Token": "secret-test-token", "X-User-Name": "ghost"})).status == 403
         response = await client.get("/api/ai/internal/bootstrap", headers={
-            "X-Kubedoor-Token": "secret-test-token", "X-User-Name": "viewer", "X-User-Permission": "read",
+            # X-User-Permission 由 AI 服务转发,master 不采信,只按库里的用户权限计算
+            "X-Kubedoor-Token": "secret-test-token", "X-User-Name": "viewer", "X-User-Permission": "rw",
         })
         assert response.status == 200
         body = await response.json()
-        assert body["username"] == "viewer"
-        assert [(c["env"], c["online"]) for c in body["clusters"]] == [("offline", False), ("online", True)]
+        assert body["username"] == "viewer" and body["permission"] == "read"
+        assert [(c["env"], c["online"], c["permission"]) for c in body["clusters"]] == [
+            ("offline", False, "read"), ("online", True, "read")]
+
+
+@pytest.mark.asyncio
+async def test_bootstrap_hides_clusters_without_permission_and_execute_checks_cluster(monkeypatch):
+    monkeypatch.setenv("AI_INTERNAL_TOKEN", "secret-test-token")
+    utils = SimpleNamespace(get_k8s_names=AsyncMock(return_value=["prod", "staging", "secret"]),
+                            PROM_TYPE="Victoria-Metrics-Cluster", PROM_K8S_TAG_KEY="origin_prometheus")
+    sent = []
+
+    def socket_for(env):
+        class Socket:
+            async def send_json(self, packet):
+                sent.append(packet)
+                connection = clients[env]
+                connection["response_queue"][packet["request_id"]] = {"success": True}
+                connection["response_events"][packet["request_id"]].set()
+        return Socket()
+
+    clients = {"staging": {"online": True, "ai_tools": True}, "secret": {"online": True, "ai_tools": True}}
+    for env, connection in clients.items():
+        connection["ws"] = socket_for(env)
+    app = internal_app(monkeypatch, clients, utils)
+    headers = {"X-Kubedoor-Token": "secret-test-token", "X-User-Name": "limited"}
+    async with TestClient(TestServer(app)) as client:
+        body = await (await client.get("/api/ai/internal/bootstrap", headers=headers)).json()
+        assert [(c["env"], c["permission"]) for c in body["clusters"]] == [("prod", "rw"), ("staging", "read")]
+        # 看不到的集群不能执行任何工具
+        response = await client.post("/api/ai/internal/agent-execute?env=secret", headers=headers,
+                                      json={"operation": "api", "phase": "prepare"})
+        assert response.status == 403
+        # 只读集群不能批准写操作
+        response = await client.post("/api/ai/internal/agent-execute?env=staging", headers=headers,
+                                      json={"operation": "api", "phase": "execute", "approved": True})
+        assert response.status == 403
+        # 只读集群可以执行只读工具,agent 收到的权限是 read
+        response = await client.post("/api/ai/internal/agent-execute?env=staging", headers=headers,
+                                      json={"operation": "api", "phase": "execute"})
+        assert response.status == 200
+        assert sent[-1]["permission"] == "read" and sent[-1]["username"] == "limited"
 
 
 @pytest.mark.asyncio
@@ -123,8 +193,7 @@ async def test_metrics_bridge_preserves_tenant_path_decodes_auth_and_injects_clu
         address = str(server.make_url("/select/7/prometheus")).split("://", 1)[1]
         utils = SimpleNamespace(get_k8s_names=AsyncMock(return_value=["prod"]), PROM_TYPE="Victoria-Metrics-Cluster",
                                 PROM_K8S_TAG_KEY="k8s", PROM_URL=f"http://metrics-user:password%40with%3Aencoding@{address}")
-        app = web.Application()
-        ai_api.register_routes(app, {}, utils)
+        app = internal_app(monkeypatch, {}, utils)
         async with TestClient(TestServer(app)) as client:
             response = await client.post("/api/ai/internal/metrics", json={"env": "prod", "query": "sum(up)", "extra_label": "k8s=other"}, headers={
                 "X-Kubedoor-Token": "test-token", "X-User-Name": "reader", "X-User-Permission": "read"})

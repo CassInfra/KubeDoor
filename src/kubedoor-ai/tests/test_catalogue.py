@@ -263,10 +263,13 @@ def master_db_module(monkeypatch):
     db.pg_fetch = AsyncMock(return_value=[])
     db.pg_fetchval = AsyncMock(return_value=0)
     db.pg_execute = AsyncMock()
+    db.pg_execute_transaction = AsyncMock(return_value=[])
     monkeypatch.setitem(sys.modules, "db", db)
     utils = ModuleType("utils")
     utils.invalidate_admis_cache = Mock()
     monkeypatch.setitem(sys.modules, "utils", utils)
+    # db_api 还依赖 master 目录下的 jvm_config / auth(纯逻辑模块),db、utils 用上面的替身
+    monkeypatch.syspath_prepend(str(Path(__file__).resolve().parents[2] / "kubedoor-master"))
     path = Path(__file__).resolve().parents[2] / "kubedoor-master/func_manager/db_api.py"
     spec = importlib.util.spec_from_file_location("catalogue_master_db_contract", path)
     module = importlib.util.module_from_spec(spec)

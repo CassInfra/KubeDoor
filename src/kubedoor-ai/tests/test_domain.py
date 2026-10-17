@@ -13,6 +13,29 @@ def test_trusted_identity_requires_both_service_token_and_identity():
         identity.require_write()
 
 
+def test_identity_cluster_permissions_follow_master_rules():
+    base = {"x-kubedoor-token": "secret", "x-user-name": "carol"}
+    identity = authenticate({**base, "x-user-permission": "none", "x-user-clusters": '{"prod":"rw","staging":"read"}'}, "secret")
+    assert identity.permission_for("prod") == "rw" and identity.can_read("staging") and not identity.can_read("other")
+    identity.require_write("prod")
+    for env in ("staging", "other"):
+        with pytest.raises(AIError):
+            identity.require_write(env)
+    with pytest.raises(AIError):
+        identity.require_write()  # 与集群无关的写(如共享记忆)只看全局权限
+    with pytest.raises(AIError):
+        identity.require_admin()
+    admin = authenticate({**base, "x-user-permission": "admin", "x-user-clusters": '{"prod":"none"}'}, "secret")
+    assert admin.permission_for("prod") == "rw" and admin.is_admin
+    reader = authenticate({**base, "x-user-permission": "read", "x-user-clusters": '{"prod":"none"}'}, "secret")
+    assert not reader.can_read("prod") and reader.can_read("staging")
+    for bad in ("[]", '{"prod":"admin"}', "not-json"):
+        with pytest.raises(AIError):
+            authenticate({**base, "x-user-permission": "read", "x-user-clusters": bad}, "secret")
+    with pytest.raises(AIError):
+        authenticate({**base, "x-user-permission": "superuser"}, "secret")
+
+
 def test_credential_cipher_authenticates_cluster_and_never_stores_plaintext():
     cipher = CredentialCipher("ab" * 32)
     config = {"token": "cluster-private-token", "clusters": []}

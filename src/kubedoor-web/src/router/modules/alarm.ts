@@ -58,7 +58,9 @@ export default {
       meta: {
         title: $t("menus.resourceMonitk8s"),
         icon: "ep:odometer",
-        showLink: VITE_HIDE_HOME === "true" ? false : true
+        showLink: VITE_HIDE_HOME === "true" ? false : true,
+        // Grafana 看板做不到按集群隔离,只给能看到全部集群的账号(后端 nginx 同样拦截)
+        roles: ["all-clusters"]
       }
     },
     {
@@ -68,7 +70,9 @@ export default {
       meta: {
         title: $t("menus.resourceMonitnode"),
         icon: "ep:data-analysis",
-        showLink: VITE_HIDE_HOME === "true" ? false : true
+        showLink: VITE_HIDE_HOME === "true" ? false : true,
+        // Grafana 看板做不到按集群隔离,只给能看到全部集群的账号(后端 nginx 同样拦截)
+        roles: ["all-clusters"]
       }
     }
   ]

@@ -27,6 +27,8 @@ export interface PureHttpRequestConfig extends AxiosRequestConfig {
   beforeResponseCallback?: (response: PureHttpResponse) => void;
   /** 后台静默请求:不显示顶部进度条,出错不弹提示(调用方自己处理) */
   silent?: boolean;
+  /** 收到 401 时不自动跳转登录页(登录、获取当前用户等认证接口自己处理) */
+  skipAuthRedirect?: boolean;
 }
 
 export default class PureHttp {

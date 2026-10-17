@@ -11,6 +11,8 @@ from aiohttp import web, WSMsgType
 from loguru import logger
 import utils, prom_real_time_data
 import db
+import auth
+from auth import principal_of
 import jvm_config
 from multidict import MultiDict
 from istio_route import istio_route
@@ -116,7 +118,7 @@ async def websocket_handler(request):
     ws = web.WebSocketResponse(max_msg_size=16 * 1024 * 1024)
     await ws.prepare(request)
 
-    logger.info(f"客户端连接成功，env={env} ver={ver}")
+    logger.info(f"客户端连接成功，env={env} ver={ver} 账号={principal_of(request).username}")
     if env not in clients:
         # 如果是新客户端，初始化状态
         clients[env] = {"ws": ws, "ver": ver, "last_heartbeat": time.time(), "online": True}
@@ -318,12 +320,13 @@ async def http_handler(request):
     if path == "/api/agent/istio/vs/apply":
         body = await istio_route.generate_json_handler(request)
     elif path == "/api/update-image":
-        username = request.headers.get('X-User-Name', '').lower()
-        permission = request.headers.get('X-User-Permission', '')
-        logger.info(f"🚧username={username}, permission={permission}: {body}")
-        # 如果权限是rw，则跳过所有权限检查
-        if permission == "rw":
-            pass  # 直接跳过所有权限检查，继续执行后续逻辑
+        principal = principal_of(request)
+        username = principal.username.lower()
+        direct = request.get("update_image_direct", principal.can_write(env))
+        logger.info(f"🚧username={username}, permission={principal.permission(env)}: {body}")
+        # 对该集群有读写权限直接放行;只读用户按 UPDATE_IMAGE 配置(集群、时间段、用户白名单)放行
+        if direct:
+            pass
         else:
             # UPDATE_IMAGE权限检查
             if not hasattr(utils, 'UPDATE_IMAGE') or not utils.UPDATE_IMAGE:
@@ -527,6 +530,7 @@ async def call_agent_api(env, path, query=None, method="GET", body=None, timeout
 
 
 async def status_handler(request):
+    principal = principal_of(request)
     agent_info = await utils.agent_info()
     agents_status = {
         env: {
@@ -537,6 +541,7 @@ async def status_handler(request):
         for env, data in clients.items()
     }
     agents = utils.merge_dicts(agents_status, agent_info)
+    agents = {env: data for env, data in agents.items() if principal.can_read(env)}
     return web.json_response({'success': True, 'data': agents})
 
 
@@ -580,12 +585,13 @@ async def prom_services_handler(request):
 
 
 async def prom_env_handler(request):
-    username = request.headers.get('X-User-Name', '')
-    permission = request.headers.get('X-User-Permission', '')
+    principal = principal_of(request)
+    username = principal.username
+    permission = principal.role
     try:
         # 环境(集群)列表即已连接的 agent 列表，直接取自内存 clients，
-        # 无需查 Prometheus，避免依赖监控系统且实时反映在线状态。
-        envs = [env for env, data in clients.items() if data.get("online")]
+        # 无需查 Prometheus，避免依赖监控系统且实时反映在线状态。只返回当前用户能看到的集群
+        envs = [env for env, data in clients.items() if data.get("online") and principal.can_read(env)]
         envs.sort()
         return web.json_response({'success': True, 'data': envs, 'username': username, 'permission': permission})
     except Exception as e:
@@ -626,7 +632,9 @@ async def prom_node_rank_handler(request):
 async def prom_overview_handler(request):
     try:
         env = request.query.get('env')
-        data = await prom_overview.get_overview_counts_async(env)
+        # 不选集群时统计当前用户能看到的全部集群
+        key_filter = None if env else prom_overview.scope_key_filter(principal_of(request))
+        data = await prom_overview.get_overview_counts_async(env, key_filter=key_filter)
         return web.json_response({'success': True, 'data': data})
     except Exception as e:
         return web.json_response({'message': str(e)}, status=500)
@@ -634,7 +642,7 @@ async def prom_overview_handler(request):
 
 async def agent_names(request):
     try:
-        k8s_names = await utils.get_k8s_names()
+        k8s_names = principal_of(request).filter_envs(await utils.get_k8s_names())
         return web.json_response({'success': True, 'data': k8s_names})
     except Exception as e:
         return web.json_response({'message': str(e)}, status=500)
@@ -1113,6 +1121,8 @@ async def lb_check_pods_handler(request):
 
 
 app = web.Application()
+# 认证鉴权中间件 + /api/auth/*、/api/admin/* 接口,必须在下面的 /api/{tail} 兜底转发之前注册
+auth.setup(app, clients)
 app.router.add_get("/ws", websocket_handler)
 app.router.add_get("/ws/pod-logs", pod_logs_websocket_handler)
 workload_relay.register_routes(app)  # Deployment/Pod 实时状态推送(/ws/workload-status)
@@ -1133,7 +1143,7 @@ app.router.add_post("/api/image/tags", image_tags_fetcher.get_image_tags_handler
 app.router.add_post("/api/events/query", query_k8s_events_handler)  # 查询K8S事件
 app.router.add_get("/api/events/menu", get_k8s_events_menu_options)  # 获取K8S事件查询菜单选项
 
-# ==========需要rw权限==========
+# 各接口需要的权限统一登记在 auth/policy.py
 app.router.add_get("/api/agent_status", status_handler)  # 获取agent状态
 app.router.add_get("/api/agent_names", agent_names)  # istio管理获取K8S列表
 app.router.add_get("/api/init_peak_data", init_peak_data)
@@ -1179,8 +1189,9 @@ app.router.add_post("/api/load-balance/check-pods", lb_check_pods_handler)
 ai_api.register_routes(app, clients, utils)
 app.router.add_route('*', "/api/{tail:.*}", http_handler)
 
-# 数据库初始化必须最先执行(建池 + 建表),再启动依赖 DB 的后台任务
+# 数据库初始化必须最先执行(建池 + 建表),再建内置账号、启动依赖 DB 的后台任务
 app.on_startup.append(init_db_and_schema)
+app.on_startup.append(auth.on_startup)
 app.on_startup.append(start_background_tasks)
 app.on_cleanup.append(cleanup_background_tasks)
 app.on_cleanup.append(close_db)

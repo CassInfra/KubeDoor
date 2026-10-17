@@ -5,9 +5,32 @@ from loguru import logger
 import utils
 
 
-def build_queries(env=None):
+_REGEX_META = set('\\.^$|?*+()[]{}')
+
+
+def _promql_regex(values):
+    """把集群名拼成 PromQL 正则字符串字面量:先转义正则元字符,再转义字符串里的反斜杠和引号。"""
+    pattern = '|'.join(''.join('\\' + c if c in _REGEX_META else c for c in value) for value in values)
+    return pattern.replace('\\', '\\\\').replace('"', '\\"')
+
+
+def scope_key_filter(principal):
+    """不指定集群时,按当前用户能看到的集群拼标签过滤;全部可见返回 None(用默认的 key!="")。"""
     key = utils.PROM_K8S_TAG_KEY
-    key_filter = f'{key}="{env}"' if env else f'{key}!=""'
+    mode, envs = principal.env_scope()
+    if mode == 'all':
+        return None
+    if mode == 'deny':
+        return f'{key}!="",{key}!~"{_promql_regex(envs)}"'
+    if not envs:
+        return f'{key}="__kubedoor_no_cluster__"'
+    return f'{key}=~"{_promql_regex(envs)}"'
+
+
+def build_queries(env=None, key_filter=None):
+    key = utils.PROM_K8S_TAG_KEY
+    if key_filter is None:
+        key_filter = f'{key}="{env}"' if env else f'{key}!=""'
     return {
         "clusters": f'count(group by({key}) (kube_node_info{{{key_filter},node!~"bursting-node|virtual-kubelet"}}))',
         "nodes": f'count(kube_node_info{{{key_filter},node!~"bursting-node|virtual-kubelet"}})',
@@ -132,8 +155,8 @@ def _format_max_metric(items):
     return [label_str, value]
 
 
-async def get_overview_counts_async(env=None):
-    queries = build_queries(env)
+async def get_overview_counts_async(env=None, key_filter=None):
+    queries = build_queries(env, key_filter)
     url = utils.get_prom_url()
     async with aiohttp.ClientSession() as session:
         tasks = [_fetch(session, url, name, q) for name, q in queries.items()]

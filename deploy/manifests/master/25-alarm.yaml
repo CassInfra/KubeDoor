@@ -16,6 +16,9 @@ spec:
     metadata:
       labels:
         app: kubedoor-alarm
+      annotations:
+        # 安装脚本算的 kubedoor-config 摘要:配置一变就重启(环境变量只在启动时读取)
+        checksum/config: '__CONFIG_HASH_ENV__'
     spec:
       containers:
         - name: kubedoor-alarm

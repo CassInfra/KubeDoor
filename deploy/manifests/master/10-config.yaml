@@ -1,4 +1,4 @@
-# kubedoor-config:master / web / alarm 三个组件共用的环境变量
+# kubedoor-config:master / alarm / ai 共用的环境变量
 # 改完后需要重启对应 Deployment 才生效:
 #   kubectl -n __NAMESPACE__ rollout restart deploy/kubedoor-master deploy/kubedoor-alarm
 apiVersion: v1
@@ -41,6 +41,20 @@ data:
   RETENTION_EVENTS_DAYS: "90"
   RETENTION_ALERTS_DAYS: "365"
   RETENTION_RESOURCES_DAYS: "365"
+  RETENTION_AUDIT_DAYS: "180"
+
+  # --- 登录与权限(账号、LDAP、集群授权都在 Web 的「系统管理」里配置)---
+  # agent 连 master 必须带账号口令(MASTER_WS 里写 Agent 账号)。升级过渡期可临时设为 "false"
+  AGENT_AUTH_REQUIRED: '__AGENT_AUTH_REQUIRED__'
+  # 登录有效期:不勾「记住我」12 小时(空闲 4 小时自动退出),勾选后 7 天
+  AUTH_SESSION_HOURS: "12"
+  AUTH_IDLE_HOURS: "4"
+  AUTH_REMEMBER_DAYS: "7"
+  # 同一账号 + 来源 IP 连续登录失败几次后锁定多少分钟
+  AUTH_LOGIN_MAX_FAILURES: "5"
+  AUTH_LOCK_MINUTES: "15"
+  # 会话 Cookie 的 Secure 标记:auto 按请求是否 HTTPS 判断;nginx 前面还有一层做 TLS 的负载均衡时设为 "true"
+  AUTH_COOKIE_SECURE: "auto"
 
   # --- 改镜像的权限控制:哪个集群、什么时间段、谁可以改 ---
   UPDATE_IMAGE: |

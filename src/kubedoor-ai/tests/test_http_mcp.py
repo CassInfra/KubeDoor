@@ -189,3 +189,32 @@ async def test_actual_sdk_probe_sends_one_correct_endpoint_without_forced_tool_c
         result = await Service(None, None, None).test_provider(PROVIDER)
     assert result["tool_calling"] is True
     assert len(requests) == 1
+
+
+@pytest.mark.asyncio
+async def test_bootstrap_hides_clusters_without_permission_and_reports_effective_permission():
+    from types import MappingProxyType
+
+    from kubedoor_ai.domain import Identity
+
+    store = SimpleNamespace(summaries=AsyncMock(return_value=[{"env": "secret", "context": "s"}, {"env": "prod", "context": "p"}]))
+    gateway = SimpleNamespace(master=AsyncMock(return_value={"clusters": [{"env": "prod", "online": True}, {"env": "staging", "online": False}]}))
+    service = Service(store, gateway, SimpleNamespace(model_factory=None))
+    carol = Identity("carol", "read", MappingProxyType({"secret": "none", "prod": "rw"}))
+    result = await service.bootstrap(carol)
+    assert [(c["env"], c["permission"], c["configured"]) for c in result["clusters"]] == [("prod", "rw", True), ("staging", "read", False)]
+    # 「无」权限的集群即使配置了 kubeconfig 也不出现;只读用户不能管理 kubeconfig
+    with pytest.raises(AIError):
+        carol.require_admin()
+
+
+def test_connection_listing_is_filtered_and_management_requires_admin():
+    rows = [{"env": "prod", "context": "p"}, {"env": "secret", "context": "s"}]
+    fake = SimpleNamespace(store=SimpleNamespace(summaries=AsyncMock(return_value=rows)))
+    app = create_app(fake, token="internal")
+    with TestClient(app) as client:
+        limited = {**HEADERS, "X-User-Permission": "rw", "X-User-Clusters": '{"secret":"none"}'}
+        listing = client.get("/api/ai/connections", headers=limited).json()
+        assert [row["env"] for row in listing["connections"]] == ["prod"]
+        assert client.delete("/api/ai/connections/prod", headers=limited).status_code == 403
+        assert client.post("/api/ai/connections/parse", headers=limited, json={"content": "x"}).status_code == 403

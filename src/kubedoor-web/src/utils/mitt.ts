@@ -8,6 +8,10 @@ type Events = {
   tagViewsShowModel: string;
   logoChange: boolean;
   changLayoutRoute: string;
+  /** 后端要求先修改初始口令(403 password_change_required) */
+  passwordChangeRequired: undefined;
+  /** 打开「修改口令」弹窗 */
+  openChangePassword: undefined;
 };
 
 export const emitter: Emitter<Events> = mitt<Events>();

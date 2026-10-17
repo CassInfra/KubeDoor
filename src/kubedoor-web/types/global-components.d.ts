@@ -11,6 +11,7 @@ declare module "vue" {
     FontIcon: (typeof import("../src/components/ReIcon"))["FontIcon"];
     Auth: (typeof import("../src/components/ReAuth"))["Auth"];
     Perms: (typeof import("../src/components/RePerms"))["Perms"];
+    ClusterPermTag: (typeof import("../src/components/ClusterPermTag.vue"))["default"];
     // Element Plus 组件
     ElAffix: (typeof import("element-plus"))["ElAffix"];
     ElAlert: (typeof import("element-plus"))["ElAlert"];
