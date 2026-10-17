@@ -506,7 +506,7 @@ vi kubedoor.conf        # 改 K8S_NAME 和 MASTER_WS（换机器执行时先 cp 
 
 2.2把登录与权限从nginx basic auth改为由master统一管理（本地账号 + LDAP，按K8S集群授权）。
 
-1. 更新到最新仓库代码，在`kubedoor.conf`中把`TAG_*`改为`2.2.0`。
+1. 更新到最新仓库代码，在`kubedoor.conf`中把`TAG_MASTER`、`TAG_AGENT`、`TAG_WEB`、`TAG_AI`改为`2.2.0`（告警服务本版没有变化，`TAG_ALARM`保持`2.1.0`）。
 2. 原`WEB_AUTH_USERS`/`WEB_RW_USERS`不再生效（安装时会提示）。执行`./install.sh master`后用内置管理员`kubedoor`登录，在「系统管理 → 用户与权限」重新建账号，或在「LDAP 设置」接入LDAP后按集群授权。
 3. agent一律要带内置Agent账号`Up4biLko1dNh`：同集群agent的`MASTER_WS`改成`ws://Up4biLko1dNh:<口令>@kubedoor-master.kubedoor`，再到各集群执行`./install.sh agent`。跨集群agent如果沿用出厂口令，`MASTER_WS`不用改；以前改过这个账号口令的，升级前在`kubedoor.conf`里把`KUBEDOOR_INIT_AGENT_PASSWORD`设为原口令（只在首次创建账号时生效）。来不及一起改时，可先设`AGENT_AUTH_REQUIRED="false"`过渡，改完再改回`true`并重跑`./install.sh master`。
 4. Grafana改为auth proxy接入：KubeDoor管理员是Admin、其他人是Viewer，并且只对能看到全部集群的账号开放。

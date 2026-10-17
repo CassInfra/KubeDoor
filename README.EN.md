@@ -510,7 +510,7 @@ vi kubedoor.conf        # set K8S_NAME and MASTER_WS (on another machine, cp kub
 
 2.2 moves sign-in and permissions from nginx basic auth to the master (local accounts + LDAP, per-cluster grants).
 
-1. Update to the latest repository code and change `TAG_*` in `kubedoor.conf` to `2.2.0`.
+1. Update to the latest repository code and change `TAG_MASTER`, `TAG_AGENT`, `TAG_WEB` and `TAG_AI` in `kubedoor.conf` to `2.2.0` (the alarm service is unchanged in this release, so `TAG_ALARM` stays at `2.1.0`).
 2. `WEB_AUTH_USERS`/`WEB_RW_USERS` no longer take effect (the install script warns about them). Run `./install.sh master`, sign in with the built-in admin `kubedoor`, then recreate accounts under 「系统管理 → 用户与权限」 (System → Users & permissions), or connect LDAP under 「LDAP 设置」 and grant clusters as needed.
 3. Every agent must now use the built-in agent account `Up4biLko1dNh`: change same-cluster agents' `MASTER_WS` to `ws://Up4biLko1dNh:<password>@kubedoor-master.kubedoor`, then run `./install.sh agent` in each cluster. Cross-cluster agents that still use the factory password need no change; if you had changed that account's password, set `KUBEDOOR_INIT_AGENT_PASSWORD` in `kubedoor.conf` to it before upgrading (it only applies when the account is first created). If you cannot update all agents at once, set `AGENT_AUTH_REQUIRED="false"` temporarily, then set it back to `true` and re-run `./install.sh master`.
 4. Grafana now uses auth proxy: KubeDoor admins are Grafana Admins, everyone else is a Viewer, and only accounts that can see every cluster can open it.
