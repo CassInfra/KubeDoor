@@ -576,6 +576,17 @@
                         <template #dropdown>
                           <el-dropdown-menu>
                             <el-dropdown-item
+                              :disabled="!canWrite(scope.row.env)"
+                              @click="
+                                openPodShell({
+                                  env: scope.row.env,
+                                  namespace: scope.row.namespace,
+                                  pod: podScope.row.name
+                                })
+                              "
+                              >终端</el-dropdown-item
+                            >
+                            <el-dropdown-item
                               @click="
                                 handleViewLogs(
                                   scope.row.env,
@@ -879,6 +890,8 @@ import {
   type PodsPush
 } from "./utils/useWorkloadStream";
 import { useSearchStoreHook } from "@/store/modules/search";
+import { useClusterPermission } from "@/utils/permission";
+import { openPodShell } from "@/utils/podShell";
 import PodLogViewer from "@/views/monit/components/PodLogViewer.vue";
 import * as monaco from "monaco-editor";
 import * as yaml from "js-yaml";
@@ -890,6 +903,8 @@ import {
 
 const { onChangeCapacity, onReboot, onUpdateImage } = useResource();
 const searchStore = useSearchStoreHook();
+// 终端能在容器里执行任意命令,只读用户置灰(后端同样校验)
+const { canWrite } = useClusterPermission();
 
 // 定义表单数据
 const searchForm = reactive({

@@ -27,6 +27,7 @@ from func_manager.mcp_service import MCPService
 from func_manager.workload_cache import WorkloadCache
 from func_manager.workload_streamer import WorkloadStreamer
 from func_manager.ai_tools import AiToolHandler
+from func_manager.pod_exec import PodExecManager
 from func_manager.ws_lifecycle import run_connection_tasks
 from k8s_client_manager import OffloadApiClient
 from scaler.scale_service import ScaleService
@@ -67,11 +68,12 @@ reboot_service = None
 workload_cache = None  # Deployment/Pod 的 list+watch 内存缓存
 workload_streamer = None  # 把缓存变化推给 master 的订阅者
 ai_tool_handler = None
+pod_exec_manager = None  # Pod 终端(web shell)会话
 
 
 def init_kubernetes():
     """在程序启动时加载 Kubernetes 配置并初始化客户端"""
-    global v1, batch_v1, core_v1, networking_v1, admission_api, custom_api, deployment_monitor, event_monitor, scale_service, admis_service, balance_node_service, mcp_service, update_image_handler, reboot_service, workload_cache, workload_streamer, ai_tool_handler
+    global v1, batch_v1, core_v1, networking_v1, admission_api, custom_api, deployment_monitor, event_monitor, scale_service, admis_service, balance_node_service, mcp_service, update_image_handler, reboot_service, workload_cache, workload_streamer, ai_tool_handler, pod_exec_manager
     try:
         config.load_incluster_config()
         ai_tool_handler = AiToolHandler()
@@ -92,6 +94,7 @@ def init_kubernetes():
         reboot_service = RebootService(v1, delete_cronjob_or_not)
         update_image_handler = partial(update_image, apps_v1=v1, deployment_monitor=deployment_monitor)
         admis_service = AdmisService(v1, core_v1, admission_api, request_futures)
+        pod_exec_manager = PodExecManager(core_v1)
         logger.info("Kubernetes 配置加载成功")
     except Exception as e:
         logger.error(f"加载 Kubernetes 配置失败: {e}")
@@ -192,6 +195,9 @@ async def process_request(ws: ClientWebSocketResponse):
                 workload_streamer.subscribe(ws, data)
             elif data.get("type") == "workload_unsub":
                 workload_streamer.unsubscribe(data.get("sub_id"))
+            elif data.get("type") == "pod_exec":
+                # Pod 终端:start / stdin / resize / ack / stop,同步入队不等待
+                pod_exec_manager.handle(ws, data)
         elif msg.type == WSMsgType.ERROR:
             logger.error(f"WebSocket 错误：{msg.data}")
 
@@ -269,6 +275,7 @@ async def connect_to_server():
                     finally:
                         event_monitor.set_websocket_connection(None)
                         workload_streamer.detach()
+                        pod_exec_manager.close_all()
                         ws_conn = None
                         if admis_service:
                             admis_service.set_ws_conn(None)
@@ -721,6 +728,8 @@ async def main():
     # Deployment/Pod 缓存跟进程走,只启动一次,不随 master 连接重建
     workload_cache.start()
     workload_streamer.start()
+    # 清理上次残留的节点终端临时 pod(agent 崩溃重启时可能有孤儿)
+    asyncio.create_task(pod_exec_manager.cleanup_orphans())
     # 初始化全局 HTTP session
     timeout = aiohttp.ClientTimeout(total=120)
     http_session = ClientSession(timeout=timeout)

@@ -402,6 +402,17 @@
                   <template #dropdown>
                     <el-dropdown-menu>
                       <el-dropdown-item
+                        :disabled="!canWrite(searchForm.env)"
+                        @click="
+                          openPodShell({
+                            env: searchForm.env,
+                            namespace: podScope.row.namespace,
+                            pod: podScope.row.name
+                          })
+                        "
+                        >终端</el-dropdown-item
+                      >
+                      <el-dropdown-item
                         @click="
                           handleEditPod(
                             searchForm.env,
@@ -711,6 +722,8 @@ import {
 } from "@/api/alarm";
 import { updateServiceContent, getServiceContent } from "@/api/service";
 import { useSearchStoreHook } from "@/store/modules/search";
+import { useClusterPermission } from "@/utils/permission";
+import { openPodShell } from "@/utils/podShell";
 import PodLogViewer from "@/views/monit/components/PodLogViewer.vue";
 import * as monaco from "monaco-editor";
 import * as yaml from "js-yaml";
@@ -728,6 +741,8 @@ interface SearchForm {
 }
 
 const searchStore = useSearchStoreHook();
+// 终端能在容器里执行任意命令,只读用户置灰(后端同样校验)
+const { canWrite } = useClusterPermission();
 
 const searchForm = reactive<SearchForm>({
   env: searchStore.env || "",

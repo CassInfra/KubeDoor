@@ -381,6 +381,10 @@ RULES = (
     # ---- WebSocket ----
     _rule('GET', '/ws', 'agent'),
     _rule('GET', '/ws/(pod-logs|workload-status)', 'env_read', env='query.env'),
+    # Pod 终端能在容器里执行任意命令:要目标集群读写权限(handler 另记 pod.exec 审计)
+    _rule('GET', '/ws/pod-exec', 'env_write', env='query.env'),
+    # 节点终端在宿主机上以 root 执行命令,权限更高:同样要集群读写(handler 记 node.exec 审计)
+    _rule('GET', '/ws/node-exec', 'env_write', env='query.env'),
     # ---- 集群列表(handler 按可见集群过滤)----
     _rule('GET', '/api/(prom_env|agent_names|agent_status)', 'login'),
     _rule('GET', '/api/prom_(ns|services|query|node_rank)', 'env_read', env='query.env'),

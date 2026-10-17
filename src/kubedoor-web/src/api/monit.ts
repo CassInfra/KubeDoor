@@ -179,6 +179,52 @@ export const createWorkloadStreamUrl = (env: string, namespace: string) => {
 };
 
 /**
+ * Pod 终端的 WebSocket 地址(需要目标集群读写权限)
+ * @param shell auto 自动识别(bash → ash → sh)或指定 bash / ash / sh
+ * @param cols 终端列数,rows 行数:连上后先按这个尺寸打开 shell
+ */
+export const createPodExecUrl = (params: {
+  env: string;
+  namespace: string;
+  pod: string;
+  container?: string;
+  shell?: string;
+  cols?: number;
+  rows?: number;
+}) => {
+  const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+  const query = new URLSearchParams({
+    env: params.env,
+    namespace: params.namespace,
+    pod_name: params.pod
+  });
+  if (params.container) query.set("container", params.container);
+  if (params.shell) query.set("shell", params.shell);
+  if (params.cols) query.set("cols", String(params.cols));
+  if (params.rows) query.set("rows", String(params.rows));
+  return `${protocol}//${window.location.host}/ws/pod-exec?${query}`;
+};
+
+/**
+ * 节点终端的 WebSocket 地址(需要目标集群读写权限)
+ * agent 会在 kubedoor 命名空间建一个临时特权 pod,用 nsenter 进宿主机命名空间
+ */
+export const createNodeExecUrl = (params: {
+  env: string;
+  node: string;
+  shell?: string;
+  cols?: number;
+  rows?: number;
+}) => {
+  const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+  const query = new URLSearchParams({ env: params.env, node: params.node });
+  if (params.shell) query.set("shell", params.shell);
+  if (params.cols) query.set("cols", String(params.cols));
+  if (params.rows) query.set("rows", String(params.rows));
+  return `${protocol}//${window.location.host}/ws/node-exec?${query}`;
+};
+
+/**
  * 获取镜像标签列表
  * @param k8s K8S环境
  * @param namespace 命名空间

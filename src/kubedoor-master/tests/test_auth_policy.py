@@ -92,6 +92,8 @@ def test_env_condition_sql():
     ('DELETE', '/api/admin/users/3', 'admin'),
     ('GET', '/ws', 'agent'),
     ('GET', '/ws/pod-logs', 'env_read'),
+    ('GET', '/ws/pod-exec', 'env_write'),  # 终端能执行任意命令
+    ('GET', '/ws/node-exec', 'env_write'),  # 节点终端在宿主机以 root 执行
     ('GET', '/api/agent/pods', 'env_read'),
     ('HEAD', '/api/agent/pods', 'env_read'),
     ('GET', '/api/pod/task_status/abc', 'env_read'),

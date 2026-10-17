@@ -76,6 +76,11 @@ def client_manager_module():
 
 
 @pytest.fixture
+def pod_exec_module():
+    return load_module("agent_test_pod_exec", AGENT_ROOT / "func_manager" / "pod_exec.py")
+
+
+@pytest.fixture
 def event_monitor_module(monkeypatch):
     fake_utils = ModuleType("utils")
     fake_utils.PROM_K8S_TAG_VALUE = "test-cluster"

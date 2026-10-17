@@ -321,6 +321,14 @@
           >
             <template #default="scope">
               <el-button
+                type="info"
+                size="default"
+                :disabled="!canWrite(searchForm.env)"
+                @click="handleNodeShell(scope.row)"
+              >
+                终端
+              </el-button>
+              <el-button
                 v-if="scope.row.schedulable"
                 type="warning"
                 size="default"
@@ -419,6 +427,8 @@ import { RefreshRight } from "@element-plus/icons-vue";
 import { getNodesList, cordonNodes, uncordonNodes } from "@/api/node";
 import { getAgentNames } from "@/api/istio";
 import { useSearchStoreHook } from "@/store/modules/search";
+import { useClusterPermission } from "@/utils/permission";
+import { openNodeShell } from "@/utils/podShell";
 import { getServiceContent, updateServiceContent } from "@/api/service";
 import * as monaco from "monaco-editor";
 import * as yaml from "js-yaml";
@@ -431,6 +441,8 @@ const nodeList = ref<any[]>([]);
 const selectedNodes = ref<any[]>([]);
 const nodeTableRef = ref();
 const searchStore = useSearchStoreHook();
+// 节点终端在宿主机以 root 执行命令,只读用户置灰(后端同样校验)
+const { canWrite } = useClusterPermission();
 const editDialogVisible = ref(false);
 const updateMethodDialogVisible = ref(false);
 const selectedUpdateMethod = ref<"apply" | "replace">("apply");
@@ -632,6 +644,15 @@ const getConditionText = (condition: string) => {
     NetworkUnavailable: "网络不可用"
   };
   return conditionMap[condition] || condition;
+};
+
+// 打开节点终端(新标签页;agent 在 kubedoor 命名空间建临时特权 pod,nsenter 进宿主机)
+const handleNodeShell = (node: any) => {
+  if (!searchForm.env) {
+    ElMessage.warning("请先选择集群");
+    return;
+  }
+  openNodeShell(searchForm.env, node.name);
 };
 
 // 单个节点禁止调度

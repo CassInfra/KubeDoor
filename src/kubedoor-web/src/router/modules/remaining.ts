@@ -13,6 +13,17 @@ export default [
     }
   },
   {
+    // Pod 终端:从 Pod 列表在新标签页打开,不带菜单和顶栏
+    path: "/pod-shell",
+    name: "PodShell",
+    component: () => import("@/views/pod-shell/index.vue"),
+    meta: {
+      title: "Pod 终端",
+      showLink: false,
+      rank: 103
+    }
+  },
+  {
     path: "/redirect",
     component: Layout,
     meta: {

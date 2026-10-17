@@ -24,6 +24,7 @@ from func_manager import silence_api
 from func_manager import data_retention
 from func_manager import ai_api
 from func_manager.workload_relay import WorkloadRelay
+from func_manager.pod_exec_relay import PodExecRelay
 import image_tags_fetcher
 from k8s_event import process_k8s_event_async, init_pg_tables_async
 from k8s_event.event_query_api import query_k8s_events_handler, get_k8s_events_menu_options
@@ -83,6 +84,8 @@ clients = {}
 pod_logs_connections = {}
 # Deployment/Pod 实时状态推送(浏览器 /ws/workload-status ⇄ agent)
 workload_relay = WorkloadRelay(clients)
+# Pod 终端(浏览器 /ws/pod-exec ⇄ agent 上的 K8S exec)
+pod_exec_relay = PodExecRelay(clients)
 
 
 async def handle_admis_request(ws, env, data):
@@ -177,6 +180,9 @@ async def websocket_handler(request):
                     elif data.get("type") in ("workload_snapshot", "workload_update"):
                         # Deployment/Pod 实时状态:只入队不等待,原样转给对应的浏览器
                         workload_relay.dispatch(env, data, msg.data)
+                    elif data.get("type") == "pod_exec":
+                        # Pod 终端的输出 / 状态:只入队不等待,转给对应的浏览器
+                        pod_exec_relay.dispatch(env, data)
                     elif data.get("type") == "k8s_event":
                         # 处理来自agent的K8S事件消息（单条）
                         # 使用 create_task 发射后不管，避免阻塞WebSocket消息循环
@@ -220,6 +226,7 @@ async def websocket_handler(request):
             clients[env]["online"] = False
             logger.info(f"客户端连接关闭，标记为离线，env={env}")
             workload_relay.on_agent_disconnected(env, ws)
+            pod_exec_relay.on_agent_disconnected(env, ws)
 
     return ws
 
@@ -1126,6 +1133,7 @@ auth.setup(app, clients)
 app.router.add_get("/ws", websocket_handler)
 app.router.add_get("/ws/pod-logs", pod_logs_websocket_handler)
 workload_relay.register_routes(app)  # Deployment/Pod 实时状态推送(/ws/workload-status)
+pod_exec_relay.register_routes(app)  # Pod 终端(/ws/pod-exec)
 db_api.register_routes(app)  # 参数化数据库 REST 接口(/api/db/*)
 silence_api.register_routes(app)  # 告警屏蔽规则(/api/db/silence/*)
 app.router.add_get("/api/prom_ns", prom_ns_handler)
