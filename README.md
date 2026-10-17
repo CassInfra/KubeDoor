@@ -60,6 +60,7 @@ KubeDoor专注微服务每日高峰时段的资源视角：采集各微服务高
 - 🌐**多集群统一纳管**：agent主动外连控制端，业务集群无需开放入站端口；所有集群的资源、指标、事件和告警集中在一个平台。
 - 🎯**高峰期资源治理**：按业务高峰时段采集资源数据，通过准入控制统一管控副本数、需求值、限制值和JVM启动参数。
 - 🔔**告警闭环**：指标告警、K8S事件告警与告警屏蔽，通知推送到企业微信、钉钉、飞书、Slack。
+- 🔐**账号与权限**：本地账号 + LDAP登录，按K8S集群授权「读写 / 只读 / 无」，登录、变更与越权操作全部留痕审计。
 - 🚀**部署简单**：一个脚本 + 一份配置文件，PostgreSQL是唯一的数据库。
 
 <div align="center">
@@ -74,11 +75,18 @@ K8S资源总览：多集群资源、风险节点、今日异常告警与事件�
 
 ## 🎉2.x新特性
 
-**相对1.7，2.x是一次架构级升级：AI助手成为核心能力，PostgreSQL成为唯一数据库，部署改为一个脚本。** 当前版本为2.1.0，下文【2.0】/【2.1】表示首次提供该能力的版本。
+**相对1.7，2.x是一次架构级升级：AI助手成为核心能力，PostgreSQL成为唯一数据库，部署改为一个脚本。** 当前版本为2.2.0，下文【2.0】/【2.1】/【2.2】表示首次提供该能力的版本。
 
 **🤖AI**
 - 【2.1】**内置AI助手**（kubedoor-ai，随控制端必装）：使用自己的模型，选定集群后用自然语言排障和运维；变更经审批后执行，支持全局记忆与kubeconfig直连。
 - 【2.1】**新版MCP**：并入kubedoor-ai，经Web入口提供`/mcp`（Streamable HTTP）与`/sse`，复用Web账号与读写权限，写操作需在Web中批准；兼容1.x的16个工具名。
+
+**🔐账号与权限**
+- 【2.2】**全新登录页**：水墨月洞门背景 + 毛玻璃登录框，湖面水波、门环圆波、梅花飘落等动效；登录与会话改由master统一管理，支持「7天内免登录」，连续输错口令自动锁定。
+- 【2.2】**LDAP登录**：在「系统管理 → LDAP 设置」配置并一键测试；登录时本地账号优先，本地没有再走LDAP，首次登录自动开通。
+- 【2.2】**K8S集群级权限**：全局权限「管理员 / 读写 / 只读 / 无」+ 按用户×集群单独授权「读写 / 只读 / 无」，单独授权优先；「无」权限的集群在所有页面、告警和AI助手中都不可见，AI助手与MCP按所选集群判断能否执行和批准修改。
+- 【2.2】**操作审计**：登录、账号与权限变更、所有写操作（含越权被拒）都可在「系统管理 → 操作审计」查询，默认保留180天。
+- 【2.2】**Agent账号认证**：agent一律带内置Agent账号连接master，普通Web账号不能注册agent；Grafana改为auth proxy接入（KubeDoor管理员为Admin，其他人为Viewer）。
 
 **🧱架构与部署**
 - 【2.0】**PostgreSQL唯一数据库**：移除ClickHouse与MySQL，master与kubedoor-ai启动时自动建表，无需任何扩展。
@@ -108,7 +116,7 @@ K8S资源总览：多集群资源、风险节点、今日异常告警与事件�
 </div>
 
 - **控制端**（`./install.sh master`）：kubedoor-web（nginx统一入口 + Vue 3控制台）、kubedoor-master（API网关、agent连接中心）、kubedoor-ai（AI助手 + MCP Server）、kubedoor-alarm（告警屏蔽、入库与IM通知）、kubedoor-collect（每日高峰期采集CronJob），以及可选的VictoriaMetrics、vmalert、Alertmanager、Grafana。
-- **集群端**（`./install.sh agent`）：kubedoor-agent，以及可选的vmagent、kube-state-metrics、node-exporter。agent**主动**通过WebSocket连接控制端，业务集群无需开放入站端口；同集群直连master的Service，跨集群经Web入口并使用读写账号认证。
+- **集群端**（`./install.sh agent`）：kubedoor-agent，以及可选的vmagent、kube-state-metrics、node-exporter。agent**主动**通过WebSocket连接控制端，业务集群无需开放入站端口；同集群直连master的Service，跨集群经Web入口，都使用内置Agent账号认证。
 - **PostgreSQL 18是唯一数据库**：用docker compose独立部署在K8S外，也可用现成的PG（无需扩展），保存管控配置、高峰期资源、K8S事件、告警记录、屏蔽规则、Istio路由以及AI会话、审批与记忆。
 - **监控栈可选**：使用内置VictoriaMetrics单机版，或接入已有的Prometheus/VictoriaMetrics；各集群指标用标签`<PROM_K8S_TAG_KEY>=<K8S_NAME>`区分。
 - **统一入口**：Web、Grafana、AI助手和MCP共用kubedoor-web的一个NodePort；登录与权限由master统一管理（本地账号/LDAP，按K8S集群授权）。
@@ -127,25 +135,25 @@ K8S资源总览：多集群资源、风险节点、今日异常告警与事件�
 - 🧠**自带模型**：在「模型设置」填写Base URL、API Key和模型名（model ID），「测试连接」会实测工具调用能力；支持任意OpenAI兼容的Chat Completions接口（含无需鉴权的自建模型，模型需支持工具调用），并专门适配DeepSeek思考模式；模型配置只保存在本人浏览器。
 - 🎯**资源上下文**：先选「K8S 集群」（每轮只操作选中的集群），可再细化到命名空间、Deployment、Pod；集群旁标注「Agent 在线」「已配置直连」「仅指标 / 历史」。
 - 🧰**统一受控工具**：所有集群操作都经同一个工具`kubedoor_tool`，覆盖**63个KubeDoor业务操作**（37个只读、26个写入：日志、事件、资源与JVM、节点、扩缩容、重启、改镜像、定时/周期任务、节点均衡、管控配置等）和**5类通用执行器**（K8S API/CRD、kubectl、istioctl、诊断命令、Pod exec），已有接口优先。
-- 🔌**多种连接方式**：KubeDoor已有接口、agent的集群内身份（免kubeconfig），或在「Agent管理」的「AI Kubeconfig」列上传kubeconfig直连（AES-256-GCM加密存储）；agent离线时仍可查询历史与监控数据。
+- 🔌**多种连接方式**：KubeDoor已有接口、agent的集群内身份（免kubeconfig），或由管理员在「Agent管理」的「AI Kubeconfig」列上传kubeconfig直连（AES-256-GCM加密存储）；agent离线时仍可查询历史与监控数据。
 - ⏰**立即/定时/周期运维**：Deployment重启与扩缩容支持立即执行、指定时间执行一次、按Cron周期执行。
 - 📈**自由指标查询**：时序库为VictoriaMetrics时，AI可直接编写MetricsQL，服务端强制限定在当前集群，时间范围最长30天。
-- 📝**全局记忆**：「总结为记忆」把会话提炼成可编辑草稿，读写账号「保存为全局记忆」后，所有登录用户都可查看和引用；提问时用「引入记忆（N）」按需带入，每轮最多10条。
+- 📝**全局记忆**：「总结为记忆」把会话提炼成可编辑草稿，全局读写账号「保存为全局记忆」后，所有登录用户都可查看和引用；提问时用「引入记忆（N）」按需带入，每轮最多10条。
 - 🧩**DeepAgents驱动**：内置「KubeDoor K8S 运维」Skill，子Agent并行排查、上下文自动压缩、PostgreSQL持久化checkpoint；会话保存在服务端（仅本人可见），流式回复、断线续传，关闭对话框后任务继续执行。
 
 #### 🛡安全护栏
 
 | 护栏 | 说明 |
 | --- | --- |
-| 审批 | 只读查询自动执行；变更、未知CLI命令、curl/openssl、Pod exec会先展示「准确参数」「执行命令」「变更预览」「配置差异」，点「批准这次操作」才执行，30分钟内有效。读写账号可勾选「自动批准执行」（只对当前页面生效） |
+| 审批 | 只读查询自动执行；变更、未知CLI命令、curl/openssl、Pod exec会先展示「准确参数」「执行命令」「变更预览」「配置差异」，点「批准这次操作」才执行，30分钟内有效。对所选集群有读写权限的账号可勾选「自动批准执行」（只对当前页面生效） |
 | 参数冻结 | 准备阶段把完整参数写入数据库，批准后按原样执行，模型无法替换；kubeconfig被替换后原批准失效 |
 | Dry-run | 通用K8S API写操作先以`dryRun=All`生成配置差异，并带resourceVersion/UID前置条件；`kubectl apply`先执行`--dry-run=server`；KubeDoor业务操作展示准确参数与变更预览 |
 | 不盲目重放 | 超时或断线的写操作标记为「执行结果不确定」，本轮不再继续写入；服务重启不会重发已派发的操作，待批准的操作可继续审批 |
 | 脱敏 | API Key只在单次运行的内存中使用，不写库、不写日志；流式输出、checkpoint、日志与记忆统一脱敏，Secret内容自动隐藏 |
-| 只读账号限制 | 只读账号可以对话和查询，但不能批准变更、不能开启自动批准、不能上传kubeconfig、不能维护全局记忆 |
+| 按集群授权 | 权限按会话所选集群计算：只读可以对话和查询，但不能批准变更、不能开启自动批准；「无」权限的集群在AI助手和MCP中都不可见；上传kubeconfig仅限管理员，维护全局记忆需要全局读写 |
 | 审计 | 会话、运行、每次工具调用（含完整参数、预览与结果）和事件写入PostgreSQL；外部MCP调用同样生成会话，可在Web中回看 |
 
-> 提示：只读账号通过AI可执行的只读查询（如K8S API GET、查看日志与ConfigMap）比经典页面更宽，Secret脱敏为尽力而为，请按需分配账号；生产环境请在Web前加HTTPS。
+> 提示：对集群只读的账号通过AI可执行的只读查询（如K8S API GET、查看日志与ConfigMap）比经典页面更宽，Secret脱敏为尽力而为，请按需分配账号；生产环境请在Web前加HTTPS。
 
 #### 🔗接入外部MCP客户端
 
@@ -366,15 +374,23 @@ AI 助手：
 **一个入口、按集群授权：Web、Grafana、AI助手和MCP共用一个NodePort，登录与权限由KubeDoor自己管理。**
 
 - 🚪统一入口：kubedoor-web的nginx只做反向代理，登录、会话和权限校验都在master；AI助手、MCP、Grafana（`/grafana/`）通过nginx `auth_request`交给master判定。
-- 👤账号：本地账号 + LDAP（Web上配置并可一键测试，首次登录自动开通）；内置超级管理员`kubedoor`只能由自己改口令，不能被删除或改权限。
-- 👥权限：全局权限分「管理员 / 读写 / 只读（默认） / 无」，再按用户×K8S集群单独授权「读写 / 只读 / 无」，单独授权优先、全局权限兜底；「无」权限的集群在所有页面、告警和AI助手中都不可见。AI助手与MCP按目标集群判断能否执行和批准修改。镜像更新仍可通过`UPDATE_IMAGE_JSON`按集群、时间段、账号向只读账号开放。
-- 🧾操作审计：登录、账号与权限变更、所有写操作（含越权被拒）都可在「系统管理 → 操作审计」查询。
+- 👤账号【2.2】：本地账号 + LDAP（Web上配置并可一键测试，首次登录自动开通）；内置超级管理员`kubedoor`只能由自己改口令，不能被删除或改权限。
+- 👥权限【2.2】：全局权限分「管理员 / 读写 / 只读（默认） / 无」，再按用户×K8S集群单独授权「读写 / 只读 / 无」，单独授权优先、全局权限兜底；「无」权限的集群在所有页面、告警和AI助手中都不可见。AI助手与MCP按目标集群判断能否执行和批准修改。镜像更新仍可通过`UPDATE_IMAGE_JSON`按集群、时间段、账号向只读账号开放。
+- 🧾操作审计【2.2】：登录、账号与权限变更、所有写操作（含越权被拒）都可在「系统管理 → 操作审计」查询。
 - 🛰多集群接入：agent首次连接自动登记；「Agent管理」查看在线状态、心跳和版本，「更新」可一键升级agent镜像，并集中配置采集、准入控制与「AI Kubeconfig」。
 - 📝操作留痕：nginx以JSON格式记录访问日志（含登录用户与请求体）；master记录操作审计；运维操作由agent推送IM；AI的会话、审批与工具调用写入PostgreSQL。
 - 🧹数据自动清理【2.0】：K8S事件保留90天，告警记录与高峰快照保留365天，master每天分批清理，可在`kubedoor-config`中调整（`0`表示不清理）。
-- 🌗界面：简体中文/English（部分页面翻译）、浅色/深色/自动主题，适配移动端。
+- 🌗界面：【2.2】水墨月洞门登录页（毛玻璃登录框，湖面水波、门环圆波动效，系统开启「减少动态效果」时自动关闭）；简体中文/English（部分页面翻译）、浅色/深色/自动主题，适配移动端。
 
-📖详见：[部署指南](deploy/README.md)
+📖详见：[部署指南](deploy/README.md)、[账号与权限](deploy/README.md#账号与权限)
+
+<details close>
+<summary>🔍点击展开截图 ...</summary>
+
+|<img src="screenshot/login.jpg" alt="水墨月洞门登录页" />|
+|-|
+
+</details>
 
 ---
 
@@ -434,7 +450,7 @@ vi kubedoor.conf        # 改 K8S_NAME 和 MASTER_WS（换机器执行时先 cp 
 ```
 
 - `K8S_NAME`：集群的唯一标识，只能用字母、数字、`-`、`_`。
-- `MASTER_WS`：同集群填`ws://kubedoor-master.kubedoor`；跨集群填`ws://<读写账号>:<密码>@<控制端节点IP>:<Web NodePort>`，同时把`REMOTE_WRITE_URL`改成控制端时序库的外部写入地址（装控制端时脚本会打印）。
+- `MASTER_WS`：必须带内置Agent账号口令，同集群填`ws://Up4biLko1dNh:<口令>@kubedoor-master.kubedoor`，跨集群填`ws://Up4biLko1dNh:<口令>@<控制端节点IP>:<Web NodePort>`（装控制端时脚本会把两种写法打印出来）；跨集群还要把`REMOTE_WRITE_URL`改成控制端时序库的外部写入地址（同样会打印）。
 - 多个集群建议各用一份配置：`./install.sh agent -c ./cluster-a.conf`。
 - 几十秒后即可在「Agent管理」看到该集群「在线」。
 
@@ -463,7 +479,7 @@ vi kubedoor.conf        # 改 K8S_NAME 和 MASTER_WS（换机器执行时先 cp 
 
 ## ♻升级说明
 
-**2.x改用PostgreSQL和脚本化部署，从1.x升级需要全新安装；2.x版本之间修改`TAG_*`后重新执行安装脚本即可。**
+**2.x改用PostgreSQL和脚本化部署，从1.x升级需要全新安装；2.x版本之间修改`TAG_*`后重新执行安装脚本即可（升级到2.2还要迁移账号，见下文）。**
 
 #### 从1.x（Helm）升级
 
@@ -486,9 +502,18 @@ vi kubedoor.conf        # 改 K8S_NAME 和 MASTER_WS（换机器执行时先 cp 
 5. 外部MCP客户端改用`/mcp`（`/sse`仍然兼容）；2.1起外部MCP的写操作需在Web中批准后才执行。
 6. 首次安装2.1时脚本会生成`kubedoor.conf.ai-secrets`，请与PostgreSQL数据一起备份。
 
+#### 从2.1.x升级到2.2
+
+2.2把登录与权限从nginx basic auth改为由master统一管理（本地账号 + LDAP，按K8S集群授权）。
+
+1. 更新到最新仓库代码，在`kubedoor.conf`中把`TAG_*`改为`2.2.0`。
+2. 原`WEB_AUTH_USERS`/`WEB_RW_USERS`不再生效（安装时会提示）。执行`./install.sh master`后用内置管理员`kubedoor`登录，在「系统管理 → 用户与权限」重新建账号，或在「LDAP 设置」接入LDAP后按集群授权。
+3. agent一律要带内置Agent账号`Up4biLko1dNh`：同集群agent的`MASTER_WS`改成`ws://Up4biLko1dNh:<口令>@kubedoor-master.kubedoor`，再到各集群执行`./install.sh agent`。跨集群agent如果沿用出厂口令，`MASTER_WS`不用改；以前改过这个账号口令的，升级前在`kubedoor.conf`里把`KUBEDOOR_INIT_AGENT_PASSWORD`设为原口令（只在首次创建账号时生效）。来不及一起改时，可先设`AGENT_AUTH_REQUIRED="false"`过渡，改完再改回`true`并重跑`./install.sh master`。
+4. Grafana改为auth proxy接入：KubeDoor管理员是Admin、其他人是Viewer，并且只对能看到全部集群的账号开放。
+
+详见[部署说明 · 账号与权限](deploy/README.md#账号与权限)。
+
 > 2.x内部升级：master与kubedoor-ai采用Recreate策略，升级期间AI/MCP短暂不可用，开启了准入控制的集群在master重启期间Deployment变更会被拒绝，建议低峰期操作。nginx配置以subPath挂载，若Web镜像标签未变，需执行`kubectl -n kubedoor rollout restart deploy/kubedoor-web`让新配置生效。
->
-> 从nginx basic auth的版本升级：原`WEB_AUTH_USERS`/`WEB_RW_USERS`不再生效，账号改到Web的「系统管理」里维护；agent一律要带Agent账号口令，同集群agent的`MASTER_WS`也要改成`ws://Up4biLko1dNh:<口令>@kubedoor-master.kubedoor`（可先设`AGENT_AUTH_REQUIRED="false"`过渡）。详见[部署说明](deploy/README.md#账号与权限)。
 
 ---
 
@@ -499,6 +524,7 @@ vi kubedoor.conf        # 改 K8S_NAME 和 MASTER_WS（换机器执行时先 cp 
 | 文档 | 内容 |
 | --- | --- |
 | [部署指南](deploy/README.md) | 一个脚本 + 一份配置安装控制端与各集群agent，PostgreSQL独立部署，含常见场景、改配置与排查 |
+| [账号与权限](deploy/README.md#账号与权限) | 本地账号与LDAP、全局权限与集群授权、内置账号、操作审计与忘记口令 |
 | [AI助手](docs/ai-assistant.md) | 模型配置、资源范围、多轮对话、变更审批、全局记忆、kubeconfig直连与外部MCP |
 | [告警屏蔽](docs/alert-silence.md) | 屏蔽规则语法、状态、命中预览与IM【屏蔽】链接 |
 | [JVM参数管控](docs/jvm-resource-control.md) | Xms/Xmx/Xss/MaxMetaspaceSize的采集与管控，高峰期堆内存与G1 Eden使用率 |
@@ -508,9 +534,10 @@ vi kubedoor.conf        # 改 K8S_NAME 和 MASTER_WS（换机器执行时先 cp 
 | [常见问题](help/FAQ.md) | 常见问题与排查 |
 
 **开发者参考**
+- [src/kubedoor-master/auth/README.md](src/kubedoor-master/auth/README.md)：认证、授权与审计的实现（权限模型、接口权限登记表、nginx `auth_request`）
 - [src/kubedoor-ai/README.md](src/kubedoor-ai/README.md)：AI服务的接口、环境变量、构建与测试
 - [src/kubedoor-tools/README.md](src/kubedoor-tools/README.md)：AI与agent共用的K8S执行库及安全边界
-- [src/kubedoor-web/README.md](src/kubedoor-web/README.md)：前端开发与构建
+- [src/kubedoor-web/README.md](src/kubedoor-web/README.md)：前端开发与构建、登录页与系统管理页面
 - [src/kubedoor-agent/load_balance/README.md](src/kubedoor-agent/load_balance/README.md)：节点均衡算法与参数
 
 ---

@@ -115,6 +115,8 @@ login:
   pureUsername: Username
   purePassword: Password
   pureLogin: Login
+  pureLoginTitle: Sign in
+  pureRemember: Stay signed in for 7 days
   pureLoginSuccess: Login Success
   pureLoginFail: Login Fail
   pureUsernameReg: Please enter username

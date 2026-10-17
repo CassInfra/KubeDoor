@@ -511,7 +511,7 @@ DeepSeek 等供应商的填写示例见 [AI 助手说明](../docs/ai-assistant.m
 AI 的通用 K8S 工具（K8S API、kubectl、istioctl、Pod 内命令等）要么经支持该能力的 agent 在集群内执行，要么用上传的 kubeconfig 直连。任选其一：
 
 - 提示「Agent 不在线」时先让 agent 恢复在线（见上文「Agent 连接」）；提示版本不支持时，把该集群的 agent 升级到与控制端相同的版本（改 `TAG_AGENT` 后 `./install.sh agent`，或在「Agent管理」点「更新」）。
-- 在「Agent管理」的「AI Kubeconfig」列「上传」kubeconfig（读写账号；YAML / JSON，最大 1 MiB），测试通过后保存。只接受自包含的配置：CA 证书只能内嵌、不能引用文件，凭据只能是 token 或内嵌的客户端证书和私钥，不支持 `exec`、`auth-provider` 插件。
+- 在「Agent管理」的「AI Kubeconfig」列「上传」kubeconfig（仅管理员；YAML / JSON，最大 1 MiB），测试通过后保存。只接受自包含的配置：CA 证书只能内嵌、不能引用文件，凭据只能是 token 或内嵌的客户端证书和私钥，不支持 `exec`、`auth-provider` 插件。
 
 已入库的历史数据和监控指标等现有接口不受影响。
 
@@ -548,7 +548,7 @@ printf '%s' '<用户名>:<密码>' | base64
 ```
 
 - 返回 401 说明没带或带错了 `Authorization` 头。kubedoor-ai 本身只在集群内（ClusterIP），必须经 Web 地址访问。建议为 MCP 单独建一个账号，并在 Web 前加 HTTPS（见「生产环境需要 HTTPS 吗」）。
-- 权限与 Web 一致：只读账号只能调用查询类工具。
+- 权限与 Web 一致，按该账号对各集群的权限执行：只读的集群只能调用查询类工具，设为「无」的集群看不到；本地账号和 LDAP 账号都可以用。
 - 写操作（重启、扩缩容、更新镜像、删除或隔离 Pod、JVM 诊断等）不会直接执行，而是返回 `"pending": true` 和 `browserlink`（形如 `/#/workbench/index?ai_session=…&ai_run=…` 的相对路径）。在浏览器打开 Web 地址加上这段路径，用**同一个账号**登录，在弹出的 AI 对话里点「批准这次操作」或「拒绝」，30 分钟内有效。执行结果不会推回 MCP 客户端，需要再调用查询工具确认。
 - 每次 MCP 调用都会在该账号的 AI 会话列表里生成一条「MCP · <操作名>」会话。
 

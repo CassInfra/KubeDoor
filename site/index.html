@@ -4,8 +4,8 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>花折 · KubeDoor — AI 驱动的多 K8S 集群智能管控平台</title>
-<meta name="description" content="花折 · KubeDoor：开源的多 K8S 集群智能管控平台。一个平台统一纳管多套 Kubernetes —— 监控、资源管理、告警事件、高峰期资源治理与准入管控一站搞定；内置可审批、可审计的 AI 运维助手，并以标准 MCP 对外开放。">
-<meta name="keywords" content="KubeDoor,花折,Kubernetes,K8S,多集群管理,AI 运维,MCP,准入控制,告警,VictoriaMetrics,PostgreSQL">
+<meta name="description" content="花折 · KubeDoor：开源的多 K8S 集群智能管控平台。一个平台统一纳管多套 Kubernetes —— 监控、资源管理、告警事件、高峰期资源治理与准入管控一站搞定；内置可审批、可审计的 AI 运维助手，并以标准 MCP 对外开放；支持 LDAP 登录与 K8S 集群级权限。">
+<meta name="keywords" content="KubeDoor,花折,Kubernetes,K8S,多集群管理,AI 运维,MCP,准入控制,告警,LDAP,集群权限,操作审计,VictoriaMetrics,PostgreSQL">
 <meta name="author" content="StarsL.cn">
 <meta name="theme-color" content="#05070f">
 <meta name="color-scheme" content="dark">
@@ -62,7 +62,6 @@
   <symbol id="i-route" viewBox="0 0 24 24"><circle cx="6" cy="18" r="2.5"/><circle cx="18" cy="6" r="2.5"/><path d="M8.5 18H15a3 3 0 0 0 0-6H9a3 3 0 0 1 0-6h6.5"/></symbol>
   <symbol id="i-db" viewBox="0 0 24 24"><ellipse cx="12" cy="5.5" rx="7.5" ry="2.8"/><path d="M4.5 5.5v13c0 1.5 3.4 2.8 7.5 2.8s7.5-1.3 7.5-2.8v-13"/><path d="M4.5 12c0 1.5 3.4 2.8 7.5 2.8s7.5-1.3 7.5-2.8"/></symbol>
   <symbol id="i-pulse" viewBox="0 0 24 24"><path d="M3 12h4l2.5-6 4 12 2.5-6H21"/></symbol>
-  <symbol id="i-gateway" viewBox="0 0 24 24"><rect x="3" y="9" width="18" height="6" rx="2"/><path d="M7 9V5.5M12 9V3.5M17 9V5.5M7 15v3.5M12 15v5M17 15v3.5"/></symbol>
   <symbol id="i-book" viewBox="0 0 24 24"><path d="M12 6.5C10 5 7.5 4.5 4 4.5v13c3.5 0 6 .5 8 2 2-1.5 4.5-2 8-2v-13c-3.5 0-6 .5-8 2z"/><path d="M12 6.5v13"/></symbol>
   <symbol id="i-robot" viewBox="0 0 24 24"><rect x="4.5" y="8" width="15" height="11" rx="3"/><path d="M12 4.5V8M9.5 13v.5M14.5 13v.5M9.5 16.5h5"/><circle cx="12" cy="3.8" r="1"/><path d="M2.5 12v3M21.5 12v3"/></symbol>
   <symbol id="i-mute" viewBox="0 0 24 24"><path d="M6 16.5V11a6 6 0 0 1 9.4-4.9M18 11v5.5l1.5 1.5H8"/><path d="M10 21h4M3.5 3.5l17 17"/></symbol>
@@ -87,9 +86,9 @@
     </a>
     <nav class="nav" aria-label="主导航">
       <ul class="nav-links">
+        <li><a href="#architecture">架构</a></li>
         <li><a href="#ai">AI 助手</a></li>
         <li><a href="#features">能力</a></li>
-        <li><a href="#architecture">架构</a></li>
         <li><a href="#screenshots">截图</a></li>
         <li><a href="#deploy">部署</a></li>
         <li><a href="#timeline">版本</a></li>
@@ -110,9 +109,9 @@
   </div>
   <nav class="mobile-menu" id="mobile-menu" aria-label="移动端导航" hidden>
     <ul>
+      <li><a href="#architecture">架构</a></li>
       <li><a href="#ai">AI 助手</a></li>
       <li><a href="#features">能力</a></li>
-      <li><a href="#architecture">架构</a></li>
       <li><a href="#screenshots">截图</a></li>
       <li><a href="#deploy">部署</a></li>
       <li><a href="#timeline">版本</a></li>
@@ -129,7 +128,7 @@
   <div class="hero-grid" aria-hidden="true"></div>
   <div class="container hero-inner">
     <div class="hero-copy">
-      <a class="hero-pill" href="#ai"><span class="pill-tag">v2.1</span><span>内置 AI 运维助手 · 标准 MCP 开放接入</span><svg class="icon" aria-hidden="true"><use href="#i-arrow"/></svg></a>
+      <a class="hero-pill" href="#access"><span class="pill-tag">v2.2</span><span>新增 LDAP 登录 · K8S 集群级权限</span><svg class="icon" aria-hidden="true"><use href="#i-arrow"/></svg></a>
       <h1 id="hero-title">
         <span class="hero-brand">花折 · KubeDoor</span>
         <span class="hero-tagline"><span class="grad-text">AI 驱动</span>的<br>多 K8S 集群<br>智能管控平台</span>
@@ -237,11 +236,50 @@ content_type: application/json-patch+json</pre>
   </div>
 </section>
 
+<!-- ============ ARCHITECTURE ============ -->
+<section class="section section-arch" id="architecture" aria-labelledby="arch-title">
+  <div class="container">
+    <header class="section-head reveal">
+      <p class="eyebrow">// 01 · 架构</p>
+      <h2 id="arch-title">控制端一套，<span class="grad-text">集群端按需扩展</span></h2>
+      <p class="section-lead">控制端与集群端可以装在同一个集群（单集群场景），也可以分开部署，纳管任意多套 Kubernetes。</p>
+    </header>
+    <figure class="arch-figure glass reveal">
+      <div class="arch-scroll">
+        <a class="arch-link" href="assets/img/architecture.svg" target="_blank" rel="noopener" title="在新标签页打开高清架构图（可缩放）"><img src="assets/img/architecture.svg" width="1600" height="940" loading="lazy" decoding="async" alt="KubeDoor 2.x 架构图：浏览器和外部 MCP 客户端经 kubedoor-web（nginx 反向代理，登录与权限由 master 统一校验）访问 kubedoor-master 与 kubedoor-ai；各业务集群的 kubedoor-agent 主动以 WebSocket 连接 master，在集群内执行操作并回传事件、日志与实时状态；master 与 kubedoor-ai 共用一个 PostgreSQL，监控数据来自 VictoriaMetrics 或已有 Prometheus，告警经 vmalert、Alertmanager 与 kubedoor-alarm 推送 IM。"></a>
+      </div>
+      <figcaption class="arch-caption"><span class="arch-hint">左右滑动查看，或点开大图缩放 · </span><a class="inline-link" href="assets/img/architecture.svg" target="_blank" rel="noopener">在新标签页打开高清架构图</a></figcaption>
+    </figure>
+    <ul class="arch-points">
+      <li class="reveal">
+        <div class="card-icon card-icon-sm"><svg class="icon" aria-hidden="true"><use href="#i-robot"/></svg></div>
+        <h3>内置 AI 运维助手</h3>
+        <p>选定集群用一句话排障与运维，自动联合日志、事件、监控与历史数据定位原因；变更先冻结参数、展示差异，经人工批准才执行，会话与每次操作全程入库审计，模型自由选。同一能力也以标准 MCP 开放。</p>
+      </li>
+      <li class="reveal" style="--d:1">
+        <div class="card-icon card-icon-sm"><svg class="icon" aria-hidden="true"><use href="#i-route"/></svg></div>
+        <h3>Agent 主动外连</h3>
+        <p>每个业务集群的 kubedoor-agent 主动以 WebSocket 连接 master（同集群走 Service，跨集群经 Web 入口），统一用内置 Agent 账号认证；控制端默认无需反向访问业务集群。</p>
+      </li>
+      <li class="reveal" style="--d:2">
+        <div class="card-icon card-icon-sm"><svg class="icon" aria-hidden="true"><use href="#i-db"/></svg></div>
+        <h3>单一 PostgreSQL</h3>
+        <p>管控配置、高峰资源、K8S 事件、告警记录、Istio 路由与 AI 会话都存在 PostgreSQL 原生表，不依赖扩展；启动自动建表，事件、告警与高峰快照按保留天数每天清理。</p>
+      </li>
+      <li class="reveal" style="--d:3">
+        <div class="card-icon card-icon-sm"><svg class="icon" aria-hidden="true"><use href="#i-pulse"/></svg></div>
+        <h3>监控栈可内置也可外接</h3>
+        <p>时序库必需（Deployment 列表、资源总览与高峰采集都依赖它）：可一并部署 VictoriaMetrics、vmalert、Alertmanager 与 Grafana，也可对接已有VictoriaMetrics。</p>
+      </li>
+    </ul>
+  </div>
+</section>
+
 <!-- ============ AI ============ -->
 <section class="section section-ai" id="ai" aria-labelledby="ai-title">
   <div class="container">
     <header class="section-head reveal">
-      <p class="eyebrow">// 01 · AI 运维助手</p>
+      <p class="eyebrow">// 02 · AI 运维助手</p>
       <h2 id="ai-title">会排障，更<span class="grad-text">守规矩</span>的 K8S 运维助手</h2>
       <p class="section-lead">在 Web 顶部打开「AI 助手」，选定一个集群，用一句话描述问题。助手自动选择数据来源，联合日志、事件、监控与历史数据定位原因；任何变更都先冻结参数并展示变更预览（K8S API 写入附服务端 <span class="nw">Dry-run 差异）</span>，<span class="nw">默认人工批准后才执行。</span></p>
     </header>
@@ -325,12 +363,12 @@ content_type: application/json-patch+json</pre>
         <li><span class="g-num">6</span><b>结果核验</b><span>不确定就先查询，不重放</span></li>
       </ol>
       <ul class="guard-chips">
-        <li>只读账号无法发起变更</li>
+        <li>按集群授权，只读集群无法发起变更</li>
         <li>所选集群是本轮硬边界</li>
         <li>Pod exec / curl / openssl 一律审批</li>
         <li>参数数组执行，不开放 shell</li>
         <li>模型 API Key 不落服务端，流式输出、checkpoint 与日志中全程脱敏</li>
-        <li>「自动批准执行」需读写账号手动勾选，仅当前页面有效</li>
+        <li>「自动批准执行」需对该集群有读写权限并手动勾选，仅当前页面有效</li>
         <li>会话、动作与事件全部入库</li>
       </ul>
     </div>
@@ -345,7 +383,7 @@ content_type: application/json-patch+json</pre>
           <li><code>/sse</code><span>SSE · 兼容旧客户端</span></li>
         </ul>
         <ul class="tick-list">
-          <li>复用 Web 登录账号（basic auth），只读账号只能调用查询类工具</li>
+          <li>复用 Web 账号（本地或 LDAP，Basic 认证），按集群权限执行：只读集群只能调用查询类工具，「无」权限的集群不可见</li>
           <li>保留 1.x 的 16 个工具名，新增统一工具 <code>kubedoor_tool</code> 与 Skill 资源 <code>skills://kubedoor-k8s</code></li>
           <li>写操作返回待批准动作与浏览器链接，用同一账号在 Web 中批准后才执行</li>
         </ul>
@@ -385,7 +423,7 @@ content_type: application/json-patch+json</pre>
 <section class="section section-features" id="features" aria-labelledby="features-title">
   <div class="container">
     <header class="section-head reveal">
-      <p class="eyebrow">// 02 · 全栈能力</p>
+      <p class="eyebrow">// 03 · 全栈能力</p>
       <h2 id="features-title">一个平台，管好<span class="grad-text">多套 K8S</span></h2>
       <p class="section-lead">从监控大屏到准入控制，从实时日志到节点均衡，覆盖 K8S 日常运维的完整链路；其中的查询与运维操作，大多也能直接交给 AI 助手完成。</p>
     </header>
@@ -450,49 +488,43 @@ content_type: application/json-patch+json</pre>
       </article>
       <article class="card glow-card fcard reveal" style="--d:2">
         <div class="card-icon"><svg class="icon" aria-hidden="true"><use href="#i-lock"/></svg></div>
-        <h3>权限与留痕</h3>
-        <p>nginx basic auth 登录，读写与只读账号分离，只读账号仅开放查询接口（改镜像按 <code>UPDATE_IMAGE_JSON</code> 授权放行）；访问日志记录操作账号，AI 操作的参数、审批与结果全部入库。</p>
+        <h3>账号权限与审计<em class="new-tag">2.2</em></h3>
+        <p>本地账号与 LDAP 统一登录，按用户 × 集群授权「读写 / 只读 / 无」，Web、Grafana、AI 助手与 MCP 共用一套权限；登录、权限变更与所有写操作（含越权被拒）进入操作审计，AI 操作的参数、审批与结果全部入库。</p>
       </article>
     </div>
-  </div>
-</section>
 
-<!-- ============ ARCHITECTURE ============ -->
-<section class="section section-arch" id="architecture" aria-labelledby="arch-title">
-  <div class="container">
-    <header class="section-head reveal">
-      <p class="eyebrow">// 03 · 架构</p>
-      <h2 id="arch-title">控制端一套，<span class="grad-text">集群端按需扩展</span></h2>
-      <p class="section-lead">控制端与集群端可以装在同一个集群（单集群场景），也可以分开部署，纳管任意多套 Kubernetes。</p>
-    </header>
-    <figure class="arch-figure glass reveal">
-      <div class="arch-scroll">
-        <a class="arch-link" href="assets/img/architecture.svg" target="_blank" rel="noopener" title="在新标签页打开高清架构图（可缩放）"><img src="assets/img/architecture.svg" width="1600" height="940" loading="lazy" decoding="async" alt="KubeDoor 2.x 架构图：浏览器和外部 MCP 客户端经 kubedoor-web（nginx 统一认证）访问 kubedoor-master 与 kubedoor-ai；各业务集群的 kubedoor-agent 主动以 WebSocket 连接 master，在集群内执行操作并回传事件、日志与实时状态；master 与 kubedoor-ai 共用一个 PostgreSQL，监控数据来自 VictoriaMetrics 或已有 Prometheus，告警经 vmalert、Alertmanager 与 kubedoor-alarm 推送 IM。"></a>
+    <div class="access" id="access">
+      <div class="access-copy reveal">
+        <p class="eyebrow eyebrow-sm">// 2.2 新增 · 账号与权限</p>
+        <h3 id="access-title">LDAP 统一登录，权限细到<span class="grad-text">每个集群</span></h3>
+        <p>登录、会话与权限改由 master 统一管理，nginx 只做反向代理：Web、Grafana、AI 助手与 MCP 共用一个入口、一套账号、一套权限。</p>
+        <ul class="tick-list">
+          <li>本地账号 + LDAP：Web 上配置并一键测试，本地账号优先，LDAP 用户首次登录自动开通</li>
+          <li>全局权限「管理员 / 读写 / 只读 / 无」兜底，再按用户 × 集群单独授权，单独授权优先</li>
+          <li>「无」权限的集群在页面、下拉框、告警与 AI 助手中都不可见；只读集群上 AI 只查询、不变更</li>
+          <li>登录、账号与权限变更、所有写操作（含越权被拒）进入操作审计，默认保留 180 天</li>
+          <li>全新水墨登录页：HttpOnly 会话、7 天内免登录、连续输错自动锁定</li>
+        </ul>
+        <a class="link-arrow" href="https://github.com/CassInfra/KubeDoor/blob/main/deploy/README.md#账号与权限" target="_blank" rel="noopener">阅读账号与权限说明<svg class="icon" aria-hidden="true"><use href="#i-arrow"/></svg></a>
       </div>
-      <figcaption class="arch-caption"><span class="arch-hint">左右滑动查看，或点开大图缩放 · </span><a class="inline-link" href="assets/img/architecture.svg" target="_blank" rel="noopener">在新标签页打开高清架构图</a></figcaption>
-    </figure>
-    <ul class="arch-points">
-      <li class="reveal">
-        <div class="card-icon card-icon-sm"><svg class="icon" aria-hidden="true"><use href="#i-route"/></svg></div>
-        <h3>Agent 主动外连</h3>
-        <p>每个业务集群的 kubedoor-agent 主动以 WebSocket 连接 master（同集群走 Service，跨集群经 Web 入口并带 basic auth），控制端默认无需反向访问业务集群（仅 AI 的 kubeconfig 直连会从控制端访问 API Server）。</p>
-      </li>
-      <li class="reveal" style="--d:1">
-        <div class="card-icon card-icon-sm"><svg class="icon" aria-hidden="true"><use href="#i-db"/></svg></div>
-        <h3>单一 PostgreSQL</h3>
-        <p>管控配置、高峰资源、K8S 事件、告警记录、Istio 路由与 AI 会话都存在 PostgreSQL 原生表，不依赖扩展；启动自动建表，事件、告警与高峰快照按保留天数每天清理。</p>
-      </li>
-      <li class="reveal" style="--d:2">
-        <div class="card-icon card-icon-sm"><svg class="icon" aria-hidden="true"><use href="#i-pulse"/></svg></div>
-        <h3>监控栈可内置也可外接</h3>
-        <p>时序库必需（Deployment 列表、资源总览与高峰采集都依赖它）：可一并部署 VictoriaMetrics、vmalert、Alertmanager 与 Grafana，也可对接已有 Prometheus / VictoriaMetrics，各集群指标需能从同一地址查到并带标签 <code>&lt;PROM_K8S_TAG_KEY&gt;=&lt;K8S_NAME&gt;</code>。</p>
-      </li>
-      <li class="reveal" style="--d:3">
-        <div class="card-icon card-icon-sm"><svg class="icon" aria-hidden="true"><use href="#i-gateway"/></svg></div>
-        <h3>AI 与 MCP 共用网关</h3>
-        <p>kubedoor-ai 同时服务 Web 助手与外部 MCP，统一经 Web nginx 认证，共享工具网关、权限、审批与审计，服务本身不单独对外暴露。</p>
-      </li>
-    </ul>
+      <figure class="access-visual reveal" style="--d:1">
+        <div class="access-shot">
+          <img src="assets/img/shots/login.webp" width="1280" height="720" loading="lazy" decoding="async" alt="KubeDoor 2.2 登录页截图：水墨宣纸背景，左侧是「花折」书法与 KubeDoor 标题，毛玻璃登录框位于中右侧发光的月洞门中">
+        </div>
+        <div class="perm-card" role="img" aria-label="集群授权示意：zhang.san 是 LDAP 账号、全局只读，单独授权 prod-a 读写；li.si 是 LDAP 账号、全局读写，单独授权 prod-a 无权限，看不到该集群；ci-bot 是本地账号、全局无，只单独授权 test 读写。其余集群按全局权限兜底。">
+          <div class="perm-head"><span>用户与权限 · 集群授权</span><span class="perm-legend"><i class="pm-dot pm-rw"></i>读写<i class="pm-dot pm-read"></i>只读<i class="pm-dot pm-none"></i>无</span></div>
+          <table class="perm-table">
+            <thead><tr><th>账号</th><th>prod-a</th><th>prod-b</th><th>test</th></tr></thead>
+            <tbody>
+              <tr><td>zhang.san<em>LDAP · 全局只读</em></td><td><b class="pm pm-rw">读写</b></td><td><b class="pm pm-read is-inherit">只读</b></td><td><b class="pm pm-read is-inherit">只读</b></td></tr>
+              <tr><td>li.si<em>LDAP · 全局读写</em></td><td><b class="pm pm-none">无</b></td><td><b class="pm pm-rw is-inherit">读写</b></td><td><b class="pm pm-rw is-inherit">读写</b></td></tr>
+              <tr><td>ci-bot<em>本地 · 全局无</em></td><td><b class="pm pm-none is-inherit">无</b></td><td><b class="pm pm-none is-inherit">无</b></td><td><b class="pm pm-rw">读写</b></td></tr>
+            </tbody>
+          </table>
+          <p class="perm-note">实线为单独授权，虚线为全局兜底 · 示意数据</p>
+        </div>
+      </figure>
+    </div>
   </div>
 </section>
 
@@ -594,7 +626,7 @@ content_type: application/json-patch+json</pre>
         </div>
       </li>
       <li class="step reveal">
-        <div class="step-side"><span class="step-num">02</span><h3>装控制端</h3><p><code>PG_HOST</code> 要填 K8S 里的 Pod 能访问到的地址（不能是 127.0.0.1）。装完会打印 Web 控制台地址与默认账号 <code>kubedoor / kubedoor</code>；<code>WEB_AUTH_USERS</code> 里还预置了一个供跨集群 Agent 使用的读写账号，两个默认账号的密码都已公开，上线前请全部修改（跨集群 <code>MASTER_WS</code> 里的账号同步替换）。</p></div>
+        <div class="step-side"><span class="step-num">02</span><h3>装控制端</h3><p><code>PG_HOST</code> 要填 K8S 里的 Pod 能访问到的地址（不能是 127.0.0.1）。装完会打印 Web 控制台地址与内置管理员 <code>kubedoor / kubedoor</code>，首次登录会强制修改口令；之后在「系统管理」里添加账号、接入 LDAP、按集群授权。内置 Agent 账号的出厂口令是公开的，上线前请在「用户与权限」里重置，并同步修改各集群的 <code>MASTER_WS</code>。</p></div>
         <div class="terminal">
           <div class="terminal-bar"><span class="dots" aria-hidden="true"><i></i><i></i><i></i></span><span class="terminal-title">bash · 可执行 kubectl 的机器</span><button class="copy-btn" type="button" data-copy-target="cmd-2" aria-label="复制第二步命令"><svg class="icon" aria-hidden="true"><use href="#i-copy"/></svg><span>复制</span></button></div>
 <pre class="code"><code id="cmd-2"><span class="c-c"># 与数据库不在同一台机器时，先在这里 git clone 仓库</span>
@@ -606,10 +638,10 @@ content_type: application/json-patch+json</pre>
         </div>
       </li>
       <li class="step reveal">
-        <div class="step-side"><span class="step-num">03</span><h3>装集群端</h3><p>到每个业务集群执行。<code>K8S_NAME</code> 是集群唯一标识；同集群 <code>MASTER_WS</code> 填 <code>ws://kubedoor-master.kubedoor</code>，跨集群填 <code>ws://&lt;账号&gt;:&lt;口令&gt;@&lt;控制端节点IP&gt;:&lt;Web NodePort&gt;</code>，账号必须是 <code>WEB_RW_USERS</code> 里的读写账号（装控制端后脚本会打印这一行），还要把 <code>REMOTE_WRITE_URL</code> 改成控制端时序库的外部地址（用内置 VictoriaMetrics 时同样会打印）。</p></div>
+        <div class="step-side"><span class="step-num">03</span><h3>装集群端</h3><p>到每个业务集群执行。<code>K8S_NAME</code> 是集群唯一标识；<code>MASTER_WS</code> 必须带内置 Agent 账号，同集群填 <code>ws://Up4biLko1dNh:&lt;口令&gt;@kubedoor-master.kubedoor</code>，跨集群填 <code>ws://Up4biLko1dNh:&lt;口令&gt;@&lt;控制端节点IP&gt;:&lt;Web NodePort&gt;</code>（装控制端后脚本会打印这两行），跨集群还要把 <code>REMOTE_WRITE_URL</code> 改成控制端时序库的外部地址（用内置 VictoriaMetrics 时同样会打印）。</p></div>
         <div class="terminal">
           <div class="terminal-bar"><span class="dots" aria-hidden="true"><i></i><i></i><i></i></span><span class="terminal-title">bash · 每个业务集群</span><button class="copy-btn" type="button" data-copy-target="cmd-3" aria-label="复制第三步命令"><svg class="icon" aria-hidden="true"><use href="#i-copy"/></svg><span>复制</span></button></div>
-<pre class="code"><code id="cmd-3"><span class="c-c"># 改 K8S_NAME 和 MASTER_WS（跨集群再改 REMOTE_WRITE_URL）；换机器执行时先从 kubedoor.conf.example 复制</span>
+<pre class="code"><code id="cmd-3"><span class="c-c"># 改 K8S_NAME 和 MASTER_WS（带 Agent 账号口令；跨集群再改 REMOTE_WRITE_URL）；换机器执行时先从 kubedoor.conf.example 复制</span>
 <span class="c-cmd">vi</span> kubedoor.conf
 ./install.sh agent</code></pre>
         </div>
@@ -627,7 +659,7 @@ content_type: application/json-patch+json</pre>
       </div>
       <div class="note glass reveal" style="--d:2">
         <h3><svg class="icon" aria-hidden="true"><use href="#i-book"/></svg>更多场景</h3>
-        <p>已有 Prometheus / VictoriaMetrics、离线内网、调整登录账号等，见 <a class="inline-link" href="https://github.com/CassInfra/KubeDoor/blob/main/deploy/README.md" target="_blank" rel="noopener">完整部署文档</a>。</p>
+        <p>已有 Prometheus / VictoriaMetrics、离线内网、账号与权限、从旧版升级等，见 <a class="inline-link" href="https://github.com/CassInfra/KubeDoor/blob/main/deploy/README.md" target="_blank" rel="noopener">完整部署文档</a>。</p>
       </div>
     </div>
   </div>
@@ -642,7 +674,11 @@ content_type: application/json-patch+json</pre>
     </header>
     <ol class="timeline">
       <li class="tl-item tl-current reveal">
-        <div class="tl-date"><time datetime="2026-10-05">2026-10-05</time><span class="tl-ver">2.1.0 · 当前</span></div>
+        <div class="tl-date"><time datetime="2026-10">2026-10</time><span class="tl-ver">2.2.0 · 当前</span></div>
+        <div class="tl-body"><h3>LDAP 登录与 K8S 集群级权限</h3><p>登录与权限改由 master 统一管理：本地账号 + LDAP，全局权限兜底、按用户 × 集群授权「读写 / 只读 / 无」，Web、Grafana、AI 助手与 MCP 共用一套权限；新增操作审计、Agent 账号认证与全新水墨登录页。</p></div>
+      </li>
+      <li class="tl-item reveal">
+        <div class="tl-date"><time datetime="2026-10-05">2026-10-05</time><span class="tl-ver">2.1.0</span></div>
         <div class="tl-body"><h3>内置 AI 运维助手，MCP 并入 AI 服务</h3><p>Web 内置 AI 助手（审批、Dry-run 差异、全局记忆、kubeconfig 加密直连）；外部 MCP 并入 kubedoor-ai，新增 Streamable HTTP 入口并接入读写权限与浏览器审批；Deployment 实时状态推送；JVM 启动参数管控与高峰期堆、G1 Eden 使用率。</p></div>
       </li>
       <li class="tl-item reveal">
@@ -691,13 +727,14 @@ content_type: application/json-patch+json</pre>
     </header>
     <ul class="doc-grid">
       <li class="reveal"><a class="doc-card glow-card" href="https://github.com/CassInfra/KubeDoor/blob/main/deploy/README.md" target="_blank" rel="noopener"><span class="doc-icon"><svg class="icon" aria-hidden="true"><use href="#i-rocket"/></svg></span><span class="doc-text"><b>部署指南</b><span>三步安装、常见场景与排查</span></span><svg class="icon doc-go" aria-hidden="true"><use href="#i-arrow"/></svg></a></li>
-      <li class="reveal" style="--d:1"><a class="doc-card glow-card" href="https://github.com/CassInfra/KubeDoor/blob/main/docs/ai-assistant.md" target="_blank" rel="noopener"><span class="doc-icon"><svg class="icon" aria-hidden="true"><use href="#i-robot"/></svg></span><span class="doc-text"><b>AI 助手与 MCP</b><span>模型配置、审批、kubeconfig、全局记忆</span></span><svg class="icon doc-go" aria-hidden="true"><use href="#i-arrow"/></svg></a></li>
-      <li class="reveal" style="--d:2"><a class="doc-card glow-card" href="https://github.com/CassInfra/KubeDoor/blob/main/docs/alert-silence.md" target="_blank" rel="noopener"><span class="doc-icon"><svg class="icon" aria-hidden="true"><use href="#i-mute"/></svg></span><span class="doc-text"><b>告警屏蔽</b><span>matcher 语法、状态与接口</span></span><svg class="icon doc-go" aria-hidden="true"><use href="#i-arrow"/></svg></a></li>
-      <li class="reveal"><a class="doc-card glow-card" href="https://github.com/CassInfra/KubeDoor/blob/main/docs/jvm-resource-control.md" target="_blank" rel="noopener"><span class="doc-icon"><svg class="icon" aria-hidden="true"><use href="#i-coffee"/></svg></span><span class="doc-text"><b>JVM 参数管控</b><span>启动参数采集、编辑与生效方式</span></span><svg class="icon doc-go" aria-hidden="true"><use href="#i-arrow"/></svg></a></li>
-      <li class="reveal" style="--d:1"><a class="doc-card glow-card" href="https://github.com/CassInfra/KubeDoor/blob/main/help/K8S%E8%B5%84%E6%BA%90%E7%AE%A1%E6%8E%A7%E5%8A%9F%E8%83%BD%E8%AF%B4%E6%98%8E.md" target="_blank" rel="noopener"><span class="doc-icon"><svg class="icon" aria-hidden="true"><use href="#i-shield"/></svg></span><span class="doc-text"><b>K8S 资源管控</b><span>准入控制与高峰资源管控说明</span></span><svg class="icon doc-go" aria-hidden="true"><use href="#i-arrow"/></svg></a></li>
-      <li class="reveal" style="--d:2"><a class="doc-card glow-card" href="https://github.com/CassInfra/KubeDoor/blob/main/help/K8S%E4%BA%8B%E4%BB%B6%E5%91%8A%E8%AD%A6%E8%A7%84%E5%88%99%E9%85%8D%E7%BD%AE%E8%AF%B4%E6%98%8E.md" target="_blank" rel="noopener"><span class="doc-icon"><svg class="icon" aria-hidden="true"><use href="#i-bell"/></svg></span><span class="doc-text"><b>K8S 事件告警规则</b><span>忽略规则、告警规则与条件语法</span></span><svg class="icon doc-go" aria-hidden="true"><use href="#i-arrow"/></svg></a></li>
-      <li class="reveal"><a class="doc-card glow-card" href="https://github.com/CassInfra/KubeDoor/blob/main/help/K8S%E5%BE%AE%E6%9C%8D%E5%8A%A1%E9%95%9C%E5%83%8F%E6%9B%B4%E6%96%B0%E9%85%8D%E7%BD%AE%E8%AF%B4%E6%98%8E.md" target="_blank" rel="noopener"><span class="doc-icon"><svg class="icon" aria-hidden="true"><use href="#i-tag"/></svg></span><span class="doc-text"><b>镜像更新配置</b><span>授权账号、时间段与仓库凭据</span></span><svg class="icon doc-go" aria-hidden="true"><use href="#i-arrow"/></svg></a></li>
-      <li class="reveal" style="--d:1"><a class="doc-card glow-card" href="https://github.com/CassInfra/KubeDoor/blob/main/help/FAQ.md" target="_blank" rel="noopener"><span class="doc-icon"><svg class="icon" aria-hidden="true"><use href="#i-help"/></svg></span><span class="doc-text"><b>常见问题 FAQ</b><span>使用与排障中的高频问题</span></span><svg class="icon doc-go" aria-hidden="true"><use href="#i-arrow"/></svg></a></li>
+      <li class="reveal" style="--d:1"><a class="doc-card glow-card" href="https://github.com/CassInfra/KubeDoor/blob/main/deploy/README.md#账号与权限" target="_blank" rel="noopener"><span class="doc-icon"><svg class="icon" aria-hidden="true"><use href="#i-lock"/></svg></span><span class="doc-text"><b>账号与权限</b><span>本地账号、LDAP、集群授权与审计</span></span><svg class="icon doc-go" aria-hidden="true"><use href="#i-arrow"/></svg></a></li>
+      <li class="reveal" style="--d:2"><a class="doc-card glow-card" href="https://github.com/CassInfra/KubeDoor/blob/main/docs/ai-assistant.md" target="_blank" rel="noopener"><span class="doc-icon"><svg class="icon" aria-hidden="true"><use href="#i-robot"/></svg></span><span class="doc-text"><b>AI 助手与 MCP</b><span>模型配置、审批、kubeconfig、全局记忆</span></span><svg class="icon doc-go" aria-hidden="true"><use href="#i-arrow"/></svg></a></li>
+      <li class="reveal"><a class="doc-card glow-card" href="https://github.com/CassInfra/KubeDoor/blob/main/docs/alert-silence.md" target="_blank" rel="noopener"><span class="doc-icon"><svg class="icon" aria-hidden="true"><use href="#i-mute"/></svg></span><span class="doc-text"><b>告警屏蔽</b><span>matcher 语法、状态与接口</span></span><svg class="icon doc-go" aria-hidden="true"><use href="#i-arrow"/></svg></a></li>
+      <li class="reveal" style="--d:1"><a class="doc-card glow-card" href="https://github.com/CassInfra/KubeDoor/blob/main/docs/jvm-resource-control.md" target="_blank" rel="noopener"><span class="doc-icon"><svg class="icon" aria-hidden="true"><use href="#i-coffee"/></svg></span><span class="doc-text"><b>JVM 参数管控</b><span>启动参数采集、编辑与生效方式</span></span><svg class="icon doc-go" aria-hidden="true"><use href="#i-arrow"/></svg></a></li>
+      <li class="reveal" style="--d:2"><a class="doc-card glow-card" href="https://github.com/CassInfra/KubeDoor/blob/main/help/K8S%E8%B5%84%E6%BA%90%E7%AE%A1%E6%8E%A7%E5%8A%9F%E8%83%BD%E8%AF%B4%E6%98%8E.md" target="_blank" rel="noopener"><span class="doc-icon"><svg class="icon" aria-hidden="true"><use href="#i-shield"/></svg></span><span class="doc-text"><b>K8S 资源管控</b><span>准入控制与高峰资源管控说明</span></span><svg class="icon doc-go" aria-hidden="true"><use href="#i-arrow"/></svg></a></li>
+      <li class="reveal"><a class="doc-card glow-card" href="https://github.com/CassInfra/KubeDoor/blob/main/help/K8S%E4%BA%8B%E4%BB%B6%E5%91%8A%E8%AD%A6%E8%A7%84%E5%88%99%E9%85%8D%E7%BD%AE%E8%AF%B4%E6%98%8E.md" target="_blank" rel="noopener"><span class="doc-icon"><svg class="icon" aria-hidden="true"><use href="#i-bell"/></svg></span><span class="doc-text"><b>K8S 事件告警规则</b><span>忽略规则、告警规则与条件语法</span></span><svg class="icon doc-go" aria-hidden="true"><use href="#i-arrow"/></svg></a></li>
+      <li class="reveal" style="--d:1"><a class="doc-card glow-card" href="https://github.com/CassInfra/KubeDoor/blob/main/help/K8S%E5%BE%AE%E6%9C%8D%E5%8A%A1%E9%95%9C%E5%83%8F%E6%9B%B4%E6%96%B0%E9%85%8D%E7%BD%AE%E8%AF%B4%E6%98%8E.md" target="_blank" rel="noopener"><span class="doc-icon"><svg class="icon" aria-hidden="true"><use href="#i-tag"/></svg></span><span class="doc-text"><b>镜像更新配置</b><span>授权账号、时间段与仓库凭据</span></span><svg class="icon doc-go" aria-hidden="true"><use href="#i-arrow"/></svg></a></li>
+      <li class="reveal" style="--d:2"><a class="doc-card glow-card" href="https://github.com/CassInfra/KubeDoor/blob/main/help/FAQ.md" target="_blank" rel="noopener"><span class="doc-icon"><svg class="icon" aria-hidden="true"><use href="#i-help"/></svg></span><span class="doc-text"><b>常见问题 FAQ</b><span>使用与排障中的高频问题</span></span><svg class="icon doc-go" aria-hidden="true"><use href="#i-arrow"/></svg></a></li>
     </ul>
 
     <div class="community">

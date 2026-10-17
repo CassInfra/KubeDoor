@@ -115,6 +115,8 @@ login:
   pureUsername: 账号
   purePassword: 密码
   pureLogin: 登录
+  pureLoginTitle: 账号登录
+  pureRemember: 7 天内免登录
   pureLoginSuccess: 登录成功
   pureLoginFail: 登录失败
   pureUsernameReg: 请输入账号

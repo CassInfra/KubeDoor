@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 940" width="1600" height="940" role="img" aria-labelledby="kd-arch-title kd-arch-desc">
 <title id="kd-arch-title">花折 · KubeDoor 2.x 架构图</title>
-<desc id="kd-arch-desc">控制端（namespace kubedoor）包含 kubedoor-web、kubedoor-master、kubedoor-ai、kubedoor-alarm、kubedoor-collect，以及可选的 Grafana、VictoriaMetrics、vmalert、Alertmanager；每个业务集群部署 kubedoor-agent 与可选的 vmagent、kube-state-metrics、node-exporter，agent 通过 WebSocket 主动连接控制端；PostgreSQL 18 独立部署在 K8S 之外，是唯一数据库；kubedoor-ai 调用用户配置的 OpenAI 兼容模型，并以 MCP 对外开放。</desc>
+<desc id="kd-arch-desc">控制端（namespace kubedoor）包含 kubedoor-web、kubedoor-master、kubedoor-ai、kubedoor-alarm、kubedoor-collect，以及可选的 Grafana、VictoriaMetrics、vmalert、Alertmanager；每个业务集群部署 kubedoor-agent 与可选的 vmagent、kube-state-metrics、node-exporter，agent 通过 WebSocket 主动连接控制端；PostgreSQL 18 独立部署在 K8S 之外，是唯一数据库；kubedoor-ai 调用用户配置的 OpenAI 兼容模型，并以 MCP 对外开放；登录与权限由 master 统一管理（本地账号 / LDAP，按集群授权）。</desc>
 
 <defs>
 <style>
@@ -158,7 +158,7 @@
 <rect class="frame" x="274" y="144" width="832" height="86" rx="12" fill="url(#cardfill)" stroke="#60a5fa" stroke-opacity="0.9" stroke-width="1.4"/>
 <rect x="290" y="142.5" width="30" height="3" rx="1.5" fill="#60a5fa"/>
 <text x="290" y="171" font-size="16" data-box="web"><tspan fill="#f1f5f9" font-weight="700">kubedoor-web</tspan><tspan fill="#93c5fd">   统一入口 · nginx 反向代理 + Vue 3 控制台 · NodePort 对外</tspan></text>
-<text x="1090" y="171" font-size="13" text-anchor="end" data-box="web"><tspan fill="#cbd5e1">basic auth 登录 · 读写 / 只读账号</tspan></text>
+<text x="1090" y="171" font-size="13" text-anchor="end" data-box="web"><tspan fill="#cbd5e1">登录与权限交给 master 校验</tspan></text>
 <rect x="310.6" y="192" width="222.8" height="24" rx="7" fill="#c084fc" fill-opacity="0.10" stroke="#c084fc" stroke-opacity="0.7" stroke-width="1"/><text x="422" y="208.5" font-size="13" fill="#c084fc" text-anchor="middle" class="mono" data-box="web">/api/ai · /mcp · /sse → ai</text>
 <rect x="615.9" y="192" width="168.2" height="24" rx="7" fill="#22d3ee" fill-opacity="0.10" stroke="#22d3ee" stroke-opacity="0.7" stroke-width="1"/><text x="700" y="208.5" font-size="13" fill="#22d3ee" text-anchor="middle" class="mono" data-box="web">/api · /ws → master</text>
 <rect x="986.2" y="192" width="105.8" height="24" rx="7" fill="#22d3ee" fill-opacity="0.10" stroke="#22d3ee" stroke-opacity="0.7" stroke-width="1"/><text x="1039.1" y="208.5" font-size="13" fill="#22d3ee" text-anchor="middle" class="mono" data-box="web">/ws ← agent</text>
@@ -196,7 +196,7 @@
 <text x="668" y="392" font-size="13" fill="#cbd5e1" data-box="master">指标查询（PromQL）</text>
 <text x="668" y="411" font-size="13" fill="#cbd5e1" data-box="master">K8S 事件入库 + 规则告警</text>
 <text x="668" y="430" font-size="13" fill="#cbd5e1" data-box="master">告警屏蔽 · Istio 路由</text>
-<text x="668" y="449" font-size="13" fill="#cbd5e1" data-box="master">改镜像权限 · 镜像 tag 查询</text>
+<text x="668" y="449" font-size="13" fill="#cbd5e1" data-box="master">LDAP · 集群授权 · 操作审计</text>
 <text x="668" y="468" font-size="13" fill="#cbd5e1" data-box="master">AI 工具桥接 · 数据定期清理</text>
 </g>
 <g class="box" id="b-grafana" data-id="grafana">

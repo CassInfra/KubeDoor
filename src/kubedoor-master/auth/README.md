@@ -1,7 +1,8 @@
 # KubeDoor 账号与权限(auth)
 
 master 统一负责认证、授权与审计,nginx 不再做认证。本目录是实现,部署和使用说明见
-[deploy/README.md](../../../deploy/README.md#账号与权限)。
+[deploy/README.md](../../../deploy/README.md#账号与权限)。前端的登录页在 `src/kubedoor-web/src/views/login/`,
+用户与权限、LDAP 设置、操作审计页面在 `src/kubedoor-web/src/views/system/`。
 
 ## 权限模型
 
