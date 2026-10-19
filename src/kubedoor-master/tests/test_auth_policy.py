@@ -100,7 +100,7 @@ def test_env_condition_sql():
     ('GET', '/api/pod/delete_pod', 'env_write'),  # GET 但会删 Pod
     ('GET', '/api/pod/auto_dump', 'env_write'),
     ('GET', '/api/admis_switch', 'admin'),
-    ('GET', '/api/agent/istio/vs', 'env_write'),
+    ('GET', '/api/agent/istio/vs', 'admin'),
     ('POST', '/api/scale', 'env_write'),
     ('POST', '/api/db/agent/collect', 'admin'),
     ('GET', '/api/agent/res/content', 'custom'),
@@ -243,24 +243,6 @@ async def test_silence_edit_checks_existing_and_new_matchers(monkeypatch):
                     body={'id': 1, 'matchers': [{'key': 'env', 'op': '=', 'value': 'staging'}]})
 
 
-@pytest.mark.asyncio
-async def test_istio_write_requires_all_associated_clusters(monkeypatch):
-    import db
-
-    async def fetch(sql, *args):
-        return [{'k8s_name': 'a'}, {'k8s_name': 'b'}]
-
-    monkeypatch.setattr(db, 'pg_fetch', fetch)
-    with pytest.raises(policy.Deny):
-        await authorize(user('read', {'a': 'rw'}), 'PUT', '/api/istio/vs', {'vs_id': '3'})
-    await authorize(user('read', {'a': 'rw', 'b': 'rw'}), 'PUT', '/api/istio/vs', {'vs_id': '3'})
-    await authorize(user('read', {'a': 'none'}), 'GET', '/api/istio/vs', {'vs_id': '3'})  # b 可读即可
-    with pytest.raises(policy.Deny):
-        await authorize(user('none'), 'GET', '/api/istio/vs', {'vs_id': '3'})
-    with pytest.raises(policy.Deny):  # 新建时按请求里的集群判断
-        await authorize(user('read', {'a': 'rw'}), 'POST', '/api/istio/vs', body={'k8s_clusters': ['a', 'c']})
-
-
 def test_top_queries_keep_cluster_filter_and_add_visibility():
     from func_manager import top_queries
 
@@ -277,52 +259,30 @@ def test_top_queries_keep_cluster_filter_and_add_visibility():
         assert params == [] and 'ANY' not in sql
 
 
-@pytest.fixture
-def istio_db(monkeypatch):
-    """vs 1 关联集群 a,vs 2 关联集群 b;路由 10 属于 vs 1,路由 20 属于 vs 2。"""
-    import db
-
-    clusters = {1: ['a'], 2: ['b']}
-    routes = {10: 1, 20: 2}
-
-    async def fetch(sql, *args):
-        assert 'FROM k8s_cluster' in sql
-        return [{'k8s_name': env} for env in clusters.get(args[0], [])]
-
-    async def fetchval(sql, *args):
-        assert 'FROM vs_http_routes' in sql
-        return routes.get(args[0])
-
-    monkeypatch.setattr(db, 'pg_fetch', fetch)
-    monkeypatch.setattr(db, 'pg_fetchval', fetchval)
-
-
 @pytest.mark.asyncio
-@pytest.mark.parametrize('method,path,query,allowed', [
-    # 读:每个引用到的 VS 都要看得到,不能用可读的集群参数或 vs_id 夹带别的集群的对象
-    ('GET', '/api/istio/vs', {'k8s_cluster': 'a'}, True),
-    ('GET', '/api/istio/vs', {'k8s_cluster': 'b'}, False),
-    ('GET', '/api/istio/vs', {'k8s_cluster': 'a', 'vs_id': '2'}, False),
-    ('GET', '/api/istio/httproute', {'vs_id': '1', 'route_id': '10'}, True),
-    ('GET', '/api/istio/httproute', {'vs_id': '1', 'route_id': '20'}, False),
-    # 写:单个路由的改、删只认 route_id,同样要按路由所属的 VS 校验
-    ('PUT', '/api/istio/httproute', {'vs_id': '1', 'route_id': '20'}, False),
-    ('DELETE', '/api/istio/httproute', {'vs_id': '1', 'route_id': '20'}, False),
-    ('DELETE', '/api/istio/httproute', {'route_id': '10'}, True),
-    ('POST', '/api/istio/httproute/reorder', {'vs_id': '2'}, False),
-    ('PUT', '/api/istio/vs', {'vs_id': '1'}, True),
-    ('DELETE', '/api/istio/vs', {'vs_id': '1', 'route_id': '20'}, False),
-    # 应用 VS:目标集群可写,且 VS 本身要看得到
-    ('POST', '/api/agent/istio/vs/apply', {'env': 'a', 'vs_id': '1'}, True),
-    ('POST', '/api/agent/istio/vs/apply', {'env': 'a', 'vs_id': '2'}, False),
+@pytest.mark.parametrize('method,path', [
+    ('POST', '/api/istio/groups'), ('PUT', '/api/istio/groups'), ('DELETE', '/api/istio/groups'),
+    ('POST', '/api/istio/collect'), ('POST', '/api/istio/import'), ('POST', '/api/istio/vs/reset'),
+    ('POST', '/api/istio/vs'), ('PUT', '/api/istio/vs'), ('DELETE', '/api/istio/vs'),
+    ('PUT', '/api/istio/vs/cluster'), ('DELETE', '/api/istio/vs/cluster'),
+    ('POST', '/api/istio/httproute'), ('PUT', '/api/istio/httproute'), ('DELETE', '/api/istio/httproute'),
+    ('POST', '/api/istio/httproute/reorder'), ('POST', '/api/istio/apply/preview'), ('POST', '/api/istio/apply'),
+    # 集群里的 VS 不能经通用转发直接读写(下发内容必须由 master 按组标准生成)
+    ('GET', '/api/agent/istio/vs'), ('POST', '/api/agent/istio/vs/apply'),
 ])
-async def test_istio_checks_every_referenced_object(istio_db, method, path, query, allowed):
-    principal = user('read', {'a': 'rw', 'b': 'none'})
-    if allowed:
-        await authorize(principal, method, path, query)
-    else:
-        with pytest.raises(policy.Deny):
-            await authorize(principal, method, path, query)
+async def test_istio_changes_are_admin_only(method, path):
+    rule = policy.match(method, path)
+    assert rule.kind == 'admin'
+    with pytest.raises(policy.Deny) as denied:  # 所有集群读写也不行
+        await authorize(user('rw'), method, path, {'env': 'a', 'vs_id': '1'})
+    assert denied.value.code == 'admin_required'
+    await authorize(user('admin'), method, path, {'env': 'a', 'vs_id': '1'})
+
+
+@pytest.mark.parametrize('path', ['/api/istio/groups', '/api/istio/matrix', '/api/istio/compare', '/api/istio/vs'])
+def test_istio_reads_are_filtered_by_handlers(path):
+    """查看只要登录,能看到哪些集群由 handler 按集群读权限过滤。"""
+    assert policy.match('GET', path).kind == 'login'
 
 
 def test_pepper_protects_hashes_and_upgrades_old_ones(monkeypatch):

@@ -1,721 +1,119 @@
-# Istio VirtualService 路由管理 API v3.0
+# Istio VirtualService 管理(全局VS管理)
 
-这是一个集成在 kubedoor-master 中的 Istio VirtualService 和 HTTP 路由规则管理系统，支持 VS 级别和路由级别的 CRUD 操作，基于优先级的路由管理，以及 K8S 集群关联管理。
+页面:ISTIO管理 → 全局VS管理(`/istio/level1-vs`)。代码:
 
-## 功能特性
+| 文件 | 内容 |
+| --- | --- |
+| `spec.py` | 纯逻辑:解析 / 渲染 spec、域名条件按集群拆分与展开、归一化哈希、规则对齐对比、规范检查、组矩阵 |
+| `store.py` | 数据访问(asyncpg,经 `db.py` 连接池) |
+| `handlers.py` | `/api/istio/*` 接口;调 agent 现有的列出 / 下发接口 |
+| `../db.sql` | 第 6~8 节:`istio_*` 七张表 |
+| `../tests/test_istio_spec.py` | 纯逻辑单测 |
+| `../tests/test_istio_api.py` | 接口端到端测试(真实 PG + 假 agent,设置 `KUBEDOOR_TEST_PG_DSN` 才运行) |
 
-- ✅ **完整的 CRUD 操作**: 支持 VirtualService 和 HTTP 路由的创建、读取、更新、删除
-- ✅ **基于优先级的路由管理**: 使用 priority 字段控制路由顺序，支持自动分配和重复检查
-- ✅ **智能优先级处理**: 不传 priority 时自动追加到最后，传入时检查重复值
-- ✅ **YAML 生成**: 根据数据库数据生成完整的 VirtualService YAML 配置
-- ✅ **K8S 集群关联管理**: 支持 VirtualService 与 K8S 集群的关联关系管理
-- ✅ **PostgreSQL 数据库**: 使用 PostgreSQL 进行数据持久化(psycopg 3.x)
-- ✅ **优先级重新整理**: 支持批量重新整理路由优先级
-- ✅ **健康检查**: 提供系统健康状态检查接口
+## 模型
 
-## 系统架构
+- **Istio 组**:一套业务的集群,如 `cassmall` = 共用的测试集群 + 各项目的生产集群。一个集群只属于一个组;
+  组成员有类型(测试 / 生产)和备注,按列筛选、做覆盖检查用。
+- **组标准 VS**:花折保存的那一份,按「组 + 命名空间 + 名称」唯一。**规则、默认路由、gateways 全组共用**,用户修改的就是它。
+- **部署关系**:每个 VS 自己选择部署到组内哪些集群(测试环境往往有全部 VS,各项目的生产集群只有一部分);
+  **hosts 和规则里的域名条件按集群各自维护**。没有部署关系 = 这个 VS 不部署到该集群。
+- **集群现状**:采集到的各集群 VirtualService 原样快照(只读),只用于对比、纳管和状态判断,不直接修改。
 
-```
-├── kubedoor-master.py   # 主要 API 服务文件
-├── istio_route/
-│   ├── istio_route.py   # 路由管理核心逻辑
-│   └── README.md        # 说明文档
-└── utils.py             # 工具函数和配置
-```
+下发到集群 X 的内容 = 组标准(gateways + 规则 + 默认路由)+ X 的 hosts + X 在各规则里的域名,由 master 生成,
+前端不传 spec。agent 用 Server-Side Apply(force)写入,`spec.http` 整段替换。
 
-## 数据库设计
+### 域名条件按集群
 
-### 全局字段
+规则里按域名区分的条件(`match` 里的 `authority`,以及写成 `headers.host` 的)取值都是该集群 hosts 里的域名,
+各集群天然不同(本机房域名 `xxx-penglai` / `xxx-kunlun`、测试和生产的域名规律也不同),所以和 hosts 一样按集群保存:
 
-| KEY       | VALUE  |
-| --------- | ------ |
-| name      | 字符串 |
-| namespace | 字符串 |
-| gateways  | 列表   |
-| hosts     | 列表   |
-| protocol  | 字符串 |
+- 组标准规则的 `match_rules` 是模板,域名条件的位置写成 `{"$domains": true}`(同一条目里的 uri / headers 等其他条件照常共用);
+  相邻、除域名外条件相同的条目合成一个「域名块」。
+- 各集群在每个域名块里要匹配的域名存在 `istio_vs_route_domain`(按域名块顺序,每块一组 `{field: authority|host, op, value}`),
+  `field` / `op` 原样保留采集到的写法。下发到某集群时每个域名展开成一个 match 条目(条目之间是「或」)。
+- 一律按集群存(各集群恰好相同也一样),纳入了该 VS 的集群都要设置,且至少匹配一个域名;
+  没设置全的集群状态是「缺少域名」,下发预览直接报错、不能下发。
+- 规则是否一致(版本 A / B)不算域名的值:只差域名的规则算同一版本;对比里标「只是域名不同」,不算规则差异。
+- 纳管时各集群的域名取自己现状里对应的规则(按不算域名值的匹配条件对齐);对不上、集群里没有这个 VS 的,纳管后显示「缺少域名」。
+- 以某集群现状更新组标准:该集群的域名取它的现状;其他集群保持原来对应规则的域名,新出现的规则取各自现状。
+- 编辑:规则弹框里按已部署的集群从各自 hosts 里选域名,可以按关键字一次在各集群里选、从一个集群复制到另一个并替换机房标识;
+  「编辑 hosts 和域名」弹框里改单个集群的 hosts 和它在各规则里的域名,可以从别的集群复制并替换(如 penglai → kunlun)。
+- 规范检查:精确匹配的域名不在该集群 hosts 里的,标为规范问题(请求到不了这条规则)。
 
-### HTTP 路由规则 [{...},{...}]
+### 无损
 
-| KEY                 | 类型           | 描述         | 示例/说明                                                     |
-| ------------------- | -------------- | ------------ | ------------------------------------------------------------- |
-| **name**            | 字符串(可选)   | 虚拟服务名称 |                                                               |
-| **match**           | **列表**(可选) | 匹配规则列表 | `[{uri: {...}, authority: {...}}, {...}]`                     |
-| match[].uri         | 字典           | URI 匹配规则 | **{**`uri: {prefix/exact/regex: 字符串}`**,**                 |
-| match[].authority   | 字典           | 权威匹配规则 | `authority: {exact: 字符串}`**}**                             |
-| **rewrite**         | **字典**(可选) | 重写规则对象 | `{uri: "/"}`                                                  |
-| rewrite.uri         | 字符串         | URI 重写路径 | `/`                                                           |
-| forward_type        | 字符串         | 转发类型     | `route/delegate`                                              |
-| **route**           | **列表**       | 路由规则列表 | `[{destination: {...}, headers: {...}}, {...}]`               |
-| route[].destination | 字典           | 目标服务     | **{**`destination: {host: 字符串, port: {number: 数字}}`**,** |
-| route[].headers     | 字典           | 请求头设置   | `headers: {request: {set: {X-Forwarded-Proto: https}}}`**}**  |
-| **delegate**        | **字典**       | 委托配置对象 | `{name: "service-orders-service", namespace: "sos"}`          |
-| delegate.name       | 字符串         | 委托服务名   | `service-orders-service`                                      |
-| delegate.namespace  | 字符串         | 命名空间     | `sos`                                                         |
-| **timeout**         | 字符串         | 超时时间     | `10s`                                                         |
+采集只建模了 hosts、gateways、http 规则的 `name / match / rewrite / route|delegate / timeout` 和默认路由。
+其他字段(`retries`、`corsPolicy`、`redirect`、`fault`、`mirror`、`tcp`、`tls`、`exportTo` 等)原样存进
+`extra` / `df_extra` / `extra_spec`,渲染时原样带回,所以「采集 → 纳管 → 下发」不会丢配置。
+页面上这些字段只读展示;规则编辑表单不认识的匹配条件、目标字段也原样保留。
 
-### vs_global 表 (VirtualService 全局配置)
+- 默认路由 = 最后一条没有 match 的规则;中间没有 match 的规则保持原位,当普通规则处理。
+- 归一化:省略和空值(`null` / `[]` / `{}`)视为相同,键顺序无关;列表顺序有意义(规则顺序决定命中)。
 
-| 字段               | 类型         | 说明                                 |
-| ------------------ | ------------ | ------------------------------------ |
-| id                 | INT          | 主键，自增                           |
-| name               | VARCHAR(255) | VirtualService 名称                  |
-| namespace          | VARCHAR(255) | 命名空间，默认 'default'             |
-| gateways           | TEXT         | 网关列表 (JSON)                      |
-| hosts              | TEXT         | 主机列表 (JSON)                      |
-| protocol           | VARCHAR(50)  | 协议类型，默认 'http'                |
-| df_forward_type    | VARCHAR(20)  | 默认路由类型 ('route' 或 'delegate') |
-| df_forward_detail  | TEXT         | 默认路由详情 (JSON)                  |
-| df_forward_timeout | VARCHAR(50)  | 默认路由超时设置                     |
-| created_at         | TIMESTAMP    | 创建时间                             |
-| updated_at         | TIMESTAMP    | 更新时间                             |
+### 规则名称
 
-### vs_http_routes 表 (HTTP 路由规则)
+用了重写就要有名称,没用重写就不要名称(名称用于访问日志里展示原始前缀)。新增 / 修改规则时后端强制校验,
+启用重写时前端默认带出「uri 前缀去掉末尾 /」;采集来的不合规规则在矩阵和详情页标为「规范问题」。
 
-| 字段           | 类型         | 说明                             |
-| -------------- | ------------ | -------------------------------- |
-| id             | INT          | 主键，自增                       |
-| vs_global_id   | INT          | 关联的全局配置 ID (外键)         |
-| name           | VARCHAR(255) | 路由规则名称                     |
-| priority       | INT          | 优先级 (数字越小优先级越高)      |
-| match_rules    | TEXT         | 匹配规则 (JSON)                  |
-| rewrite_rules  | TEXT         | 重写规则 (JSON)                  |
-| forward_type   | VARCHAR(20)  | 转发类型 ('route' 或 'delegate') |
-| forward_detail | TEXT         | 转发详情 (JSON)                  |
-| timeout        | VARCHAR(50)  | 路由级别超时设置                 |
-| created_at     | TIMESTAMP    | 创建时间                         |
-| updated_at     | TIMESTAMP    | 更新时间                         |
+### 状态
 
-### k8s_cluster 表 (K8S集群关联)
+| 状态 | 判断 |
+| --- | --- |
+| 一致 `synced` | 集群现状 = 组标准 + 该集群的 hosts 和域名 |
+| 待下发 `pending` | 不一致,但集群现状仍是上次下发(或纳管时)的内容:花折这边改了还没下发 |
+| 不一致 `diff` | 集群现状不是上次下发的内容:有人直接改过集群,或纳管后从未下发且不同 |
+| 集群中没有 `missing` | 有部署关系,但集群里没有这个 VS |
+| 缺少域名 `incomplete` | 有规则的域名条件还没设置该集群的域名(或一个都没选),补上前不能下发 |
+| 未采集 `unknown` | 该集群还没采集过现状 |
+| 未纳入 `unbound` | 集群里有同名 VS,但组标准没有部署到该集群 |
+| 未纳管 `unmanaged` | 还没有组标准,只是集群现状 |
 
-| 字段       | 类型         | 说明                        |
-| ---------- | ------------ | --------------------------- |
-| id         | INT          | 主键，自增                  |
-| k8s_name   | VARCHAR(255) | K8S集群名称                 |
-| vs_id      | INT          | 关联的VirtualService ID (外键) |
-| updated_at | TIMESTAMP    | 更新时间                    |
+比较用 `spec_hash`(归一化后整份 spec);各集群规则是否一致用 `rule_digest`(去掉 hosts,规则里域名的值也不算),
+未纳管的 VS 按它把各集群分成版本 A / B / C(集群多的版本在前)。纳管时把各集群当时的现状哈希记为「上次下发」,
+所以和组标准不同但集群没被动过的,显示「待下发」。
 
-## 快速开始
+## 典型流程
 
-### 1. 环境配置
+1. **初始化整理**:建组并加入集群 → 刷新现状(并行采集各集群,只写各自的快照) → 一致的 VS 一键纳管
+   (只差 hosts 和域名的也算一致,各集群的域名取自己的现状) →
+   不一致的先对比,选基准集群纳管(或以某集群现状更新组标准) → 确认差异后下发拉齐。
+2. **日常修改**:改组标准 → 相关集群变成「待下发」 → 先下发测试集群,验证后再下发生产集群。
+   下发前预览的是集群最新现状 → 将要下发的差异。新增按域名区分的规则时,在规则弹框里给每个集群选域名。
+3. **发现漂移**:刷新现状后出现「不一致」 → 对比 → 下发组标准覆盖回去,或以该集群现状更新组标准。
+4. **部署到新集群**:「部署到此集群」填 hosts 和各规则的域名(可以从别的集群复制并替换机房标识)→ 下发。
 
-与 kubedoor-master 共用 PostgreSQL 连接,通过环境变量设置(K8S 部署时在 `kubedoor-config` 这个 ConfigMap 里):
+删除组标准、不再部署到某集群,都只删花折里的数据,集群里的 VirtualService 不受影响。
 
-```env
-PG_HOST=10.1.1.50
-PG_PORT=5432
-PG_USER=kubedoor
-PG_PASSWORD=your_password
-PG_DATABASE=kubedoor
-```
+## 接口
 
-### 2. 数据库初始化
+查看(GET)要登录,看不到的集群不返回(组里一个都看不到就 403);**所有修改只允许管理员**(`auth/policy.py`)。
+浏览器不能经通用转发直接调 `/api/agent/istio/*`(master 的 `http_handler` 直接拒绝)。
 
-不需要手动建表。kubedoor-master 启动时会执行 `db.sql`,Istio 的三张表(`vs_global` /
-`vs_http_routes` / `k8s_cluster`)和其它表一起自动创建。
+| 方法 | 路径 | 说明 |
+| --- | --- | --- |
+| GET | `/api/istio/groups` | 组列表;管理员额外返回所有集群及所属组 |
+| POST / PUT / DELETE | `/api/istio/groups`(`?id=`) | 新建 / 修改 / 删除组。body:`{name, description, clusters:[{k8s_name, env_type, remark}]}`,顺序即显示顺序;移出组的集群,它的部署关系和现状一并删除 |
+| GET | `/api/istio/matrix?group_id=` | 组矩阵:每行一个 VS,`cells` 按集群给出 hosts、状态、版本 |
+| POST | `/api/istio/collect` | 刷新现状:`{group_id, k8s_names?}`,逐个集群返回成功 / 失败 |
+| GET | `/api/istio/compare?group_id=&namespace=&name=&left=&right=` | 对比。一方是 `standard`(组标准,不含 hosts,域名显示 `<按集群>`)、`standard@集群`、`cluster@集群`(现状);`diff.rules_same` = 只差 hosts 和域名,规则行 `op=domains` = 只是域名不同 |
+| POST | `/api/istio/import` | 纳管:`{group_id, items:[{namespace, name, base, clusters}]}`,以 base 集群现状生成组标准,各集群 hosts 和域名取自己的现状 |
+| POST | `/api/istio/vs/reset` | 以某集群现状更新组标准的共用部分:`{vs_id, k8s_name}`,hosts 不变;域名见上文 |
+| GET | `/api/istio/vs?vs_id=` | 组标准详情:共用部分、规则(`domains`:各集群的域名)、各集群的 hosts 和状态(`missing_domains` 缺哪些规则的域名,`live_domains` 现状里对应规则的域名)、规范检查 |
+| POST | `/api/istio/vs` | 新建:`{group_id, namespace, name, gateways, df_*, clusters:[{k8s_name, hosts}]}`;集群里已有同名 VS 时要求用纳管 |
+| PUT / DELETE | `/api/istio/vs?vs_id=` | 修改 gateways 和默认路由 / 删除组标准(名称、命名空间不可改) |
+| PUT / DELETE | `/api/istio/vs/cluster` | 部署到某集群并设置 hosts:`{vs_id, k8s_name, hosts, domains?: {规则 id: [[域名]]}}` / 不再部署(`?vs_id=&k8s_name=`,该集群的域名一并删除) |
+| POST | `/api/istio/httproute?vs_id=` | 新增规则;`priority` 不传追加到最后,传了检查是否占用;有域名块时带 `domains: {集群: [[域名]]}`,已纳入的集群都要给 |
+| PUT / DELETE | `/api/istio/httproute?route_id=` | 修改(`priority` 不传保持原位置,未建模字段保留,各集群域名整体替换)/ 删除(删除后重排优先级) |
+| POST | `/api/istio/httproute/reorder?vs_id=` | 优先级重排为 10、20、30…… |
+| POST | `/api/istio/apply/preview` | `{items:[{vs_id, k8s_name}]}`:从集群取最新现状(顺便刷新快照),逐项给出现状、将要下发的 spec 和结构化差异;缺少域名的项给出 error |
+| POST | `/api/istio/apply` | 下发:同一集群依次、不同集群并行;有缺少域名的项整个请求拒绝;成功的记下发人和内容哈希,完成后重新采集该集群现状;每项记审计 `istio.apply` |
 
-### 3. 启动服务
-
-启动 kubedoor-master 主服务:
+## 测试
 
 ```bash
-python kubedoor-master.py
+cd src/kubedoor-master
+python -m pytest tests/test_istio_spec.py -q
+# 接口端到端:需要一个可清空的测试库(会执行 db.sql 并清空 istio_* 表)
+KUBEDOOR_TEST_PG_DSN=postgresql://postgres@127.0.0.1:5432/kubedoor_test python -m pytest tests/test_istio_api.py -q
 ```
-
-服务监听 80 端口
-
-### 4. API 访问
-
-所有 Istio 路由管理接口都在 `/api/istio/` 路径下，集成在 kubedoor-master 服务中
-
-## API 接口详解
-
-### VS 级别接口
-
-#### 1. 获取所有 VirtualService
-
-```http
-GET /api/istio/vs?namespace=default
-```
-
-**响应示例：**
-
-```json
-[
-  {
-    "id": 1,
-    "name": "example-vs",
-    "namespace": "default",
-    "gateways": ["gateway1", "gateway2"],
-    "hosts": ["example.com", "api.example.com"],
-    "protocol": "http",
-    "df_forward_type": "route",
-    "df_forward_detail": [
-      {
-        "destination": {
-          "host": "default-service",
-          "port": { "number": 8080 }
-        }
-      }
-    ],
-    "df_forward_timeout": "30s",
-    "created_at": "2024-01-15T10:30:00",
-    "updated_at": "2024-01-15T10:30:00"
-  }
-]
-```
-
-#### 2. 获取指定 VirtualService
-
-```http
-GET /api/istio/vs?vs_id=1
-```
-
-**查询参数**:
-- `vs_id`: VirtualService ID
-
-#### 3. 创建 VirtualService
-
-```http
-POST /api/istio/vs
-Content-Type: application/json
-
-{
-  "k8s_clusters": ["cluster1", "cluster2"],
-  "name": "example-vs",
-  "namespace": "default",
-  "gateways": ["gateway1", "gateway2"],
-  "hosts": ["example.com", "api.example.com"],
-  "protocol": "http",
-  "df_forward_type": "route",
-  "df_forward_detail": [
-    {
-      "destination": {
-        "host": "default-service",
-        "port": {"number": 8080}
-      }
-    }
-  ],
-  "df_forward_timeout": "30s"
-}
-```
-
-**响应示例：**
-
-```json
-{
-  "message": "VirtualService created successfully",
-  "data": {
-    "id": 1,
-    "name": "example-vs",
-    "namespace": "default"
-  }
-}
-```
-
-#### 4. 更新 VirtualService
-
-```http
-PUT /api/istio/vs?vs_id=1
-Content-Type: application/json
-
-{
-  "name": "updated-vs-name",
-  "namespace": "production",
-  "hosts": ["new-example.com"],
-  "df_forward_timeout": "60s"
-}
-```
-
-**查询参数**:
-- `vs_id`: VirtualService ID
-
-#### 5. 删除 VirtualService
-
-```http
-DELETE /api/istio/vs?vs_id=1
-```
-
-**查询参数**:
-- `vs_id`: VirtualService ID
-
-### HTTP 路由级别接口
-
-#### 1. 获取 HTTP 路由列表
-
-```http
-GET /api/istio/httproute?vs_id=1
-```
-
-**响应示例：**
-
-```json
-[
-  {
-    "id": 1,
-    "vs_global_id": 1,
-    "name": "api-route",
-    "priority": 10,
-    "match_rules": [
-      {
-        "uri": { "prefix": "/api" },
-        "headers": {
-          "x-version": { "exact": "v1" }
-        }
-      }
-    ],
-    "rewrite_rules": {
-      "uri": "/v1"
-    },
-    "forward_type": "route",
-    "forward_detail": [
-      {
-        "destination": {
-          "host": "api-service",
-          "port": { "number": 8080 }
-        },
-        "weight": 100
-      }
-    ],
-    "timeout": "10s",
-    "created_at": "2024-01-15T10:30:00",
-    "updated_at": "2024-01-15T10:30:00"
-  }
-]
-```
-
-#### 2. 获取指定 HTTP 路由
-
-```http
-GET /api/istio/httproute?vs_id=1&route_id=1
-```
-
-#### 3. 创建 HTTP 路由
-
-```http
-POST /api/istio/httproute?vs_id=1
-Content-Type: application/json
-
-{
-  "name": "api-route",
-  "match_rules": [
-    {
-      "uri": {"prefix": "/api"},
-      "headers": {
-        "x-version": {"exact": "v1"}
-      }
-    }
-  ],
-  "rewrite_rules": {
-    "uri": "/v1"
-  },
-  "forward_type": "route",
-  "forward_detail": [
-    {
-      "destination": {
-        "host": "api-service",
-        "port": {"number": 8080}
-      },
-      "weight": 100
-    }
-  ],
-  "timeout": "10s",
-  "priority": 15
-}
-```
-
-**注意：**
-
-- `priority` 参数可选，不传则自动追加到最后
-- 传入 `priority` 时会检查是否重复，重复则返回错误
-
-**响应示例：**
-
-```json
-{
-  "message": "HTTP route created successfully",
-  "data": {
-    "route_id": 1,
-    "priority": 15
-  }
-}
-```
-
-#### 4. 更新 HTTP 路由
-
-```http
-PUT /api/istio/httproute?vs_id=1&route_id=1
-Content-Type: application/json
-
-{
-  "name": "updated-api-route",
-  "timeout": "20s"
-}
-```
-
-**查询参数**:
-- `vs_id`: VirtualService ID
-- `route_id`: 路由 ID
-
-#### 5. 删除 HTTP 路由
-
-```http
-DELETE /api/istio/httproute?vs_id=1&route_id=1
-```
-
-**查询参数**:
-- `vs_id`: VirtualService ID
-- `route_id`: 路由 ID
-
-### 路由管理辅助接口
-
-#### 重新整理路由优先级
-
-```http
-POST /api/istio/httproute/reorder?vs_id=1
-```
-
-这个接口会重新分配所有路由的优先级，确保连续性（使用 10 的倍数）。
-
-**查询参数**:
-- `vs_id`: VirtualService ID
-
-**响应示例：**
-
-```json
-{
-  "message": "Routes reordered successfully",
-  "data": {
-    "reordered_count": 5
-  }
-}
-```
-
-### 其他接口
-
-#### 生成 YAML 配置
-
-```http
-GET /api/istio/vs/yaml?vs_id=1
-```
-
-**查询参数**:
-- `vs_id`: VirtualService ID
-
-**响应示例：**
-
-```json
-{
-  "yaml": "apiVersion: networking.istio.io/v1beta1\nkind: VirtualService\nmetadata:\n  name: example-vs\n  namespace: default\nspec:\n  hosts:\n  - example.com\n  - api.example.com\n  gateways:\n  - gateway1\n  - gateway2\n  http:\n  - name: api-route\n    match:\n    - uri:\n        prefix: /api\n      headers:\n        x-version:\n          exact: v1\n    rewrite:\n      uri: /v1\n    route:\n    - destination:\n        host: api-service\n        port:\n          number: 8080\n      weight: 100\n    timeout: 10s\n  - route:\n    - destination:\n        host: default-service\n        port:\n          number: 8080\n    timeout: 30s"
-}
-```
-
-#### 2. 健康检查
-
-```http
-GET /api/istio/health
-```
-
-**响应示例：**
-
-```json
-{
-  "status": "healthy",
-  "timestamp": "2024-01-15T10:30:00Z",
-  "database": "connected"
-}
-```
-
-### K8S 集群关联管理接口
-
-#### 更新 VirtualService 的 K8S 集群关联关系
-
-**接口**: `POST /api/istio/vs/k8s`
-
-**描述**: 更新指定 VirtualService 与 K8S 集群的关联关系
-
-**请求体**:
-```json
-{
-  "vs_id": 1,
-  "k8s_clusters": ["cluster-1", "cluster-2", "cluster-3"]
-}
-```
-
-**响应**:
-```json
-{
-  "message": "K8S cluster relations updated successfully",
-  "vs_id": 1,
-  "updated_clusters": ["cluster-1", "cluster-2", "cluster-3"]
-}
-```
-
-**说明**:
-- 该接口会先删除指定 VirtualService 的所有现有 K8S 集群关联
-- 然后添加新的关联关系
-- 操作在数据库事务中进行，确保数据一致性
-- 如果 `k8s_clusters` 为空数组，则只删除现有关联，不添加新关联
-
-## 优先级管理详解
-
-### 1. 优先级规则
-
-- **数字越小，优先级越高**
-- 系统使用 10 的倍数作为基础优先级（10, 20, 30...）
-- 便于在中间插入新路由
-
-### 2. 自动优先级分配
-
-当创建路由时不传 `priority` 参数：
-
-```json
-{
-  "name": "auto-priority-route",
-  "forward_type": "route",
-  "forward_detail": [...]
-  // 不传 priority，系统自动分配
-}
-```
-
-系统会自动分配一个比当前最大优先级大 10 的值。
-
-### 3. 手动指定优先级
-
-```json
-{
-  "name": "manual-priority-route",
-  "forward_type": "route",
-  "forward_detail": [...],
-  "priority": 25  // 手动指定优先级
-}
-```
-
-如果指定的优先级已存在，会返回错误。
-
-### 4. 优先级重新整理
-
-当优先级变得不连续或需要重新排序时，调用重新整理接口：
-
-```http
-POST /api/istio/httproute/reorder?vs_name=example-vs&namespace=default
-```
-
-## 使用示例
-
-### Python 示例
-
-```python
-import requests
-import json
-
-base_url = "http://localhost:5001"
-
-# 1. 创建 VirtualService
-vs_data = {
-    "name": "my-app",
-    "namespace": "production",
-    "hosts": ["myapp.com"],
-    "gateways": ["istio-system/gateway"]
-}
-
-response = requests.post(f"{base_url}/api/istio/vs", json=vs_data)
-print(f"创建 VS: {response.json()}")
-
-# 2. 创建 HTTP 路由（自动优先级）
-route_data = {
-    "name": "api-v1",
-    "match_rules": [
-        {
-            "uri": {"prefix": "/api/v1"},
-            "headers": {
-                "x-api-version": {"exact": "v1"}
-            }
-        }
-    ],
-    "forward_type": "route",
-    "forward_detail": [
-        {
-            "destination": {
-                "host": "api-v1-service",
-                "port": {"number": 8080}
-            }
-        }
-    ],
-    "timeout": "30s"
-}
-
-response = requests.post(
-    f"{base_url}/api/istio/httproute?vs_id=1",
-    json=route_data
-)
-print(f"创建路由: {response.json()}")
-
-# 3. 创建另一个路由（指定优先级）
-route_data2 = {
-    "name": "api-v2",
-    "match_rules": [
-        {
-            "uri": {"prefix": "/api/v2"}
-        }
-    ],
-    "forward_type": "route",
-    "forward_detail": [
-        {
-            "destination": {
-                "host": "api-v2-service",
-                "port": {"number": 8080}
-            }
-        }
-    ],
-    "priority": 5  # 更高优先级
-}
-
-response = requests.post(
-    f"{base_url}/api/istio/httproute?vs_id=1",
-    json=route_data2
-)
-print(f"创建高优先级路由: {response.json()}")
-
-# 4. 获取路由列表
-response = requests.get(
-    f"{base_url}/api/istio/httproute?vs_id=1"
-)
-routes = response.json()
-print(f"路由列表: {json.dumps(routes, indent=2)}")
-
-# 5. 生成 YAML
-response = requests.get(
-    f"{base_url}/api/istio/vs/yaml?vs_id=1"
-)
-yaml_content = response.json()["yaml"]
-print(f"生成的 YAML:\n{yaml_content}")
-
-# 6. 重新整理优先级
-response = requests.post(
-    f"{base_url}/api/istio/httproute/reorder?vs_id=1"
-)
-print(f"重新整理结果: {response.json()}")
-
-# 7. 更新 K8S 集群关联关系
-k8s_data = {
-    "vs_id": 1,  # 使用创建的 VirtualService ID
-    "k8s_clusters": ["prod-cluster-1", "prod-cluster-2", "backup-cluster"]
-}
-
-response = requests.post(
-    f"{base_url}/api/istio/vs/k8s",
-    json=k8s_data
-)
-print(f"K8S集群关联更新结果: {response.json()}")
-```
-
-### curl 示例
-
-```bash
-# 创建 VirtualService
-curl -X POST "http://localhost:5001/api/istio/vs" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "name": "test-vs",
-    "hosts": ["test.com"],
-    "gateways": ["istio-system/gateway"]
-  }'
-
-# 创建 HTTP 路由
-curl -X POST "http://localhost:5001/api/istio/httproute?vs_id=1" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "name": "test-route",
-    "match_rules": [
-      {
-        "uri": {"prefix": "/test"}
-      }
-    ],
-    "forward_type": "route",
-    "forward_detail": [
-      {
-        "destination": {
-          "host": "test-service",
-          "port": {"number": 8080}
-        }
-      }
-    ]
-  }'
-
-# 获取路由列表
-curl "http://localhost:5001/api/istio/httproute?vs_id=1"
-
-# 生成 YAML
-curl "http://localhost:5001/api/istio/vs/yaml?vs_id=1"
-
-# 重新整理路由优先级
-curl -X POST "http://localhost:5001/api/istio/httproute/reorder?vs_id=1"
-
-# 更新 K8S 集群关联关系
-curl -X POST "http://localhost:5001/api/istio/vs/k8s" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "vs_id": 1,
-    "k8s_clusters": ["cluster-1", "cluster-2"]
-  }'
-```
-
-## 错误处理
-
-### 常见错误码
-
-- **400 Bad Request**: 请求参数错误
-- **404 Not Found**: 资源不存在
-- **409 Conflict**: 资源冲突（如名称重复、优先级重复）
-- **500 Internal Server Error**: 服务器内部错误
-
-### 错误响应格式
-
-```json
-{
-  "detail": "Priority 10 already exists"
-}
-```
-
-## 故障排除
-
-### 1. 数据库连接问题
-
-检查 master 的 `PG_*` 环境变量(K8S 部署时看 `kubedoor-config` 这个 ConfigMap),
-确认 `PG_HOST` 是 Pod 能访问到的地址。
-
-### 2. 优先级冲突
-
-如果遇到优先级冲突，可以：
-
-1. 使用自动优先级分配（不传 priority 参数）
-2. 调用重新整理接口重新分配优先级
-3. 手动指定一个未使用的优先级值
-
-### 3. 服务启动失败
-
-检查：
-
-- 端口 80 是否被占用
-- PostgreSQL 服务是否运行
-- 数据库权限是否正确
-
-## 扩展开发
-
-### 添加新字段
-
-1. 修改数据库表结构
-2. 更新 Pydantic 模型
-3. 修改相应的 CRUD 操作
-4. 更新 YAML 生成逻辑
-
-### 添加新接口
-
-1. 定义新的路由处理函数
-2. 添加相应的 Pydantic 模型
-3. 更新 API 文档
-
-## 许可证
-
-本项目采用 MIT 许可证。

@@ -3,11 +3,9 @@ asyncio
 aiohttp
 requests
 asyncpg
-psycopg[c,pool]
 pydantic
 PyYAML
 typing-extensions
-python-dotenv
 huaweicloudsdkcore==3.1.165
 huaweicloudsdkswr==3.1.165
 aliyun-python-sdk-core==2.16.0

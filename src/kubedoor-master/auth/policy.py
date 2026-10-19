@@ -243,119 +243,6 @@ async def silence_write_check(request, principal):
             raise Deny(403, NEED_GLOBAL_WRITE, 'global_write_required')
 
 
-async def _vs_clusters(vs_id):
-    import db
-
-    try:
-        vs_id = int(vs_id)
-    except (TypeError, ValueError):
-        raise Deny(400, 'vs_id 格式不正确', 'bad_request')
-    rows = await db.pg_fetch('SELECT k8s_name FROM k8s_cluster WHERE vs_id=$1', vs_id)
-    return [row['k8s_name'] for row in rows]
-
-
-async def _route_vs(route_id):
-    import db
-
-    try:
-        route_id = int(route_id)
-    except (TypeError, ValueError):
-        raise Deny(400, 'route_id 格式不正确', 'bad_request')
-    vs_id = await db.pg_fetchval('SELECT vs_global_id FROM vs_http_routes WHERE id=$1', route_id)
-    if vs_id is None:
-        raise Deny(404, '路由不存在', 'not_found')
-    return vs_id
-
-
-def _check_vs_write(principal, clusters):
-    if clusters:
-        check_write_all(principal, clusters)
-    elif not principal.global_write:
-        raise Deny(403, '该 VirtualService 没有关联集群,' + NEED_GLOBAL_WRITE, 'global_write_required')
-
-
-def _check_vs_read(principal, clusters):
-    """VS 关联了多个集群时,任一关联集群可读即可查看;没有关联集群的按全局权限。"""
-    if clusters:
-        if not any(principal.can_read(env) for env in clusters):
-            raise Deny(403, '没有该 VirtualService 所属集群的访问权限', 'cluster_forbidden')
-    elif not principal.global_read:
-        raise Deny(403, '需要全局只读及以上权限', 'global_read_required')
-
-
-async def _referenced_vs_ids(request):
-    """请求里引用到的所有 VS:query 的 vs_id,以及 route_id 所属的 VS。
-
-    Istio 的 handler 有的按 vs_id、有的按 route_id 取数或修改(比如取单个路由、删路由只看 route_id),
-    两个参数可能同时出现且指向不同的 VS,所以必须每个都校验,不能只看其中一个。"""
-    vs_ids = []
-    if request.query.get('vs_id'):
-        vs_ids.append(request.query.get('vs_id'))
-    if request.query.get('route_id'):
-        vs_ids.append(await _route_vs(request.query.get('route_id')))
-    return vs_ids
-
-
-async def istio_read_check(request, principal):
-    """Istio 查询:按引用到的 VS(vs_id / route_id)判断;只按集群列 VS 时检查 k8s_cluster。"""
-    vs_ids = await _referenced_vs_ids(request)
-    for vs_id in vs_ids:
-        _check_vs_read(principal, await _vs_clusters(vs_id))
-    if vs_ids:
-        return
-    cluster = request.query.get('k8s_cluster')
-    if cluster:
-        check_read_all(principal, [cluster])
-        return
-    if not principal.global_read:
-        raise Deny(403, '需要全局只读及以上权限', 'global_read_required')
-
-
-async def istio_vs_write_check(request, principal):
-    if request.method == 'POST':
-        body = await _json_body(request)
-        clusters = body.get('k8s_clusters')
-        clusters = [c for c in clusters if isinstance(c, str) and c] if isinstance(clusters, list) else []
-        _check_vs_write(principal, clusters)
-        return
-    vs_ids = await _referenced_vs_ids(request)
-    if not vs_ids:
-        raise Deny(400, '缺少 vs_id', 'bad_request')
-    for vs_id in vs_ids:
-        _check_vs_write(principal, await _vs_clusters(vs_id))
-
-
-async def istio_vs_k8s_check(request, principal):
-    """修改 VS 关联的集群:原来关联的和新关联的集群都要可写。"""
-    body = await _json_body(request)
-    clusters = await _vs_clusters(body.get('vs_id'))
-    new = body.get('k8s_clusters')
-    for env in new if isinstance(new, list) else []:
-        if isinstance(env, str) and env and env not in clusters:
-            clusters.append(env)
-    _check_vs_write(principal, clusters)
-
-
-async def istio_route_write_check(request, principal):
-    vs_ids = await _referenced_vs_ids(request)
-    if not vs_ids:
-        raise Deny(400, '缺少 vs_id 或 route_id', 'bad_request')
-    for vs_id in vs_ids:
-        _check_vs_write(principal, await _vs_clusters(vs_id))
-
-
-async def istio_apply_check(request, principal):
-    """把数据库里的 VS 应用到集群:目标集群要可写,被应用的 VS 也要看得到(不能借此读取别的集群的 VS)。"""
-    env = request.query.get('env')
-    _require_envs([env] if env else [])
-    check_write_all(principal, [env])
-    vs_ids = await _referenced_vs_ids(request)
-    if not vs_ids:
-        raise Deny(400, '缺少 vs_id', 'bad_request')
-    for vs_id in vs_ids:
-        _check_vs_read(principal, await _vs_clusters(vs_id))
-
-
 # ---------------------------------------------------------------------------
 # 规则表
 # ---------------------------------------------------------------------------
@@ -415,16 +302,11 @@ RULES = (
     _rule('GET', '/api/db/silence/(list|label_values)', 'login'),
     _rule('POST', '/api/db/silence/preview', 'login'),
     _rule('POST', '/api/db/silence/(add|edit|revoke|extend|delete)', 'custom', check=silence_write_check),
-    # ---- Istio ----
-    _rule('GET', '/api/istio/health', 'login'),
-    _rule('GET', '/api/istio/(vs|httproute)', 'custom', check=istio_read_check),
-    _rule('POST|PUT|DELETE', '/api/istio/vs', 'custom', check=istio_vs_write_check),
-    _rule('POST', '/api/istio/vs/k8s', 'custom', check=istio_vs_k8s_check),
-    _rule('POST|PUT|DELETE', '/api/istio/httproute(/reorder)?', 'custom', check=istio_route_write_check),
-    # 会把 K8S 里的 VirtualService 同步写回数据库,按写处理
-    _rule('GET', '/api/agent/istio/vs', 'env_write', env='query.env'),
-    # 把数据库里的 VS 应用到集群:目标集群可写 + 能看到这个 VS
-    _rule('POST', '/api/agent/istio/vs/apply', 'custom', check=istio_apply_check),
+    # ---- Istio(设计见 istio_route/README.md):查看按集群读权限,由 handler 过滤;所有修改只允许管理员 ----
+    _rule('GET', '/api/istio/.*', 'login'),
+    _rule('POST|PUT|DELETE', '/api/istio/.*', 'admin'),
+    # 集群里的 VS 只能经 /api/istio/* 读写(下发内容由 master 按组标准生成),通用转发直接拒绝
+    _rule('', '/api/agent/istio/.*', 'admin'),
     # ---- 节点均衡 ----
     _rule('GET', '/api/load-balance/(config|status|plan|logs)', 'global_read'),
     _rule('PUT', '/api/load-balance/config', 'global_write'),

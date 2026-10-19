@@ -13,7 +13,8 @@
 --      - k8s_pod_alert_days : 按 start_time     保留 365 天
 --      - k8s_events         : 按 lasttimestamp  保留 90 天
 --   3. 配置/管控表:k8s_agent_status / k8s_res_control / alert_silences
---      Istio 路由表:vs_global / vs_http_routes / k8s_cluster
+--      Istio 管理:istio_group / istio_group_cluster / istio_vs / istio_vs_route /
+--      istio_vs_cluster / istio_vs_route_domain / istio_vs_snapshot
 --   4. 账号与权限:auth_users / auth_user_clusters / auth_sessions / auth_settings,
 --      操作审计 audit_logs(按 ts 保留 180 天,RETENTION_AUDIT_DAYS 可调)
 --
@@ -207,69 +208,136 @@ END;
 $$ LANGUAGE plpgsql;
 
 -- =============================================================================
--- 6. Istio VirtualService —— 全局配置表
+-- 6~8. Istio VirtualService 管理(设计见 istio_route/README.md)
+--   Istio 组 = 一套业务的集群(共用的测试集群 + 各项目的生产集群),一个集群只属于一个组;
+--   组标准 VS 是花折保存的那一份:规则、默认路由、gateways 全组共用,hosts 和规则里的域名条件按集群各自维护;
+--   每个 VS 自己选择部署到组内哪些集群(istio_vs_cluster);
+--   istio_vs_snapshot 是采集到的集群现状(只读),只用于对比、纳管和状态判断,不直接修改。
 -- =============================================================================
-CREATE TABLE IF NOT EXISTS vs_global (
+-- 旧版(VS 按名称全局唯一、按单集群采集)的三张表,功能未正式使用,数据直接删除
+DROP TABLE IF EXISTS k8s_cluster, vs_http_routes, vs_global;
+
+CREATE TABLE IF NOT EXISTS istio_group (
+    id          SERIAL PRIMARY KEY,
+    name        varchar(100) NOT NULL,
+    description text NOT NULL DEFAULT '',
+    created_at  timestamptz NOT NULL DEFAULT now(),
+    updated_at  timestamptz NOT NULL DEFAULT now(),
+    CONSTRAINT uq_istio_group_name UNIQUE (name)
+);
+
+DROP TRIGGER IF EXISTS trg_istio_group_updated ON istio_group;
+CREATE TRIGGER trg_istio_group_updated BEFORE UPDATE ON istio_group
+    FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+
+-- 组成员:一个集群只属于一个组;采集现状的时间也记在这里
+CREATE TABLE IF NOT EXISTS istio_group_cluster (
+    k8s_name     varchar(255) PRIMARY KEY,
+    group_id     integer NOT NULL REFERENCES istio_group(id) ON DELETE CASCADE,
+    env_type     varchar(10) NOT NULL DEFAULT 'test',   -- test 测试 / prod 生产(按列筛选、覆盖检查)
+    remark       varchar(255) NOT NULL DEFAULT '',
+    sort_order   integer NOT NULL DEFAULT 0,
+    collected_at timestamptz,                           -- 最近一次采集现状
+    collected_by varchar(255) NOT NULL DEFAULT '',
+    vs_count     integer NOT NULL DEFAULT 0,
+    created_at   timestamptz NOT NULL DEFAULT now(),
+    CONSTRAINT ck_istio_group_cluster_env CHECK (env_type IN ('test', 'prod'))
+);
+CREATE INDEX IF NOT EXISTS idx_istio_group_cluster_group ON istio_group_cluster (group_id);
+
+-- 组标准 VS 的共用部分;JSON 列未建模的字段原样保存,下发时原样带回(采集 → 下发不丢配置)
+CREATE TABLE IF NOT EXISTS istio_vs (
     id                 SERIAL PRIMARY KEY,
+    group_id           integer NOT NULL REFERENCES istio_group(id) ON DELETE CASCADE,
+    namespace          varchar(255) NOT NULL,
     name               varchar(255) NOT NULL,
-    namespace          varchar(255) NOT NULL DEFAULT 'default',
-    gateways           text,                    -- JSON 数组
-    hosts              text NOT NULL,           -- JSON 数组
-    protocol           varchar(50) DEFAULT 'http',
-    df_forward_type    varchar(20),             -- 'route' 或 'delegate'
-    df_forward_detail  text,
+    gateways           jsonb NOT NULL DEFAULT '[]',
+    df_forward_type    varchar(20),                     -- 默认路由(最后一条无 match 的规则):route / delegate
+    df_forward_detail  jsonb,
     df_forward_timeout varchar(50),
+    df_extra           jsonb,                           -- 默认路由里其他字段
+    extra_spec         jsonb,                           -- spec 里 hosts / gateways / http 之外的字段
+    updated_by         varchar(255) NOT NULL DEFAULT '',
     created_at         timestamptz NOT NULL DEFAULT now(),
     updated_at         timestamptz NOT NULL DEFAULT now(),
-    CONSTRAINT uq_vs_global_name_ns UNIQUE (name, namespace),
-    CONSTRAINT ck_vs_global_fwd_type CHECK (df_forward_type IS NULL OR df_forward_type IN ('route', 'delegate'))
+    CONSTRAINT uq_istio_vs UNIQUE (group_id, namespace, name),
+    CONSTRAINT ck_istio_vs_df_type CHECK (df_forward_type IS NULL OR df_forward_type IN ('route', 'delegate'))
 );
-CREATE INDEX IF NOT EXISTS idx_vs_global_name_ns ON vs_global (name, namespace);
 
-DROP TRIGGER IF EXISTS trg_vs_global_updated ON vs_global;
-CREATE TRIGGER trg_vs_global_updated BEFORE UPDATE ON vs_global
+DROP TRIGGER IF EXISTS trg_istio_vs_updated ON istio_vs;
+CREATE TRIGGER trg_istio_vs_updated BEFORE UPDATE ON istio_vs
     FOR EACH ROW EXECUTE FUNCTION set_updated_at();
 
--- =============================================================================
--- 7. Istio HTTP 路由规则表
--- =============================================================================
-CREATE TABLE IF NOT EXISTS vs_http_routes (
+-- 组标准的 http 规则(不含默认路由),priority 越小越靠前
+CREATE TABLE IF NOT EXISTS istio_vs_route (
     id             SERIAL PRIMARY KEY,
-    vs_global_id   integer NOT NULL REFERENCES vs_global(id) ON DELETE CASCADE,
-    name           varchar(255),
-    priority       integer DEFAULT 0,           -- 数字越小优先级越高
-    match_rules    text,                        -- JSON
-    rewrite_rules  text,                        -- JSON
-    forward_type   varchar(20) NOT NULL,
-    forward_detail text NOT NULL,               -- JSON
+    vs_id          integer NOT NULL REFERENCES istio_vs(id) ON DELETE CASCADE,
+    priority       integer NOT NULL,
+    name           varchar(255),                        -- 用了重写就要有名称(访问日志展示),否则为空
+    match_rules    jsonb,
+    rewrite_rules  jsonb,
+    forward_type   varchar(20),                         -- route / delegate;为空时转发方式在 extra 里(如 redirect)
+    forward_detail jsonb,
     timeout        varchar(50),
+    extra          jsonb,                               -- 其他字段(retries、corsPolicy 等)
     created_at     timestamptz NOT NULL DEFAULT now(),
     updated_at     timestamptz NOT NULL DEFAULT now(),
-    CONSTRAINT ck_vs_routes_fwd_type CHECK (forward_type IN ('route', 'delegate'))
+    CONSTRAINT ck_istio_vs_route_fwd_type CHECK (forward_type IS NULL OR forward_type IN ('route', 'delegate'))
 );
-CREATE INDEX IF NOT EXISTS idx_vs_routes_vs_global_id ON vs_http_routes (vs_global_id);
-CREATE INDEX IF NOT EXISTS idx_vs_routes_priority ON vs_http_routes (vs_global_id, priority);
+CREATE INDEX IF NOT EXISTS idx_istio_vs_route_vs ON istio_vs_route (vs_id, priority);
 
-DROP TRIGGER IF EXISTS trg_vs_routes_updated ON vs_http_routes;
-CREATE TRIGGER trg_vs_routes_updated BEFORE UPDATE ON vs_http_routes
+DROP TRIGGER IF EXISTS trg_istio_vs_route_updated ON istio_vs_route;
+CREATE TRIGGER trg_istio_vs_route_updated BEFORE UPDATE ON istio_vs_route
     FOR EACH ROW EXECUTE FUNCTION set_updated_at();
 
--- =============================================================================
--- 8. K8S 集群关联表
--- =============================================================================
-CREATE TABLE IF NOT EXISTS k8s_cluster (
-    id         SERIAL PRIMARY KEY,
+-- VS 部署到哪些集群:hosts 各集群独立;applied_* 是最近一次下发(纳管时记为当时的集群现状)
+CREATE TABLE IF NOT EXISTS istio_vs_cluster (
+    vs_id        integer NOT NULL REFERENCES istio_vs(id) ON DELETE CASCADE,
+    k8s_name     varchar(255) NOT NULL REFERENCES istio_group_cluster(k8s_name) ON DELETE CASCADE,
+    hosts        jsonb NOT NULL DEFAULT '[]',
+    applied_hash varchar(64),
+    applied_at   timestamptz,
+    applied_by   varchar(255) NOT NULL DEFAULT '',
+    created_at   timestamptz NOT NULL DEFAULT now(),
+    updated_at   timestamptz NOT NULL DEFAULT now(),
+    PRIMARY KEY (vs_id, k8s_name)
+);
+CREATE INDEX IF NOT EXISTS idx_istio_vs_cluster_k8s ON istio_vs_cluster (k8s_name);
+
+DROP TRIGGER IF EXISTS trg_istio_vs_cluster_updated ON istio_vs_cluster;
+CREATE TRIGGER trg_istio_vs_cluster_updated BEFORE UPDATE ON istio_vs_cluster
+    FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+
+-- 规则里的域名条件(match 的 authority / headers.host)和 hosts 一样按集群保存:组标准规则的 match 是模板,
+-- 域名条件的位置写成 {"$domains": true};这里是各集群在每个域名块里要匹配的域名,下发时每个域名展开成一个 match 条目。
+-- 不再部署到某集群(删 istio_vs_cluster 的行)时一并删除
+CREATE TABLE IF NOT EXISTS istio_vs_route_domain (
+    route_id   integer NOT NULL REFERENCES istio_vs_route(id) ON DELETE CASCADE,
+    vs_id      integer NOT NULL,
     k8s_name   varchar(255) NOT NULL,
-    vs_id      integer NOT NULL REFERENCES vs_global(id) ON DELETE CASCADE,
+    domains    jsonb NOT NULL DEFAULT '[]',                -- [[{field: authority|host, op, value}, ...], ...] 按域名块顺序
+    created_at timestamptz NOT NULL DEFAULT now(),
     updated_at timestamptz NOT NULL DEFAULT now(),
-    CONSTRAINT uq_k8s_cluster_name_vs UNIQUE (k8s_name, vs_id)
+    PRIMARY KEY (route_id, k8s_name),
+    CONSTRAINT fk_istio_vs_route_domain_binding FOREIGN KEY (vs_id, k8s_name)
+        REFERENCES istio_vs_cluster(vs_id, k8s_name) ON DELETE CASCADE
 );
-CREATE INDEX IF NOT EXISTS idx_k8s_cluster_name ON k8s_cluster (k8s_name);
-CREATE INDEX IF NOT EXISTS idx_k8s_cluster_vs_id ON k8s_cluster (vs_id);
+CREATE INDEX IF NOT EXISTS idx_istio_vs_route_domain_binding ON istio_vs_route_domain (vs_id, k8s_name);
 
-DROP TRIGGER IF EXISTS trg_k8s_cluster_updated ON k8s_cluster;
-CREATE TRIGGER trg_k8s_cluster_updated BEFORE UPDATE ON k8s_cluster
+DROP TRIGGER IF EXISTS trg_istio_vs_route_domain_updated ON istio_vs_route_domain;
+CREATE TRIGGER trg_istio_vs_route_domain_updated BEFORE UPDATE ON istio_vs_route_domain
     FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+
+-- 集群现状:每次采集整体替换该集群的行,集群移出组时一并删除
+CREATE TABLE IF NOT EXISTS istio_vs_snapshot (
+    k8s_name         varchar(255) NOT NULL REFERENCES istio_group_cluster(k8s_name) ON DELETE CASCADE,
+    namespace        varchar(255) NOT NULL,
+    name             varchar(255) NOT NULL,
+    spec             jsonb NOT NULL,
+    resource_version varchar(64) NOT NULL DEFAULT '',
+    collected_at     timestamptz NOT NULL DEFAULT now(),
+    PRIMARY KEY (k8s_name, namespace, name)
+);
 
 -- =============================================================================
 -- 9. alert_silences —— 告警屏蔽规则(Alertmanager Silence 风格)

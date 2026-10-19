@@ -15,7 +15,7 @@ import auth
 from auth import principal_of
 import jvm_config
 from multidict import MultiDict
-from istio_route import istio_route
+from istio_route import handlers as istio_handlers
 from func_manager import namespace_cache
 from func_manager import prom_overview
 from func_manager import top_queries
@@ -319,14 +319,15 @@ async def http_handler(request):
         body = False
     if not env:
         return web.json_response({"error": "缺少 K8S 集群名称参数"}, status=400)
+    # 集群里的 VirtualService 只能经 /api/istio/* 读写:下发内容必须由 master 按组标准生成
+    if path.startswith("/api/agent/istio/"):
+        return web.json_response({"error": "请在 Istio 管理页面操作 VirtualService"}, status=403)
 
     if env not in clients or not clients[env]["online"]:
         return web.json_response({"error": "目标客户端不在线"}, status=404)
 
     logger.info(path)
-    if path == "/api/agent/istio/vs/apply":
-        body = await istio_route.generate_json_handler(request)
-    elif path == "/api/update-image":
+    if path == "/api/update-image":
         principal = principal_of(request)
         username = principal.username.lower()
         direct = request.get("update_image_direct", principal.can_write(env))
@@ -473,12 +474,7 @@ async def http_handler(request):
                     headers={"Content-Disposition": response.get("content_disposition", "")}
                 )
 
-            # 特殊处理：如果是 /api/agent/istio/vs 接口，需要对响应进行额外处理
-            if path == "/api/agent/istio/vs":
-                vs_list = response.get('data', [])
-                processed_response = await istio_route.sync_vs_from_k8s(env, vs_list)
-                return web.json_response(processed_response)
-            elif path == '/api/agent/namespaces':
+            if path == '/api/agent/namespaces':
                 namespace_cache.update_namespace_cache(env, response.get('data', []))
             # 根据 agent 返回的真实结果标记 success，避免把失败响应伪装成成功
             # agent 明确返回 success 字段时以其为准；否则含 error 字段即视为失败
@@ -503,7 +499,7 @@ async def call_agent_api(env, path, query=None, method="GET", body=None, timeout
 
     复用 http_handler 的 WS send + Event 等待机制，供 prom_services 等 handler
     在内部向 agent 取 K8S 数据时使用。成功返回 agent 响应 dict，失败抛异常。
-    与 http_handler 不同：不处理二进制/istio/namespace 特判，只返回解析后的 dict。
+    与 http_handler 不同：不处理二进制/namespace 特判，只返回解析后的 dict。
     """
     if env not in clients or not clients[env]["online"]:
         raise Exception(f"目标客户端 {env} 不在线")
@@ -1158,25 +1154,8 @@ app.router.add_get("/api/init_peak_data", init_peak_data)
 app.router.add_get("/api/cron_peak_data", cron_peak_data)
 
 
-# ==================== Istio Route 路由注册 ====================
-# VS级别接口 query: vs_id, k8s_cluster, namespace
-app.router.add_get("/api/istio/vs", istio_route.get_vs_list_handler)  # 1
-app.router.add_post("/api/istio/vs", istio_route.create_vs_handler)  # 3
-app.router.add_put("/api/istio/vs", istio_route.update_vs_handler)  # 5
-app.router.add_delete("/api/istio/vs", istio_route.delete_vs_handler)
-
-# HTTP路由级别接口 query: route_id, vs_id
-app.router.add_get("/api/istio/httproute", istio_route.get_routes_handler)  # 2
-app.router.add_post("/api/istio/httproute", istio_route.create_route_handler)  # 4
-app.router.add_put("/api/istio/httproute", istio_route.update_route_handler)  # 6
-app.router.add_delete("/api/istio/httproute", istio_route.delete_route_handler)
-
-# 路由管理辅助接口
-app.router.add_post("/api/istio/httproute/reorder", istio_route.reorder_routes_handler)
-app.router.add_get("/api/istio/health", istio_route.health_check_handler)
-
-# K8S集群关联管理接口
-app.router.add_post("/api/istio/vs/k8s", istio_route.update_k8s_vs_handler)  # 7
+# ==================== Istio VirtualService 管理(/api/istio/*,设计见 istio_route/README.md) ====================
+istio_handlers.register_routes(app, call_agent_api)
 
 
 # ==================== 负载均衡路由注册 ====================

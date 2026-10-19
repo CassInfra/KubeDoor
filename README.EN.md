@@ -357,10 +357,12 @@ Peak resource dashboard (Grafana): global peak-hour resource statistics with a T
 
 ### 8. 🌐Istio Route Management (Trial)
 
-**Maintain the Istio VirtualServices shared by multiple clusters as templates in one place and push them to several clusters with one click; the UI still labels this feature as an internal trial.**
+**Maintain one business's VirtualServices per "Istio group": KubeDoor keeps one group standard (rules, default route and gateways are shared by the whole group), hosts and the domain conditions inside rules stay per cluster, and changes are pushed to the clusters you choose.**
 
-- 🗺「全局VS管理」 (Global VS Management; English UI: "Level1 VirtualService"): VirtualServices and HTTP routes (priority, match/rewrite rules, route/delegate forwarding) are stored in PostgreSQL, can be associated with multiple clusters, and are pushed to each cluster with 「下发」 (Push).
-- 📥「采集VirtualService」 (Collect VirtualService): imports the existing VirtualServices from a cluster on first use; before importing, it clears the VSs already associated with that cluster (together with those VSs' associations with other clusters), so only use it during initial setup.
+- 🗺「全局VS管理」 (Global VS Management; English UI: "Level1 VirtualService"): a group = the shared test clusters + each project's production clusters, and every VS chooses which clusters it is deployed to. The matrix view shows each VS's hosts and status (in sync / pending push / drifted / missing / domains missing) in every cluster; hosts can be edited per cluster or copied from another cluster.
+- 🏷Per-cluster domain conditions: conditions that match on the domain (authority, headers.host) are stored per cluster just like hosts and expanded with that cluster's domains when pushing. You can pick the domains for every cluster at once by keyword, or copy them from another cluster while replacing the site token (e.g. penglai → kunlun).
+- 📥「刷新现状」 (Refresh live state): each cluster's VirtualServices are collected independently (read-only snapshots that never affect other clusters). Compare clusters (rules aligned by match conditions, side-by-side YAML), adopt the identical ones in one click (VSs that differ only in hosts and domains count as identical; each cluster keeps its own domains), and for the different ones pick a base cluster, then push to bring the others in line.
+- 🚀「下发」 (Push): preview the diff between the cluster's latest live state and what will be pushed before applying; fields the editor does not model (retries, corsPolicy, ...) are kept as-is, so pushing never drops configuration. Only administrators can make changes.
 - 🚸The 「委托VS管理」 (Delegate VS Management; English UI: "Level2 VirtualService") page is still under development; if you want to use Istio route management, contact the author.
 
 <details close>
