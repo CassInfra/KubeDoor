@@ -1,9 +1,11 @@
 """OffloadApiClient 对接真实的 kubernetes_asyncio API 类,用本地 aiohttp 假 apiserver 验证行为和原版一致"""
 
+import asyncio
 import json
 import threading
 from types import SimpleNamespace
 
+import aiohttp
 import pytest
 import pytest_asyncio
 from aiohttp import web
@@ -153,3 +155,80 @@ async def test_list_all_raw_raises_like_generated_methods(api_client, client_man
         await client_manager_module.list_all_raw(client.CoreV1Api(api_client).list_namespaced_pod, namespace="denied")
     assert info.value.status == 403 and info.value.reason == "Forbidden"
     assert json.loads(info.value.body)["message"] == "pods is forbidden"
+
+
+@pytest_asyncio.fixture
+async def slow_apiserver():
+    """list_namespace 按 state["delay"] 延迟返回;pod log 是一直不结束的 follow 流"""
+    state = {"delay": 0.0}
+
+    async def list_namespaces(request):
+        await asyncio.sleep(state["delay"])
+        return web.json_response({"kind": "NamespaceList", "metadata": {}, "items": [{"metadata": {"name": "default"}}]})
+
+    async def follow_log(request):
+        resp = web.StreamResponse()
+        await resp.prepare(request)
+        try:
+            while True:
+                await resp.write(b"line\n")
+                await asyncio.sleep(0.05)
+        except (ConnectionResetError, asyncio.CancelledError):
+            pass
+        return resp
+
+    app = web.Application()
+    app.router.add_get("/api/v1/namespaces", list_namespaces)
+    app.router.add_get("/api/v1/namespaces/{ns}/pods/{pod}/log", follow_log)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "127.0.0.1", 0)
+    await site.start()
+    yield f"http://127.0.0.1:{site._server.sockets[0].getsockname()[1]}", state
+    await runner.cleanup()
+
+
+def make_client(client_manager_module, host, pool_size=None):
+    configuration = client.Configuration()
+    configuration.host = host
+    if pool_size:
+        configuration.connection_pool_maxsize = pool_size
+    return client_manager_module.OffloadApiClient(configuration)
+
+
+@pytest.mark.asyncio
+async def test_calls_without_timeout_get_default_timeout(slow_apiserver, client_manager_module, monkeypatch):
+    host, state = slow_apiserver
+    monkeypatch.setattr(client_manager_module, "DEFAULT_REQUEST_TIMEOUT", aiohttp.ClientTimeout(total=0.2))
+    api = make_client(client_manager_module, host)
+    try:
+        core = client.CoreV1Api(api)
+        state["delay"] = 0.6
+        with pytest.raises(asyncio.TimeoutError):  # 原版不设超时,这里会一直等
+            await core.list_namespace()
+        # 调用方自己传的超时优先
+        namespaces = await core.list_namespace(_request_timeout=5)
+        assert [ns.metadata.name for ns in namespaces.items] == ["default"]
+    finally:
+        await api.close()
+
+
+@pytest.mark.asyncio
+async def test_full_pool_fails_fast_instead_of_hanging(slow_apiserver, client_manager_module, monkeypatch):
+    """连接池被 follow 日志流占满时,普通调用在 connect 超时后报错,不会永远挂着(这次故障的根因)"""
+    host, _ = slow_apiserver
+    monkeypatch.setattr(client_manager_module, "DEFAULT_REQUEST_TIMEOUT", aiohttp.ClientTimeout(total=5, connect=0.3))
+    api = make_client(client_manager_module, host, pool_size=2)
+    core = client.CoreV1Api(api)
+    streams = [
+        await core.read_namespaced_pod_log("p", "ns", follow=True, _preload_content=False,
+                                           _request_timeout=aiohttp.ClientTimeout(connect=1))
+        for _ in range(2)
+    ]
+    try:
+        with pytest.raises(aiohttp.ConnectionTimeoutError):
+            await asyncio.wait_for(core.list_namespace(), 3)
+    finally:
+        for stream in streams:
+            stream.close()
+        await api.close()

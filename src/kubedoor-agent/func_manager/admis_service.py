@@ -90,12 +90,21 @@ class AdmisService:
 
         response_future = asyncio.get_running_loop().create_future()
         self.request_futures[uid] = response_future
-        await self.ws_conn.send_json(
-            {
-                "type": "admis", "request_id": uid, "namespace": namespace,
-                "deployment": deployment_name, "jvm_config": True,
-            }
-        )
+        try:
+            await self.ws_conn.send_json(
+                {
+                    "type": "admis", "request_id": uid, "namespace": namespace,
+                    "deployment": deployment_name, "jvm_config": True,
+                }
+            )
+        except Exception as exc:
+            # 连接已断开 / 发送超时:和没连上 master 一样处理,别把 future 留在 request_futures 里
+            self.request_futures.pop(uid, None)
+            logger.error(f"admis 请求发送到 master 失败: {exc}")
+            utils.send_msg(
+                f"admis:【{utils.PROM_K8S_TAG_VALUE}】【{namespace}】【{deployment_name}】连接 kubedoor-master 失败"
+            )
+            return web.json_response(self._admis_fail(uid, 503, "连接 kubedoor-master 失败"))
         try:
             result = await asyncio.wait_for(response_future, timeout=30)
             logger.info(f"response_future 收到 admis 响应：{uid} {result}")

@@ -18,6 +18,13 @@ STATS_REPORT_INTERVAL = 120     # 统计信息报告间隔（秒）
 
 # 心跳配置
 HEARTBEAT_INTERVAL = 5          # 心跳间隔（秒）
+HEARTBEAT_ACK_TIMEOUT = 30      # master 回过 heartbeat_ack 后超过这么久没再回，判定连接失效并重连（旧版 master 不回 ack，不启用）
+
+# 与 master 的 WebSocket 连接
+WS_MAX_MSG_SIZE = 16 * 1024 * 1024  # 单条消息上限，与 master 一致；超限的回包改回错误，免得 master 断开整条连接
+WS_PING_INTERVAL = 20           # aiohttp 协议层 ping：这么久没收到 master 的任何消息就 ping，半个间隔内没有 pong 判定连接失效
+WS_SEND_TIMEOUT = 60            # 单条消息发送超时（秒）：master 不读或链路卡死时，超时判定连接失效
+WS_CLOSE_TIMEOUT = 5            # 断开时等待关闭握手的上限（秒），超时直接断开底层连接
 
 # 日志配置
 LOG_EVENT_DETAILS = False       # 是否记录事件详细信息

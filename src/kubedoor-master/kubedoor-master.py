@@ -25,6 +25,7 @@ from func_manager import data_retention
 from func_manager import ai_api
 from func_manager.workload_relay import WorkloadRelay
 from func_manager.pod_exec_relay import PodExecRelay
+from func_manager.pod_log_relay import PodLogRelay
 import image_tags_fetcher
 from k8s_event import process_k8s_event_async, init_pg_tables_async
 from k8s_event.event_query_api import query_k8s_events_handler, get_k8s_events_menu_options
@@ -80,12 +81,38 @@ async def get_authorization_header(username, password):
 
 
 clients = {}
-# 存储Pod日志WebSocket连接
-pod_logs_connections = {}
+# Pod 实时日志(浏览器 /ws/pod-logs ⇄ agent)
+pod_log_relay = PodLogRelay(clients)
 # Deployment/Pod 实时状态推送(浏览器 /ws/workload-status ⇄ agent)
 workload_relay = WorkloadRelay(clients)
 # Pod 终端(浏览器 /ws/pod-exec ⇄ agent 上的 K8S exec)
 pod_exec_relay = PodExecRelay(clients)
+
+# agent 每 5 秒发一次心跳。判离线的超时要留足余量:以前和心跳间隔一样是 5 秒,
+# 网络稍有抖动或两边事件循环稍忙就被误判离线,期间请求直接返回「目标客户端不在线」
+AGENT_HEARTBEAT_TIMEOUT = 15
+# 协议层 ping:agent 这么久没有任何消息就 ping,半个间隔内没有 pong 就断开(清理已经断掉的半开连接)
+AGENT_WS_HEARTBEAT = 30
+# 每收到一次心跳回一个 ack:agent 回过 ack 之后长时间收不到,就知道 master 没在处理这条连接,会主动重连
+HEARTBEAT_ACK = '{"type": "heartbeat_ack"}'
+
+
+def fail_pending_requests(env):
+    """agent 断开时,还在等这个 agent 回包的请求立即失败(否则要白等到各自的超时,最长 300 秒)"""
+    client = clients.get(env)
+    events = (client or {}).get("response_events") or {}
+    if not events:
+        return
+    queue = client.setdefault("response_queue", {})
+    ai_ids = client.get("ai_request_ids") or set()
+    for request_id, event in list(events.items()):
+        if request_id in ai_ids:
+            queue[request_id] = {"success": False, "error": {
+                "code": "AGENT_DISCONNECTED", "message": "与 agent 的连接已断开,操作结果未知,请先查询实际状态"}}
+        else:
+            queue[request_id] = {"success": False, "error": "与 agent 的连接已断开,请求未完成"}
+        event.set()
+    logger.warning(f"客户端 env={env} 已断开,{len(events)} 个等待回包的请求直接返回失败")
 
 
 async def handle_admis_request(ws, env, data):
@@ -118,7 +145,7 @@ async def websocket_handler(request):
     if env in clients and clients[env]["online"]:
         return web.json_response({"error": "目标客户端已在线"}, status=409)
 
-    ws = web.WebSocketResponse(max_msg_size=16 * 1024 * 1024)
+    ws = web.WebSocketResponse(max_msg_size=16 * 1024 * 1024, heartbeat=AGENT_WS_HEARTBEAT)
     await ws.prepare(request)
 
     logger.info(f"客户端连接成功，env={env} ver={ver} 账号={principal_of(request).username}")
@@ -136,6 +163,7 @@ async def websocket_handler(request):
     asyncio.create_task(workload_relay.on_agent_connected(env))
 
     try:
+        # 这是 agent 的接收循环:里面不能 await 浏览器或其它慢操作,否则心跳、回包、事件全部被堵住
         async for msg in ws:
             if msg.type == WSMsgType.TEXT:
                 # 首先尝试解析为JSON
@@ -143,10 +171,16 @@ async def websocket_handler(request):
                     data = json.loads(msg.data)
                     # 处理JSON格式的消息
                     if data.get("type") == "heartbeat":
-                        # 更新心跳时间
-                        clients[env]["last_heartbeat"] = time.time()
-                        clients[env]["online"] = True
-                        # logger.info(f"[心跳]客户端 env={env} ver={ver}")
+                        # 只认当前连接的心跳:已经被新连接替换掉的旧连接,不能把 env 重新标成在线
+                        if clients[env]["ws"] is ws:
+                            clients[env]["last_heartbeat"] = time.time()
+                            if not clients[env]["online"]:
+                                clients[env]["online"] = True
+                                logger.info(f"客户端 env={env} 心跳恢复，重新标记为在线")
+                        try:
+                            await asyncio.wait_for(ws.send_str(HEARTBEAT_ACK), 1)
+                        except Exception as e:
+                            logger.debug(f"回复心跳 ack 失败 env={env}: {e}")
                     elif data.get("type") == "admis":
                         # 使用 create_task 处理 admis 请求，避免阻塞消息循环
                         asyncio.create_task(handle_admis_request(ws, env, data))
@@ -163,20 +197,12 @@ async def websocket_handler(request):
                         if data.get("ai") is True or request_id in clients[env].get("ai_request_ids", set()):
                             logger.info(f"[AI响应]客户端 env={env}: request_id={request_id}")
                         else:
-                            logger.info(f"[响应]客户端 env={env}: request_id={request_id}：{str(response)[:500]}")
+                            # 只截原始文本的前 500 个字符:str(response) 会先把整个大响应转成字符串
+                            logger.info(f"[响应]客户端 env={env}: request_id={request_id}：{msg.data[:500]}")
 
                     elif data.get("type") == "pod_logs":
-                        # 处理来自agent的Pod日志数据，转发给前端
-                        connection_id = data.get("connection_id")
-                        if connection_id in pod_logs_connections:
-                            frontend_ws = pod_logs_connections[connection_id]["ws"]
-                            try:
-                                await frontend_ws.send_json(data)
-                            except Exception as e:
-                                logger.error(f"转发日志到前端失败: {e}")
-                                # 清理断开的连接
-                                if connection_id in pod_logs_connections:
-                                    del pod_logs_connections[connection_id]
+                        # Pod 日志:只入队不等待,按 connection_id 转给对应的浏览器
+                        pod_log_relay.dispatch(env, data, msg.data)
                     elif data.get("type") in ("workload_snapshot", "workload_update"):
                         # Deployment/Pod 实时状态:只入队不等待,原样转给对应的浏览器
                         workload_relay.dispatch(env, data, msg.data)
@@ -202,19 +228,10 @@ async def websocket_handler(request):
                 except json.JSONDecodeError:
                     # 兜底：非JSON的纯文本消息。正常日志已由agent以 type==pod_logs 的JSON
                     # 按 connection_id 精确转发（见上），此分支仅作旧版本/异常兜底，
-                    # 按 env 广播给该环境下所有日志连接。
+                    # 按 env 广播给该环境下所有日志连接(同样只入队不等待)。
                     log_message = msg.data.strip()
                     if log_message:
-                        # 转发给所有活跃的前端日志连接
-                        for connection_id, connection_info in list(pod_logs_connections.items()):
-                            if connection_info["env"] == env:
-                                try:
-                                    await connection_info["ws"].send_str(log_message)
-                                except Exception as e:
-                                    logger.error(f"转发纯文本日志到前端失败: {e}")
-                                    # 清理断开的连接
-                                    if connection_id in pod_logs_connections:
-                                        del pod_logs_connections[connection_id]
+                        pod_log_relay.dispatch_text(env, log_message)
 
             elif msg.type == WSMsgType.ERROR:
                 logger.error(f"客户端连接出错，env={env}")
@@ -227,83 +244,8 @@ async def websocket_handler(request):
             logger.info(f"客户端连接关闭，标记为离线，env={env}")
             workload_relay.on_agent_disconnected(env, ws)
             pod_exec_relay.on_agent_disconnected(env, ws)
-
-    return ws
-
-
-async def pod_logs_websocket_handler(request):
-    """处理前端Pod日志WebSocket连接"""
-    env = request.query.get("env")
-    namespace = request.query.get("namespace")
-    pod_name = request.query.get("pod_name")
-    container = request.query.get("container", "")
-
-    if not all([env, namespace, pod_name]):
-        return web.json_response({"error": "缺少必要参数"}, status=400)
-
-    if env not in clients or not clients[env]["online"]:
-        return web.json_response({"error": "目标环境不在线"}, status=404)
-
-    ws = web.WebSocketResponse()
-    await ws.prepare(request)
-
-    # 生成唯一连接ID
-    connection_id = f"{env}_{namespace}_{pod_name}_{int(time.time())}"
-
-    # 存储前端连接
-    pod_logs_connections[connection_id] = {
-        "ws": ws,
-        "env": env,
-        "namespace": namespace,
-        "pod_name": pod_name,
-        "container": container,
-    }
-
-    logger.info(f"Pod日志连接建立: {connection_id}")
-
-    try:
-        # 向agent发送开始日志流请求
-        agent_ws = clients[env]["ws"]
-        start_message = {
-            "type": "start_pod_logs",
-            "connection_id": connection_id,
-            "namespace": namespace,
-            "pod_name": pod_name,
-            "container": container,
-        }
-        await agent_ws.send_json(start_message)
-
-        # 处理前端消息
-        async for msg in ws:
-            if msg.type == WSMsgType.TEXT:
-                try:
-                    data = json.loads(msg.data)
-                    if data.get("type") == "stop_logs":
-                        # 通知agent停止日志流
-                        stop_message = {"type": "stop_pod_logs", "connection_id": connection_id}
-                        await agent_ws.send_json(stop_message)
-                        break
-                except json.JSONDecodeError:
-                    logger.error(f"收到无法解析的前端消息：{msg.data}")
-            elif msg.type == WSMsgType.ERROR:
-                logger.error(f"前端日志连接出错: {connection_id}")
-                break
-    except Exception as e:
-        logger.error(f"Pod日志连接异常: {connection_id}, 错误: {e}")
-    finally:
-        # 清理连接
-        if connection_id in pod_logs_connections:
-            del pod_logs_connections[connection_id]
-
-        # 通知agent停止日志流
-        try:
-            if env in clients and clients[env]["online"]:
-                stop_message = {"type": "stop_pod_logs", "connection_id": connection_id}
-                await clients[env]["ws"].send_json(stop_message)
-        except Exception as e:
-            logger.error(f"通知agent停止日志流失败: {e}")
-
-        logger.info(f"Pod日志连接关闭: {connection_id}")
+            pod_log_relay.on_agent_disconnected(env, ws)
+            fail_pending_requests(env)
 
     return ws
 
@@ -474,8 +416,10 @@ async def http_handler(request):
                     headers={"Content-Disposition": response.get("content_disposition", "")}
                 )
 
-            if path == '/api/agent/namespaces':
-                namespace_cache.update_namespace_cache(env, response.get('data', []))
+            # 只缓存成功拿到的命名空间列表:失败时 data 是错误信息(或没有),缓存下来会被当成成功返回一小时
+            if (path == '/api/agent/namespaces' and isinstance(response, dict)
+                    and response.get('success') is not False and isinstance(response.get('data'), list)):
+                namespace_cache.update_namespace_cache(env, response['data'])
             # 根据 agent 返回的真实结果标记 success，避免把失败响应伪装成成功
             # agent 明确返回 success 字段时以其为准；否则含 error 字段即视为失败
             if isinstance(response, dict):
@@ -655,10 +599,10 @@ async def heartbeat_check():
     """定期检查客户端的心跳状态"""
     while True:
         for env, data in clients.items():
-            if data["online"] and time.time() - data["last_heartbeat"] > 5:
+            if data["online"] and time.time() - data["last_heartbeat"] > AGENT_HEARTBEAT_TIMEOUT:
                 # 标记超时客户端为离线
                 data["online"] = False
-                logger.warning(f"客户端 env={env} 超时，标记为离线")
+                logger.warning(f"客户端 env={env} 超时，标记为离线(超过 {AGENT_HEARTBEAT_TIMEOUT} 秒没有心跳)")
         await asyncio.sleep(3)
 
 
@@ -1127,7 +1071,7 @@ app = web.Application()
 # 认证鉴权中间件 + /api/auth/*、/api/admin/* 接口,必须在下面的 /api/{tail} 兜底转发之前注册
 auth.setup(app, clients)
 app.router.add_get("/ws", websocket_handler)
-app.router.add_get("/ws/pod-logs", pod_logs_websocket_handler)
+pod_log_relay.register_routes(app)  # Pod 实时日志(/ws/pod-logs)
 workload_relay.register_routes(app)  # Deployment/Pod 实时状态推送(/ws/workload-status)
 pod_exec_relay.register_routes(app)  # Pod 终端(/ws/pod-exec)
 db_api.register_routes(app)  # 参数化数据库 REST 接口(/api/db/*)

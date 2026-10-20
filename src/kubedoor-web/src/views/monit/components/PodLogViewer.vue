@@ -326,6 +326,10 @@ const parseLogMessage = (raw: string): { lines: string[]; pod?: string } => {
           pod: data.pod_name
         };
       }
+      // 日志流出错 / 达到上限 / 与 agent 断开:显示出来,别让窗口一直空着
+      if (typeof data.error === "string" && data.error) {
+        return { lines: [`[日志流错误] ${data.error}`], pod: data.pod_name };
+      }
       return { lines: [], pod: data.pod_name };
     }
   } catch {

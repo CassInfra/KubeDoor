@@ -1,6 +1,8 @@
 import asyncio
 import importlib.util
+import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -63,3 +65,78 @@ async def test_cancelling_connection_supervisor_stops_monitor_and_children():
     with pytest.raises(asyncio.CancelledError):
         await task
     assert not monitor.running
+
+
+class FakeWs:
+    """aiohttp ClientWebSocketResponse 的替身:block 时发送卡住(模拟 master 不读),hang_close 时关闭握手卡住"""
+
+    def __init__(self, messages=()):
+        self.closed = False
+        self.sent = []
+        self.block = False
+        self.hang_close = False
+        self.messages = list(messages)
+
+    async def send_str(self, data):
+        if self.block:
+            await asyncio.Event().wait()
+        self.sent.append(data)
+
+    async def close(self):
+        if self.hang_close:
+            await asyncio.Event().wait()
+        self.closed = True
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self):
+        if not self.messages:
+            raise StopAsyncIteration
+        return self.messages.pop(0)
+
+
+@pytest.mark.asyncio
+async def test_send_timeout_marks_connection_broken():
+    raw = FakeWs()
+    conn = module.MasterConnection(raw, send_timeout=0.05, ack_timeout=30)
+    await conn.send_json({"type": "heartbeat"})
+    assert json.loads(raw.sent[0]) == {"type": "heartbeat"}
+    assert not conn.closed
+    conn.check_alive()
+
+    raw.block = True  # master 不读了:发送卡在 drain 上
+    with pytest.raises(ConnectionResetError):
+        await conn.send_json({"type": "heartbeat"})
+    assert conn.closed and conn.broken
+    raw.block = False
+    with pytest.raises(ConnectionResetError):  # 判定失效后立即失败,不会再卡住其它发送方
+        await conn.send_str("x")
+    assert len(raw.sent) == 1
+    with pytest.raises(ConnectionResetError):  # 心跳任务据此断开重连
+        conn.check_alive()
+
+
+@pytest.mark.asyncio
+async def test_ack_timeout_applies_only_after_master_acked(monkeypatch):
+    now = [1000.0]
+    monkeypatch.setattr(module, "time", SimpleNamespace(monotonic=lambda: now[0]))
+    conn = module.MasterConnection(FakeWs(), send_timeout=1, ack_timeout=30)
+    now[0] += 3600
+    conn.check_alive()  # 旧版 master 从不回 ack:不启用这项判断
+    conn.on_ack()
+    now[0] += 29
+    conn.check_alive()
+    now[0] += 2  # 回过 ack 之后 30 秒以上没再回:master 没在处理这条连接
+    with pytest.raises(ConnectionResetError):
+        conn.check_alive()
+    assert conn.closed
+
+
+@pytest.mark.asyncio
+async def test_close_is_bounded_and_iteration_is_delegated():
+    raw = FakeWs(messages=["m1", "m2"])
+    conn = module.MasterConnection(raw, send_timeout=1, ack_timeout=30)
+    assert [msg async for msg in conn] == ["m1", "m2"]
+    raw.hang_close = True  # 对端不读,关闭握手发不出去
+    await asyncio.wait_for(conn.close(0.05), 1)

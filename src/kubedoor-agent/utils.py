@@ -8,6 +8,8 @@ from loguru import logger
 
 # 用于异步执行同步HTTP请求的线程池（发送通知消息用）
 _executor = ThreadPoolExecutor(max_workers=5)
+# 发通知的 HTTP 超时(秒):不设超时时 webhook 一卡,这 5 个线程会永远占着,之后的通知全部排队发不出去
+MSG_TIMEOUT = 10
 
 
 NODE_LABLE_VALUE = "kubedoor-scheduler"
@@ -41,6 +43,15 @@ def get_version():
 
 def _send_msg_sync(content):
     """同步发送消息（内部使用）"""
+    try:
+        return _send_msg_impl(content)
+    except Exception as e:
+        # 在线程池里执行,异常没人取,不记日志就悄悄丢了
+        logger.error(f"发送通知失败【{MSG_TYPE}】: {type(e).__name__}: {e}")
+        return f"发送通知失败: {e}"
+
+
+def _send_msg_impl(content):
     response = ""
     if MSG_TYPE == "wecom":
         response = wecom(MSG_TOKEN, content)
@@ -74,7 +85,7 @@ def wecom(webhook, content, at=""):
     headers = {'Content-Type': 'application/json'}
     params = {'msgtype': 'markdown', 'markdown': {'content': f"{content}<@{at}>"}}
     data = bytes(json.dumps(params), 'utf-8')
-    response = requests.post(webhook, headers=headers, data=data)
+    response = requests.post(webhook, headers=headers, data=data, timeout=MSG_TIMEOUT)
     return response.json()
 
 
@@ -83,7 +94,7 @@ def dingding(webhook, content, at=""):
     headers = {'Content-Type': 'application/json'}
     params = {"msgtype": "markdown", "markdown": {"title": "告警", "text": content}, "at": {"atMobiles": [at]}}
     data = bytes(json.dumps(params), 'utf-8')
-    response = requests.post(webhook, headers=headers, data=data)
+    response = requests.post(webhook, headers=headers, data=data, timeout=MSG_TIMEOUT)
     return response.json()
 
 
@@ -104,7 +115,7 @@ def feishu(webhook, content, at=""):
         },
     }
     data = json.dumps(params)
-    response = requests.post(webhook, headers=headers, data=data)
+    response = requests.post(webhook, headers=headers, data=data, timeout=MSG_TIMEOUT)
     return response.json()
 
 
@@ -122,7 +133,7 @@ def slack(webhook, content, at=""):
     params = {"text": message_text}
 
     data = json.dumps(params)
-    response = requests.post(webhook_url, headers=headers, data=data)
+    response = requests.post(webhook_url, headers=headers, data=data, timeout=MSG_TIMEOUT)
     logger.info(f'【slack】{response.json()}')
     return response.json()
 

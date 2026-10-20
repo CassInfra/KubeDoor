@@ -81,6 +81,11 @@ def pod_exec_module():
 
 
 @pytest.fixture
+def pod_log_stream_module():
+    return load_module("agent_test_pod_log_stream", AGENT_ROOT / "func_manager" / "pod_log_stream.py")
+
+
+@pytest.fixture
 def event_monitor_module(monkeypatch):
     fake_utils = ModuleType("utils")
     fake_utils.PROM_K8S_TAG_VALUE = "test-cluster"

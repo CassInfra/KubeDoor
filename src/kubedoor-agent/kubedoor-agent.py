@@ -1,8 +1,8 @@
-import asyncio, utils, json, sys, base64
+import asyncio, utils, json, sys, base64, re
 from functools import partial
 from urllib.parse import urlencode
 import aiohttp
-from aiohttp import ClientSession, ClientWebSocketResponse, WSMsgType, web
+from aiohttp import ClientSession, WSMsgType, web
 from kubernetes_asyncio import client, config
 from kubernetes_asyncio.client.rest import ApiException
 from datetime import datetime
@@ -28,7 +28,8 @@ from func_manager.workload_cache import WorkloadCache
 from func_manager.workload_streamer import WorkloadStreamer
 from func_manager.ai_tools import AiToolHandler
 from func_manager.pod_exec import PodExecManager
-from func_manager.ws_lifecycle import run_connection_tasks
+from func_manager.pod_log_stream import PodLogStreamer, MAX_STREAMS as MAX_LOG_STREAMS
+from func_manager.ws_lifecycle import run_connection_tasks, MasterConnection
 from k8s_client_manager import OffloadApiClient
 from scaler.scale_service import ScaleService
 from scaler.cci_scaler import get_schedule_profile_info
@@ -50,6 +51,7 @@ http_session = None  # 全局 HTTP session，用于转发请求
 v1 = None  # AppsV1Api
 batch_v1 = None  # BatchV1Api
 core_v1 = None  # CoreV1Api
+log_core_v1 = None  # 只给 Pod 日志 follow 用的 CoreV1Api(独立连接池,长连接不能占普通调用的连接池)
 networking_v1 = None  # NetworkingV1Api
 admission_api = None  # AdmissionregistrationV1Api
 custom_api = None  # CustomObjectsApi（用于访问Metrics API）
@@ -57,8 +59,6 @@ deployment_monitor = None  # DeploymentMonitor实例
 event_monitor = None  # K8sEventMonitor实例
 # 用于存储 WebSocket 请求的 Future
 request_futures = {}
-# 存储Pod日志流任务
-pod_logs_tasks = {}
 admis_service = None
 scale_service = None
 balance_node_service = None
@@ -69,11 +69,28 @@ workload_cache = None  # Deployment/Pod 的 list+watch 内存缓存
 workload_streamer = None  # 把缓存变化推给 master 的订阅者
 ai_tool_handler = None
 pod_exec_manager = None  # Pod 终端(web shell)会话
+pod_log_streamer = None  # Pod 实时日志流
+# create_task 的结果要留引用(事件循环只持有弱引用),顺便取走异常,免得 "Task exception was never retrieved"
+_background_tasks = set()
+
+
+def _spawn(coro):
+    task = asyncio.create_task(coro)
+    _background_tasks.add(task)
+    task.add_done_callback(_background_task_done)
+    return task
+
+
+def _background_task_done(task):
+    _background_tasks.discard(task)
+    if not task.cancelled() and task.exception() is not None:
+        exc = task.exception()
+        logger.warning(f"后台任务异常: {type(exc).__name__}: {exc}")
 
 
 def init_kubernetes():
     """在程序启动时加载 Kubernetes 配置并初始化客户端"""
-    global v1, batch_v1, core_v1, networking_v1, admission_api, custom_api, deployment_monitor, event_monitor, scale_service, admis_service, balance_node_service, mcp_service, update_image_handler, reboot_service, workload_cache, workload_streamer, ai_tool_handler, pod_exec_manager
+    global v1, batch_v1, core_v1, log_core_v1, networking_v1, admission_api, custom_api, deployment_monitor, event_monitor, scale_service, admis_service, balance_node_service, mcp_service, update_image_handler, reboot_service, workload_cache, workload_streamer, ai_tool_handler, pod_exec_manager, pod_log_streamer
     try:
         config.load_incluster_config()
         ai_tool_handler = AiToolHandler()
@@ -81,6 +98,11 @@ def init_kubernetes():
         v1 = client.AppsV1Api(OffloadApiClient())
         batch_v1 = client.BatchV1Api(OffloadApiClient())
         core_v1 = client.CoreV1Api(OffloadApiClient())
+        # Pod 日志 follow 是长连接,单独一个连接池,大小和日志流上限一致。
+        # 以前和 core_v1 共用一个池(上限 100),日志流开多了池子被占满,所有 core_v1 调用都永远等不到连接
+        log_configuration = client.Configuration.get_default_copy()
+        log_configuration.connection_pool_maxsize = MAX_LOG_STREAMS
+        log_core_v1 = client.CoreV1Api(OffloadApiClient(log_configuration))
         networking_v1 = client.NetworkingV1Api(OffloadApiClient())
         admission_api = client.AdmissionregistrationV1Api(OffloadApiClient())
         custom_api = client.CustomObjectsApi(OffloadApiClient())
@@ -95,58 +117,86 @@ def init_kubernetes():
         update_image_handler = partial(update_image, apps_v1=v1, deployment_monitor=deployment_monitor)
         admis_service = AdmisService(v1, core_v1, admission_api, request_futures)
         pod_exec_manager = PodExecManager(core_v1)
+        pod_log_streamer = PodLogStreamer(log_core_v1)
         logger.info("Kubernetes 配置加载成功")
     except Exception as e:
         logger.error(f"加载 Kubernetes 配置失败: {e}")
         raise
 
 
+_JSON_CONTENT_TYPE = re.compile(r"^application/(?:[\w.+-]+?\+)?json")  # 和 aiohttp resp.json() 的判断一致
+_BINARY_CONTENT_TYPES = ('application/gzip', 'application/octet-stream')
+
+
+def _message_size(message):
+    # json.dumps 默认 ensure_ascii,绝大多数回包是纯 ASCII,isascii() 是 O(1),不用为了算大小再编码一遍
+    return len(message) if message.isascii() else len(message.encode())
+
+
 async def handle_http_request(
-    ws: ClientWebSocketResponse, request_id: str, method: str, query: dict, body: dict, path: str
+    ws: MasterConnection, request_id: str, method: str, query: dict, body: dict, path: str
 ):
-    """异步处理 HTTP 请求并发送响应，使用全局 session 复用连接"""
+    """把 master 转来的请求发给本机 HTTPS 服务,结果回给 master(使用全局 session 复用连接)
+
+    JSON 响应体原样拼进回包:以前先 resp.json() 再 send_json,大响应要在事件循环里多做一遍解析和序列化。
+    回包超过单条消息上限时改回错误:否则 master 收到超限消息会断开整条连接,其它在途请求全部失败。
+    """
+    message = None
     try:
         logger.info(f"转发请求: {method} {path}?{urlencode(query)}【{json.dumps(body)}】")
-        if method == "GET":
-            async with http_session.get(path, params=query, ssl=False, timeout=aiohttp.ClientTimeout(total=300)) as resp:
+        if method not in ("GET", "POST", "DELETE"):
+            response_data = {"success": False, "error": f"agent收到master发来的不支持的请求方法: {method}"}
+            logger.error(response_data["error"])
+        else:
+            options = {"params": query, "ssl": False}
+            if method == "GET":
+                options["timeout"] = aiohttp.ClientTimeout(total=300)
+            else:
+                options["json"] = body
+            async with http_session.request(method, path, **options) as resp:
                 content_type = resp.content_type
-                # 处理二进制响应（如 gzip 文件下载）
-                if content_type in ['application/gzip', 'application/octet-stream']:
-                    binary_data = await resp.read()
-                    # 获取 Content-Disposition 头
-                    content_disposition = resp.headers.get('Content-Disposition', '')
+                if method == "GET" and content_type in _BINARY_CONTENT_TYPES:
+                    # 处理二进制响应（如 gzip 文件下载）
                     response_data = {
                         "binary": True,
                         "content_type": content_type,
-                        "content_disposition": content_disposition,
-                        "data": base64.b64encode(binary_data).decode('utf-8')
+                        "content_disposition": resp.headers.get('Content-Disposition', ''),
+                        "data": base64.b64encode(await resp.read()).decode('utf-8'),
                     }
+                elif _JSON_CONTENT_TYPE.match(content_type) and (method == "GET" or resp.status < 400):
+                    text = (await resp.text()).strip()
+                    if text[:1] in ("{", "[") and text[-1:] in ("}", "]"):
+                        message = f'{{"type": "response", "request_id": {json.dumps(request_id)}, "response": {text}}}'
+                    else:
+                        response_data = json.loads(text) if text else None  # 空响应体和 resp.json() 一样当 None
                 else:
                     response_data = await resp.json()
-        elif method == "POST":
-            async with http_session.post(path, params=query, json=body, ssl=False) as resp:
-                response_data = await resp.json()
-                if resp.status >= 400:
-                    logger.error(f"请求返回错误状态码 {resp.status}: {method} {path} -> {response_data}")
-                    response_data = {"success": False, "status": resp.status, **response_data}
-        elif method == "DELETE":
-            async with http_session.delete(path, params=query, json=body, ssl=False) as resp:
-                response_data = await resp.json()
-                if resp.status >= 400:
-                    logger.error(f"请求返回错误状态码 {resp.status}: {method} {path} -> {response_data}")
-                    response_data = {"success": False, "status": resp.status, **response_data}
-        else:
-            response_data = {"success": False, "error": f"agent收到master发来的不支持的请求方法: {method}"}
-            logger.error(response_data["error"])
+                    if resp.status >= 400:
+                        logger.error(f"请求返回错误状态码 {resp.status}: {method} {path} -> {response_data}")
+                        response_data = {"success": False, "status": resp.status, **response_data}
+    except asyncio.TimeoutError:
+        response_data = {"success": False, "error": "agent 本地处理请求超时"}
+        logger.error(f"转发请求超时: {method} {path}")
     except Exception as e:
-        response_data = {"success": False, "error": str(e)}
-        logger.error(response_data["error"])
+        response_data = {"success": False, "error": str(e) or type(e).__name__}
+        logger.error(f"转发请求失败: {method} {path}: {type(e).__name__}: {e}")
 
-    await ws.send_json({"type": "response", "request_id": request_id, "response": response_data})
+    if message is None:
+        message = json.dumps({"type": "response", "request_id": request_id, "response": response_data})
+    size = _message_size(message)
+    if size > WS_MAX_MSG_SIZE:
+        error = (f"响应过大({size / 1048576:.1f} MB),超过 agent 与 master 之间单条消息 "
+                 f"{WS_MAX_MSG_SIZE // 1048576} MB 的上限,请缩小查询范围(例如按命名空间查询)")
+        logger.error(f"回包过大,改回错误: {method} {path} {size / 1048576:.1f} MB")
+        message = json.dumps({"type": "response", "request_id": request_id, "response": {"success": False, "error": error}})
+    try:
+        await ws.send_str(message)
+    except Exception as e:
+        logger.warning(f"回包发送失败: {method} {path}: {e}")
 
 
-async def process_request(ws: ClientWebSocketResponse):
-    """处理服务端发送的请求"""
+async def process_request(ws: MasterConnection):
+    """处理服务端发送的请求(接收循环里只做分发,不 await 耗时操作)"""
     async for msg in ws:
         if msg.type == WSMsgType.TEXT:
             try:
@@ -154,7 +204,9 @@ async def process_request(ws: ClientWebSocketResponse):
             except json.JSONDecodeError:
                 logger.error(f"收到无法解析的消息：{msg.data}")
                 continue
-            if data.get("type") == "admis":
+            if data.get("type") == "heartbeat_ack":
+                ws.on_ack()
+            elif data.get("type") == "admis":
                 request_id = data.get("request_id")
                 deploy_res = data.get("deploy_res")
                 logger.info(f"收到 admis 消息：{request_id} {deploy_res}")
@@ -162,7 +214,7 @@ async def process_request(ws: ClientWebSocketResponse):
                     request_futures[request_id].set_result(deploy_res)
                     del request_futures[request_id]
             elif data.get("type") == "ai_tool":
-                asyncio.create_task(ai_tool_handler.handle(ws, data))
+                _spawn(ai_tool_handler.handle(ws, data))
             elif data.get("type") == "request":
                 request_id = data["request_id"]
                 method = data["method"]
@@ -173,23 +225,13 @@ async def process_request(ws: ClientWebSocketResponse):
                     if data["path"].startswith('/api/pod/')
                     else 'https://127.0.0.1' + data["path"]
                 )
-                asyncio.create_task(handle_http_request(ws, request_id, method, query, body, path))
+                _spawn(handle_http_request(ws, request_id, method, query, body, path))
             elif data.get("type") == "start_pod_logs":
-                # 开始Pod日志流
-                connection_id = data.get("connection_id")
-                namespace = data.get("namespace")
-                pod_name = data.get("pod_name")
-                container = data.get("container", "")
-                logger.info(f"开始Pod日志流: {connection_id}")
-                task = asyncio.create_task(stream_pod_logs(ws, connection_id, namespace, pod_name, container))
-                pod_logs_tasks[connection_id] = task
+                # 开始Pod日志流(同步建任务,不等待)
+                pod_log_streamer.start(ws, data)
             elif data.get("type") == "stop_pod_logs":
                 # 停止Pod日志流
-                connection_id = data.get("connection_id")
-                logger.info(f"停止Pod日志流: {connection_id}")
-                if connection_id in pod_logs_tasks:
-                    pod_logs_tasks[connection_id].cancel()
-                    del pod_logs_tasks[connection_id]
+                pod_log_streamer.stop(data.get("connection_id"))
             elif data.get("type") == "workload_sub":
                 # 页面订阅 Deployment/Pod 实时状态(master 每次都发全量期望状态)
                 workload_streamer.subscribe(ws, data)
@@ -202,10 +244,11 @@ async def process_request(ws: ClientWebSocketResponse):
             logger.error(f"WebSocket 错误：{msg.data}")
 
 
-async def heartbeat(ws: ClientWebSocketResponse):
-    """定期发送心跳"""
+async def heartbeat(ws: MasterConnection):
+    """定期发送心跳;发送失败 / 超时、master 不再回应心跳时退出,由上层断开重连"""
     while True:
         try:
+            ws.check_alive()
             await ws.send_json({"type": "heartbeat"})
             logger.debug("成功发送心跳")
             await asyncio.sleep(HEARTBEAT_INTERVAL)
@@ -258,8 +301,14 @@ async def connect_to_server():
     while True:
         try:
             async with ClientSession() as session:
-                async with session.ws_connect(uri, ssl=False, max_msg_size=16 * 1024 * 1024) as ws:
+                # heartbeat:协议层 ping/pong。链路断了或 master 不再响应时 aiohttp 会主动断开,
+                # 以前没开,连接"假死"时 agent 一直以为连着,只能重启
+                async with session.ws_connect(
+                    uri, ssl=False, max_msg_size=WS_MAX_MSG_SIZE, heartbeat=WS_PING_INTERVAL
+                ) as raw_ws:
                     logger.info("成功连接到服务端")
+                    # 各模块都通过 MasterConnection 发送:每次发送带超时,master 不再回应心跳时判定连接失效
+                    ws = MasterConnection(raw_ws, WS_SEND_TIMEOUT, HEARTBEAT_ACK_TIMEOUT)
                     global ws_conn
                     ws_conn = ws
                     if admis_service:
@@ -276,9 +325,12 @@ async def connect_to_server():
                         event_monitor.set_websocket_connection(None)
                         workload_streamer.detach()
                         pod_exec_manager.close_all()
+                        # 浏览器那头的日志连接跟着旧连接一起没了,日志流全部停掉(否则一直占着连接池)
+                        pod_log_streamer.close_all()
                         ws_conn = None
                         if admis_service:
                             admis_service.set_ws_conn(None)
+                        await ws.close(WS_CLOSE_TIMEOUT)
 
         except Exception as e:
             logger.error(f"连接到服务端失败：{e}")
@@ -311,90 +363,6 @@ async def get_cci_schedule_profile(custom_api, apps_v1_api, request):
     except Exception as e:
         logger.error(f"获取ScheduleProfile失败: {e}")
         return web.json_response({"error": str(e)}, status=500)
-
-
-async def stream_pod_logs(
-    ws: ClientWebSocketResponse, connection_id: str, namespace: str, pod_name: str, container: str = ""
-):
-    """流式获取Pod日志并发送给master，使用 bytearray 和批量发送优化性能"""
-    try:
-        logger.info(f"开始获取Pod日志: {namespace}/{pod_name}")
-
-        # 发送连接成功消息
-        await ws.send_json({"type": "pod_logs", "connection_id": connection_id, "status": "connected"})
-
-        # 使用kubernetes_asyncio的日志流API
-        log_stream = await core_v1.read_namespaced_pod_log(
-            name=pod_name,
-            namespace=namespace,
-            container=container if container else None,
-            follow=True,
-            tail_lines=100,
-            timestamps=False,
-            _preload_content=False,
-        )
-
-        # 使用 bytearray 提高性能
-        buffer = bytearray()
-        batch_lines = []
-        batch_size = 10  # 批量发送行数
-
-        async for chunk in log_stream.content:
-            if not chunk:
-                continue
-            buffer.extend(chunk)
-
-            # 查找换行符并处理完整行
-            while b'\n' in buffer:
-                line_end = buffer.find(b'\n')
-                line_bytes = buffer[:line_end]
-                buffer = buffer[line_end + 1:]
-
-                try:
-                    line = line_bytes.decode('utf-8', errors='ignore').strip()
-                    if line:
-                        batch_lines.append(line)
-                        # 批量发送
-                        if len(batch_lines) >= batch_size:
-                            await ws.send_json(
-                                {
-                                    "type": "pod_logs",
-                                    "connection_id": connection_id,
-                                    "pod_name": pod_name,
-                                    "container": container,
-                                    "log": '\n'.join(batch_lines),
-                                }
-                            )
-                            batch_lines.clear()
-                except Exception as decode_error:
-                    logger.warning(f"解码日志行失败: {decode_error}")
-
-        # 发送剩余日志
-        if batch_lines:
-            await ws.send_json(
-                {
-                    "type": "pod_logs",
-                    "connection_id": connection_id,
-                    "pod_name": pod_name,
-                    "container": container,
-                    "log": '\n'.join(batch_lines),
-                }
-            )
-
-    except asyncio.CancelledError:
-        logger.info(f"Pod日志流被取消: {connection_id}")
-        await ws.send_json({"type": "pod_logs", "connection_id": connection_id, "status": "disconnected"})
-    except ApiException as e:
-        error_msg = f"Kubernetes API错误: {e.status} - {e.reason}"
-        logger.error(f"Pod日志流API异常: {connection_id}, 错误: {error_msg}")
-        await ws.send_json({"type": "pod_logs", "connection_id": connection_id, "error": error_msg})
-    except Exception as e:
-        logger.error(f"Pod日志流异常: {connection_id}, 错误: {e}")
-        await ws.send_json({"type": "pod_logs", "connection_id": connection_id, "error": str(e)})
-    finally:
-        # 清理任务
-        if connection_id in pod_logs_tasks:
-            del pod_logs_tasks[connection_id]
 
 
 async def delete_cronjob_or_not(cronjob_name, job_type):
@@ -712,7 +680,7 @@ async def cleanup():
         await http_session.close()
         logger.info("HTTP session 已关闭")
     # 关闭 K8S 客户端
-    for api_client in [v1, batch_v1, core_v1, networking_v1, admission_api, custom_api]:
+    for api_client in [v1, batch_v1, core_v1, log_core_v1, networking_v1, admission_api, custom_api]:
         if api_client and hasattr(api_client, 'api_client'):
             try:
                 await api_client.api_client.close()

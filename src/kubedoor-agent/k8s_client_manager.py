@@ -9,6 +9,7 @@ import asyncio
 import json
 import re
 
+import aiohttp
 from kubernetes_asyncio import client, config
 from kubernetes_asyncio.client import rest
 from kubernetes_asyncio.client.exceptions import ApiException
@@ -17,6 +18,11 @@ from loguru import logger
 # 响应体达到这个大小才放到线程里反序列化(64KB 在事件循环里反序列化也就几毫秒,不值得切线程)
 OFFLOAD_MIN_BYTES = 64 * 1024
 LIST_PAGE_SIZE = 500
+# 没传 _request_timeout 的调用统一用这个超时。kubernetes_asyncio 默认完全不设超时(aiohttp.ClientTimeout()),
+# 连接池(每个 ApiClient 上限 100)被占满或连接卡死时调用会永远挂着,接口一直不返回、也没有任何报错。
+# connect 包含等连接池空位的时间,池满时报 ConnectionTimeoutError;total 覆盖读完整个响应
+# (apiserver 对非 watch 请求自己有 60 秒上限)。watch / 日志 follow 这类长连接要自己传超时。
+DEFAULT_REQUEST_TIMEOUT = aiohttp.ClientTimeout(total=120, connect=60)
 
 
 async def list_all_raw(list_fn, **kwargs):
@@ -53,11 +59,14 @@ class OffloadApiClient(client.ApiClient):
 
     kubernetes_asyncio 原版在事件循环里同步反序列化,一个 Pod 约 1.7ms:list 几千个 Pod 就会卡住
     事件循环好几秒,期间 /api/health 探活、master 心跳、K8S 事件 watch、admission webhook 全部停摆。
-    这里只接管"读响应体 + 反序列化"这一步,处理逻辑和原版 __call_api 一致;拼请求、鉴权、超时仍走原版。
+    这里只接管"读响应体 + 反序列化"这一步,处理逻辑和原版 __call_api 一致;拼请求、鉴权仍走原版。
     _preload_content=False(watch / 日志流 / 自己解析原始 JSON 的调用)原样透传。
+    没传 _request_timeout 的调用补上 DEFAULT_REQUEST_TIMEOUT(原版默认不设超时)。
     """
 
     def call_api(self, *args, **kwargs):
+        if kwargs.get("_request_timeout") is None:
+            kwargs["_request_timeout"] = DEFAULT_REQUEST_TIMEOUT
         types_map = kwargs.get("response_types_map")
         # 生成的 API 方法都用关键字传这几个参数;对不上的调用方式一律走原版
         if kwargs.get("async_req") or kwargs.get("_preload_content", True) is False or not isinstance(types_map, dict):
