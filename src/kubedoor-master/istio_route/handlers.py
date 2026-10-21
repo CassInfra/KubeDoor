@@ -1,15 +1,17 @@
 """Istio VirtualService 管理接口(/api/istio/*),设计见 README.md。
 
 权限(auth/policy.py 登记):查看按集群读权限,看不到的集群不返回;所有修改只允许管理员。
-集群里的 VS 只经这里读写:master 调 agent 现有的 /api/agent/istio/vs(列出)和 /api/agent/istio/vs/apply(下发),
-下发内容由 master 按组标准生成,不接受前端传来的 spec;浏览器不能经通用转发直接调这两个 agent 接口。
+集群里的 VS 只经这里读写:master 调 agent 的 /api/agent/istio/vs(列出)、/api/agent/istio/vs/apply(下发)
+和 /api/agent/istio/vs/delete(删除),下发内容由 master 按组标准生成,不接受前端传来的 spec;
+浏览器不能经通用转发直接调这些 agent 接口。
 """
 
 import asyncio
 import functools
 import json
+import re
 from datetime import datetime
-from typing import Dict, List, Optional, Union
+from typing import Dict, Iterable, List, Optional, Union
 
 from aiohttp import web
 from loguru import logger
@@ -22,6 +24,7 @@ from .store import IstioError
 
 AGENT_LIST_PATH = '/api/agent/istio/vs'
 AGENT_APPLY_PATH = '/api/agent/istio/vs/apply'
+AGENT_DELETE_PATH = '/api/agent/istio/vs/delete'
 AGENT_TIMEOUT = 60
 
 _call_agent = None  # register_routes 时注入 kubedoor-master 的 call_agent_api
@@ -124,6 +127,87 @@ async def _standard(vs_id: int) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# 组的 VS 范围与跨组冲突
+# ---------------------------------------------------------------------------
+def _safe_scope(include, ignore, overrides: Dict[tuple, dict]) -> S.VSScope:
+    """库里的规则保存时都校验过;万一有编译不了的(如换了 Python 版本),跳过那一条,不影响页面。"""
+    def usable(items):
+        kept = []
+        for item in items or []:
+            try:
+                S.compile_pattern(item)
+                kept.append(item)
+            except (re.error, KeyError, TypeError) as exc:
+                logger.warning(f'跳过无效的 Istio 组规则 {item}: {exc}')
+        return kept
+
+    return S.VSScope(usable(include), usable(ignore), {key: row['action'] for key, row in overrides.items()})
+
+
+class GroupView:
+    """一个组(或组管理里正在编辑的组)的 VS 范围,以及和它共用集群的其他组 —— 判断忽略和冲突用。"""
+
+    def __init__(self, group_id: Optional[int], clusters: List[str], scope: S.VSScope,
+                 overrides: Dict[tuple, dict], standards: set, others: List[dict], present: Dict[str, set]):
+        self.group_id = group_id
+        self.clusters = clusters
+        self.scope = scope
+        self.overrides = overrides      # 本组的手动决定:{(namespace, name): {action, created_by, created_at}}
+        self.standards = standards      # 本组有组标准的 VS(含被忽略的)
+        self.others = others
+        self.present = present          # {k8s_name: {(namespace, name)}},本组和其他组集群的现状
+
+    def classify(self, key: tuple) -> dict:
+        return self.scope.classify(*key)
+
+    def conflicts(self, keys: Iterable[tuple]) -> Dict[tuple, List[dict]]:
+        return S.find_conflicts(self.group_id, self.clusters, keys, self.others, self.present)
+
+
+async def _group_view(group_id: Optional[int], clusters: List[str], include, ignore) -> GroupView:
+    groups = await store.list_groups()
+    mine = set(clusters)
+    related = [g for g in groups if g['id'] != group_id and mine & {c['k8s_name'] for c in g['clusters']}]
+    ids = [g['id'] for g in related] + ([group_id] if group_id is not None else [])
+    overrides = await store.load_overrides(ids)
+    standards = await store.standard_keys(ids)
+    present = await store.snapshot_keys(mine | {c['k8s_name'] for g in related for c in g['clusters']})
+    others = [{
+        'id': g['id'], 'name': g['name'], 'clusters': [c['k8s_name'] for c in g['clusters']],
+        'scope': _safe_scope(g['include_patterns'], g['ignore_patterns'], overrides[g['id']]),
+        'standards': standards[g['id']],
+    } for g in related]
+    own = overrides.get(group_id, {}) if group_id is not None else {}
+    return GroupView(group_id, list(clusters), _safe_scope(include, ignore, own), own,
+                     standards.get(group_id, set()) if group_id is not None else set(), others, present)
+
+
+async def _view_of(group: dict) -> GroupView:
+    return await _group_view(group['id'], [c['k8s_name'] for c in group['clusters']],
+                             group['include_patterns'], group['ignore_patterns'])
+
+
+def _scope_text(result: dict) -> str:
+    """被排除的原因,给提示用。"""
+    if result['reason'] == S.SCOPE_MANUAL:
+        return '已在本组手动忽略'
+    if result['reason'] == S.SCOPE_IGNORE_RULE:
+        return f"匹配本组的忽略规则「{result['pattern']}」"
+    if result['reason'] == S.SCOPE_NOT_INCLUDED:
+        return '不在本组的包含规则里'
+    return ''
+
+
+def _conflict_text(conflicts: List[dict]) -> str:
+    return '、'.join(f"组 {c['group']}(共用集群 {'、'.join(c['clusters'])})" for c in conflicts)
+
+
+def _conflict_error(key: tuple, conflicts: List[dict]) -> str:
+    return (f'{key[0]}/{key[1]} 也在{_conflict_text(conflicts)}里;同一个 VS 只能属于一个组,'
+            '请先在不该管它的组里忽略它')
+
+
+# ---------------------------------------------------------------------------
 # 请求模型
 # ---------------------------------------------------------------------------
 def _timeout(value: Optional[str]) -> Optional[str]:
@@ -162,7 +246,63 @@ class GroupCluster(BaseModel):
         return value
 
 
-class GroupRequest(BaseModel):
+class PatternItem(BaseModel):
+    """组的包含 / 忽略规则:glob 通配符(* 任意多个字符,? 一个字符)或 regex 正则(全匹配)。
+    规则里有 / 时匹配「命名空间/名称」,否则只匹配名称。"""
+
+    type: str = 'glob'
+    pattern: str
+
+    @field_validator('type')
+    @classmethod
+    def _type(cls, value):
+        if value not in S.PATTERN_TYPES:
+            raise ValueError('规则类型只能是 glob(通配符)或 regex(正则)')
+        return value
+
+    @field_validator('pattern')
+    @classmethod
+    def _pattern(cls, value):
+        value = (value or '').strip()
+        if not value:
+            raise ValueError('规则不能为空')
+        if len(value) > 300:
+            raise ValueError('规则太长(最多 300 个字符)')
+        return value
+
+
+def _check_patterns(items: List[PatternItem], what: str) -> List[PatternItem]:
+    """正则要能编译;重复的去掉。"""
+    result, seen = [], set()
+    for index, item in enumerate(items):
+        try:
+            S.compile_pattern(item.model_dump())
+        except re.error as exc:
+            raise ValueError(f'{what}第 {index + 1} 条「{item.pattern}」正则写法有误:{exc}')
+        if (item.type, item.pattern) not in seen:
+            seen.add((item.type, item.pattern))
+            result.append(item)
+    return result
+
+
+class ScopeRules(BaseModel):
+    """组的 VS 范围:包含规则为空表示全部;忽略规则优先于包含规则。"""
+
+    include_patterns: List[PatternItem] = Field(default=[], max_length=200)
+    ignore_patterns: List[PatternItem] = Field(default=[], max_length=200)
+
+    @model_validator(mode='after')
+    def _patterns(self):
+        self.include_patterns = _check_patterns(self.include_patterns, '包含规则')
+        self.ignore_patterns = _check_patterns(self.ignore_patterns, '忽略规则')
+        return self
+
+    def rules(self):
+        return ([item.model_dump() for item in self.include_patterns],
+                [item.model_dump() for item in self.ignore_patterns])
+
+
+class GroupRequest(ScopeRules):
     name: str = Field(min_length=1, max_length=100)
     description: str = ''
     clusters: List[GroupCluster] = []
@@ -181,6 +321,25 @@ class GroupRequest(BaseModel):
         if len(names) != len(set(names)):
             raise ValueError('集群不能重复')
         return self
+
+
+class VSKey(BaseModel):
+    namespace: str = Field(min_length=1, max_length=255)
+    name: str = Field(min_length=1, max_length=255)
+
+
+class ScopeChangeRequest(BaseModel):
+    """在组里忽略 / 取消忽略这些 VS。"""
+
+    group_id: int
+    items: List[VSKey] = Field(min_length=1, max_length=1000)
+
+
+class LiveDeleteRequest(VSKey):
+    """删除集群里的 VirtualService。"""
+
+    group_id: int
+    k8s_name: str = Field(min_length=1, max_length=255)
 
 
 class VSFields(BaseModel):
@@ -276,6 +435,8 @@ class VSCreateRequest(VSFields):
     namespace: str
     name: str
     clusters: List[ClusterHosts] = Field(min_length=1)
+    # 名称被本组的包含 / 忽略规则排除时,仍然创建并单独纳入本组
+    force_include: bool = False
 
     @field_validator('namespace')
     @classmethod
@@ -447,7 +608,8 @@ async def _collect_cluster(k8s_name: str, username: str) -> dict:
     try:
         items = await fetch_live(k8s_name)
         await store.replace_snapshots(k8s_name, items, username)
-        return {'k8s_name': k8s_name, 'success': True, 'count': len(items)}
+        return {'k8s_name': k8s_name, 'success': True, 'count': len(items),
+                'keys': [(item['namespace'], item['name']) for item in items]}
     except IstioError as exc:
         return {'k8s_name': k8s_name, 'success': False, 'error': exc.message}
     except Exception as exc:
@@ -468,19 +630,23 @@ async def list_groups(request):
         if principal.is_admin or visible:
             result.append({**group, 'clusters': group['clusters'] if principal.is_admin else visible})
     data = {'groups': result}
-    if principal.is_admin:  # 组管理弹框:所有已接入的集群,以及各自属于哪个组
+    if principal.is_admin:  # 组管理弹框:所有已接入的集群,以及各自已在哪些组里(一个集群可以属于多个组)
         import utils
 
-        owner = {c['k8s_name']: g['name'] for g in groups for c in g['clusters']}
-        names = sorted(set(await utils.get_k8s_names()) | set(owner))
-        data['clusters'] = [{'k8s_name': name, 'group': owner.get(name, '')} for name in names]
+        owners: Dict[str, List[str]] = {}
+        for g in groups:
+            for c in g['clusters']:
+                owners.setdefault(c['k8s_name'], []).append(g['name'])
+        names = sorted(set(await utils.get_k8s_names()) | set(owners))
+        data['clusters'] = [{'k8s_name': name, 'groups': owners.get(name, [])} for name in names]
     return _ok(data)
 
 
 @handler
 async def create_group(request):
     req = GroupRequest(**await _body(request))
-    group_id = await store.save_group(None, req.name, req.description, [c.model_dump() for c in req.clusters])
+    group_id = await store.save_group(None, req.name, req.description, [c.model_dump() for c in req.clusters],
+                                      *req.rules())
     return _ok({'id': group_id}, msg='Istio 组已创建')
 
 
@@ -488,7 +654,8 @@ async def create_group(request):
 async def update_group(request):
     group_id = _int(request.query.get('id'), 'id')
     req = GroupRequest(**await _body(request))
-    await store.save_group(group_id, req.name, req.description, [c.model_dump() for c in req.clusters])
+    await store.save_group(group_id, req.name, req.description, [c.model_dump() for c in req.clusters],
+                           *req.rules())
     return _ok(msg='Istio 组已保存')
 
 
@@ -500,22 +667,90 @@ async def delete_group(request):
     return _ok(msg='Istio 组已删除,集群里的 VirtualService 不受影响')
 
 
+@handler
+async def preview_group(request):
+    """组管理里预览包含 / 忽略规则的效果:按所选集群已采集的现状,哪些 VS 归本组、哪些被忽略、哪些和其他组冲突。"""
+    query = request.query
+    group_id = _int(query.get('group_id'), 'group_id') if query.get('group_id') else None
+    try:
+        rules = ScopeRules(include_patterns=json.loads(query.get('include') or '[]'),
+                           ignore_patterns=json.loads(query.get('ignore') or '[]'))
+    except ValueError as exc:
+        if isinstance(exc, ValidationError):
+            raise
+        raise IstioError('include / ignore 必须是 JSON 数组')
+    principal = principal_of(request)
+    clusters = [c for c in dict.fromkeys((query.get('clusters') or '').split(',')) if c and principal.can_read(c)]
+    view = await _group_view(group_id, clusters, *rules.rules())
+    where: Dict[tuple, List[str]] = {}
+    for k8s_name in clusters:
+        for key in view.present.get(k8s_name, ()):
+            where.setdefault(key, []).append(k8s_name)
+    keys = set(where) | view.standards
+    classes = {key: view.classify(key) for key in keys}
+    shown = [key for key in keys if classes[key]['visible']]
+    conflicts = view.conflicts(shown)
+    collected = await store.collected_clusters(clusters)
+    items = [{'namespace': key[0], 'name': key[1], **classes[key], 'clusters': where.get(key, []),
+              'managed': key in view.standards, 'conflicts': conflicts.get(key, [])} for key in sorted(keys)]
+    return _ok({
+        'total': len(keys), 'visible': len(shown), 'ignored': len(keys) - len(shown), 'conflict': len(conflicts),
+        'uncollected': [c for c in clusters if c not in collected], 'items': items,
+    })
+
+
 # ---------------------------------------------------------------------------
 # 组矩阵、采集现状、对比、纳管
 # ---------------------------------------------------------------------------
 @handler
 async def group_matrix(request):
+    """组矩阵:只列本组范围内的 VS(按组规则和手动忽略 / 单独纳入),同时给出被忽略的列表和统计。"""
     group = await _group(_int(request.query.get('group_id'), 'group_id'))
     visible = _visible(request, group)
-    standards = await store.list_standards(group['id'])
-    snapshots = await store.load_snapshots([c['k8s_name'] for c in visible])
-    rows = S.build_matrix(visible, standards, snapshots)
-    return _ok({'group': {**group, 'clusters': visible}, 'rows': rows})
+    names = [c['k8s_name'] for c in visible]
+    view = await _view_of(group)
+    standards = {(s['namespace'], s['name']): s for s in await store.list_standards(group['id'])}
+    snapshots = await store.load_snapshots(names)
+    order = {name: index for index, name in enumerate(names)}
+    where: Dict[tuple, List[str]] = {}  # VS 在哪些集群的现状里(按列的顺序)
+    for (k8s_name, namespace, name) in sorted(snapshots, key=lambda k: order[k[0]]):
+        where.setdefault((namespace, name), []).append(k8s_name)
+    keys = set(standards) | set(where)
+    classes = {key: view.classify(key) for key in keys}
+    shown = {key for key in keys if classes[key]['visible']}
+    rows = S.build_matrix(visible, [s for key, s in standards.items() if key in shown],
+                          {k: v for k, v in snapshots.items() if (k[1], k[2]) in shown})
+    conflicts = view.conflicts(shown)
+    for row in rows:
+        key = (row['namespace'], row['name'])
+        row['conflicts'] = conflicts.get(key, [])
+        row['included'] = classes[key]['reason'] == S.SCOPE_INCLUDED
+
+    ignored = []
+    for key in sorted(keys - shown):
+        override = view.overrides.get(key) if classes[key]['reason'] == S.SCOPE_MANUAL else None
+        ignored.append({
+            'namespace': key[0], 'name': key[1], 'reason': classes[key]['reason'], 'pattern': classes[key]['pattern'],
+            'vs_id': standards[key]['id'] if key in standards else None, 'clusters': where.get(key, []),
+            'by': override['created_by'] if override else '', 'at': override['created_at'] if override else None,
+            'stale': False,
+        })
+    # 手动忽略过、但现状和组标准里都已经没有的(集群里删掉了):也列出来,可以取消
+    for key, override in sorted(view.overrides.items()):
+        if override['action'] == S.OVERRIDE_IGNORE and key not in keys:
+            ignored.append({'namespace': key[0], 'name': key[1], 'reason': S.SCOPE_MANUAL, 'pattern': None,
+                            'vs_id': None, 'clusters': [], 'by': override['created_by'],
+                            'at': override['created_at'], 'stale': True})
+    manual = sum(1 for key in keys - shown if classes[key]['reason'] == S.SCOPE_MANUAL)
+    stats = {'total': len(keys), 'visible': len(shown), 'ignored': len(keys) - len(shown), 'manual': manual,
+             'by_rule': len(keys) - len(shown) - manual, 'conflict': len(conflicts)}
+    return _ok({'group': {**group, 'clusters': visible}, 'rows': rows, 'ignored': ignored, 'stats': stats})
 
 
 @handler
 async def collect(request):
-    """刷新集群现状:并行调各集群 agent 列出 VS,整体替换各自的快照,不动组标准,互不影响。"""
+    """刷新集群现状:并行调各集群 agent 列出 VS,整体替换各自的快照(各组共用),不动组标准,互不影响。
+    返回每个集群的 VS 总数,以及按本组规则归本组的和被忽略的个数。"""
     body = await _body(request)
     group = await _group(_int(body.get('group_id'), 'group_id'))
     targets = body.get('k8s_names') or [c['k8s_name'] for c in group['clusters']]
@@ -524,6 +759,13 @@ async def collect(request):
     _members(group, targets)
     username = _username(request)
     results = await asyncio.gather(*(_collect_cluster(name, username) for name in targets))
+    overrides = (await store.load_overrides([group['id']]))[group['id']]
+    scope = _safe_scope(group['include_patterns'], group['ignore_patterns'], overrides)
+    for result in results:
+        keys = result.pop('keys', None)
+        if keys is not None:
+            result['group_count'] = sum(1 for key in keys if scope.visible(*key))
+            result['ignored_count'] = len(keys) - result['group_count']
     return _ok(list(results))
 
 
@@ -573,12 +815,20 @@ async def import_standards(request):
     group = await _group(req.group_id)
     names = [c['k8s_name'] for c in group['clusters']]
     snapshots = await store.load_snapshots(names)
+    view = await _view_of(group)
     username = _username(request)
     results = []
     for item in req.items:
         result = {'namespace': item.namespace, 'name': item.name}
         try:
             _members(group, [item.base, *item.clusters])
+            key = (item.namespace, item.name)
+            scope = view.classify(key)
+            if not scope['visible']:
+                raise IstioError(f'{_scope_text(scope)},不能纳管;如需由本组管理,先在「查看忽略」里取消忽略')
+            conflicts = view.conflicts([key]).get(key)
+            if conflicts:
+                raise IstioError(_conflict_error(key, conflicts))
             base = snapshots.get((item.base, item.namespace, item.name))
             if base is None:
                 raise IstioError(f'集群 {item.base} 的现状里没有 {item.namespace}/{item.name},请先刷新现状')
@@ -685,6 +935,8 @@ async def get_vs(request):
                'domains': {k: v for k, v in route['domains'].items() if k in names}}
               for route in S.sort_routes(standard['routes'])]
     clusters = _cluster_rows(visible, standard, snapshots)
+    view = await _view_of(group)
+    vs_key = (standard['namespace'], standard['name'])
     data = {key: standard[key] for key in (
         'id', 'group_id', 'namespace', 'name', 'gateways', 'df_forward_type', 'df_forward_detail',
         'df_forward_timeout', 'df_extra', 'extra_spec', 'updated_by', 'created_at', 'updated_at')}
@@ -693,8 +945,34 @@ async def get_vs(request):
         clusters=clusters,
         routes=routes,
         lint=S.lint_http(shared.get('http')) + [issue for row in clusters for issue in row.pop('lint')],
+        scope=view.classify(vs_key),
+        conflicts=view.conflicts([vs_key]).get(vs_key, []),
     )
     return _ok(data)
+
+
+async def _check_new_vs(view: GroupView, namespace: str, name: str) -> dict:
+    """新建前检查:本组是否已有组标准(可能被忽略了)、集群里是否已有同名的(要用纳管)、
+    其他组里是否已有、名称是否被本组的规则 / 手动忽略排除。"""
+    key = (namespace, name)
+    return {
+        'scope': view.classify(key),
+        'standard': key in view.standards,
+        'in_clusters': sorted(k8s for k8s in view.clusters if key in view.present.get(k8s, ())),
+        'conflicts': view.conflicts([key]).get(key, []),
+    }
+
+
+@handler
+async def check_vs(request):
+    """新建 VS 前的检查(见 _check_new_vs),前端据此提示;名称被本组排除时可以确认后单独纳入。"""
+    query = request.query
+    group = await _group(_int(query.get('group_id'), 'group_id'))
+    _visible(request, group)
+    namespace, name = (query.get('namespace') or '').strip(), (query.get('name') or '').strip()
+    if not namespace or not name:
+        raise IstioError('缺少参数: namespace / name')
+    return _ok(await _check_new_vs(await _view_of(group), namespace, name))
 
 
 @handler
@@ -705,13 +983,26 @@ async def create_vs(request):
     if len(names) != len(set(names)):
         raise IstioError('集群不能重复')
     _members(group, names)
-    existing = await store.load_snapshots([c['k8s_name'] for c in group['clusters']], req.namespace, req.name)
-    if existing:
-        clusters = '、'.join(sorted(k for k, _, _ in existing))
-        raise IstioError(f'集群 {clusters} 里已经有 {req.namespace}/{req.name},请在列表里用「纳管」')
+    view = await _view_of(group)
+    target, key = f'{req.namespace}/{req.name}', (req.namespace, req.name)
+    check = await _check_new_vs(view, req.namespace, req.name)
+    excluded = not check['scope']['visible']
+    hint = ',它在本组被忽略了:先在「查看忽略」里取消忽略' if excluded else ''
+    if check['standard']:
+        raise IstioError(f'本组已经有 {target} 的组标准{hint}')
+    if check['in_clusters']:
+        raise IstioError(f"集群 {'、'.join(check['in_clusters'])} 里已经有 {target},请在列表里用「纳管」{hint}")
+    if check['conflicts']:
+        raise IstioError(f"{_conflict_text(check['conflicts'])}里已经有 {target},同一个 VS 只能属于一个组")
+    if excluded and not req.force_include:
+        raise IstioError(f"{target} {_scope_text(check['scope'])},创建后会被本组忽略;确认要创建的话请选择「单独纳入本组」")
     vs = req.model_dump(include={'gateways', 'df_forward_type', 'df_forward_detail', 'df_forward_timeout'})
     bindings = {c.k8s_name: {'hosts': c.hosts} for c in req.clusters}
-    vs_id = await store.create_standard(group['id'], req.namespace, req.name, vs, [], bindings, _username(request))
+    username = _username(request)
+    vs_id = await store.create_standard(group['id'], req.namespace, req.name, vs, [], bindings, username)
+    if excluded:  # 确认后创建:组规则也排除的单独纳入,只是手动忽略过的取消忽略
+        action = None if view.scope.rule(*key)['visible'] else S.OVERRIDE_INCLUDE
+        await store.set_overrides(group['id'], {key: action}, username)
     return _ok({'id': vs_id}, msg='VirtualService 已创建,配好规则后到各集群下发')
 
 
@@ -766,6 +1057,83 @@ async def remove_vs_cluster(request):
 
 
 # ---------------------------------------------------------------------------
+# 组的 VS 范围:忽略 / 取消忽略;删除集群里的 VS
+# ---------------------------------------------------------------------------
+@handler
+async def ignore_vs(request):
+    """在本组忽略这些 VS:不再显示、不能纳管和下发;组标准(如果有)保留,取消忽略后恢复。集群里的 VS 不受影响。"""
+    req = ScopeChangeRequest(**await _body(request))
+    await _group(req.group_id)
+    actions = {(item.namespace, item.name): S.OVERRIDE_IGNORE for item in req.items}
+    await store.set_overrides(req.group_id, actions, _username(request))
+    return _ok(msg=f'已忽略 {len(actions)} 个 VirtualService,可以在「查看忽略」里取消')
+
+
+@handler
+async def unignore_vs(request):
+    """取消忽略:组规则本来就纳入的,去掉手动忽略;被组规则排除的,单独纳入本组(不受规则影响)。"""
+    req = ScopeChangeRequest(**await _body(request))
+    group = await _group(req.group_id)
+    scope = _safe_scope(group['include_patterns'], group['ignore_patterns'], {})
+    actions = {}
+    for item in req.items:
+        key = (item.namespace, item.name)
+        actions[key] = None if scope.rule(*key)['visible'] else S.OVERRIDE_INCLUDE
+    await store.set_overrides(req.group_id, actions, _username(request))
+    included = sum(1 for action in actions.values() if action == S.OVERRIDE_INCLUDE)
+    note = f',其中 {included} 个被组规则排除的已单独纳入本组' if included else ''
+    return _ok(msg=f'已取消忽略 {len(actions)} 个 VirtualService{note}')
+
+
+def _old_agent(resp) -> bool:
+    """旧版 agent 没有删除接口:本地服务回 404 纯文本,agent 解析 JSON 失败。"""
+    return isinstance(resp, dict) and 'status' not in resp and 'unexpected mimetype' in str(resp.get('error', ''))
+
+
+@handler
+async def delete_live(request):
+    """删除集群里的 VirtualService(立即生效)。删除前的内容记进审计 istio.delete,误删可以照着恢复;
+    本组标准部署到了该集群的,同时不再部署(删掉该集群的 hosts 和域名),免得下次下发又建回来。"""
+    req = LiveDeleteRequest(**await _body(request))
+    group = await _group(req.group_id)
+    _members(group, [req.k8s_name])
+    username, ip = _username(request), client_ip(request)
+    target = f'{req.namespace}/{req.name}'
+    items = await fetch_live(req.k8s_name)
+    live = next((i for i in items if i['namespace'] == req.namespace and i['name'] == req.name), None)
+    detail = {'group_id': group['id'], 'spec': live['spec'] if live else None,
+              'resource_version': live['resource_version'] if live else None}
+    if live is not None:
+        try:
+            resp = await _call_agent(req.k8s_name, AGENT_DELETE_PATH, query={'namespace': req.namespace, 'name': req.name},
+                                     method='DELETE', timeout=AGENT_TIMEOUT)
+        except Exception as exc:
+            resp = {'success': False, 'error': str(exc)}
+        gone = isinstance(resp, dict) and (resp.get('success') is True or resp.get('status') == 404)
+        if not gone:
+            error = (f'集群 {req.k8s_name} 的 agent 版本过旧,还不支持删除 VirtualService,请先升级 agent'
+                     if _old_agent(resp) else _agent_error(resp))
+            audit.record_bg(username, 'istio.delete', env=req.k8s_name, target=target, ip=ip, success=False,
+                            detail={**detail, 'error': error})
+            raise IstioError(f'删除失败:{error}', 502)
+    standard = await store.find_standard(group['id'], req.namespace, req.name)
+    unbound = bool(standard and req.k8s_name in standard['bindings'])
+    if unbound:
+        await store.delete_binding(standard['id'], req.k8s_name)
+    try:  # 集群里本来就没有的,刚取到的就是最新现状
+        fresh = items if live is None else await fetch_live(req.k8s_name)
+        await store.replace_snapshots(req.k8s_name, fresh, username)
+    except Exception as exc:
+        logger.warning(f'删除后刷新集群 {req.k8s_name} 的现状失败: {exc}')
+        await store.drop_snapshot(req.k8s_name, req.namespace, req.name)
+    if live is not None:
+        audit.record_bg(username, 'istio.delete', env=req.k8s_name, target=target, ip=ip, success=True,
+                        detail={**detail, 'unbound': unbound})
+    message = f'已从集群 {req.k8s_name} 删除 {target}' if live is not None else f'集群 {req.k8s_name} 里已经没有 {target}'
+    return _ok(msg=message + (',并且本组不再部署到该集群' if unbound else ''))
+
+
+# ---------------------------------------------------------------------------
 # 组标准的 http 规则
 # ---------------------------------------------------------------------------
 @handler
@@ -805,23 +1173,37 @@ async def reorder_routes(request):
 # 下发
 # ---------------------------------------------------------------------------
 async def _prepare(items: List[ApplyItem]) -> List[dict]:
-    """每一项都必须是组标准已纳入的集群;生成要下发的 spec。规则的域名没设置全的,error 说明缺哪些。"""
+    """每一项都必须是组标准已纳入的集群;生成要下发的 spec。不能下发的(在本组被忽略、和其他组冲突、
+    规则的域名没设置全)error 说明原因。"""
     standards: Dict[int, dict] = {}
+    views: Dict[int, GroupView] = {}
     prepared = []
     for item in items:
         if item.vs_id not in standards:
             standards[item.vs_id] = await _standard(item.vs_id)
         standard = standards[item.vs_id]
+        if standard['group_id'] not in views:
+            views[standard['group_id']] = await _view_of(await _group(standard['group_id']))
+        view = views[standard['group_id']]
         binding = standard['bindings'].get(item.k8s_name)
         if binding is None:
             raise IstioError(f"{standard['namespace']}/{standard['name']} 没有部署到集群 {item.k8s_name}")
         rendered = S.standard_spec(standard, binding['hosts'], item.k8s_name)
+        key = (standard['namespace'], standard['name'])
+        scope, conflicts = view.classify(key), view.conflicts([key]).get(key)
         missing = S.missing_domains(standard, item.k8s_name)
+        if not scope['visible']:
+            error = f'{_scope_text(scope)},不能下发;如需下发,先在「查看忽略」里取消忽略'
+        elif conflicts:
+            error = _conflict_error(key, conflicts)
+        elif missing:
+            error = f"还没设置 {item.k8s_name} 的域名:{'、'.join(missing)}"
+        else:
+            error = None
         prepared.append({
             'vs_id': standard['id'], 'k8s_name': item.k8s_name,
             'namespace': standard['namespace'], 'name': standard['name'],
-            'spec': rendered, 'hash': S.spec_hash(rendered),
-            'error': f"还没设置 {item.k8s_name} 的域名:{'、'.join(missing)}" if missing else None,
+            'spec': rendered, 'hash': S.spec_hash(rendered), 'error': error,
         })
     return prepared
 
@@ -914,11 +1296,16 @@ def register_routes(app, call_agent_api):
     router.add_post('/api/istio/groups', create_group)
     router.add_put('/api/istio/groups', update_group)
     router.add_delete('/api/istio/groups', delete_group)
+    router.add_get('/api/istio/groups/preview', preview_group)
     router.add_get('/api/istio/matrix', group_matrix)
     router.add_post('/api/istio/collect', collect)
     router.add_get('/api/istio/compare', compare)
     router.add_post('/api/istio/import', import_standards)
+    router.add_post('/api/istio/ignore', ignore_vs)
+    router.add_post('/api/istio/unignore', unignore_vs)
+    router.add_post('/api/istio/live/delete', delete_live)
     router.add_post('/api/istio/vs/reset', reset_standard)
+    router.add_get('/api/istio/vs/check', check_vs)
     router.add_get('/api/istio/vs', get_vs)
     router.add_post('/api/istio/vs', create_vs)
     router.add_put('/api/istio/vs', update_vs)

@@ -4,24 +4,49 @@
 
 | 文件 | 内容 |
 | --- | --- |
-| `spec.py` | 纯逻辑:解析 / 渲染 spec、域名条件按集群拆分与展开、归一化哈希、规则对齐对比、规范检查、组矩阵 |
+| `spec.py` | 纯逻辑:解析 / 渲染 spec、域名条件按集群拆分与展开、归一化哈希、规则对齐对比、规范检查、组的 VS 范围与跨组冲突、组矩阵 |
 | `store.py` | 数据访问(asyncpg,经 `db.py` 连接池) |
-| `handlers.py` | `/api/istio/*` 接口;调 agent 现有的列出 / 下发接口 |
-| `../db.sql` | 第 6~8 节:`istio_*` 七张表 |
+| `handlers.py` | `/api/istio/*` 接口;调 agent 的列出 / 下发 / 删除接口 |
+| `../db.sql` | 第 6~8 节:`istio_*` 九张表(含早先「一个集群只属于一个组」结构的升级) |
 | `../tests/test_istio_spec.py` | 纯逻辑单测 |
 | `../tests/test_istio_api.py` | 接口端到端测试(真实 PG + 假 agent,设置 `KUBEDOOR_TEST_PG_DSN` 才运行) |
 
 ## 模型
 
-- **Istio 组**:一套业务的集群,如 `cassmall` = 共用的测试集群 + 各项目的生产集群。一个集群只属于一个组;
-  组成员有类型(测试 / 生产)和备注,按列筛选、做覆盖检查用。
+- **Istio 组**:一个项目的集群 = 共用的测试集群 + 本项目的生产集群。**一个集群可以属于多个组**
+  (多个项目共用的测试集群),组成员有类型(测试 / 生产)和备注,按列筛选、做覆盖检查用。
+- **组的 VS 范围**:**同一个 VS 只能属于一个组**。组的包含 / 忽略规则决定哪些 VS 归本组,单个 VS 还可以手动忽略 /
+  取消忽略,见下文「组的 VS 范围」。
 - **组标准 VS**:花折保存的那一份,按「组 + 命名空间 + 名称」唯一。**规则、默认路由、gateways 全组共用**,用户修改的就是它。
 - **部署关系**:每个 VS 自己选择部署到组内哪些集群(测试环境往往有全部 VS,各项目的生产集群只有一部分);
   **hosts 和规则里的域名条件按集群各自维护**。没有部署关系 = 这个 VS 不部署到该集群。
-- **集群现状**:采集到的各集群 VirtualService 原样快照(只读),只用于对比、纳管和状态判断,不直接修改。
+- **集群现状**:采集到的各集群 VirtualService 原样快照(只读,按集群存,各组共用),只用于对比、纳管和状态判断;
+  采集状态(时间、采集人、VS 总数)在 `istio_cluster_state`。集群不在任何组里时,它的现状一并删除。
 
 下发到集群 X 的内容 = 组标准(gateways + 规则 + 默认路由)+ X 的 hosts + X 在各规则里的域名,由 master 生成,
 前端不传 spec。agent 用 Server-Side Apply(force)写入,`spec.http` 整段替换。
+
+### 组的 VS 范围
+
+- **包含 / 忽略规则**(`istio_group.include_patterns` / `ignore_patterns`):每条是通配符(`*` 任意多个字符,`?` 一个字符)
+  或正则(全匹配);规则里有 `/` 时匹配「命名空间/名称」,否则只匹配名称。先看忽略规则(匹配就排除),
+  包含规则为空表示全部,否则至少匹配一条。保存时校验正则;组管理里可以按已采集的现状预览规则的效果和冲突。
+- **单个 VS 的手动决定**(`istio_group_vs_override`,优先于组规则):列表每行的「忽略」= `ignore`;
+  「查看忽略」里取消忽略:组规则本来就纳入的删掉手动决定,被组规则排除的记为 `include`(单独纳入,不受规则影响)。
+- 被忽略的(手动 + 规则排除)不显示、不能纳管和下发;已纳管的组标准保留,取消忽略后恢复。「查看忽略」列出全部,
+  并给出组里的 VS 总数(组内各集群现状 + 组标准)、忽略数(手动 / 规则排除);手动忽略过、现状里已经没有的也列出来。
+- **冲突**:本组的 VS,也在和本组共用集群的其他组里(那个组的组标准或任一集群现状里有,且没被它排除)。
+  矩阵里整行标红,不能纳管和下发,要先在不该管它的组里忽略它。新建 VS 时同名的已在其他组里会拒绝;
+  名称被本组规则排除的会提示,确认后创建并单独纳入。
+- 采集照常拉取集群里的全部 VS(现状各组共用),按规则在展示和处理时过滤,所以改规则不用重新采集;
+  刷新现状的结果里给出每个集群的总数、归本组的个数和被忽略的个数。
+
+### 删除集群里的 VS
+
+矩阵格子菜单的「删除」、详情页「更多 → 从集群删除」:调 agent 的 `DELETE /api/agent/istio/vs/delete` 立即删除。
+删除前从集群取最新内容记进审计 `istio.delete`(`detail.spec`,误删可以照着恢复);本组标准部署到了该集群的,
+同时不再部署(删掉该集群的 hosts 和域名),免得下次下发又建回来。这个接口要新版 agent(只换镜像),
+旧版 agent 会提示先升级。
 
 ### 域名条件按集群
 
@@ -83,7 +108,11 @@
 3. **发现漂移**:刷新现状后出现「不一致」 → 对比 → 下发组标准覆盖回去,或以该集群现状更新组标准。
 4. **部署到新集群**:「部署到此集群」填 hosts 和各规则的域名(可以从别的集群复制并替换机房标识)→ 下发。
 
-删除组标准、不再部署到某集群,都只删花折里的数据,集群里的 VirtualService 不受影响。
+5. **多个项目共用测试集群**:每个项目一个组,都加入共用的测试集群,用包含 / 忽略规则划分 VS(如 b2c 组包含 `b2c*`,
+   另一个组忽略 `b2c*`)→ 刷新现状,红色的冲突行在不该管它的组里忽略 → 各组分别纳管、下发。
+
+删除组标准、不再部署到某集群、忽略,都只动花折里的数据,集群里的 VirtualService 不受影响;
+要删集群里的 VS 用格子菜单的「删除」。
 
 ## 接口
 
@@ -92,22 +121,26 @@
 
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
-| GET | `/api/istio/groups` | 组列表;管理员额外返回所有集群及所属组 |
-| POST / PUT / DELETE | `/api/istio/groups`(`?id=`) | 新建 / 修改 / 删除组。body:`{name, description, clusters:[{k8s_name, env_type, remark}]}`,顺序即显示顺序;移出组的集群,它的部署关系和现状一并删除 |
-| GET | `/api/istio/matrix?group_id=` | 组矩阵:每行一个 VS,`cells` 按集群给出 hosts、状态、版本 |
-| POST | `/api/istio/collect` | 刷新现状:`{group_id, k8s_names?}`,逐个集群返回成功 / 失败 |
+| GET | `/api/istio/groups` | 组列表(含包含 / 忽略规则);管理员额外返回所有集群,以及各自已在哪些组里 |
+| POST / PUT / DELETE | `/api/istio/groups`(`?id=`) | 新建 / 修改 / 删除组。body:`{name, description, clusters:[{k8s_name, env_type, remark}], include_patterns, ignore_patterns}`,规则每条 `{type: glob\|regex, pattern}`,集群顺序即显示顺序;移出组的集群,它在本组的部署关系删除,不再属于任何组的集群,现状也删除 |
+| GET | `/api/istio/groups/preview?group_id=&clusters=&include=&ignore=` | 组管理里预览规则(`include` / `ignore` 是 JSON 数组):按所选集群已采集的现状,每个 VS 归本组还是被忽略、和哪些组冲突;不保存 |
+| GET | `/api/istio/matrix?group_id=` | 组矩阵:只列本组范围内的 VS,`cells` 按集群给出 hosts、状态、版本,`conflicts` 冲突的组;另给 `ignored`(被忽略的 VS 和原因)和 `stats`(总数、忽略数) |
+| POST | `/api/istio/collect` | 刷新现状:`{group_id, k8s_names?}`,逐个集群返回成功 / 失败,以及 VS 总数、归本组的个数、被忽略的个数 |
+| POST | `/api/istio/ignore` / `/api/istio/unignore` | `{group_id, items:[{namespace, name}]}`:在本组忽略 / 取消忽略(被组规则排除的取消忽略后单独纳入) |
+| POST | `/api/istio/live/delete` | `{group_id, k8s_name, namespace, name}`:删除集群里的 VS,见上文;审计 `istio.delete` |
 | GET | `/api/istio/compare?group_id=&namespace=&name=&left=&right=` | 对比。一方是 `standard`(组标准,不含 hosts,域名显示 `<按集群>`)、`standard@集群`、`cluster@集群`(现状);`diff.rules_same` = 只差 hosts 和域名,规则行 `op=domains` = 只是域名不同 |
 | POST | `/api/istio/import` | 纳管:`{group_id, items:[{namespace, name, base, clusters}]}`,以 base 集群现状生成组标准,各集群 hosts 和域名取自己的现状 |
 | POST | `/api/istio/vs/reset` | 以某集群现状更新组标准的共用部分:`{vs_id, k8s_name}`,hosts 不变;域名见上文 |
 | GET | `/api/istio/vs?vs_id=` | 组标准详情:共用部分、规则(`domains`:各集群的域名)、各集群的 hosts 和状态(`missing_domains` 缺哪些规则的域名,`live_domains` 现状里对应规则的域名)、规范检查 |
-| POST | `/api/istio/vs` | 新建:`{group_id, namespace, name, gateways, df_*, clusters:[{k8s_name, hosts}]}`;集群里已有同名 VS 时要求用纳管 |
+| GET | `/api/istio/vs/check?group_id=&namespace=&name=` | 新建前检查:本组是否已有组标准、集群里是否已有同名的、其他组里是否已有、名称是否被本组排除 |
+| POST | `/api/istio/vs` | 新建:`{group_id, namespace, name, gateways, df_*, clusters:[{k8s_name, hosts}], force_include?}`;集群里已有同名 VS 时要求用纳管,其他组里已有的拒绝;名称被本组排除的要 `force_include`(单独纳入) |
 | PUT / DELETE | `/api/istio/vs?vs_id=` | 修改 gateways 和默认路由 / 删除组标准(名称、命名空间不可改) |
 | PUT / DELETE | `/api/istio/vs/cluster` | 部署到某集群并设置 hosts:`{vs_id, k8s_name, hosts, domains?: {规则 id: [[域名]]}}` / 不再部署(`?vs_id=&k8s_name=`,该集群的域名一并删除) |
 | POST | `/api/istio/httproute?vs_id=` | 新增规则;`priority` 不传追加到最后,传了检查是否占用;有域名块时带 `domains: {集群: [[域名]]}`,已纳入的集群都要给 |
 | PUT / DELETE | `/api/istio/httproute?route_id=` | 修改(`priority` 不传保持原位置,未建模字段保留,各集群域名整体替换)/ 删除(删除后重排优先级) |
 | POST | `/api/istio/httproute/reorder?vs_id=` | 优先级重排为 10、20、30…… |
-| POST | `/api/istio/apply/preview` | `{items:[{vs_id, k8s_name}]}`:从集群取最新现状(顺便刷新快照),逐项给出现状、将要下发的 spec 和结构化差异;缺少域名的项给出 error |
-| POST | `/api/istio/apply` | 下发:同一集群依次、不同集群并行;有缺少域名的项整个请求拒绝;成功的记下发人和内容哈希,完成后重新采集该集群现状;每项记审计 `istio.apply` |
+| POST | `/api/istio/apply/preview` | `{items:[{vs_id, k8s_name}]}`:从集群取最新现状(顺便刷新快照),逐项给出现状、将要下发的 spec 和结构化差异;不能下发的项(在本组被忽略、和其他组冲突、缺少域名)给出 error |
+| POST | `/api/istio/apply` | 下发:同一集群依次、不同集群并行;有不能下发的项整个请求拒绝;成功的记下发人和内容哈希,完成后重新采集该集群现状;每项记审计 `istio.apply` |
 
 ## 测试
 

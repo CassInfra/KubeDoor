@@ -7,10 +7,12 @@ import {
   type MatrixRow,
   importIstio
 } from "@/api/istio";
+import { conflictText } from "../utils";
 
 defineOptions({ name: "IstioImportDialog" });
 
-/** 纳管:以基准集群的现状生成组标准,勾选的集群纳入该 VS,各集群 hosts 取自己的现状 */
+/** 纳管:以基准集群的现状生成组标准,勾选的集群纳入该 VS,各集群 hosts 取自己的现状;
+ *  和其他组冲突的(同一个 VS 只能属于一个组)先不纳管 */
 const props = defineProps<{
   groupId: number;
   rows: MatrixRow[];
@@ -55,7 +57,12 @@ function versionOf(item: Item, k8s: string) {
 }
 
 const ready = computed(() =>
-  items.value.filter(item => item.base && item.clusters.length)
+  items.value.filter(
+    item => item.base && item.clusters.length && !item.row.conflicts.length
+  )
+);
+const blocked = computed(
+  () => items.value.filter(item => item.row.conflicts.length).length
 );
 
 async function submit() {
@@ -111,10 +118,27 @@ function resultOf(item: Item) {
       class="mb-3"
       title="以「基准集群」的现状生成组标准(规则、默认路由、gateways 全组共用);勾选的集群纳入这个 VS,hosts 和规则里的域名取各自的现状(集群里没有的,hosts 先用基准集群的,域名要在纳管后补上)。和组标准不一样的集群会显示「待下发」,看过差异再下发即可拉齐。"
     />
+    <el-alert
+      v-if="blocked"
+      type="error"
+      :closable="false"
+      show-icon
+      class="mb-3"
+      :title="`有 ${blocked} 个 VS 也在其他组里(同一个 VS 只能属于一个组),这次不纳管:先在不该管它的组里忽略它`"
+    />
     <el-table :data="items" border size="small" max-height="520">
       <el-table-column label="VirtualService" min-width="200">
         <template #default="{ row }">
-          <div>{{ row.row.name }}</div>
+          <div>
+            {{ row.row.name }}
+            <el-tooltip
+              v-if="row.row.conflicts.length"
+              :content="`也在${conflictText(row.row.conflicts)}里`"
+              placement="top"
+            >
+              <el-tag size="small" type="danger" effect="dark">冲突</el-tag>
+            </el-tooltip>
+          </div>
           <div class="sub">{{ row.row.namespace }}</div>
         </template>
       </el-table-column>

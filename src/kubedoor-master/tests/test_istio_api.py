@@ -47,12 +47,14 @@ def vs(hosts, routes, gateway='istio-system/internal', **extra):
 
 
 class FakeAgent:
-    """按集群保存 VirtualService;列出 / 下发两个接口和真 agent 的返回格式一致。"""
+    """按集群保存 VirtualService;列出 / 下发 / 删除接口和真 agent 的返回格式一致。"""
 
     def __init__(self):
         self.clusters = {}
         self.offline = set()
+        self.old_agent = set()  # 还没有删除接口的旧版 agent
         self.applied = []
+        self.deleted = []
 
     def put(self, k8s_name, name, spec):
         self.clusters.setdefault(k8s_name, {})[(NS, name)] = copy.deepcopy(spec)
@@ -72,6 +74,16 @@ class FakeAgent:
             meta = body['metadata']
             items[(meta['namespace'], meta['name'])] = copy.deepcopy(body['spec'])
             return {'success': True, 'message': f"VirtualService {meta['name']} applied successfully"}
+        if path == handlers.AGENT_DELETE_PATH and method == 'DELETE':
+            if env in self.old_agent:  # 本地服务没有这个路由:回 404 纯文本,agent 解析 JSON 失败
+                return {'success': False, 'error': "404, message='Attempt to decode JSON with unexpected mimetype: "
+                                                   "text/plain; charset=utf-8', url='https://localhost/'"}
+            key = (query['namespace'], query['name'])
+            if key not in items:
+                return {'success': False, 'status': 404, 'error': f'VirtualService {key[1]} not found'}
+            self.deleted.append((env, key))
+            del items[key]
+            return {'success': True, 'message': f'VirtualService {key[1]} deleted successfully'}
         raise AssertionError(f'unexpected agent call {method} {path}')
 
 
@@ -321,41 +333,232 @@ async def test_group_membership_rules(env, monkeypatch):
     await call(client, 'POST', '/api/istio/import', {'group_id': group_id, 'items': [
         {'namespace': NS, 'name': 'a', 'base': 'beta-k', 'clusters': ['beta-k', 'prod-a']}]})
 
-    taken = await call(client, 'POST', '/api/istio/groups', {
-        'name': 'other', 'clusters': [{'k8s_name': 'beta-k', 'env_type': 'test'}]}, status=400)
-    assert '已属于组 cassmall' in taken['error']
+    # 一个集群可以属于多个组(多个项目共用的测试集群)
+    other = await call(client, 'POST', '/api/istio/groups', {
+        'name': 'other', 'clusters': [{'k8s_name': 'beta-k', 'env_type': 'test'}, {'k8s_name': 'prod-b', 'env_type': 'prod'}],
+        'include_patterns': [{'type': 'glob', 'pattern': 'b*'}]})
+    other_id = other['data']['id']
     dup = await call(client, 'POST', '/api/istio/groups', {'name': 'cassmall'}, status=400)
     assert '已存在' in dup['error']
     bad_type = await call(client, 'POST', '/api/istio/groups', {
         'name': 'x', 'clusters': [{'k8s_name': 'prod-b', 'env_type': 'dev'}]}, status=400)
     assert '集群类型' in bad_type['error']
+    bad_regex = await call(client, 'POST', '/api/istio/groups', {
+        'name': 'x', 'ignore_patterns': [{'type': 'glob', 'pattern': 'ok-*'}, {'type': 'regex', 'pattern': 'a(b'}]},
+        status=400)
+    assert '忽略规则第 2 条「a(b」正则写法有误' in bad_regex['error']
 
     groups = (await call(client, 'GET', '/api/istio/groups'))['data']
-    assert {c['k8s_name']: c['group'] for c in groups['clusters']}['prod-b'] == ''
+    owners = {c['k8s_name']: c['groups'] for c in groups['clusters']}
+    assert owners['beta-k'] == ['cassmall', 'other'] and owners['prod-b'] == ['other'] and owners['prod-a'] == ['cassmall']
+    saved = next(g for g in groups['groups'] if g['id'] == other_id)
+    assert saved['include_patterns'] == [{'type': 'glob', 'pattern': 'b*'}] and saved['ignore_patterns'] == []
+    beta_k = next(c for c in saved['clusters'] if c['k8s_name'] == 'beta-k')
+    assert beta_k['collected_at'] and beta_k['vs_count'] == 2  # 采集状态按集群,各组共用
 
-    # 集群离线:只有它失败
+    # 集群离线:只有它失败;刷新结果给出本组的个数
     agent.offline.add('beta-p')
     collected = {r['k8s_name']: r for r in (await call(client, 'POST', '/api/istio/collect',
                                                          {'group_id': group_id}))['data']}
     assert collected['beta-k']['success'] and not collected['beta-p']['success']
     assert '不在线' in collected['beta-p']['error']
+    other_collected = (await call(client, 'POST', '/api/istio/collect', {'group_id': other_id,
+                                                                          'k8s_names': ['beta-k']}))['data'][0]
+    assert (other_collected['count'], other_collected['group_count'], other_collected['ignored_count']) == (2, 1, 1)
     outside = await call(client, 'POST', '/api/istio/collect', {'group_id': group_id, 'k8s_names': ['prod-b']},
                          status=400)
     assert '不在组' in outside['error']
 
-    # 把 prod-a 移出组:它的部署关系和现状一起删掉;调整顺序和类型
+    # 把 beta-k、prod-a 移出 cassmall:本组在它们上的部署关系删掉;beta-k 还在 other 组,现状保留,prod-a 的删掉
     await call(client, 'PUT', f'/api/istio/groups?id={group_id}', {
         'name': 'cassmall', 'clusters': [{'k8s_name': 'beta-p', 'env_type': 'test'},
-                                         {'k8s_name': 'beta-k', 'env_type': 'test'},
                                          {'k8s_name': 'prod-b', 'env_type': 'prod'}]})
     rows = await matrix(client, group_id)
-    assert list(rows['a']['cells']) == ['beta-p', 'beta-k', 'prod-b']
+    assert list(rows['a']['cells']) == ['beta-p', 'prod-b']
+    assert await db.pg_fetchval("SELECT count(*) FROM istio_vs_cluster WHERE k8s_name IN ('beta-k', 'prod-a')") == 0
+    assert await db.pg_fetchval("SELECT count(*) FROM istio_vs_snapshot WHERE k8s_name = 'beta-k'") == 2
     assert await db.pg_fetchval("SELECT count(*) FROM istio_vs_snapshot WHERE k8s_name = 'prod-a'") == 0
-    assert await db.pg_fetchval("SELECT count(*) FROM istio_vs_cluster WHERE k8s_name = 'prod-a'") == 0
+    assert await db.pg_fetchval("SELECT count(*) FROM istio_cluster_state WHERE k8s_name = 'prod-a'") == 0
 
     await call(client, 'DELETE', '/api/istio/groups', id=group_id)
     assert await db.pg_fetchval('SELECT count(*) FROM istio_vs') == 0
     await call(client, 'DELETE', '/api/istio/groups', id=group_id, status=404)
+    assert await db.pg_fetchval("SELECT count(*) FROM istio_vs_snapshot WHERE k8s_name = 'beta-p'") == 0
+    assert await db.pg_fetchval("SELECT count(*) FROM istio_vs_snapshot WHERE k8s_name = 'beta-k'") == 2
+
+
+async def two_groups(client, agent):
+    """共用测试集群 beta-k / beta-p 的两个项目组:
+    A = beta + prod-a,忽略 b-*;B = beta + prod-b,只包含 b-* 和正则 x-.*。x-shared 两个组都包含(冲突)。"""
+    for cluster in ('beta-k', 'beta-p'):
+        for name in ('a-one', 'a-two', 'b-one', 'x-shared'):
+            agent.put(cluster, name, vs([f'{name}.beta.x.com'], [route(f'/{name}/', 1)]))
+    agent.put('prod-a', 'a-one', vs(['a-one.x.com'], [route('/a-one/', 1)]))
+    agent.put('prod-b', 'b-one', vs(['b-one.x.com'], [route('/b-one/', 1)]))
+    a = await call(client, 'POST', '/api/istio/groups', {
+        'name': 'A', 'clusters': [{'k8s_name': 'beta-k'}, {'k8s_name': 'beta-p'}, {'k8s_name': 'prod-a', 'env_type': 'prod'}],
+        'ignore_patterns': [{'type': 'glob', 'pattern': 'b-*'}]})
+    b = await call(client, 'POST', '/api/istio/groups', {
+        'name': 'B', 'clusters': [{'k8s_name': 'beta-k'}, {'k8s_name': 'beta-p'}, {'k8s_name': 'prod-b', 'env_type': 'prod'}],
+        'include_patterns': [{'type': 'glob', 'pattern': 'b-*'}, {'type': 'regex', 'pattern': 'x-.*'}]})
+    a_id, b_id = a['data']['id'], b['data']['id']
+    await call(client, 'POST', '/api/istio/collect', {'group_id': a_id})
+    await call(client, 'POST', '/api/istio/collect', {'group_id': b_id, 'k8s_names': ['prod-b']})
+    return a_id, b_id
+
+
+async def matrix_data(client, group_id):
+    return (await call(client, 'GET', '/api/istio/matrix', group_id=group_id))['data']
+
+
+@pytest.mark.asyncio
+async def test_group_scope_ignore_and_conflicts(env):
+    client, agent, _ = env
+    a_id, b_id = await two_groups(client, agent)
+
+    data = await matrix_data(client, a_id)
+    rows = {r['name']: r for r in data['rows']}
+    assert sorted(rows) == ['a-one', 'a-two', 'x-shared']
+    assert [(c['group'], c['clusters']) for c in rows['x-shared']['conflicts']] == [('B', ['beta-k', 'beta-p'])]
+    assert rows['a-one']['conflicts'] == []
+    assert [(i['name'], i['reason'], i['pattern'], i['clusters']) for i in data['ignored']] == [
+        ('b-one', S.SCOPE_IGNORE_RULE, 'b-*', ['beta-k', 'beta-p'])]
+    assert data['stats'] == {'total': 4, 'visible': 3, 'ignored': 1, 'manual': 0, 'by_rule': 1, 'conflict': 1}
+    b_data = await matrix_data(client, b_id)
+    assert sorted(r['name'] for r in b_data['rows']) == ['b-one', 'x-shared']
+    assert {i['name']: i['reason'] for i in b_data['ignored']} == {'a-one': S.SCOPE_NOT_INCLUDED,
+                                                                   'a-two': S.SCOPE_NOT_INCLUDED}
+
+    # 冲突的不能纳管;在 B 里忽略后 A 才能纳管
+    blocked = (await call(client, 'POST', '/api/istio/import', {'group_id': a_id, 'items': [
+        {'namespace': NS, 'name': 'x-shared', 'base': 'beta-k', 'clusters': ['beta-k']}]}))['data'][0]
+    assert not blocked['success'] and '也在组 B(共用集群 beta-k、beta-p)里' in blocked['error']
+    ignored = await call(client, 'POST', '/api/istio/ignore', {'group_id': b_id, 'items': [{'namespace': NS, 'name': 'x-shared'}]})
+    assert '已忽略 1 个' in ignored['msg']
+    b_data = await matrix_data(client, b_id)
+    assert [r['name'] for r in b_data['rows']] == ['b-one']
+    manual = next(i for i in b_data['ignored'] if i['name'] == 'x-shared')
+    assert manual['reason'] == S.SCOPE_MANUAL and manual['by'] == 'admin' and manual['at']
+    assert b_data['stats']['manual'] == 1 and b_data['stats']['by_rule'] == 2
+    imported = await call(client, 'POST', '/api/istio/import', {'group_id': a_id, 'items': [
+        {'namespace': NS, 'name': n, 'base': 'beta-k', 'clusters': ['beta-k', 'beta-p']} for n in ('x-shared', 'a-one')]})
+    assert all(r['success'] for r in imported['data'])
+    assert all(not r['conflicts'] for r in (await matrix_data(client, a_id))['rows'])
+
+    # 被组规则排除的取消忽略 → 单独纳入本组(于是和 B 冲突);再忽略回去
+    await call(client, 'POST', '/api/istio/unignore', {'group_id': a_id, 'items': [{'namespace': NS, 'name': 'b-one'}]})
+    rows = {r['name']: r for r in (await matrix_data(client, a_id))['rows']}
+    assert rows['b-one']['included'] and rows['b-one']['conflicts'][0]['group'] == 'B'
+    await call(client, 'POST', '/api/istio/ignore', {'group_id': a_id, 'items': [{'namespace': NS, 'name': 'b-one'}]})
+    assert 'b-one' not in {r['name'] for r in (await matrix_data(client, a_id))['rows']}
+
+    # B 的规则改成也包含 a-one:冲突,A 里已纳管的 a-one 不能下发;预览给出原因
+    a_one = rows['a-one']['vs_id']
+    await call(client, 'PUT', f'/api/istio/groups?id={b_id}', {
+        'name': 'B', 'clusters': [{'k8s_name': 'beta-k'}, {'k8s_name': 'beta-p'}, {'k8s_name': 'prod-b', 'env_type': 'prod'}],
+        'include_patterns': [{'type': 'glob', 'pattern': 'b-*'}, {'type': 'regex', 'pattern': 'x-.*'},
+                             {'type': 'glob', 'pattern': 'istio-system/a-on?'}]})
+    preview = (await call(client, 'POST', '/api/istio/apply/preview', {'items': [{'vs_id': a_one, 'k8s_name': 'beta-k'}]}))['data'][0]
+    assert '也在组 B' in preview['error'] and preview['diff'] is None
+    denied = await call(client, 'POST', '/api/istio/apply', {'items': [{'vs_id': a_one, 'k8s_name': 'beta-k'}]}, status=400)
+    assert '同一个 VS 只能属于一个组' in denied['error']
+    detail = (await call(client, 'GET', '/api/istio/vs', vs_id=a_one))['data']
+    assert detail['scope']['visible'] and detail['conflicts'][0]['group'] == 'B'
+
+    # A 里忽略已纳管的 a-one:组标准保留但不显示、不能下发;取消忽略后恢复
+    await call(client, 'POST', '/api/istio/ignore', {'group_id': a_id, 'items': [{'namespace': NS, 'name': 'a-one'}]})
+    data = await matrix_data(client, a_id)
+    assert 'a-one' not in {r['name'] for r in data['rows']}
+    assert next(i for i in data['ignored'] if i['name'] == 'a-one')['vs_id'] == a_one
+    detail = (await call(client, 'GET', '/api/istio/vs', vs_id=a_one))['data']
+    assert not detail['scope']['visible'] and detail['scope']['reason'] == S.SCOPE_MANUAL
+    denied = await call(client, 'POST', '/api/istio/apply', {'items': [{'vs_id': a_one, 'k8s_name': 'beta-k'}]}, status=400)
+    assert '手动忽略' in denied['error']
+    await call(client, 'POST', '/api/istio/unignore', {'group_id': a_id, 'items': [{'namespace': NS, 'name': 'a-one'}]})
+    assert 'a-one' in {r['name'] for r in (await matrix_data(client, a_id))['rows']}
+    assert await db.pg_fetchval("SELECT count(*) FROM istio_group_vs_override WHERE name = 'a-one'") == 0
+
+    # 手动忽略过、集群里已删掉的,仍列在忽略里(可以取消),不计入总数
+    await call(client, 'POST', '/api/istio/ignore', {'group_id': a_id, 'items': [{'namespace': NS, 'name': 'gone'}]})
+    data = await matrix_data(client, a_id)
+    gone = next(i for i in data['ignored'] if i['name'] == 'gone')
+    assert gone['stale'] and gone['clusters'] == [] and data['stats']['total'] == 4
+
+    # 组管理里预览规则:按所选集群的现状,不保存
+    preview = (await call(client, 'GET', '/api/istio/groups/preview', group_id=b_id, clusters='beta-k,prod-b,new-c',
+                          include=json.dumps([{'type': 'glob', 'pattern': '*-one'}]), ignore='[]'))['data']
+    assert (preview['total'], preview['visible'], preview['ignored']) == (4, 2, 2)
+    assert preview['uncollected'] == ['new-c']
+    items = {i['name']: i for i in preview['items']}
+    assert items['b-one']['clusters'] == ['beta-k', 'prod-b'] and items['a-one']['conflicts'][0]['group'] == 'A'
+    assert items['x-shared']['reason'] == S.SCOPE_MANUAL  # B 里手动忽略的,预览也算上
+    bad = await call(client, 'GET', '/api/istio/groups/preview', clusters='beta-k', include='{bad', status=400)
+    assert 'JSON' in bad['error']
+
+
+@pytest.mark.asyncio
+async def test_create_vs_checks_group_scope(env):
+    client, agent, _ = env
+    a_id, b_id = await two_groups(client, agent)
+    body = {'group_id': a_id, 'namespace': NS, 'gateways': ['istio-system/internal'],
+            'clusters': [{'k8s_name': 'beta-k', 'hosts': ['n.x.com']}]}
+
+    # 名称匹配本组的忽略规则:先提示,确认后单独纳入
+    check = (await call(client, 'GET', '/api/istio/vs/check', group_id=a_id, namespace=NS, name='b-new'))['data']
+    assert check['scope'] == {'visible': False, 'reason': S.SCOPE_IGNORE_RULE, 'pattern': 'b-*'}
+    assert not check['standard'] and not check['in_clusters'] and not check['conflicts']
+    excluded = await call(client, 'POST', '/api/istio/vs', {**body, 'name': 'b-new'}, status=400)
+    assert '匹配本组的忽略规则「b-*」' in excluded['error'] and '单独纳入本组' in excluded['error']
+    created = await call(client, 'POST', '/api/istio/vs', {**body, 'name': 'b-new', 'force_include': True})
+    rows = {r['name']: r for r in (await matrix_data(client, a_id))['rows']}
+    assert rows['b-new']['vs_id'] == created['data']['id'] and rows['b-new']['included']
+
+    # 其他组已有(B 包含 b-* 的话 b-new 会冲突):B 再建同名的被拒绝
+    taken = await call(client, 'POST', '/api/istio/vs', {**body, 'group_id': b_id, 'name': 'b-new'}, status=400)
+    assert '组 A(共用集群 beta-k、beta-p)里已经有' in taken['error']
+    # 集群里已有的要用纳管;本组被忽略的提示先取消忽略
+    exists = await call(client, 'POST', '/api/istio/vs', {**body, 'group_id': b_id, 'name': 'a-two'}, status=400)
+    assert '纳管' in exists['error'] and '取消忽略' in exists['error']
+    check = (await call(client, 'GET', '/api/istio/vs/check', group_id=b_id, namespace=NS, name='a-two'))['data']
+    assert check['in_clusters'] == ['beta-k', 'beta-p'] and check['scope']['reason'] == S.SCOPE_NOT_INCLUDED
+
+
+@pytest.mark.asyncio
+async def test_delete_vs_in_cluster(env):
+    client, agent, audits = env
+    a_id, _ = await two_groups(client, agent)
+    imported = await call(client, 'POST', '/api/istio/import', {'group_id': a_id, 'items': [
+        {'namespace': NS, 'name': 'a-one', 'base': 'beta-k', 'clusters': ['beta-k', 'prod-a']}]})
+    vs_id = imported['data'][0]['vs_id']
+
+    # 删除生产集群里的 a-one:集群里没了,本组不再部署到该集群,审计里留着删除前的内容
+    deleted = await call(client, 'POST', '/api/istio/live/delete',
+                         {'group_id': a_id, 'k8s_name': 'prod-a', 'namespace': NS, 'name': 'a-one'})
+    assert deleted['msg'] == '已从集群 prod-a 删除 istio-system/a-one,并且本组不再部署到该集群'
+    assert agent.deleted == [('prod-a', (NS, 'a-one'))]
+    assert (NS, 'a-one') not in agent.clusters['prod-a']
+    record = audits[-1]
+    assert record[1] == 'istio.delete' and record[2]['env'] == 'prod-a' and record[2]['success']
+    assert record[2]['detail']['spec']['hosts'] == ['a-one.x.com'] and record[2]['detail']['unbound']
+    cells_now = (await matrix(client, a_id))['a-one']['cells']
+    assert cells_now['prod-a']['status'] == S.NONE and not cells_now['prod-a']['bound']
+    assert cells_now['beta-k']['bound']
+
+    # 再删一次:集群里已经没有了
+    again = await call(client, 'POST', '/api/istio/live/delete',
+                       {'group_id': a_id, 'k8s_name': 'prod-a', 'namespace': NS, 'name': 'a-one'})
+    assert again['msg'] == '集群 prod-a 里已经没有 istio-system/a-one'
+
+    # 旧版 agent 没有删除接口:提示升级,集群和部署关系都不动
+    agent.old_agent.add('beta-k')
+    old = await call(client, 'POST', '/api/istio/live/delete',
+                     {'group_id': a_id, 'k8s_name': 'beta-k', 'namespace': NS, 'name': 'a-one'}, status=502)
+    assert 'agent 版本过旧' in old['error'] and (NS, 'a-one') in agent.clusters['beta-k']
+    assert audits[-1][2]['success'] is False
+    assert (await call(client, 'GET', '/api/istio/vs', vs_id=vs_id))['data']['clusters'][0]['bound']
+    outside = await call(client, 'POST', '/api/istio/live/delete',
+                         {'group_id': a_id, 'k8s_name': 'prod-b', 'namespace': NS, 'name': 'b-one'}, status=400)
+    assert '不在组' in outside['error']
 
 
 def domain_values(lists):

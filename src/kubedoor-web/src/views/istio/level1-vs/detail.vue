@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from "vue";
+import { computed, h as vnode, onMounted, ref } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { ElMessageBox } from "element-plus";
 import { ArrowLeft, Edit, Plus, Warning } from "@element-plus/icons-vue";
@@ -10,6 +10,7 @@ import {
   type IstioRoute,
   type VSClusterRow,
   type VSDetail,
+  deleteIstioLiveVS,
   deleteIstioRoute,
   deleteIstioVS,
   getIstioVS,
@@ -26,12 +27,14 @@ import {
   ENV_TYPE_LABEL,
   ENV_TYPE_TAG,
   STATUS_META,
+  conflictText,
   describeMatch,
   displayRoute,
   domainBlockCount,
   formatDomain,
   formatTime,
   forwardSummary,
+  scopeText,
   toYaml
 } from "./utils";
 
@@ -178,6 +181,51 @@ async function unbind(c: VSClusterRow) {
   await load();
 }
 
+/** 删除集群里的 VirtualService;本组标准部署到了该集群的,同时不再部署 */
+async function deleteLive(c: VSClusterRow) {
+  const v = vs.value;
+  if (!v) return;
+  const lines = [
+    vnode(
+      "p",
+      null,
+      `从集群 ${c.k8s_name} 删除 ${v.namespace}/${v.name}?删除后立即生效,依赖它的域名路由会失效。`
+    ),
+    c.env_type === "prod"
+      ? vnode(
+          "p",
+          { style: "color: var(--el-color-danger); font-weight: 600" },
+          "这是生产集群。"
+        )
+      : null,
+    c.bound
+      ? vnode(
+          "p",
+          null,
+          "组标准部署到了该集群:同时不再部署(删除花折里该集群的 hosts 和域名),组标准和其他集群不受影响。"
+        )
+      : null,
+    vnode("p", null, "删除前的内容会记在审计日志(istio.delete)里。")
+  ];
+  await ElMessageBox.confirm(
+    vnode("div", null, lines),
+    "删除集群里的 VirtualService",
+    {
+      type: "warning",
+      confirmButtonText: "删除",
+      confirmButtonClass: "el-button--danger"
+    }
+  );
+  const res = await deleteIstioLiveVS(
+    v.group_id,
+    c.k8s_name,
+    v.namespace,
+    v.name
+  );
+  message(res.msg || "已删除", { type: "success" });
+  await load();
+}
+
 async function removeVS() {
   if (!vs.value) return;
   await ElMessageBox.confirm(
@@ -232,6 +280,22 @@ onMounted(load);
         >
         <div v-for="item in vs.lint" :key="item">{{ item }}</div>
       </el-alert>
+      <el-alert
+        v-if="!vs.scope.visible"
+        type="warning"
+        :closable="false"
+        show-icon
+        class="mb-3"
+        :title="`这个 VS 在组「${vs.group.name}」里已忽略(${scopeText(vs.scope)}):列表里不显示,也不能下发;在列表页「查看忽略」里取消忽略后恢复`"
+      />
+      <el-alert
+        v-if="vs.conflicts.length"
+        type="error"
+        :closable="false"
+        show-icon
+        class="mb-3"
+        :title="`同一个 VS 只能属于一个组:也在${conflictText(vs.conflicts)}里,下发会被拒绝;请在不该管它的组里忽略它`"
+      />
 
       <el-card shadow="never" class="mb-3">
         <template #header>
@@ -322,6 +386,13 @@ onMounted(load);
                       </el-dropdown-item>
                       <el-dropdown-item v-if="row.bound" @click="unbind(row)">
                         不再部署到此集群
+                      </el-dropdown-item>
+                      <el-dropdown-item
+                        v-if="row.in_cluster"
+                        divided
+                        @click="deleteLive(row)"
+                      >
+                        <span class="danger-text">从集群删除</span>
                       </el-dropdown-item>
                     </el-dropdown-menu>
                   </template>
@@ -641,6 +712,10 @@ onMounted(load);
 
 .domain-block {
   margin-right: 8px;
+}
+
+.danger-text {
+  color: var(--el-color-danger);
 }
 
 .warn {

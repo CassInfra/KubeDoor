@@ -11,6 +11,8 @@
   只是域名不同的规则单独标出。
 - lint_http / lint_domains:规范检查 —— 用了重写就要有名称,没用重写就不要名称(名称用于访问日志展示);
   域名条件里的域名要在本集群的 hosts 里。
+- VSScope / find_conflicts:组的 VS 范围(包含 / 忽略规则 + 单个 VS 的手动忽略 / 单独纳入),
+  以及同一个 VS 是否也在共用集群的其他组里(同一个 VS 只能属于一个组)。
 - build_matrix:组矩阵,每行一个 VS,每列一个集群。
 """
 
@@ -39,6 +41,17 @@ DOMAIN_FIELDS = ('authority', 'host')
 STRING_OPS = ('exact', 'prefix', 'regex')
 # 不按某个集群展开时(组标准本身、该集群还没设置)域名条件显示成这个值
 DOMAIN_PLACEHOLDER = '<按集群>'
+
+# 组的 VS 范围:包含 / 忽略规则的写法,单个 VS 的手动决定,以及判断结果的原因
+PATTERN_TYPES = ('glob', 'regex')        # 通配符(* 任意多个字符,? 一个字符)/ 正则(全匹配)
+OVERRIDE_IGNORE = 'ignore'               # 手动忽略
+OVERRIDE_INCLUDE = 'include'             # 单独纳入:组规则排除的,在「查看忽略」里取消忽略
+OVERRIDE_ACTIONS = (OVERRIDE_IGNORE, OVERRIDE_INCLUDE)
+SCOPE_RULE = 'rule'                      # 组规则纳入
+SCOPE_INCLUDED = 'include'               # 单独纳入
+SCOPE_MANUAL = 'manual'                  # 手动忽略
+SCOPE_IGNORE_RULE = 'ignore_rule'        # 匹配了忽略规则
+SCOPE_NOT_INCLUDED = 'not_included'      # 一条包含规则都没匹配上
 
 # 集群格子的状态
 SYNCED = 'synced'        # 集群现状 = 组标准 + 该集群 hosts
@@ -578,6 +591,81 @@ def diff_specs(left: Optional[dict], right: Optional[dict]) -> dict:
             'moved': sum(1 for r in routes if r['moved']),
         },
     }
+
+
+# ---------------------------------------------------------------------------
+# 组的 VS 范围:包含 / 忽略规则 + 单个 VS 的手动忽略 / 单独纳入;跨组冲突
+# ---------------------------------------------------------------------------
+def compile_pattern(item: dict):
+    """{'type': 'glob' | 'regex', 'pattern': ...} → 全匹配用的正则;正则写错抛 re.error。"""
+    pattern = item['pattern']
+    if item.get('type') == 'regex':
+        return re.compile(pattern)
+    return re.compile(''.join('.*' if ch == '*' else '.' if ch == '?' else re.escape(ch) for ch in pattern))
+
+
+def pattern_matches(item: dict, compiled, namespace: str, name: str) -> bool:
+    """规则里有 / 时匹配「命名空间/名称」,否则只匹配名称。"""
+    target = f'{namespace}/{name}' if '/' in item['pattern'] else name
+    return compiled.fullmatch(target) is not None
+
+
+class VSScope:
+    """组的 VS 范围。先看单个 VS 的手动决定,再看组规则:匹配忽略规则的排除,
+    包含规则为空表示全部,否则至少匹配一条包含规则。"""
+
+    def __init__(self, include=(), ignore=(), overrides: Optional[Dict[tuple, str]] = None):
+        self.include = [(item, compile_pattern(item)) for item in include or ()]
+        self.ignore = [(item, compile_pattern(item)) for item in ignore or ()]
+        self.overrides = overrides or {}  # {(namespace, name): 'ignore' | 'include'}
+
+    def rule(self, namespace: str, name: str) -> dict:
+        """只按组规则判断:{'visible', 'reason', 'pattern'}。"""
+        for item, compiled in self.ignore:
+            if pattern_matches(item, compiled, namespace, name):
+                return {'visible': False, 'reason': SCOPE_IGNORE_RULE, 'pattern': item['pattern']}
+        if not self.include:
+            return {'visible': True, 'reason': SCOPE_RULE, 'pattern': None}
+        for item, compiled in self.include:
+            if pattern_matches(item, compiled, namespace, name):
+                return {'visible': True, 'reason': SCOPE_RULE, 'pattern': item['pattern']}
+        return {'visible': False, 'reason': SCOPE_NOT_INCLUDED, 'pattern': None}
+
+    def classify(self, namespace: str, name: str) -> dict:
+        action = self.overrides.get((namespace, name))
+        if action == OVERRIDE_IGNORE:
+            return {'visible': False, 'reason': SCOPE_MANUAL, 'pattern': None}
+        if action == OVERRIDE_INCLUDE:
+            return {'visible': True, 'reason': SCOPE_INCLUDED, 'pattern': None}
+        return self.rule(namespace, name)
+
+    def visible(self, namespace: str, name: str) -> bool:
+        return self.classify(namespace, name)['visible']
+
+
+def find_conflicts(group_id: Optional[int], clusters: List[str], keys: Iterable[tuple], others: List[dict],
+                   present_by_cluster: Dict[str, set]) -> Dict[tuple, List[dict]]:
+    """同一个 VS 只能属于一个组:keys(本组的 VS)里,也在和本组共用集群的其他组里的。
+
+    其他组「有」一个 VS = 它的组标准或它任一集群的现状里有,且没被它的规则 / 手动忽略排除。
+    others:[{'id', 'name', 'clusters': [k8s_name], 'scope': VSScope, 'standards': {(namespace, name)}}];
+    返回 {(namespace, name): [{'group_id', 'group', 'clusters': 共用的集群}]}。"""
+    keys = list(keys)
+    result: Dict[tuple, List[dict]] = {}
+    for other in others:
+        if other['id'] == group_id:
+            continue
+        theirs = set(other['clusters'])
+        shared = [c for c in clusters if c in theirs]
+        if not shared:
+            continue
+        present = set(other.get('standards') or ())
+        for k8s_name in other['clusters']:
+            present |= present_by_cluster.get(k8s_name, set())
+        for key in keys:
+            if key in present and other['scope'].visible(*key):
+                result.setdefault(key, []).append({'group_id': other['id'], 'group': other['name'], 'clusters': shared})
+    return result
 
 
 # ---------------------------------------------------------------------------

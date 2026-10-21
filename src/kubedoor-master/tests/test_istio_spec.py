@@ -1,6 +1,7 @@
 """istio_route/spec.py 的纯逻辑测试:采集 → 下发无损、归一化、规则对齐对比、名称规范、状态与组矩阵。"""
 import copy
 import pathlib
+import re
 import sys
 
 import pytest
@@ -451,3 +452,65 @@ def test_matrix_domain_only_difference_is_one_version():
     standard['routes'][0]['domains'].pop('k')
     row = S.build_matrix(clusters, [standard], snapshots)[0]
     assert row['cells']['k']['status'] == S.INCOMPLETE
+
+
+# ---------------------------------------------------------------- 组的 VS 范围与冲突
+def glob(pattern):
+    return {'type': 'glob', 'pattern': pattern}
+
+
+def regex(pattern):
+    return {'type': 'regex', 'pattern': pattern}
+
+
+@pytest.mark.parametrize('item,namespace,name,matched', [
+    (glob('b2c-*'), 'istio-system', 'b2c-int', True),
+    (glob('b2c-*'), 'istio-system', 'b2c.courier-int', False),  # . 是普通字符
+    (glob('b2c?courier-int'), 'istio-system', 'b2c.courier-int', True),
+    (glob('b2c'), 'istio-system', 'b2c-int', False),  # 全匹配
+    (glob('istio-system/*-ext'), 'istio-system', 'cis-ext', True),  # 有 / 时匹配「命名空间/名称」
+    (glob('istio-system/*-ext'), 'other', 'cis-ext', False),
+    (regex('b2c[-.].*'), 'istio-system', 'b2c.job-int', True),
+    (regex('b2c'), 'istio-system', 'b2c-int', False),  # 正则也是全匹配
+    (regex('.*-(ext|int)'), 'istio-system', 'infra-int', True),
+])
+def test_pattern_matching(item, namespace, name, matched):
+    assert S.pattern_matches(item, S.compile_pattern(item), namespace, name) is matched
+
+
+def test_scope_order_overrides_then_ignore_then_include():
+    scope = S.VSScope(include=[glob('b2c-*'), regex('infra.*')], ignore=[glob('*-ext')],
+                      overrides={('istio-system', 'b2c-old'): 'ignore', ('istio-system', 'kmw-int'): 'include'})
+    ns = 'istio-system'
+    assert scope.classify(ns, 'b2c-int') == {'visible': True, 'reason': S.SCOPE_RULE, 'pattern': 'b2c-*'}
+    assert scope.classify(ns, 'b2c-ext') == {'visible': False, 'reason': S.SCOPE_IGNORE_RULE, 'pattern': '*-ext'}
+    assert scope.classify(ns, 'cis-int') == {'visible': False, 'reason': S.SCOPE_NOT_INCLUDED, 'pattern': None}
+    assert scope.classify(ns, 'b2c-old')['reason'] == S.SCOPE_MANUAL
+    assert scope.classify(ns, 'kmw-int') == {'visible': True, 'reason': S.SCOPE_INCLUDED, 'pattern': None}
+    assert scope.rule(ns, 'kmw-int')['reason'] == S.SCOPE_NOT_INCLUDED  # rule 不看手动决定
+    everything = S.VSScope()  # 包含规则为空 = 全部
+    assert everything.visible(ns, 'anything') and everything.classify(ns, 'x')['pattern'] is None
+    with pytest.raises(re.error):
+        S.VSScope(include=[regex('a(b')])
+
+
+def test_find_conflicts_only_with_groups_sharing_clusters():
+    present = {'beta': {('ns', 'a'), ('ns', 'b'), ('ns', 'x')}, 'prod-b': {('ns', 'b')}, 'other': {('ns', 'a')}}
+    others = [
+        {'id': 2, 'name': 'B', 'clusters': ['beta', 'prod-b'], 'scope': S.VSScope(include=[glob('b'), glob('x')]),
+         'standards': set()},
+        {'id': 3, 'name': 'C', 'clusters': ['other'], 'scope': S.VSScope(), 'standards': {('ns', 'a')}},  # 不共用集群
+        {'id': 4, 'name': 'D', 'clusters': ['beta'], 'scope': S.VSScope(overrides={('ns', 'x'): 'ignore'}),
+         'standards': set()},
+        {'id': 1, 'name': 'self', 'clusters': ['beta'], 'scope': S.VSScope(), 'standards': set()},  # 本组跳过
+    ]
+    conflicts = S.find_conflicts(1, ['beta', 'prod-a'], [('ns', 'a'), ('ns', 'x'), ('ns', 'only-mine')], others,
+                                 present)
+    assert conflicts == {
+        ('ns', 'a'): [{'group_id': 4, 'group': 'D', 'clusters': ['beta']}],
+        ('ns', 'x'): [{'group_id': 2, 'group': 'B', 'clusters': ['beta']}],
+    }
+    # 其他组只有组标准(还没部署)也算
+    others[0]['standards'] = {('ns', 'only-mine')}
+    others[0]['scope'] = S.VSScope()
+    assert S.find_conflicts(1, ['beta'], [('ns', 'only-mine')], others[:1], present)[('ns', 'only-mine')][0]['group'] == 'B'

@@ -1,17 +1,26 @@
 <script setup lang="ts">
 import { computed, reactive, ref, watch } from "vue";
+import { ElMessageBox } from "element-plus";
 import { Refresh } from "@element-plus/icons-vue";
 import { message } from "@/utils/message";
 import {
   type IstioGroupCluster,
+  type VSCheck,
   type VSDetail,
   type VSFields,
+  checkIstioVS,
   createIstioVS,
   getServiceFirstPort,
   updateIstioVS
 } from "@/api/istio";
 import { getPromNamespace, getPromServices } from "@/api/monit";
-import { ENV_TYPE_LABEL, parseHostsText, toYaml } from "../utils";
+import {
+  ENV_TYPE_LABEL,
+  conflictText,
+  parseHostsText,
+  scopeText,
+  toYaml
+} from "../utils";
 
 defineOptions({ name: "IstioVSDialog" });
 
@@ -56,6 +65,8 @@ const members = ref<{ k8s_name: string; selected: boolean; hosts: string }[]>(
 const saving = ref(false);
 const namespaceOptions = ref<string[]>([]);
 const serviceOptions = ref<string[]>([]);
+/** 新建时名称的检查结果(本组 / 集群 / 其他组里是否已有,名称是否被本组排除) */
+const nameCheck = ref<VSCheck | null>(null);
 
 const isEdit = computed(() => !!props.vs);
 const refEnv = computed(
@@ -139,18 +150,67 @@ watch(
       selected: false,
       hosts: ""
     }));
+    nameCheck.value = null;
     loadNamespaces();
   },
   { immediate: true }
 );
 
-/** 名称以 -ext / -int 结尾时自动带出对应网关(和现有 VS 的命名习惯一致) */
+watch(
+  () => [form.namespace, form.name],
+  () => {
+    nameCheck.value = null;
+  }
+);
+
+/** 名称以 -ext / -int 结尾时自动带出对应网关(和现有 VS 的命名习惯一致);顺便检查名称 */
 function onNameBlur() {
-  if (isEdit.value || form.gateways.length) return;
+  if (isEdit.value) return;
+  runCheck();
+  if (form.gateways.length) return;
   if (form.name.endsWith("-ext")) form.gateways = ["istio-system/external"];
   else if (form.name.endsWith("-int"))
     form.gateways = ["istio-system/internal"];
 }
+
+async function runCheck() {
+  const namespace = form.namespace.trim();
+  const name = form.name.trim();
+  if (!namespace || !NAME_PATTERN.test(name)) return null;
+  const res = await checkIstioVS(props.groupId, namespace, name);
+  // 检查期间名称又改了:结果作废
+  if (form.namespace.trim() !== namespace || form.name.trim() !== name)
+    return null;
+  nameCheck.value = res.data;
+  return res.data;
+}
+
+/** 名称检查的提示:有问题的不能创建;只是被本组规则排除的,保存时确认后单独纳入 */
+const checkHint = computed(() => {
+  const check = nameCheck.value;
+  if (!check) return null;
+  const hidden = check.scope.visible
+    ? ""
+    : ",它在本组被忽略了:先在「查看忽略」里取消忽略";
+  if (check.standard)
+    return { type: "error" as const, text: `本组已经有这个 VS${hidden}` };
+  if (check.in_clusters.length)
+    return {
+      type: "error" as const,
+      text: `集群 ${check.in_clusters.join("、")} 里已经有同名 VS,请在列表里用「纳管」${hidden}`
+    };
+  if (check.conflicts.length)
+    return {
+      type: "error" as const,
+      text: `${conflictText(check.conflicts)}里已经有这个 VS,同一个 VS 只能属于一个组`
+    };
+  if (!check.scope.visible)
+    return {
+      type: "warning" as const,
+      text: `名称${scopeText(check.scope)},按本组规则会被忽略;保存时可以确认单独纳入本组`
+    };
+  return null;
+});
 
 function copyHosts(target: { hosts: string }, from: string) {
   const source = members.value.find(m => m.k8s_name === from);
@@ -286,11 +346,26 @@ async function save() {
         message(`请填写 ${noHosts.join("、")} 的 hosts`, { type: "warning" });
         return;
       }
+      const check = await runCheck();
+      if (check && checkHint.value?.type === "error") {
+        message(checkHint.value.text, { type: "warning" });
+        return;
+      }
+      let forceInclude = false;
+      if (check && !check.scope.visible) {
+        await ElMessageBox.confirm(
+          `${form.namespace.trim()}/${form.name.trim()} ${scopeText(check.scope)},按本组规则创建后会被忽略。仍要创建并单独纳入本组吗(不受包含 / 忽略规则影响)?`,
+          "名称被本组排除",
+          { type: "warning", confirmButtonText: "创建并单独纳入" }
+        );
+        forceInclude = true;
+      }
       const res = await createIstioVS({
         group_id: props.groupId,
         namespace: form.namespace.trim(),
         name: form.name.trim(),
         clusters,
+        force_include: forceInclude,
         ...payload
       });
       message("已创建,配好规则后到各集群下发", { type: "success" });
@@ -331,6 +406,14 @@ async function save() {
             </el-form-item>
           </el-col>
         </el-row>
+        <el-alert
+          v-if="checkHint"
+          :type="checkHint.type"
+          :title="checkHint.text"
+          :closable="false"
+          show-icon
+          class="name-hint"
+        />
       </template>
       <el-form-item label="gateways">
         <el-select
@@ -564,5 +647,10 @@ async function save() {
   gap: 8px;
   align-items: flex-start;
   margin: 4px 0 4px 24px;
+}
+
+.name-hint {
+  width: auto;
+  margin: -8px 0 12px 100px;
 }
 </style>

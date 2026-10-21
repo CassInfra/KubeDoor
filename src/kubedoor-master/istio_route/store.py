@@ -28,12 +28,24 @@ def _load(value):
     return json.loads(value) if isinstance(value, str) else value
 
 
-_MEMBER_COLS = 'k8s_name, group_id, env_type, remark, sort_order, collected_at, collected_by, vs_count'
+_GROUP_COLS = 'id, name, description, include_patterns, ignore_patterns, created_at, updated_at'
+# 组成员 + 该集群的采集状态(采集按集群,各组共用)
+_MEMBER_SQL = ('SELECT m.group_id, m.k8s_name, m.env_type, m.remark, m.sort_order, s.collected_at, '
+               "COALESCE(s.collected_by, '') AS collected_by, COALESCE(s.vs_count, 0) AS vs_count "
+               'FROM istio_group_cluster m LEFT JOIN istio_cluster_state s ON s.k8s_name = m.k8s_name')
 _VS_COLS = ('id, group_id, namespace, name, gateways, df_forward_type, df_forward_detail, df_forward_timeout, '
             'df_extra, extra_spec, updated_by, created_at, updated_at')
 _ROUTE_COLS = ('r.id, r.vs_id, r.priority, r.name, r.match_rules, r.rewrite_rules, r.forward_type, r.forward_detail, '
                'r.timeout, r.extra, r.created_at, r.updated_at')
 _BINDING_COLS = 'b.vs_id, b.k8s_name, b.hosts, b.applied_hash, b.applied_at, b.applied_by'
+
+
+def _group(row, members) -> dict:
+    data = dict(row)
+    data['include_patterns'] = _load(data['include_patterns']) or []
+    data['ignore_patterns'] = _load(data['ignore_patterns']) or []
+    data['clusters'] = members
+    return data
 
 
 def _member(row) -> dict:
@@ -69,73 +81,149 @@ def _binding(row) -> dict:
 # Istio 组
 # ---------------------------------------------------------------------------
 async def list_groups() -> List[dict]:
-    groups = await db.pg_fetch('SELECT id, name, description, created_at, updated_at FROM istio_group ORDER BY name')
-    members = await db.pg_fetch(
-        f'SELECT {_MEMBER_COLS} FROM istio_group_cluster ORDER BY group_id, sort_order, k8s_name')
+    groups = await db.pg_fetch(f'SELECT {_GROUP_COLS} FROM istio_group ORDER BY name')
+    members = await db.pg_fetch(f'{_MEMBER_SQL} ORDER BY m.group_id, m.sort_order, m.k8s_name')
     by_group: Dict[int, List[dict]] = {}
     for row in members:
         by_group.setdefault(row['group_id'], []).append(_member(row))
-    return [{**dict(row), 'clusters': by_group.get(row['id'], [])} for row in groups]
+    return [_group(row, by_group.get(row['id'], [])) for row in groups]
 
 
 async def get_group(group_id: int) -> Optional[dict]:
-    row = await db.pg_fetchrow(
-        'SELECT id, name, description, created_at, updated_at FROM istio_group WHERE id = $1', group_id)
+    row = await db.pg_fetchrow(f'SELECT {_GROUP_COLS} FROM istio_group WHERE id = $1', group_id)
     if row is None:
         return None
-    members = await db.pg_fetch(
-        f'SELECT {_MEMBER_COLS} FROM istio_group_cluster WHERE group_id = $1 ORDER BY sort_order, k8s_name', group_id)
-    return {**dict(row), 'clusters': [_member(m) for m in members]}
+    members = await db.pg_fetch(f'{_MEMBER_SQL} WHERE m.group_id = $1 ORDER BY m.sort_order, m.k8s_name', group_id)
+    return _group(row, [_member(m) for m in members])
 
 
-async def save_group(group_id: Optional[int], name: str, description: str, clusters: List[dict]) -> int:
-    """新建(group_id 为空)或修改组。clusters 按显示顺序:[{k8s_name, env_type, remark}]。
+async def _drop_orphan_clusters(conn) -> None:
+    """不在任何组里的集群:采集到的现状和采集状态一并删除。"""
+    await conn.execute(
+        'DELETE FROM istio_vs_snapshot WHERE k8s_name NOT IN (SELECT k8s_name FROM istio_group_cluster)')
+    await conn.execute(
+        'DELETE FROM istio_cluster_state WHERE k8s_name NOT IN (SELECT k8s_name FROM istio_group_cluster)')
 
-    移出组的集群,它在本组 VS 里的 hosts 和采集到的现状一并删除(外键级联);已属于别的组的集群不能加入。"""
+
+async def save_group(group_id: Optional[int], name: str, description: str, clusters: List[dict],
+                     include_patterns: List[dict], ignore_patterns: List[dict]) -> int:
+    """新建(group_id 为空)或修改组。clusters 按显示顺序:[{k8s_name, env_type, remark}];一个集群可以属于多个组。
+
+    移出组的集群,它在本组 VS 里的 hosts 和域名一并删除;不再属于任何组的集群,采集到的现状也删除。"""
     names = [c['k8s_name'] for c in clusters]
+    patterns = (_dump(include_patterns or []), _dump(ignore_patterns or []))
     try:
         async with db.get_pool().acquire() as conn:
             async with conn.transaction():
                 if group_id is None:
                     group_id = await conn.fetchval(
-                        'INSERT INTO istio_group (name, description) VALUES ($1, $2) RETURNING id', name, description)
+                        'INSERT INTO istio_group (name, description, include_patterns, ignore_patterns) '
+                        'VALUES ($1, $2, $3::jsonb, $4::jsonb) RETURNING id', name, description, *patterns)
                 else:
                     status = await conn.execute(
-                        'UPDATE istio_group SET name = $2, description = $3 WHERE id = $1', group_id, name, description)
+                        'UPDATE istio_group SET name = $2, description = $3, include_patterns = $4::jsonb, '
+                        'ignore_patterns = $5::jsonb WHERE id = $1', group_id, name, description, *patterns)
                     if status == 'UPDATE 0':
                         raise IstioError('Istio 组不存在', 404)
-                taken = await conn.fetch(
-                    'SELECT c.k8s_name, g.name AS group_name FROM istio_group_cluster c '
-                    'JOIN istio_group g ON g.id = c.group_id '
-                    'WHERE c.k8s_name = ANY($1::text[]) AND c.group_id <> $2 ORDER BY c.k8s_name',
-                    names, group_id)
-                if taken:
-                    raise IstioError('；'.join(f"集群 {r['k8s_name']} 已属于组 {r['group_name']}" for r in taken))
+                await conn.execute(
+                    'DELETE FROM istio_vs_cluster b USING istio_vs v WHERE b.vs_id = v.id AND v.group_id = $1 '
+                    'AND NOT (b.k8s_name = ANY($2::text[]))', group_id, names)
                 await conn.execute(
                     'DELETE FROM istio_group_cluster WHERE group_id = $1 AND NOT (k8s_name = ANY($2::text[]))',
                     group_id, names)
                 for index, cluster in enumerate(clusters):
                     await conn.execute(
-                        'INSERT INTO istio_group_cluster (k8s_name, group_id, env_type, remark, sort_order) '
-                        'VALUES ($1, $2, $3, $4, $5) ON CONFLICT (k8s_name) DO UPDATE SET '
+                        'INSERT INTO istio_group_cluster (group_id, k8s_name, env_type, remark, sort_order) '
+                        'VALUES ($1, $2, $3, $4, $5) ON CONFLICT (group_id, k8s_name) DO UPDATE SET '
                         'env_type = EXCLUDED.env_type, remark = EXCLUDED.remark, sort_order = EXCLUDED.sort_order',
-                        cluster['k8s_name'], group_id, cluster['env_type'], cluster.get('remark') or '', index)
+                        group_id, cluster['k8s_name'], cluster['env_type'], cluster.get('remark') or '', index)
+                await _drop_orphan_clusters(conn)
     except asyncpg.UniqueViolationError:
         raise IstioError(f'组名 {name} 已存在')
     return group_id
 
 
 async def delete_group(group_id: int) -> bool:
-    """删除组:组标准、各集群 hosts、采集到的现状都会删除;集群里的 VirtualService 不受影响。"""
-    status = await db.pg_execute('DELETE FROM istio_group WHERE id = $1', group_id)
+    """删除组:组标准、各集群 hosts 和域名、手动忽略记录都会删除,只在这个组里的集群的现状也删除;
+    集群里的 VirtualService 不受影响。"""
+    async with db.get_pool().acquire() as conn:
+        async with conn.transaction():
+            status = await conn.execute('DELETE FROM istio_group WHERE id = $1', group_id)
+            await _drop_orphan_clusters(conn)
     return status != 'DELETE 0'
+
+
+# ---------------------------------------------------------------------------
+# 组的 VS 范围:单个 VS 的手动忽略 / 单独纳入
+# ---------------------------------------------------------------------------
+async def load_overrides(group_ids: Iterable[int]) -> Dict[int, Dict[tuple, dict]]:
+    """{group_id: {(namespace, name): {action, created_by, created_at}}}"""
+    ids = list(group_ids)
+    result: Dict[int, Dict[tuple, dict]] = {group_id: {} for group_id in ids}
+    if not ids:
+        return result
+    rows = await db.pg_fetch(
+        'SELECT group_id, namespace, name, action, created_by, created_at FROM istio_group_vs_override '
+        'WHERE group_id = ANY($1::int[])', ids)
+    for row in rows:
+        result[row['group_id']][(row['namespace'], row['name'])] = {
+            'action': row['action'], 'created_by': row['created_by'], 'created_at': row['created_at']}
+    return result
+
+
+async def set_overrides(group_id: int, actions: Dict[tuple, Optional[str]], username: str) -> None:
+    """{(namespace, name): 'ignore' | 'include' | None},None 表示删掉手动决定(回到按组规则)。"""
+    async with db.get_pool().acquire() as conn:
+        async with conn.transaction():
+            for (namespace, name), action in actions.items():
+                if action is None:
+                    await conn.execute(
+                        'DELETE FROM istio_group_vs_override WHERE group_id = $1 AND namespace = $2 AND name = $3',
+                        group_id, namespace, name)
+                else:
+                    await conn.execute(
+                        'INSERT INTO istio_group_vs_override (group_id, namespace, name, action, created_by) '
+                        'VALUES ($1, $2, $3, $4, $5) ON CONFLICT (group_id, namespace, name) DO UPDATE SET '
+                        'action = EXCLUDED.action, created_by = EXCLUDED.created_by, created_at = now()',
+                        group_id, namespace, name, action, username)
+
+
+async def standard_keys(group_ids: Iterable[int]) -> Dict[int, set]:
+    """各组已有组标准的 VS:{group_id: {(namespace, name)}}"""
+    ids = list(group_ids)
+    result: Dict[int, set] = {group_id: set() for group_id in ids}
+    if ids:
+        for row in await db.pg_fetch(
+                'SELECT group_id, namespace, name FROM istio_vs WHERE group_id = ANY($1::int[])', ids):
+            result[row['group_id']].add((row['namespace'], row['name']))
+    return result
+
+
+async def snapshot_keys(k8s_names: Iterable[str]) -> Dict[str, set]:
+    """各集群现状里有哪些 VS:{k8s_name: {(namespace, name)}}"""
+    names = list(k8s_names)
+    result: Dict[str, set] = {name: set() for name in names}
+    if names:
+        for row in await db.pg_fetch(
+                'SELECT k8s_name, namespace, name FROM istio_vs_snapshot WHERE k8s_name = ANY($1::text[])', names):
+            result[row['k8s_name']].add((row['namespace'], row['name']))
+    return result
+
+
+async def collected_clusters(k8s_names: Iterable[str]) -> set:
+    names = list(k8s_names)
+    if not names:
+        return set()
+    rows = await db.pg_fetch(
+        'SELECT k8s_name FROM istio_cluster_state WHERE k8s_name = ANY($1::text[]) AND collected_at IS NOT NULL', names)
+    return {row['k8s_name'] for row in rows}
 
 
 # ---------------------------------------------------------------------------
 # 集群现状(采集结果)
 # ---------------------------------------------------------------------------
 async def replace_snapshots(k8s_name: str, items: List[dict], username: str) -> None:
-    """用采集结果整体替换该集群的现状。items:[{namespace, name, spec, resource_version}]。"""
+    """用采集结果整体替换该集群的现状(各组共用)。items:[{namespace, name, spec, resource_version}]。"""
     async with db.get_pool().acquire() as conn:
         async with conn.transaction():
             await conn.execute('DELETE FROM istio_vs_snapshot WHERE k8s_name = $1', k8s_name)
@@ -146,8 +234,22 @@ async def replace_snapshots(k8s_name: str, items: List[dict], username: str) -> 
                     [(k8s_name, item['namespace'], item['name'], _dump(item['spec']),
                       item.get('resource_version') or '') for item in items])
             await conn.execute(
-                'UPDATE istio_group_cluster SET collected_at = now(), collected_by = $2, vs_count = $3 '
-                'WHERE k8s_name = $1', k8s_name, username, len(items))
+                'INSERT INTO istio_cluster_state (k8s_name, collected_at, collected_by, vs_count) '
+                'VALUES ($1, now(), $2, $3) ON CONFLICT (k8s_name) DO UPDATE SET '
+                'collected_at = now(), collected_by = EXCLUDED.collected_by, vs_count = EXCLUDED.vs_count',
+                k8s_name, username, len(items))
+
+
+async def drop_snapshot(k8s_name: str, namespace: str, name: str) -> None:
+    """集群里删掉了某个 VS(重新采集失败时用):只从现状里去掉这一条。"""
+    async with db.get_pool().acquire() as conn:
+        async with conn.transaction():
+            status = await conn.execute(
+                'DELETE FROM istio_vs_snapshot WHERE k8s_name = $1 AND namespace = $2 AND name = $3',
+                k8s_name, namespace, name)
+            if status != 'DELETE 0':
+                await conn.execute('UPDATE istio_cluster_state SET vs_count = GREATEST(vs_count - 1, 0) '
+                                   'WHERE k8s_name = $1', k8s_name)
 
 
 async def load_snapshots(k8s_names: Iterable[str], namespace: str = None, name: str = None) -> Dict[tuple, dict]:

@@ -1,8 +1,8 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from "vue";
+import { computed, h as vnode, onMounted, ref } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { ElMessageBox } from "element-plus";
-import { Plus, Refresh, Setting, Warning } from "@element-plus/icons-vue";
+import { Hide, Plus, Refresh, Setting, Warning } from "@element-plus/icons-vue";
 import { message } from "@/utils/message";
 import { useClusterPermission } from "@/utils/permission";
 import {
@@ -12,8 +12,10 @@ import {
   type IstioMatrix,
   type MatrixRow,
   collectIstio,
+  deleteIstioLiveVS,
   getIstioGroups,
   getIstioMatrix,
+  ignoreIstioVS,
   removeIstioVSCluster,
   resetIstioVS
 } from "@/api/istio";
@@ -23,11 +25,13 @@ import ImportDialog from "./components/ImportDialog.vue";
 import ApplyDialog from "./components/ApplyDialog.vue";
 import HostsDialog from "./components/HostsDialog.vue";
 import VSDialog from "./components/VSDialog.vue";
+import IgnoredDialog from "./components/IgnoredDialog.vue";
 import {
   COVERAGE_LABEL,
   ENV_TYPE_LABEL,
   ENV_TYPE_TAG,
   STATUS_META,
+  conflictText,
   formatTime
 } from "./utils";
 
@@ -52,6 +56,7 @@ const selectedKeys = ref<string[]>([]);
 const FILTERS = [
   { value: "all", label: "全部" },
   { value: "problem", label: "需要处理" },
+  { value: "conflict", label: "与其他组冲突" },
   { value: "unmanaged", label: "未纳管" },
   { value: "inconsistent", label: "各集群规则不一致" },
   { value: "lint", label: "规范问题" },
@@ -69,8 +74,19 @@ const rows = computed(() => matrix.value?.rows ?? []);
 const gatewayOptions = computed(() =>
   Array.from(new Set(rows.value.flatMap(r => r.gateways))).sort()
 );
+/** 每个集群里属于本组的 VS 个数(现状里有的) */
+const groupCount = computed(() => {
+  const counts: Record<string, number> = {};
+  for (const row of rows.value) {
+    for (const [k8s, cell] of Object.entries(row.cells)) {
+      if (cell.in_cluster) counts[k8s] = (counts[k8s] ?? 0) + 1;
+    }
+  }
+  return counts;
+});
 
 function needsAction(row: MatrixRow) {
+  if (row.conflicts.length) return true;
   if (row.vs_id === null) return row.versions.length > 1;
   return Object.values(row.cells).some(c => ACTION_STATUSES.includes(c.status));
 }
@@ -79,6 +95,7 @@ const filteredRows = computed(() => {
   const kw = keyword.value.trim().toLowerCase();
   return rows.value.filter(row => {
     if (filter.value === "problem" && !needsAction(row)) return false;
+    if (filter.value === "conflict" && !row.conflicts.length) return false;
     if (filter.value === "unmanaged" && row.vs_id !== null) return false;
     if (filter.value === "inconsistent" && row.versions.length <= 1)
       return false;
@@ -110,8 +127,15 @@ const summary = computed(() => ({
   total: rows.value.length,
   managed: rows.value.filter(r => r.vs_id !== null).length,
   problem: rows.value.filter(needsAction).length,
-  lint: rows.value.filter(r => r.lint.length).length
+  lint: rows.value.filter(r => r.lint.length).length,
+  conflict: rows.value.filter(r => r.conflicts.length).length,
+  ignored: matrix.value?.stats.ignored ?? 0
 }));
+
+/** 和其他组冲突的行底色标红 */
+function rowClass({ row }: { row: MatrixRow }) {
+  return row.conflicts.length ? "row-conflict" : "";
+}
 
 // ---------------------------------------------------------------- 加载
 async function loadGroups(prefer?: number | null) {
@@ -170,18 +194,19 @@ async function collect() {
     const res = await collectIstio(groupId.value);
     const failed = res.data.filter(r => !r.success);
     const ok = res.data.filter(r => r.success);
+    const done = ok
+      .map(
+        r =>
+          `${r.k8s_name} ${r.count} 个(本组 ${r.group_count},忽略 ${r.ignored_count})`
+      )
+      .join(",");
     if (failed.length) {
       message(
-        `已采集 ${ok.length} 个集群;失败:${failed.map(f => `${f.k8s_name}(${f.error})`).join(";")}`,
+        `已采集 ${done || "0 个集群"};失败:${failed.map(f => `${f.k8s_name}(${f.error})`).join(";")}`,
         { type: "warning", duration: 8000 }
       );
     } else {
-      message(
-        `已采集 ${ok.map(r => `${r.k8s_name} ${r.count} 个`).join(",")}`,
-        {
-          type: "success"
-        }
-      );
+      message(`已采集 ${done}`, { type: "success", duration: 5000 });
     }
     await loadMatrix();
   } finally {
@@ -297,6 +322,88 @@ async function unbind(row: MatrixRow, k8s: string) {
   await loadMatrix();
 }
 
+// ---------------------------------------------------------------- 忽略 / 删除集群里的 VS
+const ignoredDialog = ref(false);
+
+/** 从「查看忽略」去改组的包含 / 忽略规则 */
+function editRules() {
+  ignoredDialog.value = false;
+  groupDialog.value = true;
+}
+
+async function ignoreRows(targets: MatrixRow[]) {
+  if (!group.value || !targets.length) return;
+  const name = group.value.name;
+  const managed = targets.filter(r => r.vs_id !== null).length;
+  const label =
+    targets.length === 1
+      ? `${targets[0].namespace}/${targets[0].name}`
+      : `所选的 ${targets.length} 个 VirtualService`;
+  await ElMessageBox.confirm(
+    `在组「${name}」忽略 ${label}?忽略后本组不再显示、不再处理它,集群里的 VirtualService 不受影响;` +
+      (managed
+        ? `其中 ${managed} 个已纳管,组标准会保留(不显示、不能下发)。`
+        : "") +
+      "可以在「查看忽略」里取消。",
+    "忽略 VirtualService",
+    { type: "warning", confirmButtonText: "忽略" }
+  );
+  const res = await ignoreIstioVS(
+    group.value.id,
+    targets.map(r => ({ namespace: r.namespace, name: r.name }))
+  );
+  message(res.msg || "已忽略", { type: "success" });
+  await loadMatrix();
+}
+
+async function deleteLive(row: MatrixRow, k8s: string) {
+  if (!group.value) return;
+  const prod =
+    clusters.value.find(c => c.k8s_name === k8s)?.env_type === "prod";
+  const lines = [
+    vnode(
+      "p",
+      null,
+      `从集群 ${k8s} 删除 ${row.namespace}/${row.name}?删除后立即生效,依赖它的域名路由会失效。`
+    ),
+    prod
+      ? vnode(
+          "p",
+          { style: "color: var(--el-color-danger); font-weight: 600" },
+          "这是生产集群。"
+        )
+      : null,
+    row.cells[k8s]?.bound
+      ? vnode(
+          "p",
+          null,
+          "本组标准部署到了该集群:同时不再部署(删除花折里该集群的 hosts 和域名),组标准和其他集群不受影响。"
+        )
+      : null,
+    row.conflicts.length
+      ? vnode("p", null, `注意:这个 VS 也在${conflictText(row.conflicts)}里。`)
+      : null,
+    vnode("p", null, "删除前的内容会记在审计日志(istio.delete)里。")
+  ];
+  await ElMessageBox.confirm(
+    vnode("div", null, lines),
+    "删除集群里的 VirtualService",
+    {
+      type: "warning",
+      confirmButtonText: "删除",
+      confirmButtonClass: "el-button--danger"
+    }
+  );
+  const res = await deleteIstioLiveVS(
+    group.value.id,
+    k8s,
+    row.namespace,
+    row.name
+  );
+  message(res.msg || "已删除", { type: "success" });
+  await loadMatrix();
+}
+
 function onCellCommand(row: MatrixRow, k8s: string, command: string) {
   if (command === "compare") openCompare(row, k8s);
   else if (command === "hosts") openHosts(row, k8s);
@@ -305,6 +412,7 @@ function onCellCommand(row: MatrixRow, k8s: string, command: string) {
   else if (command === "reset") resetFrom(row, k8s);
   else if (command === "unbind") unbind(row, k8s);
   else if (command === "import") openImport([row], k8s);
+  else if (command === "delete") deleteLive(row, k8s);
 }
 
 function goDetail(row: MatrixRow) {
@@ -339,7 +447,7 @@ onMounted(async () => {
       <el-select
         :model-value="groupId ?? undefined"
         placeholder="选择 Istio 组"
-        style="width: 200px"
+        style="width: 180px"
         @change="selectGroup"
       >
         <el-option
@@ -356,9 +464,9 @@ onMounted(async () => {
         v-model="keyword"
         placeholder="VS 名称 / host"
         clearable
-        style="width: 200px"
+        style="width: 170px"
       />
-      <el-select v-model="filter" style="width: 160px">
+      <el-select v-model="filter" style="width: 150px">
         <el-option
           v-for="f in FILTERS"
           :key="f.value"
@@ -372,7 +480,7 @@ onMounted(async () => {
         collapse-tags
         collapse-tags-tooltip
         placeholder="显示的集群"
-        style="width: 240px"
+        style="width: 210px"
       >
         <el-option
           v-for="c in clusters"
@@ -383,6 +491,9 @@ onMounted(async () => {
       </el-select>
       <el-button :icon="Refresh" :loading="loading" @click="loadMatrix"
         >刷新</el-button
+      >
+      <el-button v-if="group" :icon="Hide" @click="ignoredDialog = true"
+        >查看忽略({{ summary.ignored }})</el-button
       >
       <template v-if="isAdmin && group">
         <el-button type="success" :loading="collecting" @click="collect"
@@ -404,6 +515,12 @@ onMounted(async () => {
           @click="applySelected"
         >
           下发所选
+        </el-button>
+        <el-button
+          :disabled="!selectedRows.length"
+          @click="ignoreRows(selectedRows)"
+        >
+          忽略所选
         </el-button>
       </template>
     </div>
@@ -432,16 +549,29 @@ onMounted(async () => {
           <span class="sub">
             {{
               c.collected_at
-                ? `现状 ${formatTime(c.collected_at)} · ${c.vs_count} 个`
+                ? `现状 ${formatTime(c.collected_at)} · 本组 ${groupCount[c.k8s_name] ?? 0} / 集群共 ${c.vs_count} 个`
                 : "未采集现状"
             }}
           </span>
         </div>
       </div>
       <div class="summary">
-        共 {{ summary.total }} 个 VirtualService,已纳管
-        {{ summary.managed }} 个,需要处理 {{ summary.problem }} 个,规范问题
-        {{ summary.lint }} 个
+        <span>
+          共 {{ summary.total }} 个 VirtualService,已纳管
+          {{ summary.managed }} 个,需要处理 {{ summary.problem }} 个,规范问题
+          {{ summary.lint }} 个<span
+            v-if="summary.conflict"
+            class="conflict-sum"
+            >,与其他组冲突 {{ summary.conflict }} 个(红色行)</span
+          >
+        </span>
+        <el-link
+          type="info"
+          :underline="false"
+          class="ignored-link"
+          @click="ignoredDialog = true"
+          >忽略 {{ summary.ignored }} 个</el-link
+        >
         <span class="legend">
           <el-tooltip
             v-for="(meta, status) in STATUS_META"
@@ -464,6 +594,7 @@ onMounted(async () => {
         v-loading="loading"
         :data="filteredRows"
         :row-key="rowKey"
+        :row-class-name="rowClass"
         border
         size="small"
         class="matrix"
@@ -476,7 +607,7 @@ onMounted(async () => {
           fixed
           reserve-selection
         />
-        <el-table-column label="VirtualService" min-width="230" fixed>
+        <el-table-column label="VirtualService" min-width="260" fixed>
           <template #default="{ row }">
             <div class="vs-name">
               <el-link
@@ -489,6 +620,25 @@ onMounted(async () => {
               <el-tag v-if="row.vs_id === null" size="small" type="info"
                 >未纳管</el-tag
               >
+              <el-tooltip v-if="row.conflicts.length" placement="top">
+                <template #content>
+                  <div>也在{{ conflictText(row.conflicts) }}里</div>
+                  <div>
+                    同一个 VS
+                    只能属于一个组:请在不该管它的组里忽略它,之后才能纳管和下发
+                  </div>
+                </template>
+                <el-tag size="small" type="danger" effect="dark">冲突</el-tag>
+              </el-tooltip>
+              <el-tooltip
+                v-if="row.included"
+                content="被组规则排除、单独纳入本组的(不受包含 / 忽略规则影响);点「忽略」可以撤销"
+                placement="top"
+              >
+                <el-tag size="small" type="info" effect="plain"
+                  >单独纳入</el-tag
+                >
+              </el-tooltip>
               <el-tooltip v-if="row.lint.length" placement="top">
                 <template #content>
                   <div v-for="item in row.lint" :key="item">{{ item }}</div>
@@ -661,12 +811,19 @@ onMounted(async () => {
                   >
                     以此集群为准纳管
                   </el-dropdown-item>
+                  <el-dropdown-item
+                    v-if="isAdmin && row.cells[c.k8s_name].in_cluster"
+                    command="delete"
+                    divided
+                  >
+                    <span class="danger-text">删除</span>
+                  </el-dropdown-item>
                 </el-dropdown-menu>
               </template>
             </el-dropdown>
           </template>
         </el-table-column>
-        <el-table-column label="操作" width="150" fixed="right" align="center">
+        <el-table-column label="操作" width="180" fixed="right" align="center">
           <template #default="{ row }">
             <el-button
               v-if="row.vs_id !== null"
@@ -685,6 +842,13 @@ onMounted(async () => {
               @click="openImport([row])"
               >纳管</el-button
             >
+            <el-button
+              v-if="isAdmin"
+              link
+              type="info"
+              @click="ignoreRows([row])"
+              >忽略</el-button
+            >
           </template>
         </el-table-column>
       </el-table>
@@ -698,6 +862,27 @@ onMounted(async () => {
       @saved="onGroupSaved"
     />
     <template v-if="group">
+      <IgnoredDialog
+        v-model="ignoredDialog"
+        :group-id="group.id"
+        :group-name="group.name"
+        :items="matrix?.ignored ?? []"
+        :stats="
+          matrix?.stats ?? {
+            total: 0,
+            visible: 0,
+            ignored: 0,
+            manual: 0,
+            by_rule: 0,
+            conflict: 0
+          }
+        "
+        :include-patterns="group.include_patterns"
+        :ignore-patterns="group.ignore_patterns"
+        :is-admin="isAdmin"
+        @changed="loadMatrix"
+        @edit-rules="editRules"
+      />
       <CompareDialog
         v-if="compare.row"
         v-model="compare.visible"
@@ -859,5 +1044,23 @@ onMounted(async () => {
 .cell-unbound .host,
 .cell-unmanaged .host {
   color: var(--el-text-color-secondary);
+}
+
+/* 和其他组冲突的 VS:整行底色标红 */
+.matrix :deep(.el-table__row.row-conflict > td.el-table__cell) {
+  background-color: var(--el-color-danger-light-9);
+}
+
+.matrix :deep(.el-table__row.row-conflict:hover > td.el-table__cell) {
+  background-color: var(--el-color-danger-light-8);
+}
+
+.conflict-sum,
+.danger-text {
+  color: var(--el-color-danger);
+}
+
+.ignored-link {
+  font-size: 13px;
 }
 </style>

@@ -263,12 +263,13 @@ def test_top_queries_keep_cluster_filter_and_add_visibility():
 @pytest.mark.parametrize('method,path', [
     ('POST', '/api/istio/groups'), ('PUT', '/api/istio/groups'), ('DELETE', '/api/istio/groups'),
     ('POST', '/api/istio/collect'), ('POST', '/api/istio/import'), ('POST', '/api/istio/vs/reset'),
+    ('POST', '/api/istio/ignore'), ('POST', '/api/istio/unignore'), ('POST', '/api/istio/live/delete'),
     ('POST', '/api/istio/vs'), ('PUT', '/api/istio/vs'), ('DELETE', '/api/istio/vs'),
     ('PUT', '/api/istio/vs/cluster'), ('DELETE', '/api/istio/vs/cluster'),
     ('POST', '/api/istio/httproute'), ('PUT', '/api/istio/httproute'), ('DELETE', '/api/istio/httproute'),
     ('POST', '/api/istio/httproute/reorder'), ('POST', '/api/istio/apply/preview'), ('POST', '/api/istio/apply'),
     # 集群里的 VS 不能经通用转发直接读写(下发内容必须由 master 按组标准生成)
-    ('GET', '/api/agent/istio/vs'), ('POST', '/api/agent/istio/vs/apply'),
+    ('GET', '/api/agent/istio/vs'), ('POST', '/api/agent/istio/vs/apply'), ('DELETE', '/api/agent/istio/vs/delete'),
 ])
 async def test_istio_changes_are_admin_only(method, path):
     rule = policy.match(method, path)
@@ -279,7 +280,8 @@ async def test_istio_changes_are_admin_only(method, path):
     await authorize(user('admin'), method, path, {'env': 'a', 'vs_id': '1'})
 
 
-@pytest.mark.parametrize('path', ['/api/istio/groups', '/api/istio/matrix', '/api/istio/compare', '/api/istio/vs'])
+@pytest.mark.parametrize('path', ['/api/istio/groups', '/api/istio/groups/preview', '/api/istio/matrix',
+                                  '/api/istio/compare', '/api/istio/vs', '/api/istio/vs/check'])
 def test_istio_reads_are_filtered_by_handlers(path):
     """查看只要登录,能看到哪些集群由 handler 按集群读权限过滤。"""
     assert policy.match('GET', path).kind == 'login'

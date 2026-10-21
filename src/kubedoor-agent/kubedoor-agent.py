@@ -604,7 +604,9 @@ async def setup_routes(app):
     app.router.add_post(
         '/api/agent/istio/vs/apply', lambda request: istio_manager.apply_virtualservice(custom_api, request)
     )
-    # app.router.add_delete('/api/agent/istio/vs/delete', lambda request: istio_manager.delete_virtualservice(custom_api, request))
+    app.router.add_delete(
+        '/api/agent/istio/vs/delete', lambda request: istio_manager.delete_virtualservice(custom_api, request)
+    )
 
     # K8S资源管理接口
     app.router.add_get('/api/agent/jvm/configs', lambda request: get_jvm_configs(v1, request))

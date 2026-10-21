@@ -13,8 +13,8 @@
 --      - k8s_pod_alert_days : 按 start_time     保留 365 天
 --      - k8s_events         : 按 lasttimestamp  保留 90 天
 --   3. 配置/管控表:k8s_agent_status / k8s_res_control / alert_silences
---      Istio 管理:istio_group / istio_group_cluster / istio_vs / istio_vs_route /
---      istio_vs_cluster / istio_vs_route_domain / istio_vs_snapshot
+--      Istio 管理:istio_group / istio_group_cluster / istio_group_vs_override / istio_cluster_state /
+--      istio_vs / istio_vs_route / istio_vs_cluster / istio_vs_route_domain / istio_vs_snapshot
 --   4. 账号与权限:auth_users / auth_user_clusters / auth_sessions / auth_settings,
 --      操作审计 audit_logs(按 ts 保留 180 天,RETENTION_AUDIT_DAYS 可调)
 --
@@ -209,41 +209,63 @@ $$ LANGUAGE plpgsql;
 
 -- =============================================================================
 -- 6~8. Istio VirtualService 管理(设计见 istio_route/README.md)
---   Istio 组 = 一套业务的集群(共用的测试集群 + 各项目的生产集群),一个集群只属于一个组;
+--   Istio 组 = 一套业务的集群(共用的测试集群 + 各项目的生产集群);一个集群可以属于多个组(如多个项目共用的测试集群),
+--   同一个 VS 只能属于一个组:用组的包含 / 忽略规则和单个 VS 的手动忽略 / 单独纳入(istio_group_vs_override)划分;
 --   组标准 VS 是花折保存的那一份:规则、默认路由、gateways 全组共用,hosts 和规则里的域名条件按集群各自维护;
 --   每个 VS 自己选择部署到组内哪些集群(istio_vs_cluster);
---   istio_vs_snapshot 是采集到的集群现状(只读),只用于对比、纳管和状态判断,不直接修改。
+--   istio_vs_snapshot 是采集到的集群现状(按集群,各组共用,只读),只用于对比、纳管和状态判断,不直接修改。
 -- =============================================================================
 -- 旧版(VS 按名称全局唯一、按单集群采集)的三张表,功能未正式使用,数据直接删除
 DROP TABLE IF EXISTS k8s_cluster, vs_http_routes, vs_global;
 
 CREATE TABLE IF NOT EXISTS istio_group (
-    id          SERIAL PRIMARY KEY,
-    name        varchar(100) NOT NULL,
-    description text NOT NULL DEFAULT '',
-    created_at  timestamptz NOT NULL DEFAULT now(),
-    updated_at  timestamptz NOT NULL DEFAULT now(),
+    id               SERIAL PRIMARY KEY,
+    name             varchar(100) NOT NULL,
+    description      text NOT NULL DEFAULT '',
+    include_patterns jsonb NOT NULL DEFAULT '[]',      -- 包含的 VS:[{type: glob|regex, pattern}],为空 = 全部
+    ignore_patterns  jsonb NOT NULL DEFAULT '[]',      -- 忽略的 VS,优先于包含
+    created_at       timestamptz NOT NULL DEFAULT now(),
+    updated_at       timestamptz NOT NULL DEFAULT now(),
     CONSTRAINT uq_istio_group_name UNIQUE (name)
 );
+ALTER TABLE istio_group ADD COLUMN IF NOT EXISTS include_patterns jsonb NOT NULL DEFAULT '[]';
+ALTER TABLE istio_group ADD COLUMN IF NOT EXISTS ignore_patterns jsonb NOT NULL DEFAULT '[]';
 
 DROP TRIGGER IF EXISTS trg_istio_group_updated ON istio_group;
 CREATE TRIGGER trg_istio_group_updated BEFORE UPDATE ON istio_group
     FOR EACH ROW EXECUTE FUNCTION set_updated_at();
 
--- 组成员:一个集群只属于一个组;采集现状的时间也记在这里
+-- 组成员:一个集群可以属于多个组
 CREATE TABLE IF NOT EXISTS istio_group_cluster (
-    k8s_name     varchar(255) PRIMARY KEY,
-    group_id     integer NOT NULL REFERENCES istio_group(id) ON DELETE CASCADE,
-    env_type     varchar(10) NOT NULL DEFAULT 'test',   -- test 测试 / prod 生产(按列筛选、覆盖检查)
-    remark       varchar(255) NOT NULL DEFAULT '',
-    sort_order   integer NOT NULL DEFAULT 0,
-    collected_at timestamptz,                           -- 最近一次采集现状
-    collected_by varchar(255) NOT NULL DEFAULT '',
-    vs_count     integer NOT NULL DEFAULT 0,
-    created_at   timestamptz NOT NULL DEFAULT now(),
+    group_id   integer NOT NULL REFERENCES istio_group(id) ON DELETE CASCADE,
+    k8s_name   varchar(255) NOT NULL,
+    env_type   varchar(10) NOT NULL DEFAULT 'test',     -- test 测试 / prod 生产(按列筛选、覆盖检查)
+    remark     varchar(255) NOT NULL DEFAULT '',
+    sort_order integer NOT NULL DEFAULT 0,
+    created_at timestamptz NOT NULL DEFAULT now(),
+    CONSTRAINT istio_group_cluster_pkey PRIMARY KEY (group_id, k8s_name),
     CONSTRAINT ck_istio_group_cluster_env CHECK (env_type IN ('test', 'prod'))
 );
-CREATE INDEX IF NOT EXISTS idx_istio_group_cluster_group ON istio_group_cluster (group_id);
+
+-- 单个 VS 在组里的手动决定,优先于组的包含 / 忽略规则
+CREATE TABLE IF NOT EXISTS istio_group_vs_override (
+    group_id   integer NOT NULL REFERENCES istio_group(id) ON DELETE CASCADE,
+    namespace  varchar(255) NOT NULL,
+    name       varchar(255) NOT NULL,
+    action     varchar(10) NOT NULL,                   -- ignore 手动忽略 / include 单独纳入(组规则排除的取消忽略)
+    created_by varchar(255) NOT NULL DEFAULT '',
+    created_at timestamptz NOT NULL DEFAULT now(),
+    PRIMARY KEY (group_id, namespace, name),
+    CONSTRAINT ck_istio_group_vs_override_action CHECK (action IN ('ignore', 'include'))
+);
+
+-- 采集状态按集群:现状各组共用,集群不在任何组里时一并删除
+CREATE TABLE IF NOT EXISTS istio_cluster_state (
+    k8s_name     varchar(255) PRIMARY KEY,
+    collected_at timestamptz,                           -- 最近一次采集现状
+    collected_by varchar(255) NOT NULL DEFAULT '',
+    vs_count     integer NOT NULL DEFAULT 0              -- 集群里的 VS 总数(不分组)
+);
 
 -- 组标准 VS 的共用部分;JSON 列未建模的字段原样保存,下发时原样带回(采集 → 下发不丢配置)
 CREATE TABLE IF NOT EXISTS istio_vs (
@@ -290,10 +312,11 @@ DROP TRIGGER IF EXISTS trg_istio_vs_route_updated ON istio_vs_route;
 CREATE TRIGGER trg_istio_vs_route_updated BEFORE UPDATE ON istio_vs_route
     FOR EACH ROW EXECUTE FUNCTION set_updated_at();
 
--- VS 部署到哪些集群:hosts 各集群独立;applied_* 是最近一次下发(纳管时记为当时的集群现状)
+-- VS 部署到哪些集群:hosts 各集群独立;applied_* 是最近一次下发(纳管时记为当时的集群现状)。
+-- 集群必须是 VS 所在组的成员,移出组时由程序一并删除
 CREATE TABLE IF NOT EXISTS istio_vs_cluster (
     vs_id        integer NOT NULL REFERENCES istio_vs(id) ON DELETE CASCADE,
-    k8s_name     varchar(255) NOT NULL REFERENCES istio_group_cluster(k8s_name) ON DELETE CASCADE,
+    k8s_name     varchar(255) NOT NULL,
     hosts        jsonb NOT NULL DEFAULT '[]',
     applied_hash varchar(64),
     applied_at   timestamptz,
@@ -328,9 +351,9 @@ DROP TRIGGER IF EXISTS trg_istio_vs_route_domain_updated ON istio_vs_route_domai
 CREATE TRIGGER trg_istio_vs_route_domain_updated BEFORE UPDATE ON istio_vs_route_domain
     FOR EACH ROW EXECUTE FUNCTION set_updated_at();
 
--- 集群现状:每次采集整体替换该集群的行,集群移出组时一并删除
+-- 集群现状(各组共用):每次采集整体替换该集群的行,集群不在任何组里时一并删除
 CREATE TABLE IF NOT EXISTS istio_vs_snapshot (
-    k8s_name         varchar(255) NOT NULL REFERENCES istio_group_cluster(k8s_name) ON DELETE CASCADE,
+    k8s_name         varchar(255) NOT NULL,
     namespace        varchar(255) NOT NULL,
     name             varchar(255) NOT NULL,
     spec             jsonb NOT NULL,
@@ -338,6 +361,26 @@ CREATE TABLE IF NOT EXISTS istio_vs_snapshot (
     collected_at     timestamptz NOT NULL DEFAULT now(),
     PRIMARY KEY (k8s_name, namespace, name)
 );
+
+-- 升级:早先一个集群只属于一个组(istio_group_cluster 主键是 k8s_name,采集状态也记在里面,
+-- istio_vs_cluster / istio_vs_snapshot 外键引用它)。改成可以属于多个组,采集状态挪到 istio_cluster_state,数据保留
+DO $$
+BEGIN
+    IF EXISTS (SELECT 1 FROM information_schema.columns
+               WHERE table_schema = current_schema() AND table_name = 'istio_group_cluster'
+                 AND column_name = 'collected_at') THEN
+        INSERT INTO istio_cluster_state (k8s_name, collected_at, collected_by, vs_count)
+            SELECT k8s_name, collected_at, collected_by, vs_count FROM istio_group_cluster
+            ON CONFLICT (k8s_name) DO NOTHING;
+        ALTER TABLE istio_vs_cluster DROP CONSTRAINT IF EXISTS istio_vs_cluster_k8s_name_fkey;
+        ALTER TABLE istio_vs_snapshot DROP CONSTRAINT IF EXISTS istio_vs_snapshot_k8s_name_fkey;
+        ALTER TABLE istio_group_cluster DROP CONSTRAINT istio_group_cluster_pkey;
+        ALTER TABLE istio_group_cluster ADD CONSTRAINT istio_group_cluster_pkey PRIMARY KEY (group_id, k8s_name);
+        ALTER TABLE istio_group_cluster DROP COLUMN collected_at, DROP COLUMN collected_by, DROP COLUMN vs_count;
+    END IF;
+END $$;
+DROP INDEX IF EXISTS idx_istio_group_cluster_group;  -- 主键 (group_id, k8s_name) 已覆盖
+CREATE INDEX IF NOT EXISTS idx_istio_group_cluster_k8s ON istio_group_cluster (k8s_name);
 
 -- =============================================================================
 -- 9. alert_silences —— 告警屏蔽规则(Alertmanager Silence 风格)

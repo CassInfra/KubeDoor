@@ -5,6 +5,8 @@ import {
   type DomainItem,
   type DomainLists,
   type EnvType,
+  type VSConflict,
+  type VSScopeResult,
   DOMAIN_KEY
 } from "@/api/istio";
 
@@ -12,6 +14,31 @@ type TagType = "success" | "warning" | "danger" | "info" | "primary";
 
 /** 不按某个集群展开时,域名条件显示成这个值(和后端 DOMAIN_PLACEHOLDER 一致) */
 export const DOMAIN_PLACEHOLDER = "<按集群>";
+
+export const PATTERN_TYPE_LABEL = { glob: "通配符", regex: "正则" } as const;
+
+/** VS 被本组排除 / 纳入的原因 */
+export function scopeText(scope: Pick<VSScopeResult, "reason" | "pattern">) {
+  switch (scope.reason) {
+    case "manual":
+      return "手动忽略";
+    case "ignore_rule":
+      return `匹配忽略规则「${scope.pattern}」`;
+    case "not_included":
+      return "不在包含规则里";
+    case "include":
+      return "单独纳入(不受组规则影响)";
+    default:
+      return scope.pattern ? `匹配包含规则「${scope.pattern}」` : "组规则纳入";
+  }
+}
+
+/** 同一个 VS 也在这些组里 */
+export function conflictText(conflicts: VSConflict[]) {
+  return conflicts
+    .map(c => `组 ${c.group}(共用集群 ${c.clusters.join("、")})`)
+    .join("、");
+}
 
 /** 集群格子状态:文案、颜色、说明 */
 export const STATUS_META: Record<

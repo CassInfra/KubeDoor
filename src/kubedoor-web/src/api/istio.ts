@@ -34,15 +34,28 @@ export interface IstioGroupCluster {
   env_type: EnvType;
   remark: string;
   sort_order: number;
+  /** 采集按集群,各组共用 */
   collected_at: string | null;
   collected_by: string;
+  /** 集群里的 VS 总数(不分组) */
   vs_count: number;
+}
+
+/** 组的包含 / 忽略规则:glob 通配符(* 任意多个字符,? 一个字符)或 regex 正则(全匹配);
+ *  规则里有 / 时匹配「命名空间/名称」,否则只匹配名称 */
+export interface VSPattern {
+  type: "glob" | "regex";
+  pattern: string;
 }
 
 export interface IstioGroup {
   id: number;
   name: string;
   description: string;
+  /** 包含的 VS,为空表示全部 */
+  include_patterns: VSPattern[];
+  /** 忽略的 VS,优先于包含 */
+  ignore_patterns: VSPattern[];
   clusters: IstioGroupCluster[];
   created_at: string;
   updated_at: string;
@@ -50,14 +63,80 @@ export interface IstioGroup {
 
 export interface IstioGroupList {
   groups: IstioGroup[];
-  /** 只有管理员有:所有已接入的集群及所属组(空串表示未分组) */
-  clusters?: { k8s_name: string; group: string }[];
+  /** 只有管理员有:所有已接入的集群,以及各自已在哪些组里(一个集群可以属于多个组) */
+  clusters?: { k8s_name: string; groups: string[] }[];
 }
 
 export interface GroupPayload {
   name: string;
   description: string;
   clusters: { k8s_name: string; env_type: EnvType; remark: string }[];
+  include_patterns: VSPattern[];
+  ignore_patterns: VSPattern[];
+}
+
+/** VS 在组里的范围判断:rule 组规则纳入 / include 单独纳入 / manual 手动忽略 / ignore_rule 匹配忽略规则 / not_included 不在包含规则里 */
+export type ScopeReason =
+  | "rule"
+  | "include"
+  | "manual"
+  | "ignore_rule"
+  | "not_included";
+
+export interface VSScopeResult {
+  visible: boolean;
+  reason: ScopeReason;
+  /** 命中的规则 */
+  pattern: string | null;
+}
+
+/** 同一个 VS 只能属于一个组:也在这个组里(与本组共用这些集群) */
+export interface VSConflict {
+  group_id: number;
+  group: string;
+  clusters: string[];
+}
+
+/** 本组忽略的 VS(手动忽略的,和被组规则排除的) */
+export interface IgnoredVS {
+  namespace: string;
+  name: string;
+  reason: "manual" | "ignore_rule" | "not_included";
+  pattern: string | null;
+  /** 本组有组标准(忽略期间保留) */
+  vs_id: number | null;
+  /** 在哪些集群的现状里 */
+  clusters: string[];
+  by: string;
+  at: string | null;
+  /** 手动忽略过、现状和组标准里都已经没有了 */
+  stale: boolean;
+}
+
+export interface ScopeStats {
+  /** 组内各集群现状 + 组标准里的 VS 总数 */
+  total: number;
+  visible: number;
+  ignored: number;
+  manual: number;
+  by_rule: number;
+  conflict: number;
+}
+
+export interface GroupPreview {
+  total: number;
+  visible: number;
+  ignored: number;
+  conflict: number;
+  /** 还没采集过现状的集群 */
+  uncollected: string[];
+  items: (VSScopeResult & {
+    namespace: string;
+    name: string;
+    clusters: string[];
+    managed: boolean;
+    conflicts: VSConflict[];
+  })[];
 }
 
 export interface VersionInfo {
@@ -91,11 +170,17 @@ export interface MatrixRow {
   cells: Record<string, MatrixCell>;
   coverage: "" | "test_only" | "prod_only";
   status_count: Record<string, number>;
+  /** 也在共用集群的其他组里(同一个 VS 只能属于一个组),不为空时整行标红 */
+  conflicts: VSConflict[];
+  /** 被组规则排除、单独纳入本组的 */
+  included: boolean;
 }
 
 export interface IstioMatrix {
   group: IstioGroup;
   rows: MatrixRow[];
+  ignored: IgnoredVS[];
+  stats: ScopeStats;
 }
 
 export interface IstioRoute {
@@ -152,6 +237,9 @@ export interface VSDetail extends VSFields {
   clusters: VSClusterRow[];
   routes: IstioRoute[];
   lint: string[];
+  /** 在本组的范围判断:被忽略时不显示在列表里,也不能下发 */
+  scope: VSScopeResult;
+  conflicts: VSConflict[];
 }
 
 export interface VSCreatePayload extends VSFields {
@@ -159,6 +247,18 @@ export interface VSCreatePayload extends VSFields {
   namespace: string;
   name: string;
   clusters: { k8s_name: string; hosts: string[] }[];
+  /** 名称被本组排除时,确认后仍然创建并单独纳入本组 */
+  force_include?: boolean;
+}
+
+/** 新建 VS 前的检查 */
+export interface VSCheck {
+  scope: VSScopeResult;
+  /** 本组已有这个 VS 的组标准(可能被忽略了) */
+  standard: boolean;
+  /** 集群里已有同名的(要用纳管) */
+  in_clusters: string[];
+  conflicts: VSConflict[];
 }
 
 export interface RoutePayload {
@@ -237,7 +337,11 @@ export interface ItemResult {
 export interface CollectResult {
   k8s_name: string;
   success: boolean;
+  /** 集群里的 VS 总数 */
   count?: number;
+  /** 按本组规则归本组的 / 被忽略的 */
+  group_count?: number;
+  ignored_count?: number;
   error?: string;
 }
 
@@ -280,6 +384,51 @@ export const updateIstioGroup = (id: number, data: GroupPayload) =>
 
 export const deleteIstioGroup = (id: number) =>
   http.request<Done>("delete", "/api/istio/groups", { params: { id } });
+
+/** 组管理里预览包含 / 忽略规则的效果(按所选集群已采集的现状,不保存) */
+export const previewIstioGroup = (params: {
+  group_id: number | null;
+  clusters: string[];
+  include_patterns: VSPattern[];
+  ignore_patterns: VSPattern[];
+}) =>
+  http.request<Result<GroupPreview>>("get", "/api/istio/groups/preview", {
+    params: {
+      group_id: params.group_id ?? undefined,
+      clusters: params.clusters.join(","),
+      include: JSON.stringify(params.include_patterns),
+      ignore: JSON.stringify(params.ignore_patterns)
+    }
+  });
+
+/** 在组里忽略这些 VS:不再显示、不再处理;集群里的 VS 不受影响 */
+export const ignoreIstioVS = (
+  groupId: number,
+  items: { namespace: string; name: string }[]
+) =>
+  http.request<Done>("post", "/api/istio/ignore", {
+    data: { group_id: groupId, items }
+  });
+
+/** 取消忽略;被组规则排除的会单独纳入本组 */
+export const unignoreIstioVS = (
+  groupId: number,
+  items: { namespace: string; name: string }[]
+) =>
+  http.request<Done>("post", "/api/istio/unignore", {
+    data: { group_id: groupId, items }
+  });
+
+/** 删除集群里的 VirtualService(立即生效);本组部署到了该集群的,同时不再部署 */
+export const deleteIstioLiveVS = (
+  groupId: number,
+  k8sName: string,
+  namespace: string,
+  name: string
+) =>
+  http.request<Done>("post", "/api/istio/live/delete", {
+    data: { group_id: groupId, k8s_name: k8sName, namespace, name }
+  });
 
 // ---------------------------------------------------------------- 矩阵 / 现状 / 对比 / 纳管
 export const getIstioMatrix = (groupId: number) =>
@@ -324,6 +473,16 @@ export const getIstioVS = (vsId: number) =>
 
 export const createIstioVS = (data: VSCreatePayload) =>
   http.request<Result<{ id: number }>>("post", "/api/istio/vs", { data });
+
+/** 新建前检查:本组是否已有、集群里是否已有、其他组里是否已有、名称是否被本组排除 */
+export const checkIstioVS = (
+  groupId: number,
+  namespace: string,
+  name: string
+) =>
+  http.request<Result<VSCheck>>("get", "/api/istio/vs/check", {
+    params: { group_id: groupId, namespace, name }
+  });
 
 export const updateIstioVS = (vsId: number, data: VSFields) =>
   http.request<Done>("put", "/api/istio/vs", { params: { vs_id: vsId }, data });
