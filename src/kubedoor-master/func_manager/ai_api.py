@@ -127,6 +127,18 @@ def register_routes(app, clients, utils):
             "prom_type": utils.PROM_TYPE, "prom_label_key": utils.PROM_K8S_TAG_KEY,
         })
 
+    async def identity(request):
+        # The trusted internal-auth middleware has already resolved X-User-Name
+        # to a live, enabled human principal. Never accept role/cluster claims
+        # from the AI service itself.
+        principal = authorize(request)
+        return web.json_response({
+            "username": principal.username,
+            "permission": principal.role,
+            "clusters": dict(principal.clusters),
+            "default_permission": principal.default_permission,
+        })
+
     async def execute(request):
         principal = authorize(request)
         env = request.query.get("env", "")
@@ -213,6 +225,7 @@ def register_routes(app, clients, utils):
                                   "start": params.get("start"), "end": params.get("end"), "truncated": False})
 
     app.router.add_get("/api/ai/internal/bootstrap", bootstrap)
+    app.router.add_get("/api/ai/internal/identity", identity)
     app.router.add_post("/api/ai/internal/agent-execute", execute)
     app.router.add_post("/api/ai/internal/agent-cancel", cancel)
     app.router.add_post("/api/ai/internal/metrics", metrics)

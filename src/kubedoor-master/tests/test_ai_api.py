@@ -82,6 +82,14 @@ async def test_internal_routes_require_service_token_and_user_identity(monkeypat
         assert body["username"] == "viewer" and body["permission"] == "read"
         assert [(c["env"], c["online"], c["permission"]) for c in body["clusters"]] == [
             ("offline", False, "read"), ("online", True, "read")]
+        identity = await client.get("/api/ai/internal/identity", headers={
+            "X-Kubedoor-Token": "secret-test-token", "X-User-Name": "limited", "X-User-Permission": "admin",
+        })
+        assert identity.status == 200
+        identity_body = await identity.json()
+        assert identity_body["username"] == "limited"
+        assert identity_body["permission"] == "none"
+        assert identity_body["clusters"] == {"prod": "rw", "staging": "read"}
 
 
 @pytest.mark.asyncio

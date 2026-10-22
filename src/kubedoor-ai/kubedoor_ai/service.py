@@ -264,8 +264,11 @@ class Service:
             return {"id": session_id, "title": current["title"], "generated": False}
         return {**row, "generated": True}
 
-    async def new_run(self, identity, session_id, scope, origin="chat", skill_ids=None, key=None, memory_ids=None):
-        await self.store.session(session_id, identity)
+    async def new_run(self, identity, session_id, scope, origin="chat", skill_ids=None, key=None, memory_ids=None, channel="web"):
+        if channel == "web":
+            await self.store.session(session_id, identity)
+        else:
+            await self.store.session(session_id, identity, channel=channel)
         scope = normalize_scope(scope)
         cluster = await self.ensure_env(identity, scope["env"])
         skills = skill_ids or []

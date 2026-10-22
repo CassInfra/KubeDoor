@@ -28,6 +28,15 @@ export default {
       }
     },
     {
+      path: "/system/wecom-ai",
+      name: "SystemWeComAI",
+      component: () => import("@/views/system/wecom-ai/index.vue"),
+      meta: {
+        title: "企微 AI 机器人",
+        roles: ["admin"]
+      }
+    },
+    {
       path: "/system/audit",
       name: "SystemAudit",
       component: () => import("@/views/system/audit/index.vue"),

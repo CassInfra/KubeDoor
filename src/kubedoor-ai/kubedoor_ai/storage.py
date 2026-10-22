@@ -60,8 +60,11 @@ class Store:
     async def execute(self, sql, *args):
         return await self.pool.execute(sql, *args)
 
-    async def session(self, sid: str, identity: Identity):
-        row = await self.one("SELECT * FROM kubedoor_ai_sessions WHERE id=$1::uuid AND username=$2", sid, identity.username)
+    async def session(self, sid: str, identity: Identity, channel="web"):
+        if channel == "web":
+            row = await self.one("SELECT * FROM kubedoor_ai_sessions WHERE id=$1::uuid AND username=$2 AND channel='web'", sid, identity.username)
+        else:
+            row = await self.one("SELECT * FROM kubedoor_ai_sessions WHERE id=$1::uuid AND username=$2 AND channel=$3", sid, identity.username, channel)
         if not row:
             raise AIError("会话不存在", 404, "not_found")
         return row

@@ -203,6 +203,14 @@ DeepAgents 加载仓库内 `skills/kubedoor-k8s`，Skills 文件只读；会话�
 | `PG_HOST`、`PG_PORT`、`PG_USER`、`PG_PASSWORD`、`PG_DATABASE` | 历史、动作、连接与 checkpoint 使用的 PostgreSQL |
 | `PORT` | 服务端口，默认 `8000` |
 
+### 企业微信智能机器人
+
+管理员可在「系统管理 → 企微 AI 机器人」配置企业微信 API 模式的 Bot ID、Secret，以及仅供该机器人使用的模型 Base URL、API Key 和模型名。凭证使用 `AI_ENCRYPTION_KEY` 对应的 AES-256-GCM 密钥加密写入 AI 数据库，不会通过管理接口回显。启用后 AI 服务通过 Python SDK 主动建立企业微信 WebSocket 长连接；无需公网回调地址，运行环境需允许出站访问企业微信长连接服务。
+
+首版只处理机器人单聊文本。管理员在同一页面将企微事件中的 UserID 绑定到已启用的花折人类账号，并可指定默认集群；每条消息仍由 master 按用户名实时解析用户状态与集群授权，映射不会授予权限。首次遇到的未绑定成员会出现在待绑定列表。用户可发送「当前集群」查看上下文，或发送「切换集群 <名称>」切换到自己有权访问的集群。K8S 写操作仍通过 AI 审批；企微审批卡片仅绑定原始成员、花折账号、运行和冻结的 action，其他成员或过期卡片不能批准。
+
+企微会话单独持久化，不会显示在网页 AI 会话列表中；网页 AI 的模型配置保持原样。Bot Secret 和模型 API Key 留空保存表示保持原密钥不变；修改 Base URL、模型或 Bot ID 后保存会重建长连接。首次接入建议先测试模型工具调用，保存启用配置后确认连接状态为「已连接」，再绑定测试账号和只读集群做单聊验收。
+
 所有浏览器、Skills、工具与 MCP 入口由可信 nginx 注入 `X-Kubedoor-Token`、
 `X-User-Name`、`X-User-Permission`（全局角色 `admin`/`rw`/`read`/`none`）和
 `X-User-Clusters`（单独授权的集群 JSON，如 `{"prod":"rw","test":"none"}`）。这些值来自

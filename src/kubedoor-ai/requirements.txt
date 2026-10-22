@@ -8,3 +8,4 @@ psycopg[binary,pool]==3.3.6
 asyncpg==0.31.0
 cryptography==50.0.2
 uvicorn==0.54.0
+wecom-aibot-python-sdk==1.0.2

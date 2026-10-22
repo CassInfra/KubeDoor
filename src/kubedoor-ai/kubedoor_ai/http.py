@@ -54,13 +54,19 @@ def create_app(service=None, token=None):
     async def lifespan(app):
         owned = service is None
         app.state.service = service or await Service.open(os.getenv("MASTER_URL", "http://kubedoor-master"), token, os.getenv("AI_ENCRYPTION_KEY", ""))
+        app.state.wecom = None
         try:
+            if owned:
+                from .wecom import WeComIntegration
+                app.state.wecom = WeComIntegration(app.state.service)
+                await app.state.wecom.start()
             async with AsyncExitStack() as stack:
                 await stack.enter_async_context(streamable.router.lifespan_context(streamable))
                 await stack.enter_async_context(legacy.router.lifespan_context(legacy))
                 yield
         finally:
             if owned:
+                await app.state.wecom.close()
                 await app.state.service.close()
 
     async def handle(request: Request):
@@ -101,7 +107,7 @@ def create_app(service=None, token=None):
                     result = await svc.store.one("INSERT INTO kubedoor_ai_connections(env,encrypted_config,context,updated_by) VALUES($1,$2,$3,$4) ON CONFLICT(env) DO UPDATE SET encrypted_config=EXCLUDED.encrypted_config,context=EXCLUDED.context,revision=kubedoor_ai_connections.revision+1,test_status='success',tested_at=now(),updated_by=EXCLUDED.updated_by,updated_at=now() RETURNING env,context,revision,test_status,tested_at", env, encrypted, context, identity.username)
             elif endpoint == "sessions":
                 if request.method == "GET":
-                    result = {"sessions": await svc.store.fetch("SELECT id,title,created_at,updated_at FROM kubedoor_ai_sessions WHERE username=$1 ORDER BY updated_at DESC", identity.username)}
+                    result = {"sessions": await svc.store.fetch("SELECT id,title,created_at,updated_at FROM kubedoor_ai_sessions WHERE username=$1 AND channel='web' ORDER BY updated_at DESC", identity.username)}
                 else:
                     data = await body(request)
                     result = await svc.new_session(identity, data.get("title", "新会话"), request.headers.get("idempotency-key"))
@@ -196,6 +202,28 @@ def create_app(service=None, token=None):
                 return StreamingResponse(events(), media_type="text/event-stream", headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"})
             elif endpoint == "provider-test":
                 result = await svc.test_provider((await body(request)).get("provider"))
+            elif endpoint == "wecom-config":
+                identity.require_admin()
+                if request.method == "GET":
+                    result = await request.app.state.wecom.admin_config()
+                else:
+                    result = await request.app.state.wecom.save_config(identity, await body(request))
+            elif endpoint == "wecom-test":
+                identity.require_admin()
+                provider = (await body(request)).get("provider")
+                if isinstance(provider, dict) and not provider.get("api_key") and request.app.state.wecom.config:
+                    provider = {**provider, "api_key": request.app.state.wecom.config.get("api_key", "")}
+                result = await svc.test_provider(provider)
+            elif endpoint == "wecom-users":
+                identity.require_admin()
+                if request.method == "GET":
+                    result = {"users": await request.app.state.wecom.users()}
+                else:
+                    result = await request.app.state.wecom.save_user(identity, await body(request))
+            elif endpoint == "wecom-user":
+                identity.require_admin()
+                await request.app.state.wecom.delete_user(request.path_params["userid"])
+                result = {"success": True}
             elif endpoint == "skills":
                 result = {"skills": SKILLS}
             elif endpoint == "skill":
@@ -245,6 +273,10 @@ def create_app(service=None, token=None):
     route("/runs/{rid}/decisions", "decisions", ["POST"])
     route("/runs/{rid}/cancel", "cancel", ["POST"])
     route("/provider/test", "provider-test", ["POST"])
+    route("/wecom", "wecom-config", ["GET", "PUT"])
+    route("/wecom/test", "wecom-test", ["POST"])
+    route("/wecom/users", "wecom-users", ["GET", "POST"])
+    route("/wecom/users/{userid}", "wecom-user", ["DELETE"])
     route("/skills", "skills", ["GET"])
     route("/skills/{skill_id}", "skill", ["GET"])
     route("/tools", "tools", ["GET"])
@@ -257,5 +289,6 @@ def create_app(service=None, token=None):
     app.add_middleware(Authentication, token=token)
     if service is not None:
         app.state.service = service
+        app.state.wecom = None
     app.state.mcp = mcp
     return app

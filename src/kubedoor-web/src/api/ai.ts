@@ -136,6 +136,32 @@ export interface AIConnection {
   error?: string;
 }
 
+export interface WeComConfig {
+  enabled: boolean;
+  configured: boolean;
+  connected: boolean;
+  authenticated: boolean;
+  reconnecting: boolean;
+  error?: string | null;
+  bot_id?: string;
+  base_url?: string;
+  model?: string;
+  has_bot_secret: boolean;
+  has_api_key: boolean;
+  updated_by?: string;
+  updated_at?: string;
+}
+
+export interface WeComUser {
+  wecom_userid: string;
+  username: string | null;
+  default_env: string | null;
+  current_env: string | null;
+  first_seen_at: string;
+  last_seen_at: string;
+  pending_approvals: number;
+}
+
 export class AIRequestError extends Error {
   constructor(
     message: string,
@@ -338,6 +364,25 @@ export const aiApi = {
     request<{ status?: string }>(`/runs/${itemPath(id)}/cancel`, "POST", {}),
   testProvider: (provider: AIProvider) =>
     request<Record<string, any>>("/provider/test", "POST", { provider }),
+  wecomConfig: () => request<WeComConfig>("/wecom"),
+  saveWecomConfig: (data: {
+    enabled: boolean;
+    bot_id: string;
+    bot_secret?: string;
+    base_url: string;
+    api_key?: string;
+    model: string;
+  }) => request<WeComConfig>("/wecom", "PUT", data),
+  testWecomProvider: (provider: AIProvider) =>
+    request<Record<string, any>>("/wecom/test", "POST", { provider }),
+  wecomUsers: () => request<{ users: WeComUser[] }>("/wecom/users"),
+  saveWecomUser: (data: {
+    wecom_userid: string;
+    username: string;
+    default_env?: string | null;
+  }) => request<{ success: boolean }>("/wecom/users", "POST", data),
+  deleteWecomUser: (userid: string) =>
+    request<{ success: boolean }>(`/wecom/users/${itemPath(userid)}`, "DELETE"),
   connections: () => request<{ connections: AIConnection[] }>("/connections"),
   parseConnection: (content: string) =>
     request<{
