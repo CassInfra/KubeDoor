@@ -23,6 +23,7 @@ import VSDialog from "./components/VSDialog.vue";
 import HostsDialog from "./components/HostsDialog.vue";
 import CompareDialog from "./components/CompareDialog.vue";
 import ApplyDialog from "./components/ApplyDialog.vue";
+import LiveDialog from "./components/LiveDialog.vue";
 import {
   ENV_TYPE_LABEL,
   ENV_TYPE_TAG,
@@ -135,6 +136,7 @@ const vsDialog = ref(false);
 const compare = ref({ visible: false, left: "", right: "" });
 const applyState = ref({ visible: false, items: [] as ApplyItem[] });
 const hostsState = ref({ visible: false, k8sName: "" });
+const liveState = ref({ visible: false, cluster: null as VSClusterRow | null });
 
 function openCompare(c: VSClusterRow) {
   compare.value = {
@@ -157,6 +159,10 @@ function openApply(clusters: VSClusterRow[]) {
 
 function openHosts(c: VSClusterRow) {
   hostsState.value = { visible: true, k8sName: c.k8s_name };
+}
+
+function openLive(c: VSClusterRow) {
+  liveState.value = { visible: true, cluster: c };
 }
 
 async function resetFrom(c: VSClusterRow) {
@@ -354,8 +360,15 @@ onMounted(load);
               <span v-else class="sub">-</span>
             </template>
           </el-table-column>
-          <el-table-column label="操作" width="330">
+          <el-table-column label="操作" width="390">
             <template #default="{ row }">
+              <el-button
+                v-if="row.in_cluster"
+                link
+                type="primary"
+                @click="openLive(row)"
+                >查看现状</el-button
+              >
               <el-button link type="primary" @click="openCompare(row)"
                 >对比</el-button
               >
@@ -604,6 +617,15 @@ onMounted(load);
         :vs-id="vs.id"
         :k8s-name="hostsState.k8sName"
         @saved="load"
+      />
+      <LiveDialog
+        v-if="liveState.cluster"
+        v-model="liveState.visible"
+        :group-id="vs.group_id"
+        :k8s-name="liveState.cluster.k8s_name"
+        :env-type="liveState.cluster.env_type"
+        :namespace="vs.namespace"
+        :name="vs.name"
       />
       <CompareDialog
         v-model="compare.visible"

@@ -377,6 +377,24 @@ def manifest(namespace: str, name: str, spec: dict) -> dict:
     }
 
 
+# kubectl apply 记下的上次配置:整个对象的 JSON 串,很长,内容和 spec 重复
+LAST_APPLIED_ANNOTATION = 'kubectl.kubernetes.io/last-applied-configuration'
+
+
+def clean_live(obj: dict) -> dict:
+    """查看集群现状用:原样保留,只去掉 metadata.managedFields 和 last-applied 注解(注解删空了就整个去掉)。"""
+    obj = copy.deepcopy(obj)
+    metadata = obj.get('metadata')
+    if isinstance(metadata, dict):
+        metadata.pop('managedFields', None)
+        annotations = metadata.get('annotations')
+        if isinstance(annotations, dict):
+            annotations.pop(LAST_APPLIED_ANNOTATION, None)
+            if not annotations:
+                metadata.pop('annotations')
+    return obj
+
+
 # ---------------------------------------------------------------------------
 # 规则描述、规范检查
 # ---------------------------------------------------------------------------
@@ -472,8 +490,24 @@ def route_key(entry: dict) -> str:
 
 
 def rule_key(entry: dict) -> str:
-    """不算域名值的匹配条件:各集群域名不同的同一条规则用它对齐。"""
+    """不算域名值的匹配条件:两条规则这个一样,一条的域名才能套到另一条上。"""
     return canonical(split_match(entry.get('match') or [])[0])
+
+
+def forward_key(entry: dict) -> str:
+    """转发目标:各目标的 destination(不算权重、不分先后),或委托的下级 VS、重定向等其他写法。"""
+    targets = entry.get('route')
+    if isinstance(targets, list):
+        return canonical(sorted({canonical(t.get('destination')) for t in targets if isinstance(t, dict)}))
+    return canonical({key: entry[key] for key in ('delegate', 'redirect', 'directResponse') if key in entry})
+
+
+def domain_rule_key(entry: dict) -> str:
+    """各集群只是域名不同的同一条规则:不算域名值的匹配条件一样,转发目标也一样。
+
+    只看匹配条件不够:只有域名条件的几条规则去掉域名后一模一样,只能按位置对,
+    某个集群少一条这样的规则时,后面规则的域名就对到别的规则上了。"""
+    return canonical([rule_key(entry), forward_key(entry)])
 
 
 def _merge_moved(rows: List[dict], left_keys: List[str], right_keys: List[str]) -> List[dict]:
@@ -498,17 +532,17 @@ def _merge_moved(rows: List[dict], left_keys: List[str], right_keys: List[str]) 
 def align_rules(left: List[dict], right: List[dict]) -> List[dict]:
     """两组规则对齐,返回 [{left_index, right_index, moved?}]。
 
-    先按匹配条件对齐;对不上的一段里再按不算域名值的匹配条件对齐(只是域名不同的同一条规则);
+    先按匹配条件对齐;对不上的一段里再按 domain_rule_key 对齐(各集群只是域名不同的同一条规则);
     最后两边都有、但位置对不上的合并成一行,标记 moved。"""
     keys = [route_key(e) for e in left], [route_key(e) for e in right]
-    rule_keys = [rule_key(e) for e in left], [rule_key(e) for e in right]
+    domain_keys = [domain_rule_key(e) for e in left], [domain_rule_key(e) for e in right]
     rows = []
     matcher = difflib.SequenceMatcher(a=keys[0], b=keys[1], autojunk=False)
     for tag, i1, i2, j1, j2 in matcher.get_opcodes():
         if tag == 'equal':
             rows += [{'left_index': i, 'right_index': j} for i, j in zip(range(i1, i2), range(j1, j2))]
             continue
-        inner = difflib.SequenceMatcher(a=rule_keys[0][i1:i2], b=rule_keys[1][j1:j2], autojunk=False)
+        inner = difflib.SequenceMatcher(a=domain_keys[0][i1:i2], b=domain_keys[1][j1:j2], autojunk=False)
         for tag2, a1, a2, b1, b2 in inner.get_opcodes():
             if tag2 == 'equal':
                 rows += [{'left_index': i1 + a, 'right_index': j1 + b} for a, b in zip(range(a1, a2), range(b1, b2))]
@@ -516,7 +550,7 @@ def align_rules(left: List[dict], right: List[dict]) -> List[dict]:
                 rows += [{'left_index': i1 + a, 'right_index': None} for a in range(a1, a2)]
                 rows += [{'left_index': None, 'right_index': j1 + b} for b in range(b1, b2)]
     rows = _merge_moved(rows, *keys)
-    return _merge_moved(rows, *rule_keys)
+    return _merge_moved(rows, *domain_keys)
 
 
 def diff_http(left: List[dict], right: List[dict]) -> List[dict]:

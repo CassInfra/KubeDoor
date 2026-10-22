@@ -43,6 +43,34 @@ async def get_virtualservice(custom_objects_api, request):
         return web.json_response({"error": f"服务器内部错误: {str(e)}"}, status=500)
 
 
+async def get_virtualservice_detail(custom_objects_api, request):
+    """
+    GET接口：获取单个VirtualService的完整内容（含 metadata，和 kubectl get -o yaml 一样）
+    参数：
+    - custom_objects_api: Kubernetes CustomObjectsApi客户端
+    - request: HTTP请求对象，查询参数包含name和namespace
+    返回：VirtualService对象
+    """
+    name = request.query.get('name')
+    namespace = request.query.get('namespace')
+    if not name or not namespace:
+        return web.json_response({"error": "缺少必要参数: namespace, name"}, status=400)
+    try:
+        vs = await custom_objects_api.get_namespaced_custom_object(
+            group="networking.istio.io", version="v1beta1", namespace=namespace, plural="virtualservices", name=name
+        )
+        return web.json_response({"success": True, "data": vs})
+
+    except ApiException as e:
+        if e.status == 404:
+            return web.json_response({"error": f"VirtualService {namespace}/{name} not found"}, status=404)
+        logger.error(f"查询VirtualService失败: {e}")
+        return web.json_response({"error": f"Kubernetes API错误: {e.reason}"}, status=e.status)
+    except Exception as e:
+        logger.error(f"查询VirtualService异常: {e}")
+        return web.json_response({"error": f"服务器内部错误: {str(e)}"}, status=500)
+
+
 async def apply_virtualservice(custom_objects_api, request):
     """
     POST接口：创建或更新VirtualService

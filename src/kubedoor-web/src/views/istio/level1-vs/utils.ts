@@ -1,5 +1,6 @@
 import * as yaml from "js-yaml";
 import dayjs from "dayjs";
+import utc from "dayjs/plugin/utc";
 import {
   type CellStatus,
   type DomainItem,
@@ -9,6 +10,8 @@ import {
   type VSScopeResult,
   DOMAIN_KEY
 } from "@/api/istio";
+
+dayjs.extend(utc);
 
 type TagType = "success" | "warning" | "danger" | "info" | "primary";
 
@@ -103,8 +106,13 @@ export const COVERAGE_LABEL: Record<string, string> = {
   prod_only: "只在生产环境"
 };
 
+/** 时间一律按北京时间(UTC+8)显示,不受浏览器所在时区影响 */
 export function formatTime(value?: string | null) {
-  return value ? dayjs(value).format("YYYY-MM-DD HH:mm:ss") : "";
+  return value
+    ? dayjs(value)
+        .utcOffset(8 * 60)
+        .format("YYYY-MM-DD HH:mm:ss")
+    : "";
 }
 
 /** spec 转 YAML;对比时两边都按键名排序,避免字段顺序不同造成的假差异 */

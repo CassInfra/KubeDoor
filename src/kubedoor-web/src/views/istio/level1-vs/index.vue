@@ -2,7 +2,14 @@
 import { computed, h as vnode, onMounted, ref } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { ElMessageBox } from "element-plus";
-import { Hide, Plus, Refresh, Setting, Warning } from "@element-plus/icons-vue";
+import {
+  Clock,
+  Hide,
+  Plus,
+  Refresh,
+  Setting,
+  Warning
+} from "@element-plus/icons-vue";
 import { message } from "@/utils/message";
 import { useClusterPermission } from "@/utils/permission";
 import {
@@ -26,6 +33,7 @@ import ApplyDialog from "./components/ApplyDialog.vue";
 import HostsDialog from "./components/HostsDialog.vue";
 import VSDialog from "./components/VSDialog.vue";
 import IgnoredDialog from "./components/IgnoredDialog.vue";
+import LiveDialog from "./components/LiveDialog.vue";
 import {
   COVERAGE_LABEL,
   ENV_TYPE_LABEL,
@@ -298,6 +306,20 @@ function openHosts(row: MatrixRow, k8s: string) {
   hostsState.value = { visible: true, vsId: row.vs_id, k8sName: k8s };
 }
 
+const liveState = ref({ visible: false, k8sName: "", namespace: "", name: "" });
+const liveEnvType = computed(
+  () =>
+    clusters.value.find(c => c.k8s_name === liveState.value.k8sName)?.env_type
+);
+function openLive(row: MatrixRow, k8s: string) {
+  liveState.value = {
+    visible: true,
+    k8sName: k8s,
+    namespace: row.namespace,
+    name: row.name
+  };
+}
+
 async function resetFrom(row: MatrixRow, k8s: string) {
   if (row.vs_id === null) return;
   await ElMessageBox.confirm(
@@ -405,7 +427,8 @@ async function deleteLive(row: MatrixRow, k8s: string) {
 }
 
 function onCellCommand(row: MatrixRow, k8s: string, command: string) {
-  if (command === "compare") openCompare(row, k8s);
+  if (command === "live") openLive(row, k8s);
+  else if (command === "compare") openCompare(row, k8s);
   else if (command === "hosts") openHosts(row, k8s);
   else if (command === "apply" && row.vs_id !== null)
     openApply([{ vs_id: row.vs_id, k8s_name: k8s }]);
@@ -704,6 +727,24 @@ onMounted(async () => {
               @command="cmd => onCellCommand(row, c.k8s_name, cmd)"
             >
               <div :class="['cell', `cell-${row.cells[c.k8s_name].status}`]">
+                <!-- 右上角:上次从这里下发的时间 -->
+                <el-tooltip
+                  v-if="row.cells[c.k8s_name].applied_at"
+                  placement="top"
+                >
+                  <template #content>
+                    <div>
+                      下发时间
+                      {{
+                        formatTime(row.cells[c.k8s_name].applied_at)
+                      }}(北京时间)
+                    </div>
+                    <div v-if="row.cells[c.k8s_name].applied_by">
+                      下发人 {{ row.cells[c.k8s_name].applied_by }}
+                    </div>
+                  </template>
+                  <el-icon class="applied-icon"><Clock /></el-icon>
+                </el-tooltip>
                 <div class="cell-head">
                   <el-tooltip
                     v-if="
@@ -770,6 +811,11 @@ onMounted(async () => {
               </div>
               <template #dropdown>
                 <el-dropdown-menu>
+                  <el-dropdown-item
+                    v-if="row.cells[c.k8s_name].in_cluster"
+                    command="live"
+                    >查看现状</el-dropdown-item
+                  >
                   <el-dropdown-item command="compare">对比</el-dropdown-item>
                   <template v-if="isAdmin && row.vs_id !== null">
                     <el-dropdown-item
@@ -923,6 +969,14 @@ onMounted(async () => {
         :k8s-name="hostsState.k8sName"
         @saved="loadMatrix"
       />
+      <LiveDialog
+        v-model="liveState.visible"
+        :group-id="group.id"
+        :k8s-name="liveState.k8sName"
+        :env-type="liveEnvType"
+        :namespace="liveState.namespace"
+        :name="liveState.name"
+      />
       <VSDialog
         v-model="vsDialog"
         :group-id="group.id"
@@ -1014,6 +1068,7 @@ onMounted(async () => {
 }
 
 .cell {
+  position: relative;
   min-height: 36px;
   padding: 2px 4px;
   cursor: pointer;
@@ -1024,10 +1079,19 @@ onMounted(async () => {
   background: var(--el-fill-color);
 }
 
+.applied-icon {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  font-size: 13px;
+  color: var(--el-text-color-secondary);
+}
+
 .cell-head {
   display: flex;
   gap: 6px;
   align-items: center;
+  padding-right: 16px;
   margin-bottom: 2px;
 }
 

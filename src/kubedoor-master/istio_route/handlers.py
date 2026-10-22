@@ -1,9 +1,9 @@
 """Istio VirtualService 管理接口(/api/istio/*),设计见 README.md。
 
 权限(auth/policy.py 登记):查看按集群读权限,看不到的集群不返回;所有修改只允许管理员。
-集群里的 VS 只经这里读写:master 调 agent 的 /api/agent/istio/vs(列出)、/api/agent/istio/vs/apply(下发)
-和 /api/agent/istio/vs/delete(删除),下发内容由 master 按组标准生成,不接受前端传来的 spec;
-浏览器不能经通用转发直接调这些 agent 接口。
+集群里的 VS 只经这里读写:master 调 agent 的 /api/agent/istio/vs(列出)、/api/agent/istio/vs/detail(查看单个)、
+/api/agent/istio/vs/apply(下发)和 /api/agent/istio/vs/delete(删除),下发内容由 master 按组标准生成,
+不接受前端传来的 spec;浏览器不能经通用转发直接调这些 agent 接口。
 """
 
 import asyncio
@@ -23,6 +23,7 @@ from . import store
 from .store import IstioError
 
 AGENT_LIST_PATH = '/api/agent/istio/vs'
+AGENT_DETAIL_PATH = '/api/agent/istio/vs/detail'
 AGENT_APPLY_PATH = '/api/agent/istio/vs/apply'
 AGENT_DELETE_PATH = '/api/agent/istio/vs/delete'
 AGENT_TIMEOUT = 60
@@ -1057,7 +1058,7 @@ async def remove_vs_cluster(request):
 
 
 # ---------------------------------------------------------------------------
-# 组的 VS 范围:忽略 / 取消忽略;删除集群里的 VS
+# 组的 VS 范围:忽略 / 取消忽略;查看 / 删除集群里的 VS
 # ---------------------------------------------------------------------------
 @handler
 async def ignore_vs(request):
@@ -1086,8 +1087,41 @@ async def unignore_vs(request):
 
 
 def _old_agent(resp) -> bool:
-    """旧版 agent 没有删除接口:本地服务回 404 纯文本,agent 解析 JSON 失败。"""
+    """旧版 agent 没有查看单个 / 删除接口:本地服务回 404 纯文本,agent 解析 JSON 失败。"""
     return isinstance(resp, dict) and 'status' not in resp and 'unexpected mimetype' in str(resp.get('error', ''))
+
+
+@handler
+async def live_detail(request):
+    """查看集群里这个 VS 的现状:实时从 agent 取完整对象,去掉 managedFields 和 last-applied 注解。
+    旧版 agent 还没有取单个 VS 的接口,用列表接口拼出来(只有 spec,full 为 False)。"""
+    query = request.query
+    group = await _group(_int(query.get('group_id'), 'group_id'))
+    k8s_name, namespace, name = (query.get(key) or '' for key in ('k8s_name', 'namespace', 'name'))
+    if not k8s_name or not namespace or not name:
+        raise IstioError('缺少参数: k8s_name / namespace / name')
+    visible = {c['k8s_name'] for c in _visible(request, group)}
+    _members(group, [k8s_name])
+    if k8s_name not in visible:
+        raise IstioError(f'没有集群 {k8s_name} 的访问权限', 403)
+    gone = f'集群 {k8s_name} 里已经没有 {namespace}/{name}'
+    try:
+        resp = await _call_agent(k8s_name, AGENT_DETAIL_PATH, query={'namespace': namespace, 'name': name},
+                                 timeout=AGENT_TIMEOUT)
+    except Exception as exc:
+        raise IstioError(f'集群 {k8s_name}:{exc}', 502)
+    if isinstance(resp, dict) and resp.get('success') is True and isinstance(resp.get('data'), dict):
+        return _ok({'object': S.clean_live(resp['data']), 'full': True})
+    if isinstance(resp, dict) and resp.get('status') == 404:
+        raise IstioError(gone, 404)
+    if not _old_agent(resp):
+        raise IstioError(f'从集群 {k8s_name} 取现状失败:{_agent_error(resp)}', 502)
+    live = next((i for i in await fetch_live(k8s_name) if i['namespace'] == namespace and i['name'] == name), None)
+    if live is None:
+        raise IstioError(gone, 404)
+    obj = S.manifest(namespace, name, live['spec'])
+    obj['metadata']['resourceVersion'] = live['resource_version']
+    return _ok({'object': obj, 'full': False})
 
 
 @handler
@@ -1303,6 +1337,7 @@ def register_routes(app, call_agent_api):
     router.add_post('/api/istio/import', import_standards)
     router.add_post('/api/istio/ignore', ignore_vs)
     router.add_post('/api/istio/unignore', unignore_vs)
+    router.add_get('/api/istio/live', live_detail)
     router.add_post('/api/istio/live/delete', delete_live)
     router.add_post('/api/istio/vs/reset', reset_standard)
     router.add_get('/api/istio/vs/check', check_vs)

@@ -108,6 +108,22 @@ def test_render_orders_routes_by_priority_and_puts_default_last():
     assert manifest['apiVersion'] == 'networking.istio.io/v1beta1' and manifest['metadata']['name'] == 'demo'
 
 
+def test_clean_live_drops_managed_fields_and_last_applied():
+    live = {'apiVersion': 'networking.istio.io/v1', 'kind': 'VirtualService',
+            'metadata': {'name': 'demo', 'namespace': 'istio-system', 'resourceVersion': '42',
+                         'managedFields': [{'manager': 'kubectl-client-side-apply'}],
+                         'annotations': {S.LAST_APPLIED_ANNOTATION: '{"spec":{}}', 'owner': 'ops'}},
+            'spec': {'hosts': ['a.example.com']}}
+    cleaned = S.clean_live(live)
+    assert cleaned['metadata'] == {'name': 'demo', 'namespace': 'istio-system', 'resourceVersion': '42',
+                                   'annotations': {'owner': 'ops'}}
+    assert cleaned['spec'] == live['spec'] and 'managedFields' in live['metadata']  # 不改传入的对象
+    # 只有 last-applied 一个注解:annotations 整个去掉
+    live['metadata']['annotations'].pop('owner')
+    assert 'annotations' not in S.clean_live(live)['metadata']
+    assert S.clean_live({'kind': 'VirtualService'}) == {'kind': 'VirtualService'}
+
+
 def test_hash_ignores_key_order_and_empty_values():
     a = {'hosts': ['x'], 'http': [{'match': [], 'route': [{'destination': {'host': 'd'}}], 'timeout': None}]}
     b = {'http': [{'route': [{'destination': {'host': 'd'}}]}], 'gateways': [], 'hosts': ['x']}
@@ -401,6 +417,33 @@ def test_align_rules_with_identical_templates():
     kunlun = [rule(name, '-k') for name in 'abc']
     assert [(r['op'], r['left_index'], r['right_index']) for r in S.diff_http(left, kunlun)] == [
         ('domains', 0, 0), ('domains', 1, 1), ('domains', 2, 2)]
+
+
+def test_align_domain_only_rules_by_forward_target():
+    """只有域名条件的几条规则去掉域名后一样:某个集群少一条时按转发目标对上,域名不能按位置套到别的规则上。"""
+    def rule(service, port, *domains, field='authority'):
+        match = [{'headers': {'host': {'exact': d}}} if field == 'host' else {'authority': {'exact': d}}
+                 for d in domains]
+        return {'match': match, 'route': [{'destination': {'host': f'{service}.ns.svc.cluster.local',
+                                                           'port': {'number': port}}}]}
+
+    prod = [rule('gateway', 10001, 'cap.example.com', field='host'), rule('job', 10089, 'job.example.com'),
+            rule('nacos', 8848, 'nacos.example.com')]
+    beta = [rule('gateway', 10001, 'cap-p.beta.example.com', 'cap.beta.example.com', field='host'),
+            rule('nacos', 8848, 'nacos-alpha.example.com')]
+    assert [(r['op'], r['left_index'], r['right_index']) for r in S.diff_http(prod, beta)] == [
+        ('domains', 0, 0), ('left_only', 1, None), ('domains', 2, 1)]
+    found = S.aligned_domains(prod, {'http': beta})
+    assert {i: [d['value'] for d in lists[0]] for i, lists in found.items()} == {
+        0: ['cap-p.beta.example.com', 'cap.beta.example.com'], 2: ['nacos-alpha.example.com']}
+    # 转发目标不算权重、不分先后;端口不同、委托的下级 VS 不同都算不同目标
+    weighted = {'route': [{'destination': {'host': 'v1'}, 'weight': 90}, {'destination': {'host': 'v2'}, 'weight': 10}]}
+    swapped = {'route': [{'destination': {'host': 'v2'}, 'weight': 50}, {'destination': {'host': 'v1'}, 'weight': 50}]}
+    assert S.forward_key(weighted) == S.forward_key(swapped)
+    assert S.forward_key(prod[2]) != S.forward_key({**prod[2], 'route': [{'destination': {
+        'host': 'nacos.ns.svc.cluster.local', 'port': {'number': 9848}}}]})
+    assert S.forward_key({'delegate': {'name': 'a', 'namespace': 'ns'}}) != S.forward_key(
+        {'delegate': {'name': 'b', 'namespace': 'ns'}})
 
 
 def test_aligned_domains_takes_values_from_matching_rules():

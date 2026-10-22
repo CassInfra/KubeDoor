@@ -601,6 +601,9 @@ async def setup_routes(app):
     app.router.add_get('/api/agent/pods', lambda request: pod_manager.get_pod_list(core_v1, custom_api, request))
     # VirtualService管理接口
     app.router.add_get('/api/agent/istio/vs', lambda request: istio_manager.get_virtualservice(custom_api, request))
+    app.router.add_get(
+        '/api/agent/istio/vs/detail', lambda request: istio_manager.get_virtualservice_detail(custom_api, request)
+    )
     app.router.add_post(
         '/api/agent/istio/vs/apply', lambda request: istio_manager.apply_virtualservice(custom_api, request)
     )

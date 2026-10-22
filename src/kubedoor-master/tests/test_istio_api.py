@@ -46,13 +46,18 @@ def vs(hosts, routes, gateway='istio-system/internal', **extra):
     return {'hosts': hosts, 'gateways': [gateway], 'http': routes, **extra}
 
 
+# 旧版 agent 没有的接口:本地服务回 404 纯文本,agent 解析 JSON 失败
+OLD_AGENT_ERROR = {'success': False, 'error': "404, message='Attempt to decode JSON with unexpected mimetype: "
+                                              "text/plain; charset=utf-8', url='https://localhost/'"}
+
+
 class FakeAgent:
-    """按集群保存 VirtualService;列出 / 下发 / 删除接口和真 agent 的返回格式一致。"""
+    """按集群保存 VirtualService;列出 / 查看 / 下发 / 删除接口和真 agent 的返回格式一致。"""
 
     def __init__(self):
         self.clusters = {}
         self.offline = set()
-        self.old_agent = set()  # 还没有删除接口的旧版 agent
+        self.old_agent = set()  # 还没有查看单个 / 删除接口的旧版 agent
         self.applied = []
         self.deleted = []
 
@@ -67,6 +72,17 @@ class FakeAgent:
             data = [{'name': name, 'namespace': ns, 'resourceVersion': '1', 'spec': copy.deepcopy(spec)}
                     for (ns, name), spec in items.items()]
             return {'success': True, 'data': data, 'total': len(data)}
+        if path == handlers.AGENT_DETAIL_PATH and method == 'GET':
+            if env in self.old_agent:
+                return OLD_AGENT_ERROR
+            key = (query['namespace'], query['name'])
+            if key not in items:
+                return {'success': False, 'status': 404, 'error': f'VirtualService {key[0]}/{key[1]} not found'}
+            metadata = {'name': key[1], 'namespace': key[0], 'resourceVersion': '1', 'generation': 3,
+                        'managedFields': [{'manager': 'kubedoor-agent', 'operation': 'Apply'}],
+                        'annotations': {S.LAST_APPLIED_ANNOTATION: json.dumps({'spec': items[key]}), 'note': 'kept'}}
+            return {'success': True, 'data': {'apiVersion': 'networking.istio.io/v1', 'kind': 'VirtualService',
+                                              'metadata': metadata, 'spec': copy.deepcopy(items[key])}}
         if path == handlers.AGENT_APPLY_PATH and method == 'POST':
             self.applied.append((env, copy.deepcopy(body)))
             if body['spec'].get('hosts') == ['reject.example.com']:
@@ -75,9 +91,8 @@ class FakeAgent:
             items[(meta['namespace'], meta['name'])] = copy.deepcopy(body['spec'])
             return {'success': True, 'message': f"VirtualService {meta['name']} applied successfully"}
         if path == handlers.AGENT_DELETE_PATH and method == 'DELETE':
-            if env in self.old_agent:  # 本地服务没有这个路由:回 404 纯文本,agent 解析 JSON 失败
-                return {'success': False, 'error': "404, message='Attempt to decode JSON with unexpected mimetype: "
-                                                   "text/plain; charset=utf-8', url='https://localhost/'"}
+            if env in self.old_agent:
+                return OLD_AGENT_ERROR
             key = (query['namespace'], query['name'])
             if key not in items:
                 return {'success': False, 'status': 404, 'error': f'VirtualService {key[1]} not found'}
@@ -561,6 +576,34 @@ async def test_delete_vs_in_cluster(env):
     assert '不在组' in outside['error']
 
 
+@pytest.mark.asyncio
+async def test_view_live_vs(env):
+    """查看集群现状:实时取完整对象,去掉 managedFields 和 last-applied 注解;按集群读权限;旧版 agent 只有 spec。"""
+    client, agent, _ = env
+    group_id = await setup_group(client, agent)
+    params = {'group_id': group_id, 'k8s_name': 'beta-k', 'namespace': NS, 'name': 'a'}
+    data = (await call(client, 'GET', '/api/istio/live', **params))['data']
+    meta = data['object']['metadata']
+    assert data['full'] is True and meta['generation'] == 3 and meta['annotations'] == {'note': 'kept'}
+    assert 'managedFields' not in meta and data['object']['spec'] == agent.clusters['beta-k'][(NS, 'a')]
+    gone = await call(client, 'GET', '/api/istio/live', **{**params, 'name': 'gone'}, status=404)
+    assert gone['error'] == f'集群 beta-k 里已经没有 {NS}/gone'
+    outside = await call(client, 'GET', '/api/istio/live', **{**params, 'k8s_name': 'prod-x'}, status=400)
+    assert '不在组' in outside['error']
+    # 只能看有读权限的集群
+    reader = {'X-Test-Role': 'none', 'X-Test-Clusters': json.dumps({'beta-k': 'read'})}
+    await call(client, 'GET', '/api/istio/live', **params, headers=reader)
+    denied = await call(client, 'GET', '/api/istio/live', **{**params, 'k8s_name': 'prod-a'}, headers=reader,
+                        status=403)
+    assert '没有集群 prod-a 的访问权限' in denied['error']
+    # 旧版 agent 没有查看单个的接口:用列表接口拼出来,只有 spec
+    agent.old_agent.add('beta-k')
+    data = (await call(client, 'GET', '/api/istio/live', **params))['data']
+    assert data['full'] is False and data['object']['metadata'] == {'name': 'a', 'namespace': NS, 'resourceVersion': '1'}
+    assert data['object']['spec'] == agent.clusters['beta-k'][(NS, 'a')]
+    await call(client, 'GET', '/api/istio/live', **{**params, 'name': 'gone'}, status=404)
+
+
 def domain_values(lists):
     return [[item['value'] for item in block] for block in lists]
 
@@ -668,3 +711,35 @@ async def test_domain_conditions_are_kept_per_cluster(env):
     # 不再部署到 prod-x:它在各规则里的域名一起删掉
     await call(client, 'DELETE', '/api/istio/vs/cluster', vs_id=vs_id, k8s_name='prod-x')
     assert await db.pg_fetchval("SELECT count(*) FROM istio_vs_route_domain WHERE k8s_name = 'prod-x'") == 0
+
+
+@pytest.mark.asyncio
+async def test_import_takes_domains_from_rule_with_same_target(env):
+    """只有域名条件的几条规则,测试集群少一条:域名取转发目标一样的规则的,不按位置错位到别的规则上。"""
+    client, agent, _ = env
+
+    def host_rule(service, port, *domains):
+        return {'match': [{'authority': {'exact': d}} for d in domains],
+                'route': [{'destination': {'host': f'{service}.adv.svc.cluster.local', 'port': {'number': port}}}]}
+
+    agent.put('prod-k', 'adv', vs(['cap.x.com', 'job.x.com', 'nacos.x.com'], [
+        host_rule('gateway', 10001, 'cap.x.com'), host_rule('job', 10089, 'job.x.com'),
+        host_rule('nacos', 8848, 'nacos.x.com')]))
+    agent.put('beta-k', 'adv', vs(['cap-beta.x.com', 'nacos-alpha.x.com'], [
+        host_rule('gateway', 10001, 'cap-beta.x.com'), host_rule('nacos', 8848, 'nacos-alpha.x.com')]))
+    created = await call(client, 'POST', '/api/istio/groups', {'name': 'g', 'clusters': [
+        {'k8s_name': 'beta-k', 'env_type': 'test'}, {'k8s_name': 'prod-k', 'env_type': 'prod'}]})
+    group_id = created['data']['id']
+    await call(client, 'POST', '/api/istio/collect', {'group_id': group_id})
+    await call(client, 'POST', '/api/istio/import', {'group_id': group_id, 'items': [
+        {'namespace': NS, 'name': 'adv', 'base': 'prod-k', 'clusters': ['beta-k', 'prod-k']}]})
+    vs_id = (await matrix(client, group_id))['adv']['vs_id']
+    detail = (await call(client, 'GET', '/api/istio/vs', vs_id=vs_id))['data']
+    gateway, job, nacos = detail['routes']
+    assert domain_values(gateway['domains']['beta-k']) == [['cap-beta.x.com']]
+    assert 'beta-k' not in job['domains']
+    assert domain_values(nacos['domains']['beta-k']) == [['nacos-alpha.x.com']]
+    beta = next(c for c in detail['clusters'] if c['k8s_name'] == 'beta-k')
+    assert beta['status'] == S.INCOMPLETE and beta['missing_domains'] == ['第 2 条规则(域名按集群 → job.adv)']
+    # 「编辑 hosts 和域名」的默认值同样按转发目标取:job 规则在测试集群里没有对应的
+    assert set(beta['live_domains']) == {str(gateway['id']), str(nacos['id'])}

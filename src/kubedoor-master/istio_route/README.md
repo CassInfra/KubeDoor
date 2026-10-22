@@ -41,6 +41,15 @@
 - 采集照常拉取集群里的全部 VS(现状各组共用),按规则在展示和处理时过滤,所以改规则不用重新采集;
   刷新现状的结果里给出每个集群的总数、归本组的个数和被忽略的个数。
 
+### 查看集群里的 VS
+
+矩阵格子菜单的「查看现状」、详情页集群列表的「查看现状」:实时调 agent 的 `GET /api/agent/istio/vs/detail`
+取集群里的完整对象(和 `kubectl get -o yaml` 一样,不是采集的快照),去掉 `metadata.managedFields` 和
+`kubectl.kubernetes.io/last-applied-configuration` 注解后按 YAML 显示。要有该集群的读权限。
+这个 agent 接口也要新版 agent;旧版 agent 退回用列表接口拼出来,只有 spec(页面提示升级)。
+
+矩阵格子右上角的时钟图标:从这里下发过的,鼠标移上去显示最近一次下发的时间(北京时间)和下发人。
+
 ### 删除集群里的 VS
 
 矩阵格子菜单的「删除」、详情页「更多 → 从集群删除」:调 agent 的 `DELETE /api/agent/istio/vs/delete` 立即删除。
@@ -60,7 +69,9 @@
 - 一律按集群存(各集群恰好相同也一样),纳入了该 VS 的集群都要设置,且至少匹配一个域名;
   没设置全的集群状态是「缺少域名」,下发预览直接报错、不能下发。
 - 规则是否一致(版本 A / B)不算域名的值:只差域名的规则算同一版本;对比里标「只是域名不同」,不算规则差异。
-- 纳管时各集群的域名取自己现状里对应的规则(按不算域名值的匹配条件对齐);对不上、集群里没有这个 VS 的,纳管后显示「缺少域名」。
+- 纳管时各集群的域名取自己现状里对应的规则:匹配条件完全一样的直接对上;只是域名不同的,要不算域名值的匹配条件一样、
+  转发目标(destination,不算权重)也一样才算同一条 —— 只有域名条件的几条规则去掉域名后一模一样,不看转发目标就只能按位置对,
+  某个集群少一条时域名会对到别的规则上。对不上、集群里没有这个 VS 的,纳管后显示「缺少域名」。
 - 以某集群现状更新组标准:该集群的域名取它的现状;其他集群保持原来对应规则的域名,新出现的规则取各自现状。
 - 编辑:规则弹框里按已部署的集群从各自 hosts 里选域名,可以按关键字一次在各集群里选、从一个集群复制到另一个并替换机房标识;
   「编辑 hosts 和域名」弹框里改单个集群的 hosts 和它在各规则里的域名,可以从别的集群复制并替换(如 penglai → kunlun)。
@@ -124,9 +135,10 @@
 | GET | `/api/istio/groups` | 组列表(含包含 / 忽略规则);管理员额外返回所有集群,以及各自已在哪些组里 |
 | POST / PUT / DELETE | `/api/istio/groups`(`?id=`) | 新建 / 修改 / 删除组。body:`{name, description, clusters:[{k8s_name, env_type, remark}], include_patterns, ignore_patterns}`,规则每条 `{type: glob\|regex, pattern}`,集群顺序即显示顺序;移出组的集群,它在本组的部署关系删除,不再属于任何组的集群,现状也删除 |
 | GET | `/api/istio/groups/preview?group_id=&clusters=&include=&ignore=` | 组管理里预览规则(`include` / `ignore` 是 JSON 数组):按所选集群已采集的现状,每个 VS 归本组还是被忽略、和哪些组冲突;不保存 |
-| GET | `/api/istio/matrix?group_id=` | 组矩阵:只列本组范围内的 VS,`cells` 按集群给出 hosts、状态、版本,`conflicts` 冲突的组;另给 `ignored`(被忽略的 VS 和原因)和 `stats`(总数、忽略数) |
+| GET | `/api/istio/matrix?group_id=` | 组矩阵:只列本组范围内的 VS,`cells` 按集群给出 hosts、状态、版本、最近一次下发的时间和下发人,`conflicts` 冲突的组;另给 `ignored`(被忽略的 VS 和原因)和 `stats`(总数、忽略数) |
 | POST | `/api/istio/collect` | 刷新现状:`{group_id, k8s_names?}`,逐个集群返回成功 / 失败,以及 VS 总数、归本组的个数、被忽略的个数 |
 | POST | `/api/istio/ignore` / `/api/istio/unignore` | `{group_id, items:[{namespace, name}]}`:在本组忽略 / 取消忽略(被组规则排除的取消忽略后单独纳入) |
+| GET | `/api/istio/live?group_id=&k8s_name=&namespace=&name=` | 查看集群里 VS 的现状(实时取完整对象,见上文):`{object, full}`,`full=false` 是旧版 agent,只有 spec |
 | POST | `/api/istio/live/delete` | `{group_id, k8s_name, namespace, name}`:删除集群里的 VS,见上文;审计 `istio.delete` |
 | GET | `/api/istio/compare?group_id=&namespace=&name=&left=&right=` | 对比。一方是 `standard`(组标准,不含 hosts,域名显示 `<按集群>`)、`standard@集群`、`cluster@集群`(现状);`diff.rules_same` = 只差 hosts 和域名,规则行 `op=domains` = 只是域名不同 |
 | POST | `/api/istio/import` | 纳管:`{group_id, items:[{namespace, name, base, clusters}]}`,以 base 集群现状生成组标准,各集群 hosts 和域名取自己的现状 |

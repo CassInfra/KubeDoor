@@ -369,6 +369,13 @@ export interface ApplyResult extends ApplyItem {
   error: string | null;
 }
 
+/** 集群里 VS 的现状(实时从 agent 取),已去掉 managedFields 和 last-applied 注解 */
+export interface LiveVS {
+  object: Record<string, any>;
+  /** false:该集群的 agent 版本较旧,只取得到 spec,没有完整的 metadata */
+  full: boolean;
+}
+
 type Result<T> = { success: boolean; data: T; msg?: string };
 type Done = { success: boolean; msg?: string };
 
@@ -418,6 +425,20 @@ export const unignoreIstioVS = (
   http.request<Done>("post", "/api/istio/unignore", {
     data: { group_id: groupId, items }
   });
+
+/** 查看集群里 VirtualService 的现状(实时取,不是采集的快照);出错不弹提示,由对话框显示 */
+export const getIstioLive = (
+  groupId: number,
+  k8sName: string,
+  namespace: string,
+  name: string
+) =>
+  http.request<Result<LiveVS>>(
+    "get",
+    "/api/istio/live",
+    { params: { group_id: groupId, k8s_name: k8sName, namespace, name } },
+    { silent: true }
+  );
 
 /** 删除集群里的 VirtualService(立即生效);本组部署到了该集群的,同时不再部署 */
 export const deleteIstioLiveVS = (
