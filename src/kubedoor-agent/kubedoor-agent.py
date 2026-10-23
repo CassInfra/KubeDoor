@@ -8,6 +8,7 @@ from kubernetes_asyncio.client.rest import ApiException
 from datetime import datetime
 from loguru import logger
 from res_manager import configmap_manager
+from res_manager import coredns_manager
 from res_manager import service_manager
 from res_manager import ingress_manager
 from res_manager import pod_manager
@@ -16,6 +17,7 @@ from res_manager import stateful_daemon_manager
 from res_manager.node_manager import get_nodes_list, cordon_nodes, uncordon_nodes
 
 from func_manager import k8s_resource_handler
+from func_manager import net_probe
 from func_manager.upimage_monitor import DeploymentMonitor, update_image
 from func_manager.restart_service import RebootService
 from func_manager.k8s_event_monitor import K8sEventMonitor
@@ -583,6 +585,12 @@ async def setup_routes(app):
     # ConfigMap管理接口
     app.router.add_get('/api/agent/configmaps', lambda request: configmap_manager.get_configmap_list(core_v1, request))
     app.router.add_get('/api/agent/namespaces', lambda request: configmap_manager.get_namespace_list(core_v1, request))
+    # CoreDNS管理接口(kube-system/coredns 的 hosts 自定义解析)
+    app.router.add_get('/api/agent/coredns', lambda request: coredns_manager.get_coredns(core_v1, request))
+    app.router.add_post('/api/agent/coredns/save', lambda request: coredns_manager.save_coredns(core_v1, request))
+    # 网络测试:从 agent 所在 Pod 解析域名(和业务 Pod 里 ping 一样)、测 TCP 端口(相当于 nc -zv)
+    app.router.add_get('/api/agent/net/resolve', net_probe.handle_resolve)
+    app.router.add_get('/api/agent/net/tcp', net_probe.handle_tcp)
     # Service管理接口
     app.router.add_get('/api/agent/services', lambda request: service_manager.get_service_list(core_v1, request))
     app.router.add_get(

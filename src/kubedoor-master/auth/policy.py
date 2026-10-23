@@ -253,6 +253,9 @@ _AGENT_READ_PATHS = '|'.join([
     'agent/jvm/configs', 'agent/statefulsets', 'agent/statefulset/pods', 'agent/daemonsets',
     'agent/daemonset/pods', 'load-balance/isolated', 'load-balance/nodes-cpu', 'load-balance/namespaces',
     'pod/get_logs', 'pod/download_logs', 'pod/get_previous_logs', r'pod/task_status/[^/]+',
+    # CoreDNS:查看 coredns ConfigMap;从 agent 所在 Pod 解析域名(保存、TCP 端口测试走默认的集群写:
+    # 端口测试会从集群内向任意地址发起连接,只给读写用户,并记审计)
+    'agent/coredns', 'agent/net/resolve',
 ])
 
 RULES = (

@@ -95,6 +95,16 @@ export default {
       }
     },
     {
+      path: "/monit/coredns",
+      name: "CoreDnsManager",
+      component: () => import("@/views/monit/coredns/index.vue"),
+      meta: {
+        title: "CoreDNS管理",
+        icon: "ep:compass",
+        showLink: VITE_HIDE_HOME === "true" ? false : true
+      }
+    },
+    {
       path: "/monit/nodemanager",
       name: "NodeManager",
       component: () => import("@/views/monit/nodemanager/index.vue"),

@@ -86,6 +86,16 @@ def pod_log_stream_module():
 
 
 @pytest.fixture
+def coredns_module():
+    return load_module("agent_test_coredns_manager", AGENT_ROOT / "res_manager" / "coredns_manager.py")
+
+
+@pytest.fixture
+def net_probe_module():
+    return load_module("agent_test_net_probe", AGENT_ROOT / "func_manager" / "net_probe.py")
+
+
+@pytest.fixture
 def event_monitor_module(monkeypatch):
     fake_utils = ModuleType("utils")
     fake_utils.PROM_K8S_TAG_VALUE = "test-cluster"

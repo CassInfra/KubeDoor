@@ -104,6 +104,11 @@ def test_env_condition_sql():
     ('POST', '/api/scale', 'env_write'),
     ('POST', '/api/db/agent/collect', 'admin'),
     ('GET', '/api/agent/res/content', 'custom'),
+    ('GET', '/api/agent/coredns', 'env_read'),
+    ('GET', '/api/agent/net/resolve', 'env_read'),  # 从 agent 所在 Pod 解析域名
+    ('GET', '/api/agent/net/tcp', 'env_write'),  # 端口测试会从集群内向任意地址发起连接
+    ('POST', '/api/agent/coredns/save', 'env_write'),
+    ('GET', '/api/agent/coredns/save', 'env_write'),  # 只登记了 GET 的只读路径,别的子路径不放宽
     ('POST', '/api/db/silence/add', 'custom'),
     ('PUT', '/api/load-balance/config', 'global_write'),
     ('GET', '/api/something/new', 'env_write'),  # 没登记的接口默认按集群写
