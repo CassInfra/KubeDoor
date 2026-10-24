@@ -1,10 +1,11 @@
 name: GitHub Pages
 # 首次使用：仓库 Settings → Pages → Build and deployment → Source 选择 "GitHub Actions"
+# 官网放在 Web 控制台的 public/site 下：同一份文件既发布到 Pages，也随 web 镜像作为「关于」页
 on:
   push:
     branches: [main]
     paths:
-      - "site/**"
+      - "src/kubedoor-web/public/site/**"
       - ".github/workflows/pages.yml"
   workflow_dispatch:
 permissions:
@@ -29,6 +30,6 @@ jobs:
       - uses: actions/configure-pages@45bfe0192ca1faeb007ade9deae92b16b8254a0d # v6.0.0
       - uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
         with:
-          path: site
+          path: src/kubedoor-web/public/site
       - id: deployment
         uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5.0.1

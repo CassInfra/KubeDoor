@@ -100,6 +100,8 @@ declare global {
       rank?: number;
       /** 只对这些全局角色显示(如 ["admin"]),不写表示所有登录用户可见 `可选` */
       roles?: Array<string>;
+      /** 内嵌的`iframe`链接(没有子路由的顶级页面用,如「关于」)`可选` */
+      frameSrc?: string;
     };
     /** 子路由配置项 */
     children?: Array<RouteChildrenConfigsTable>;
