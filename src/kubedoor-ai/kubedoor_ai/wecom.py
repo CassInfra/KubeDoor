@@ -140,8 +140,14 @@ class WeComIntegration:
 
     async def _identity(self, username):
         hint = Identity(username, "none")
-        async with asyncio.timeout(10):
-            raw = await self.service.gateway.master(hint, "GET", "/api/ai/internal/identity")
+        try:
+            async with asyncio.timeout(10):
+                raw = await self.service.gateway.master(hint, "GET", "/api/ai/internal/identity")
+        except AIError as exc:
+            # master 不认这个用户名(不存在、已停用或是 Agent 账号)时回 403,网关只带回了状态码
+            if exc.status == 403:
+                raise AIError(f"花折账号 {username} 不存在、已停用或不是 Web 账号", 403, "identity_invalid") from None
+            raise
         permission = raw.get("permission")
         clusters = raw.get("clusters")
         if raw.get("username") != username or permission not in ("admin", "rw", "read", "none") or not isinstance(clusters, dict):

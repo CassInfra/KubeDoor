@@ -191,6 +191,30 @@ async def test_internal_token_acts_as_named_user(fake):
 
 
 @pytest.mark.asyncio
+async def test_initial_password_only_blocks_password_entry_points(fake):
+    client = await make_client(fake)
+    try:
+        guest = await add_user(fake, 'wecom-guest', 'read', 'Guest-pass-1', must_change=True)
+        internal = {'X-Kubedoor-Token': TOKEN, 'X-User-Name': 'wecom-guest'}
+        # AI 服务代表账号调用(企微机器人):不用这个账号的口令,不要求先改初始口令,权限照常按库里计算
+        allowed = await client.get('/api/agent/pods', params={'env': 'prod'}, headers=internal)
+        assert allowed.status == 200 and (await allowed.json())['via'] == 'internal'
+        assert (await client.post('/api/scale', params={'env': 'prod'}, headers=internal)).status == 403
+        # 用口令进来的照旧要先改:Basic(脚本 / MCP 客户端)、nginx 的 verify、Web 登录后的会话
+        password = {'Authorization': basic('wecom-guest', 'Guest-pass-1')}
+        blocked = await client.get('/api/agent/pods', params={'env': 'prod'}, headers=password)
+        assert blocked.status == 403 and (await blocked.json())['code'] == 'password_change_required'
+        assert (await client.get('/api/auth/verify?for=mcp', headers=password)).status == 403
+        assert (await login(client, 'wecom-guest', 'Guest-pass-1')).status == 200
+        assert (await client.get('/api/auth/verify?for=session')).status == 403
+        # 停用的账号内部调用也拒绝
+        await fake.update_user(guest['id'], enabled=False)
+        assert (await client.get('/api/agent/pods', params={'env': 'prod'}, headers=internal)).status == 403
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
 async def test_verify_endpoint_for_nginx_auth_request(fake):
     client = await make_client(fake)
     try:

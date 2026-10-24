@@ -180,6 +180,18 @@ async def test_default_permission_rejects_admin_and_accounts_without_clusters():
 
 
 @pytest.mark.asyncio
+async def test_unknown_account_error_explains_master_403():
+    master = AsyncMock(side_effect=AIError("KubeDoor 接口返回 HTTP 403", 403, "upstream_error"))
+    integration, service = make_integration(master=master)
+    with pytest.raises(AIError, match="ghost 不存在、已停用或不是 Web 账号"):
+        await integration.save_unbound_username(Identity("admin", "admin"), {"username": "ghost"})
+    assert service.store.executes == []
+    master.side_effect = AIError("KubeDoor 接口暂不可用", 502, "upstream_error")
+    with pytest.raises(AIError, match="暂不可用"):
+        await integration.save_unbound_username(Identity("admin", "admin"), {"username": "ghost"})
+
+
+@pytest.mark.asyncio
 async def test_default_permission_can_be_saved_and_cleared():
     master = AsyncMock(return_value={"username": "guest", "permission": "read", "clusters": {}})
     integration, service = make_integration(master=master)

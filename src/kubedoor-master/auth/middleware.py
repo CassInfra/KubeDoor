@@ -150,7 +150,9 @@ def create_middleware():
             return deny(401, 'unauthorized', '未登录或登录已过期,请重新登录')
         if principal.is_agent:
             return deny(403, 'agent_account', 'Agent 账号只能用于 agent 连接,不能访问其它接口')
-        if principal.must_change_password and rule.kind != 'session':
+        # 「先改初始口令」只拦用口令进来的请求。AI 服务代表用户的内部调用不拦:网页 AI 助手 / MCP 的入口
+        # 已经在 /api/auth/verify 拦过,企微机器人用不到这个账号的口令(管理员新建、没人登录过的账号也要能用)
+        if principal.must_change_password and rule.kind != 'session' and principal.via != 'internal':
             return deny(403, 'password_change_required', '请先修改初始口令')
 
         is_write = _is_write(rule, request.method)

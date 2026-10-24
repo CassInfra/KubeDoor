@@ -32,7 +32,8 @@ master 统一负责认证、授权与审计,nginx 不再做认证。本目录是
 
 1. `X-Kubedoor-Token`(= `AI_INTERNAL_TOKEN`):集群内部服务。带 `X-User-Name` 时代表该用户
    (AI 服务),**权限按库里的用户重新计算**,不采信 `X-User-Permission`;不带用户名就是系统身份(CronJob)。
-   token 不对直接 401。nginx 会清掉外部请求带的这个头。
+   token 不对直接 401。nginx 会清掉外部请求带的这个头。这类调用不受「先改初始口令」限制:
+   网页 AI 助手和 MCP 的入口已经在 `/api/auth/verify` 拦过,企微机器人用不到账号的口令;停用的账号照样拒绝。
 2. 会话 Cookie `kubedoor_session`:浏览器登录后的 HttpOnly + SameSite=Strict Cookie。库里只存 token 的
    SHA-256;不勾「记住我」12 小时、空闲 4 小时过期,勾选 7 天(`AUTH_*`)。改密、禁用、重置口令、
    删除账号会删掉对应会话。
