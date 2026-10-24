@@ -217,9 +217,13 @@ def create_app(service=None, token=None):
             elif endpoint == "wecom-users":
                 identity.require_admin()
                 if request.method == "GET":
-                    result = {"users": await request.app.state.wecom.users()}
+                    result = {"users": await request.app.state.wecom.users(),
+                              "unbound_username": await request.app.state.wecom.unbound_username()}
                 else:
                     result = await request.app.state.wecom.save_user(identity, await body(request))
+            elif endpoint == "wecom-unbound":
+                identity.require_admin()
+                result = await request.app.state.wecom.save_unbound_username(identity, await body(request))
             elif endpoint == "wecom-user":
                 identity.require_admin()
                 await request.app.state.wecom.delete_user(request.path_params["userid"])
@@ -276,6 +280,7 @@ def create_app(service=None, token=None):
     route("/wecom", "wecom-config", ["GET", "PUT"])
     route("/wecom/test", "wecom-test", ["POST"])
     route("/wecom/users", "wecom-users", ["GET", "POST"])
+    route("/wecom/unbound", "wecom-unbound", ["PUT"])
     route("/wecom/users/{userid}", "wecom-user", ["DELETE"])
     route("/skills", "skills", ["GET"])
     route("/skills/{skill_id}", "skill", ["GET"])

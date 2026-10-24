@@ -32,15 +32,16 @@
 * [🎉2.x新特性](#2x新特性)
 * [💠架构](#架构)
 * [💎功能](#功能)
-  * [🤖AI助手与MCP](#1-ai助手与mcp)
-  * [📡多集群监控](#2-多集群监控)
-  * [🎛K8S资源管理](#3-k8s资源管理)
-  * [🧬告警、事件与屏蔽](#4-告警事件与屏蔽)
-  * [🚧高峰期资源与准入管控](#5-高峰期资源与准入管控)
-  * [☕JVM管控与诊断](#6-jvm管控与诊断)
-  * [⚖节点均衡与弹性调度](#7-节点均衡与弹性调度)
-  * [🌐Istio路由管理（试用）](#8-istio路由管理试用)
-  * [🔐平台与权限](#9-平台与权限)
+  * [🤖AI助手、企微机器人与MCP](#1-ai助手企微机器人与mcp)
+  * [🌐Istio VirtualService管理](#2-istio-virtualservice管理)
+  * [🧭CoreDNS管理](#3-coredns管理)
+  * [🎛K8S资源管理](#4-k8s资源管理)
+  * [📡多集群监控](#5-多集群监控)
+  * [🧬告警、事件与屏蔽](#6-告警事件与屏蔽)
+  * [🚧高峰期资源与准入管控](#7-高峰期资源与准入管控)
+  * [☕JVM管控与诊断](#8-jvm管控与诊断)
+  * [⚖节点均衡与弹性调度](#9-节点均衡与弹性调度)
+  * [🔐平台与权限](#10-平台与权限)
 * [🚀快速部署](#快速部署)
 * [♻升级说明](#升级说明)
 * [📚文档](#文档)
@@ -52,13 +53,16 @@
 
 ## 🌈概述
 
-🌼**花折 - KubeDoor** 是一个使用Python + Vue开发的**AI驱动的多K8S集群智能管控平台**：控制端装一套、每个业务集群装一个agent，就能在一个Web里完成多集群的监控、资源管理、告警与事件、高峰期资源治理、JVM管控和节点均衡；同时内置**可审批、可审计的AI运维助手**，并以**标准MCP**对外开放。
+🌼**花折 - KubeDoor** 是一个使用Python + Vue开发的**AI驱动的多K8S集群智能管控平台**：控制端装一套、每个业务集群装一个agent，就能在一个Web里完成多集群的监控、资源管理、告警与事件、Istio路由、CoreDNS解析、高峰期资源治理和JVM管控；内置**可审批、可审计的AI运维助手**，网页和**企业微信**里都能直接对话，并以**标准MCP**对外开放。
 
 KubeDoor专注微服务每日高峰时段的资源视角：采集各微服务高峰期的真实资源用量，基于K8S准入控制让资源需求值与真实用量保持一致。2.x在此基础上把AI助手作为核心能力，并把数据库统一为PostgreSQL、把部署简化为一个脚本。
 
-- 🤖**AI运维助手**：用自然语言排障、查询和变更；自动调用63个KubeDoor业务操作与K8S API、kubectl、istioctl等通用工具，查询自动执行，变更先展示参数与差异，人工批准后才执行。
-- 🌐**多集群统一纳管**：agent主动外连控制端，业务集群无需开放入站端口；所有集群的资源、指标、事件和告警集中在一个平台。
+- 🤖**AI运维助手**：用自然语言排障、查询和变更，自动调用63个KubeDoor业务操作与K8S API、kubectl、istioctl等工具；查询自动执行，变更先展示参数与差异，人工批准后才执行。
+- 💬**企微智能机器人**：在企业微信里单聊机器人就能让AI助手排障和运维，变更点审批卡片批准；成员绑定花折账号（未绑定的成员可统一设置默认权限），按账号权限实时校验。
+- 🌐**Istio VirtualService管理**：把一个项目在多个集群里的VirtualService收拢成一份组标准，hosts和域名按集群维护；对比各集群差异、一键纳管，预览差异后再下发。
+- 🧭**CoreDNS管理**：像改表格一样维护集群的自定义解析，只重写改动的行；保存前看差异，保存后从集群内确认解析已生效。
 - 🎯**高峰期资源治理**：按业务高峰时段采集资源数据，通过准入控制统一管控副本数、需求值、限制值和JVM启动参数。
+- 🛰**多集群统一纳管**：agent主动外连控制端，业务集群无需开放入站端口；所有集群的资源、指标、事件和告警集中在一个平台。
 - 🔔**告警闭环**：指标告警、K8S事件告警与告警屏蔽，通知推送到企业微信、钉钉、飞书、Slack。
 - 🔐**账号与权限**：本地账号 + LDAP登录，按K8S集群授权「读写 / 只读 / 无」，登录、变更与越权操作全部留痕审计。
 - 🚀**部署简单**：一个脚本 + 一份配置文件，PostgreSQL是唯一的数据库。
@@ -75,35 +79,28 @@ K8S资源总览：多集群资源、风险节点、今日异常告警与事件�
 
 ## 🎉2.x新特性
 
-**相对1.7，2.x是一次架构级升级：AI助手成为核心能力，PostgreSQL成为唯一数据库，部署改为一个脚本。** 当前版本为2.2.0，下文【2.0】/【2.1】/【2.2】表示首次提供该能力的版本。
+**相对1.7，2.x是一次架构级升级：AI助手成为核心能力，PostgreSQL成为唯一数据库，部署改为一个脚本。** 下面按版本倒序列出主要变化，详细说明见[功能](#功能)。
 
-**🤖AI**
-- 【2.1】**内置AI助手**（kubedoor-ai，随控制端必装）：使用自己的模型，选定集群后用自然语言排障和运维；变更经审批后执行，支持全局记忆与kubeconfig直连。
-- 【2.1】**新版MCP**：并入kubedoor-ai，经Web入口提供`/mcp`（Streamable HTTP）与`/sse`，复用Web账号与读写权限，写操作需在Web中批准；兼容1.x的16个工具名。
+**✨2.3：企微机器人、Istio VirtualService管理、CoreDNS管理**
+- 💬**企微智能机器人**：企业微信API模式机器人经长连接接入AI助手，无需公网回调地址；单聊流式回复，变更通过「批准 / 拒绝」卡片审批，成员绑定花折账号（未绑定的成员可统一设置默认权限），按账号实时校验集群权限。
+- 🌐**Istio VirtualService管理（重构）**：按「Istio组」管理一个项目的VirtualService，组标准全组共用，hosts和规则里的域名条件按集群维护；刷新现状、对比、一键纳管，预览差异后下发，跨组冲突检测，未建模字段原样保留。
+- 🧭**CoreDNS管理**：表格化维护hosts自定义解析，只重写改动的行；保存前展示差异、并发修改自动检测冲突，从集群内检查解析是否生效，另有解析测试、端口测试和Monaco「高级编辑」。
 
-**🔐账号与权限**
-- 【2.2】**全新登录页**：水墨月洞门背景 + 毛玻璃登录框，湖面水波、门环圆波、梅花飘落等动效；登录与会话改由master统一管理，支持「7天内免登录」，连续输错口令自动锁定。
-- 【2.2】**LDAP登录**：在「系统管理 → LDAP 设置」配置并一键测试；登录时本地账号优先，本地没有再走LDAP，首次登录自动开通。
-- 【2.2】**K8S集群级权限**：全局权限「管理员 / 读写 / 只读 / 无」+ 按用户×集群单独授权「读写 / 只读 / 无」，单独授权优先；「无」权限的集群在所有页面、告警和AI助手中都不可见，AI助手与MCP按所选集群判断能否执行和批准修改。
-- 【2.2】**操作审计**：登录、账号与权限变更、所有写操作（含越权被拒）都可在「系统管理 → 操作审计」查询，默认保留180天。
-- 【2.2】**Agent账号认证**：agent一律带内置Agent账号连接master，普通Web账号不能注册agent；Grafana改为auth proxy接入（KubeDoor管理员为Admin，其他人为Viewer）。
+**🔐2.2：账号与权限**
+- **LDAP登录 + K8S集群级权限**：全局权限「管理员 / 读写 / 只读 / 无」+ 按用户×集群单独授权，「无」权限的集群在所有页面、告警和AI助手中都不可见；登录与会话改由master统一管理，agent和Grafana也统一接入KubeDoor认证。
+- **操作审计**：登录、账号与权限变更、所有写操作（含越权被拒）都可查询，默认保留180天。
+- **Pod终端与节点终端**：网页终端进容器，或经临时特权Pod进宿主机。
+- 另有：Agent批量更新与重启、滚动更新参数（maxSurge / maxUnavailable）管控、管控配置跨环境同步、水墨月洞门登录页。
 
-**🧱架构与部署**
-- 【2.0】**PostgreSQL唯一数据库**：移除ClickHouse与MySQL，master与kubedoor-ai启动时自动建表，无需任何扩展。
-- 【2.0】**脚本化部署**：`deploy/install.sh` + `kubedoor.conf`取代Helm，支持渲染预览、组件按需开关、内网镜像仓库，并能自动发现集群里已有的kube-state-metrics。
-- 【2.0】**数据自动清理**：K8S事件保留90天，告警记录与高峰快照保留365天，可调整。
-- 【2.0】**参数化数据接口**：前端改用`/api/db/*`，不再直传SQL。
+**🤖2.1：AI助手**
+- **内置AI助手**（kubedoor-ai，随控制端必装）：使用自己的模型，选定集群后用自然语言排障和运维；变更经审批后执行，支持全局记忆与kubeconfig直连。
+- **新版MCP**：并入kubedoor-ai，经Web入口提供`/mcp`（Streamable HTTP）与`/sse`，复用Web账号与权限，写操作需在Web中批准；兼容1.x的16个工具名。
+- 另有：Deployment实时状态、JVM启动参数管控与高峰期P95堆内存。
 
-**🔔告警**
-- 【2.0】**告警屏蔽**：Alertmanager风格的匹配条件、命中预览、到期自动失效；被屏蔽的告警照常入库，只拦截通知。
-
-**🎛资源与运维**
-- 【2.1】**Deployment实时状态**：WebSocket实时推送就绪/期望副本、滚动更新状态和Pod明细。
-- 【2.1】**JVM启动参数管控**：采集并管控`Xms`/`Xmx`/`Xss`/`MaxMetaspaceSize`，新增每日高峰P95堆内存与G1 Eden使用率。
-- 【2.0】**节点均衡**：按节点CPU负载生成迁移计划，人工确认后分批隔离式迁移。
-- 【2.0】**CCI弹性扩容**：华为云CCE临时扩容时，超出本地上限的Pod弹到CCI。
-- 【2.0】**日志增强**：Deployment级聚合日志、容器切换、完整日志gzip下载；Pod页支持按节点筛选与命名空间多选。
-- 【2.0】**准入加速**：准入查询改为单条SQL + 60秒缓存，修改开关、管控表后立即生效。
+**🧱2.0：架构与部署**
+- **PostgreSQL唯一数据库**：移除ClickHouse与MySQL，启动时自动建表、无需扩展，过期数据自动清理。
+- **脚本化部署**：`deploy/install.sh` + `kubedoor.conf`取代Helm，支持渲染预览、组件按需开关、内网镜像仓库。
+- 另有：告警屏蔽、节点均衡、华为云CCI弹性扩容、Deployment级聚合日志。
 
 ---
 
@@ -115,50 +112,61 @@ K8S资源总览：多集群资源、风险节点、今日异常告警与事件�
 <img src="screenshot/kubedoor-arch.png" alt="KubeDoor 2.x 架构总览" />
 </div>
 
-- **控制端**（`./install.sh master`）：kubedoor-web（nginx统一入口 + Vue 3控制台）、kubedoor-master（API网关、agent连接中心）、kubedoor-ai（AI助手 + MCP Server）、kubedoor-alarm（告警屏蔽、入库与IM通知）、kubedoor-collect（每日高峰期采集CronJob），以及可选的VictoriaMetrics、vmalert、Alertmanager、Grafana。
+- **控制端**（`./install.sh master`）：kubedoor-web（nginx统一入口 + Vue 3控制台）、kubedoor-master（API网关、agent连接中心）、kubedoor-ai（AI助手、企微机器人与MCP Server）、kubedoor-alarm（告警屏蔽、入库与IM通知）、kubedoor-collect（每日高峰期采集CronJob），以及可选的VictoriaMetrics、vmalert、Alertmanager、Grafana。
 - **集群端**（`./install.sh agent`）：kubedoor-agent，以及可选的vmagent、kube-state-metrics、node-exporter。agent**主动**通过WebSocket连接控制端，业务集群无需开放入站端口；同集群直连master的Service，跨集群经Web入口，都使用内置Agent账号认证。
-- **PostgreSQL 18是唯一数据库**：用docker compose独立部署在K8S外，也可用现成的PG（无需扩展），保存管控配置、高峰期资源、K8S事件、告警记录、屏蔽规则、Istio路由以及AI会话、审批与记忆。
+- **PostgreSQL 18是唯一数据库**：用docker compose独立部署在K8S外，也可用现成的PG（无需扩展）。
 - **监控栈可选**：使用内置VictoriaMetrics单机版，或接入已有的Prometheus/VictoriaMetrics；各集群指标用标签`<PROM_K8S_TAG_KEY>=<K8S_NAME>`区分。
-- **统一入口**：Web、Grafana、AI助手和MCP共用kubedoor-web的一个NodePort；登录与权限由master统一管理（本地账号/LDAP，按K8S集群授权）。
-- **AI必装、MCP默认开放**：kubedoor-ai随控制端安装；外部MCP入口（`/mcp`、`/sse`）可用`ENABLE_MCP="false"`关闭，不影响网页里的AI助手。
+- **统一入口**：Web、Grafana、AI助手和MCP共用kubedoor-web的一个NodePort，登录与权限由master统一管理；外部MCP入口（`/mcp`、`/sse`）可用`ENABLE_MCP="false"`关闭，不影响网页里的AI助手。
 
 ---
 
 ## 💎功能
 
-**覆盖K8S日常运维的完整链路；其中的查询与运维操作，大多也可以直接交给AI助手完成。**
+**覆盖K8S日常运维的完整链路；其中的查询与运维操作，大多也可以直接交给AI助手完成。** 下文【2.x】表示首次提供该能力的版本。
 
-### 1. 🤖AI助手与MCP
+### 1. 🤖AI助手、企微机器人与MCP
 
-**点击顶栏正中的「AI 助手」，在「KubeDoor 助手」里选定集群，用一句话描述问题：查询自动执行，变更先审批再执行，全程可追溯。** 同一套工具、权限与审批也以标准MCP开放给Cursor、Claude Code等外部客户端。
+**点击顶栏正中的「AI 助手」，选定集群后用一句话描述问题：查询自动执行，变更先审批再执行，全程可追溯。** 同一套工具、权限与审批也开放给企业微信机器人，以及Cursor、Claude Code等外部MCP客户端。
 
-- 🧠**自带模型**：在「模型设置」填写Base URL、API Key和模型名（model ID），「测试连接」会实测工具调用能力；支持任意OpenAI兼容的Chat Completions接口（含无需鉴权的自建模型，模型需支持工具调用），并专门适配DeepSeek思考模式；模型配置只保存在本人浏览器。
-- 🎯**资源上下文**：先选「K8S 集群」（每轮只操作选中的集群），可再细化到命名空间、Deployment、Pod；集群旁标注「Agent 在线」「已配置直连」「仅指标 / 历史」。
-- 🧰**统一受控工具**：所有集群操作都经同一个工具`kubedoor_tool`，覆盖**63个KubeDoor业务操作**（37个只读、26个写入：日志、事件、资源与JVM、节点、扩缩容、重启、改镜像、定时/周期任务、节点均衡、管控配置等）和**5类通用执行器**（K8S API/CRD、kubectl、istioctl、诊断命令、Pod exec），已有接口优先。
-- 🔌**多种连接方式**：KubeDoor已有接口、agent的集群内身份（免kubeconfig），或由管理员在「Agent管理」的「AI Kubeconfig」列上传kubeconfig直连（AES-256-GCM加密存储）；agent离线时仍可查询历史与监控数据。
-- ⏰**立即/定时/周期运维**：Deployment重启与扩缩容支持立即执行、指定时间执行一次、按Cron周期执行。
-- 📈**自由指标查询**：时序库为VictoriaMetrics时，AI可直接编写MetricsQL，服务端强制限定在当前集群，时间范围最长30天。
-- 📝**全局记忆**：「总结为记忆」把会话提炼成可编辑草稿，全局读写账号「保存为全局记忆」后，所有登录用户都可查看和引用；提问时用「引入记忆（N）」按需带入，每轮最多10条。
-- 🧩**DeepAgents驱动**：内置「KubeDoor K8S 运维」Skill，子Agent并行排查、上下文自动压缩、PostgreSQL持久化checkpoint；会话保存在服务端（仅本人可见），流式回复、断线续传，关闭对话框后任务继续执行。
+- 🧠**自带模型**：在「模型设置」填写Base URL、API Key和模型名，「测试连接」实测工具调用能力；支持任意OpenAI兼容的Chat Completions接口（含无需鉴权的自建模型），并专门适配DeepSeek思考模式；模型配置只保存在本人浏览器。
+- 🎯**资源上下文**：先选「K8S 集群」（每轮只操作选中的集群），可再细化到命名空间、Deployment、Pod。
+- 🧰**统一受控工具**：所有集群操作都经同一个工具`kubedoor_tool`，覆盖**63个KubeDoor业务操作**（37个只读、26个写入）和**5类通用执行器**（K8S API/CRD、kubectl、istioctl、诊断命令、Pod exec），已有接口优先。
+- 🔌**多种连接方式**：KubeDoor已有接口、agent的集群内身份（免kubeconfig），或由管理员在「Agent管理」上传kubeconfig直连（加密存储）；agent离线时仍可查询历史与监控数据。
+- ⏰**立即/定时/周期运维**：Deployment重启与扩缩容支持立即、定时、按Cron周期执行；时序库为VictoriaMetrics时，AI还能直接写MetricsQL查询指标（限定在当前集群）。
+- 📝**全局记忆**：会话可「总结为记忆」，保存为全局记忆后，所有登录用户提问时都能按需引入。
+- 🧩**DeepAgents驱动**：内置「KubeDoor K8S 运维」Skill，子Agent并行排查、上下文自动压缩；会话保存在服务端（仅本人可见），流式回复、断线续传，关闭对话框后任务继续执行。
+
+#### 💬企业微信智能机器人
+
+**【2.3】管理员在「系统管理 → 企微 AI 机器人」接入企业微信智能机器人后，成员在企业微信里单聊机器人，就能像在网页里一样查询、排障和发起变更。**
+
+- 🔗**长连接接入**：填写企业微信API模式机器人的Bot ID和Secret，kubedoor-ai主动建立长连接，不需要公网回调地址，只要能出站访问企业微信；页面实时显示连接状态，断线自动重连。
+- 🧠**专用模型**：机器人单独配置模型（Base URL、API Key、模型名），「测试模型」检查工具调用能力，不影响网页AI的模型配置；凭证加密存储（AES-256-GCM），不会回显。
+- 👥**成员绑定与默认权限**：把企业微信UserID绑定到花折账号并指定默认集群，没绑定的成员发过一次消息就会出现在「待绑定」列表；也可以设置「未绑定成员默认权限」，让未绑定的成员统一按一个花折账号的权限使用（建议专门建一个，如只读账号；不能选管理员），不设置则必须先绑定。绑定本身不授予任何权限，每条消息都按花折账号实时校验，账号停用或失去集群权限立即生效。
+- 🎯**集群切换**：发送「当前集群」查看当前和可访问的集群，发送「切换集群 <名称>」切换到有权限的集群。
+- ✅**审批卡片**：回复流式输出；变更和网页一样先冻结参数，再推送「批准 / 拒绝」卡片，只有发起的成员本人能批准，过期即失效，批准后继续执行并回传结果。
+- 🗂企微会话单独保存，不出现在网页AI的会话列表；首版只支持单聊文本消息。
+
+📖详见：[企业微信智能机器人](src/kubedoor-ai/README.md#企业微信智能机器人)
 
 #### 🛡安全护栏
 
 | 护栏 | 说明 |
 | --- | --- |
-| 审批 | 只读查询自动执行；变更、未知CLI命令、curl/openssl、Pod exec会先展示「准确参数」「执行命令」「变更预览」「配置差异」，点「批准这次操作」才执行，30分钟内有效。对所选集群有读写权限的账号可勾选「自动批准执行」（只对当前页面生效） |
+| 审批 | 只读查询自动执行；变更、未知CLI命令、curl/openssl、Pod exec会先展示准确参数、执行命令、变更预览或配置差异，批准后才执行，30分钟内有效。对所选集群有读写权限的账号可勾选「自动批准执行」（只对当前页面生效） |
 | 参数冻结 | 准备阶段把完整参数写入数据库，批准后按原样执行，模型无法替换；kubeconfig被替换后原批准失效 |
-| Dry-run | 通用K8S API写操作先以`dryRun=All`生成配置差异，并带resourceVersion/UID前置条件；`kubectl apply`先执行`--dry-run=server`；KubeDoor业务操作展示准确参数与变更预览 |
-| 不盲目重放 | 超时或断线的写操作标记为「执行结果不确定」，本轮不再继续写入；服务重启不会重发已派发的操作，待批准的操作可继续审批 |
-| 脱敏 | API Key只在单次运行的内存中使用，不写库、不写日志；流式输出、checkpoint、日志与记忆统一脱敏，Secret内容自动隐藏 |
-| 按集群授权 | 权限按会话所选集群计算：只读可以对话和查询，但不能批准变更、不能开启自动批准；「无」权限的集群在AI助手和MCP中都不可见；上传kubeconfig仅限管理员，维护全局记忆需要全局读写 |
-| 审计 | 会话、运行、每次工具调用（含完整参数、预览与结果）和事件写入PostgreSQL；外部MCP调用同样生成会话，可在Web中回看 |
+| Dry-run | 通用K8S API写操作先以`dryRun=All`生成配置差异，并带resourceVersion/UID前置条件；`kubectl apply`先执行`--dry-run=server` |
+| 不盲目重放 | 超时或断线的写操作标记为「执行结果不确定」，本轮不再继续写入；服务重启不会重发已派发的操作 |
+| 脱敏 | 网页AI的API Key只在单次运行的内存中使用，不写库、不写日志（企微机器人的模型密钥加密存储）；流式输出、checkpoint、日志与记忆统一脱敏，Secret内容自动隐藏 |
+| 按集群授权 | 只读可以对话和查询，但不能批准变更、不能开启自动批准；「无」权限的集群在AI助手、企微机器人和MCP中都不可见；上传kubeconfig仅限管理员 |
+| 审计 | 会话、运行、每次工具调用（含完整参数、预览与结果）写入PostgreSQL；外部MCP调用同样生成会话，可在Web中回看 |
 
 > 提示：对集群只读的账号通过AI可执行的只读查询（如K8S API GET、查看日志与ConfigMap）比经典页面更宽，Secret脱敏为尽力而为，请按需分配账号；生产环境请在Web前加HTTPS。
 
 #### 🔗接入外部MCP客户端
 
-- **地址**：`http(s)://<KubeDoor 地址>/mcp`（Streamable HTTP，推荐）；只支持SSE的客户端用`/sse`。`<KubeDoor 地址>`就是Web入口，如`<节点IP>:<Web NodePort>`。
-- **鉴权**：复用Web账号（本地或LDAP），请求头`Authorization: Basic <base64(用户名:密码)>`；按该账号的集群权限执行，只读集群只能调用只读工具，「无」权限的集群不可见。
+- **地址**：`http(s)://<KubeDoor 地址>/mcp`（Streamable HTTP，推荐），只支持SSE的客户端用`/sse`；`<KubeDoor 地址>`就是Web入口，如`<节点IP>:<Web NodePort>`。
+- **鉴权**：复用Web账号（本地或LDAP），请求头`Authorization: Basic <base64(用户名:密码)>`，按该账号的集群权限执行。
 - **工具**：保留1.x的16个工具名（如`get_k8s_list`、`get_pods_logs`、`scale_deployment`、`get_pod_jvm_dump`）+ 统一工具`kubedoor_tool` + Skill资源`skills://kubedoor-k8s`。
 - **变更不会直接执行**：写操作和需进入Pod执行的JVM诊断会返回`pending`和`browserlink`（相对路径），用**同一账号**登录Web打开即可审批；执行结果不会回推给MCP客户端，请再次查询核验。
 - **关闭外部入口**：`kubedoor.conf`中设置`ENABLE_MCP="false"`。
@@ -218,37 +226,57 @@ AI 助手：
 
 ---
 
-### 2. 📡多集群监控
+### 2. 🌐Istio VirtualService管理
 
-**各集群的vmagent把指标远程写入同一个时序库，靠一个标签区分集群——在一个Web里看全部集群。**
+**【2.3】按「Istio组」统一维护一个项目在多个集群里的VirtualService：花折保存一份组标准（规则、默认路由、gateways全组共用），hosts和规则里的域名条件按集群各自维护，对比、纳管、预览后下发。**
 
-- 🖥「K8S资源总览」大屏：可在「全部集群」与单集群之间切换，展示集群、节点、工作负载、容器组、持久卷数量，4类风险节点徽章和6项最高使用率/分配率，以及今日Top10异常Pod告警、Top10异常K8S事件与最近10日告警趋势，30秒自动刷新。
-- 🌊统一时序库：每个集群的指标带`<PROM_K8S_TAG_KEY>=<K8S_NAME>`标签；可用内置VictoriaMetrics单机版，也可接入已有Prometheus/VictoriaMetrics（所有集群需汇总到同一个可查询的库）。
-- 🔌已有监控自动适配：集群里已有kube-state-metrics、node-exporter时可关闭自带组件，vmagent会在全集群自动发现已有的kube-state-metrics。
-- 📊Grafana看板：「K8S监控看板📊」「节点监控看板📊」「高峰资源看板📊」内嵌在Web中，随安装自动导入（Grafana为可选组件，高峰资源看板的数据来自PostgreSQL）。
-- 📈Deployment资源指标：Deployment页按服务展示CPU、内存用量与需求值、限制值（来自时序库）。
+适合同一套服务部署在测试集群和多个生产集群（多机房）的场景：各集群的VirtualService规则基本相同、只有域名不同，过去逐个集群`kubectl apply`，时间一长就对不上；现在改一处、按集群下发，哪个集群漂移了一眼可见。
+
+- 🗺**组与矩阵**：一个组 = 共用的测试集群 + 本项目的生产集群，一个集群可以加入多个组；矩阵视图一屏看到每个VirtualService在各集群的hosts和状态（一致 / 待下发 / 不一致 / 集群中没有 / 缺少域名），每个VirtualService自己选择部署到哪些集群。
+- 📥**刷新现状与纳管**：并行采集各集群的VirtualService（只读快照）；规则按匹配条件对齐、YAML逐行对比各集群差异，一致的一键纳管（只差hosts和域名的也算一致），不一致的选基准集群纳管后再下发拉齐。
+- ✏**可视化编辑**：新建VirtualService，新增/编辑HTTP规则（匹配条件、URI重写、转发目标与权重或下级VirtualService、超时、优先级），一键「整理优先级」；按域名区分的条件（authority、headers.host）按集群各存一份，可按关键字一次在各集群里选域名，或从其它集群复制并替换机房标识（如penglai→kunlun）。
+- 🚀**预览后下发**：下发前从集群取最新现状，逐项展示「集群现状 → 将要下发」的差异，勾选了生产集群会额外提醒；矩阵格子上能看到最近一次的下发人和时间。
+- 🧩**范围与冲突**：同一个VirtualService只能属于一个组，组用包含 / 忽略规则（通配符或正则）划定范围，单个VirtualService也可以手动忽略或单独纳入；和共用集群的其他组冲突的整行标红，不能纳管和下发。
+- 🔎**查看与删除**：实时查看集群里VirtualService的完整对象（同`kubectl get -o yaml`），或直接从集群删除（二次确认，删除前的内容记入审计）。
+- 🛡**无损与权限**：未建模的字段（retries、corsPolicy、redirect、fault等）原样保留，下发不丢配置；查看按集群读权限过滤，所有修改只允许管理员。
+- 🚸委托（delegate）VirtualService的管理页面仍在开发中。
 
 <details close>
 <summary>🔍点击展开截图 ...</summary>
 
-|<img src="screenshot/1.0/2.jpg" alt="K8S监控看板" />|
+|<img src="screenshot/istio-vs.png" alt="Istio VirtualService管理" />|
 |-|
 
 </details>
 
+📖详见：[Istio VirtualService管理说明](src/kubedoor-master/istio_route/README.md)（模型、状态判断与典型流程）
+
 ---
 
-### 3. 🎛K8S资源管理
+### 3. 🧭CoreDNS管理
+
+**【2.3】在「资源管理 → CoreDNS管理」维护集群CoreDNS的自定义解析（`kube-system/coredns`里hosts插件的记录）：像改表格一样增删改，保存前看差异，保存后从集群内确认解析已生效，不用再`kubectl edit`手改Corefile。**
+
+- 📋**表格化编辑**：hosts记录拆成「IP / 域名 / 备注」表格，可搜索，可按启用 / 停用 / 注释 / 未保存筛选；「启用」开关等于在行首加`#`注释掉（不删除，随时可再启用），整行注释可以当分组标题；任意位置插入、复制、删除，改过的行标黄、新增的标绿。
+- 🧷**只改该改的行**：只重写改动的行并按已有列对齐，其余内容（注释、空行、其他插件）原样保留；实时校验IP、域名格式和记录位置（必须在fallthrough之前），有多个server块时可切换。
+- 🔍**保存前确认，不覆盖别人的修改**：逐行「保存」或「全部保存」，保存和删除前都先展示改动；保存带resourceVersion乐观锁，打开后被别人（kubectl或其他页面）改过会提示冲突，「加载最新」后尽量保留未保存的修改。
+- ✅**生效检查**：每条记录可「检查」，从kubedoor-agent所在Pod每秒解析一次，直到解析到期望的IP（停用的记录则是不再解析到），并显示等了多久；Corefile没开reload插件时提醒需要重启CoreDNS。
+- 🛠**网络测试**：「解析测试」走agent所在Pod的`/etc/resolv.conf`（和进业务Pod执行ping一样，会补search域）；「端口测试」相当于在集群内执行`nc -zv`，需要集群读写权限。
+- 📝**高级编辑**：Monaco编辑器直接编辑ConfigMap里的全部文件（Corefile、`*.server`、hosts等按类型语法高亮），Ctrl+S保存、Ctrl+/切换注释；保存前校验Corefile并展示差异。
+- 🔐只读账号可以查看、检查和解析测试，修改需要该集群的读写权限，每次保存都记入操作审计；需要新版agent（旧版会提示先升级）。
+
+---
+
+### 4. 🎛K8S资源管理
 
 **在一个控制台里管理所有集群的Deployment、Pod、Service、Ingress、ConfigMap、StatefulSet、DaemonSet和节点，常用运维动作一键完成。**
 
-- 🗂统一资源页：各类资源的查看、Monaco编辑器编辑YAML（Create / Apply / Replace）与删除；所选集群和命名空间跨页面记忆。
-- ⚡Deployment实时状态【2.1】：WebSocket推送Pod列的就绪/期望副本数与「更新中」「已暂停」「超时」状态，查询栏标注「实时」「连接中」「agent 离线」「实时不可用」，展开明细后Pod增删实时刷新。
-- 📜日志查看器：实时跟随、关键字搜索/筛选/逐条定位、ERROR/WARN/INFO多色标记、保留ANSI颜色、「重启前日志」；【2.0】Deployment行的「日志」可聚合全部Pod（最多60个），支持切换容器；选中单个Pod时可「下载日志」（完整日志gzip）。
-- 🔁扩缩容与重启：支持「立即执行」「定时执行」「周期执行」，可选「临时扩容」「调度到指定节点」；定时/周期任务由agent以CronJob形式创建在业务集群的`kubedoor`命名空间，Web上的时间按北京时间填写。
-- 🧪Pod隔离：「隔离」把Pod的`app`标签改为`<原值>-ALERT`，使其脱离Service流量、保留现场排查，可同时「临时扩容1个Pod」；另支持删除与批量删除。
-- 🏷镜像更新：「更新镜像」弹窗自动列出镜像仓库最近20个标签（阿里云ACR、华为云SWR、Harbor，需在`REGISTRY_SECRET_JSON`中配置仓库凭据），也可手动输入；只读账号可按集群、时间段、账号白名单授权，更新进度推送IM。
-- 🔍Pod页：【2.0】按节点筛选、命名空间多选；一键跳转该Pod的「事件」「告警」。
+- 🗂**统一资源页**：查看、用Monaco编辑YAML（Create / Apply / Replace）与删除；Deployment的就绪副本、滚动更新状态和Pod明细由WebSocket实时刷新【2.1】。
+- 💻**Pod终端与节点终端【2.2】**：在新标签页打开网页终端；Pod终端自动选择bash / ash / sh，节点终端由agent起临时特权Pod，`nsenter`进宿主机，退出后自动清理；需要集群读写权限，会话记入审计。
+- 📜**日志查看器**：实时跟随、关键字搜索与定位、日志级别着色、「重启前日志」；Deployment可聚合查看全部Pod的日志，完整日志可gzip下载。
+- 🔁**扩缩容与重启**：立即、定时、按周期执行，可选「临时扩容」「调度到指定节点」。
+- 🏷**镜像更新**：自动列出镜像仓库最近20个标签（阿里云ACR、华为云SWR、Harbor），只读账号可按集群、时间段、账号白名单授权，进度推送IM。
+- 🧪**Pod隔离**：把Pod的`app`标签改为`<原值>-ALERT`，脱离Service流量、保留现场排查，可同时临时扩容1个Pod。
 
 <details close>
 <summary>🔍点击展开截图 ...</summary>
@@ -262,16 +290,33 @@ AI 助手：
 
 ---
 
-### 4. 🧬告警、事件与屏蔽
+### 5. 📡多集群监控
+
+**各集群的vmagent把指标远程写入同一个时序库，靠一个标签区分集群——在一个Web里看全部集群。**
+
+- 🖥**K8S资源总览**：在全部集群与单集群之间切换，展示资源数量、风险节点、最高使用率/分配率，以及今日Top10异常Pod告警、Top10异常K8S事件和近10日告警趋势。
+- 🌊**统一时序库**：可用内置VictoriaMetrics单机版，也可接入已有的Prometheus/VictoriaMetrics；集群里已有的kube-state-metrics、node-exporter可以直接复用。
+- 📊**Grafana看板**：「K8S监控看板📊」「节点监控看板📊」「高峰资源看板📊」内嵌在Web中，随安装自动导入。
+
+<details close>
+<summary>🔍点击展开截图 ...</summary>
+
+|<img src="screenshot/1.0/2.jpg" alt="K8S监控看板" />|
+|-|
+
+</details>
+
+---
+
+### 6. 🧬告警、事件与屏蔽
 
 **指标告警、K8S事件告警和运维操作通知统一推送到企业微信、钉钉、飞书、Slack；告警屏蔽只拦通知、不丢数据。**
 
-- 🚨指标告警：内置44条vmalert告警规则（Pod状态与资源、Deployment、节点、JVM等）和2条记录规则，经Alertmanager交给kubedoor-alarm推送IM（名称以`K8S_Pod`开头的Pod类告警同时入库PostgreSQL），故障/恢复通知标注持续时长。
-- 📋告警分析：「告警面板」按告警名聚合并按日累计；「K8S告警详情」支持多条件筛选、处理标记与自动刷新，可直接对Pod执行隔离、删除、Dump、Jstack、JFR、JVM，或一键「屏蔽」。
-- 🔕告警屏蔽【2.0】：Alertmanager风格条件（`=`、`!=`、`=~`、`!~`，正则需完全匹配），快捷时长与「命中预览」，状态分为生效中/待生效/已过期/已解除，支持解除、续期、重新启用、克隆；IM通知里的【屏蔽】链接可直达屏蔽页并预填条件（需配置`KUBEDOOR_EXTURL`）。被屏蔽的告警照常入库、只拦截通知，屏蔽不作用于K8S事件告警。
-- 📺K8S事件中心：各集群agent采集全部K8S事件写入PostgreSQL（同一事件只保留一行），在「K8S事件详情」按集群、命名空间、Kind、名称、原因、消息、来源检索，命中规则的事件标为「已告警」。
-- 🧾事件规则告警：用JSON配置忽略规则与告警规则（条件不区分大小写），内置关键事件、重启、健康检查失败、挂载失败、调度失败、资源压力、僵尸进程等规则；`ALERT_DEDUP_WINDOW`（默认300秒）内同一事件不重复通知。规则只来自ConfigMap `kubedoor-master-file-cfg`（源文件`deploy/manifests/master/alert_rules.json`），修改后需执行`kubectl -n kubedoor rollout restart deploy/kubedoor-master`。
-- 📮运维通知：隔离、删除、JVM诊断、扩缩容、重启、改镜像进度、准入结果都由agent推送IM，可按集群配置不同的机器人；外部系统也可通过`POST /api/custom_alert`写入告警记录。
+- 🚨**指标告警**：内置44条vmalert告警规则（Pod、Deployment、节点、JVM等），经Alertmanager由kubedoor-alarm推送IM，Pod类告警同时入库，故障/恢复通知标注持续时长。
+- 📋**告警分析**：「告警面板」按告警名按日聚合；「K8S告警详情」支持多条件筛选，可直接对Pod执行隔离、删除、Dump、Jstack、JFR，或一键「屏蔽」。
+- 🔕**告警屏蔽【2.0】**：Alertmanager风格条件（`=`、`!=`、`=~`、`!~`），命中预览、到期自动失效；IM通知里的【屏蔽】链接直达屏蔽页并预填条件。被屏蔽的告警照常入库，只拦截通知。
+- 📺**K8S事件中心**：各集群的全部K8S事件写入PostgreSQL，可按集群、命名空间、Kind、原因、消息等检索；用JSON规则配置事件告警（内置重启、健康检查失败、调度失败、资源压力等规则），去重窗口内同一事件不重复通知。
+- 📮**运维通知**：隔离、扩缩容、重启、改镜像、准入结果等由agent推送IM，可按集群配置不同的机器人；外部系统可通过`POST /api/custom_alert`写入告警。
 
 <details close>
 <summary>🔍点击展开截图 ...</summary>
@@ -285,21 +330,15 @@ AI 助手：
 
 ---
 
-### 5. 🚧高峰期资源与准入管控
+### 7. 🚧高峰期资源与准入管控
 
 **采集每个微服务每日业务高峰时段的真实资源用量，再通过K8S准入控制让需求值与高峰期真实用量保持一致——调度更准确，资源碎片更少。**
 
-- 📊高峰期采集：在「Agent管理」开启「自动采集」并设置「高峰时段」（默认`10:00:00-11:30:00`），每天北京时间01:00采集前一天的高峰数据；也可点「采集」补采历史数据（1~90天），重复采集不会重复写入。
-- 📐采集口径：CPU、内存取高峰时段**P80**（列名「P80PodCPU%」「P80Pod内存%」），堆内存与G1 Eden使用率取**P95**；管控表采用**最近10天里整个集群CPU总消耗最大的那一天**的数据，CPU/内存用量作为需求值。
-- 🗂「高峰资源管控」：集中查看当日Pod、指定Pod、使用率、需求值、限制值与JVM参数，支持批量扩缩容、批量重启、「配置」（保存并扩缩容 / 保存并重启 / 保存）和「新增资源」；「每日高峰资源」查看每天的原始采集数据，「高峰资源看板📊」看长期趋势与TOP10。
-- 🚧准入控制：在「Agent管理」开启「准入控制」并选择管控命名空间后，agent自动创建MutatingWebhook。Deployment创建或发布时，副本数（优先「指定Pod」，未指定时取「当日Pod」）、第一个容器的requests/limits及JVM参数改写为管控值；通过scale扩缩容时只改写副本数。
-- 🆕新服务管控：管控表中没有的服务，「新服务免确认」关闭时部署会被拒绝并通知，开启时直接放行、不做管控；每日采集也会把新出现的服务自动加入管控表并通知。
-- ⏱临时扩容豁免：「临时扩容」后5分钟内，该Deployment的副本变更直接放行。
-- ⚡准入加速【2.0】：master用单条SQL查询（5秒超时）并缓存60秒，修改开关、管控表或完成采集后立即生效。
+- 📊**高峰期采集**：在「Agent管理」开启「自动采集」并设置「高峰时段」，每天北京时间01:00采集前一天的高峰数据，也可补采1~90天；CPU、内存取高峰时段P80，堆内存与G1 Eden使用率取P95，管控表采用最近10天里集群CPU总消耗最大那一天的数据。
+- 🗂**高峰资源管控**：集中查看和配置副本数、需求值、限制值、JVM参数与滚动更新参数（maxSurge / maxUnavailable）【2.2】，支持批量扩缩容、批量重启，配置可「同步到」其他K8S环境【2.2】；「高峰资源看板📊」看长期趋势与TOP10。
+- 🚧**准入控制**：开启后agent自动创建MutatingWebhook，Deployment创建、发布和扩缩容时按管控值改写副本数、第一个容器的requests/limits与JVM参数；管控表里没有的新服务可选择拒绝并通知或直接放行，「临时扩容」后5分钟内放行副本变更。
 
 > ⚠️ 准入控制默认关闭，开启后为**fail-closed**：agent或master不可用时，所有未打`kubedoor-ignore`标签的命名空间里的Deployment创建、发布和扩缩容都会被拒绝，应急可执行`kubectl delete mutatingwebhookconfiguration kubedoor-admis-configuration`。
->
-> 💡 「新增资源」时「指定Pod」必须填写（0表示发布服务但暂不启动Pod，不能为-1）；-1（按「当日Pod」管控）只适用于已采集过高峰期数据的服务。
 
 <details close>
 <summary>🔍点击展开截图 ...</summary>
@@ -316,14 +355,13 @@ AI 助手：
 
 ---
 
-### 6. ☕JVM管控与诊断
+### 8. ☕JVM管控与诊断
 
 **Java微服务的启动参数、高峰期堆内存使用率和一键诊断，都在KubeDoor里完成。**
 
-- 🩺一键诊断：在Deployment、Pod、K8S告警详情页对Pod执行「Dump」「Jstack」「JFR」「JVM」，结果弹窗展示并推送IM；Dump、Jstack、JFR的文件上传到`OSS_URL`指定的对象存储。
-- 🧩JVM启动参数管控【2.1】：自动采集Deployment第一个容器`args`（`args[0]`为`java`）中的`-Xms`、`-Xmx`、`-Xss`、`-XX:MaxMetaspaceSize`，在「高峰资源管控」查看并在「配置」中修改（Xss单位k，其余m），下次发布或重启时由准入控制替换为管控值（需开启准入控制）。
-- 📈堆内存与G1 Eden【2.1】：每日高峰时段的P95堆内存使用率「P95podHeap%」和G1 Eden使用率「P95podG1E%」，仅展示，辅助调整JVM参数。
-- 🚨JVM告警：内置14条JVM告警规则（堆/非堆内存、GC、线程等），vmagent自动抓取带`prometheus.io/jvm: "true"`注解的Pod。
+- 🩺**一键诊断**：在Deployment、Pod、K8S告警详情页对Pod执行「Dump」「Jstack」「JFR」「JVM」，结果弹窗展示并推送IM，文件上传到对象存储（`OSS_URL`）。
+- 🧩**启动参数管控【2.1】**：采集并管控`-Xms`、`-Xmx`、`-Xss`、`-XX:MaxMetaspaceSize`，发布或重启时由准入控制替换为管控值；每日高峰P95堆内存与G1 Eden使用率辅助调参。
+- 🚨**JVM告警**：内置14条JVM告警规则，vmagent自动抓取带`prometheus.io/jvm: "true"`注解的Pod。
 
 <details close>
 <summary>🔍点击展开截图 ...</summary>
@@ -337,53 +375,28 @@ AI 助手：
 
 ---
 
-### 7. ⚖节点均衡与弹性调度
+### 9. ⚖节点均衡与弹性调度
 
 **按节点实时CPU负载生成迁移计划，人工确认后分批迁移；扩容时还能把Pod调度到指定节点或华为云CCI。**
 
-- ⚖「节点均衡」【2.0】：「分析负载」根据节点CPU使用率的极差与标准差迭代生成「迁移计划」，确认后「执行选中」或「执行全部」；采用隔离式迁移，分批执行，新Pod就绪后才进行下一批，旧Pod保留在「隔离Pod」中，确认无误后再清理。
-- ⚙「负载均衡配置」：可调整不均衡阈值、均衡目标、最小副本数、黑名单、排除命名空间/节点、源/目标节点选择策略等。仅支持手动执行，依赖metrics-server；执行期间会临时禁止调度（cordon）其它节点，建议在低峰期操作。
-- ☁CCI弹性扩容【2.0】：华为云CCE集群在「临时扩容」时勾选「CCI扩容」并设置「本地Pod数」，超出部分弹到CCI。
-- 🎯调度到指定节点：扩缩容、重启、隔离时可按「当前CPU」「当前内存」「峰值CPU」「峰值内存」「Pod数」查看节点排行并挑选目标节点。
-- 💻「节点管理」：查看节点CPU、内存、磁盘、Pod的用量与可分配量及节点状态，支持批量禁止/允许调度（用量数据依赖metrics-server）。
+- ⚖**节点均衡【2.0】**：「分析负载」按节点CPU使用率生成「迁移计划」，确认后分批隔离式迁移（新Pod就绪后才进行下一批，旧Pod确认无误再清理），阈值、黑名单、排除命名空间/节点等可配置。仅支持手动执行，执行期间会临时禁止调度（cordon）其它节点，依赖metrics-server，建议在低峰期操作。
+- 🎯**指定节点与CCI**：扩缩容、重启、隔离时按CPU、内存、Pod数排行挑选目标节点；华为云CCE集群「临时扩容」时可把超出部分弹到CCI【2.0】。
+- 💻**节点管理**：查看节点用量与可分配量，批量禁止/允许调度，打开节点终端。
 
 📖详见：[节点均衡算法与参数](src/kubedoor-agent/load_balance/README.md)（开发者文档；其中的定时检测、自动执行等配置项目前未实现，只能手动执行）
 
 ---
 
-### 8. 🌐Istio路由管理（试用）
-
-**按「Istio组」统一维护一个项目的VirtualService：花折保存一份组标准（规则、默认路由、gateway全组共用），hosts和规则里的域名条件按集群各自维护，按需下发到组里的集群。**
-
-- 🗺「全局VS管理」：一个组 = 共用的测试集群 + 本项目的生产集群，一个集群可以加入多个组（多个项目共用的测试集群），每个VS自己选择部署到哪些集群；矩阵视图同时看到每个VS在各集群的hosts和状态（一致/待下发/不一致/集群中没有/缺少域名），hosts可单独修改、从其它集群复制。
-- 🧩「组的VS范围」：同一个VS只能属于一个组，组用包含 / 忽略规则（通配符或正则）划分VS，单个VS也可以手动忽略、在「查看忽略」里取消；和共用集群的其他组冲突的VS整行标红，要先在其中一个组忽略才能纳管和下发。格子菜单可以直接删除集群里的VS（二次确认，删除前的内容记入审计）。
-- 🏷「域名条件按集群」：规则里按域名区分的条件（authority、headers.host）和hosts一样各集群各存一份，下发时按该集群的域名展开；可按关键字一次在各集群里选域名，或从其它集群复制并替换机房标识（如penglai→kunlun）。
-- 📥「刷新现状」：各集群各自采集VirtualService（只读快照，不影响别的集群）；对比各集群差异（规则按匹配条件对齐、YAML逐行对比），一致的一键纳管（只差hosts和域名的也算一致，域名取各集群自己的现状），不一致的选基准集群纳管后再下发拉齐。
-- 🚀「下发」：先预览集群最新现状与将要下发内容的差异再执行；采集到的未建模字段（retries、corsPolicy等）原样保留，下发不丢配置。所有修改只允许管理员操作。
-- 🚸「委托VS管理」页面仍在开发中；如需使用Istio路由管理，可联系作者。
-
-<details close>
-<summary>🔍点击展开截图 ...</summary>
-
-|<img src="screenshot/istio-vs.png" alt="全局VS管理" />|
-|-|
-
-</details>
-
----
-
-### 9. 🔐平台与权限
+### 10. 🔐平台与权限
 
 **一个入口、按集群授权：Web、Grafana、AI助手和MCP共用一个NodePort，登录与权限由KubeDoor自己管理。**
 
-- 🚪统一入口：kubedoor-web的nginx只做反向代理，登录、会话和权限校验都在master；AI助手、MCP、Grafana（`/grafana/`）通过nginx `auth_request`交给master判定。
-- 👤账号【2.2】：本地账号 + LDAP（Web上配置并可一键测试，首次登录自动开通）；内置超级管理员`kubedoor`只能由自己改口令，不能被删除或改权限。
-- 👥权限【2.2】：全局权限分「管理员 / 读写 / 只读（默认） / 无」，再按用户×K8S集群单独授权「读写 / 只读 / 无」，单独授权优先、全局权限兜底；「无」权限的集群在所有页面、告警和AI助手中都不可见。AI助手与MCP按目标集群判断能否执行和批准修改。镜像更新仍可通过`UPDATE_IMAGE_JSON`按集群、时间段、账号向只读账号开放。
-- 🧾操作审计【2.2】：登录、账号与权限变更、所有写操作（含越权被拒）都可在「系统管理 → 操作审计」查询。
-- 🛰多集群接入：agent首次连接自动登记；「Agent管理」查看在线状态、心跳和版本，「更新」可一键升级agent镜像，并集中配置采集、准入控制与「AI Kubeconfig」。
-- 📝操作留痕：nginx以JSON格式记录访问日志（含登录用户与请求体）；master记录操作审计；运维操作由agent推送IM；AI的会话、审批与工具调用写入PostgreSQL。
-- 🧹数据自动清理【2.0】：K8S事件保留90天，告警记录与高峰快照保留365天，master每天分批清理，可在`kubedoor-config`中调整（`0`表示不清理）。
-- 🌗界面：【2.2】水墨月洞门登录页（毛玻璃登录框，湖面水波、门环圆波动效，系统开启「减少动态效果」时自动关闭）；简体中文/English（部分页面翻译）、浅色/深色/自动主题，适配移动端。
+- 🚪**统一入口**：kubedoor-web的nginx只做反向代理，登录、会话和权限校验都在master；AI助手、MCP、Grafana（`/grafana/`）通过nginx `auth_request`交给master判定。
+- 👥**账号与权限【2.2】**：本地账号 + LDAP（Web上配置并可一键测试，首次登录自动开通）；全局权限「管理员 / 读写 / 只读（默认） / 无」，再按用户×K8S集群单独授权，单独授权优先；「无」权限的集群在所有页面、告警和AI中都不可见。内置超级管理员`kubedoor`不能被删除或改权限。
+- 🧾**操作审计【2.2】**：登录、账号与权限变更、所有写操作（含越权被拒）都可在「系统管理 → 操作审计」查询。
+- 🛰**Agent管理**：agent首次连接自动登记，查看在线状态、心跳和版本；单个或勾选批量更新镜像、重启【2.2】，集中配置采集、准入控制与「AI Kubeconfig」。
+- 🧹**数据自动清理**：K8S事件保留90天，告警记录与高峰快照保留365天，可在`kubedoor-config`中调整（`0`表示不清理）。
+- 🌗**界面**：水墨月洞门登录页【2.2】，简体中文/English（部分页面翻译）、浅色/深色/自动主题，适配移动端。
 
 📖详见：[部署指南](deploy/README.md)、[账号与权限](deploy/README.md#账号与权限)
 
@@ -470,19 +483,20 @@ vi kubedoor.conf        # 改 K8S_NAME 和 MASTER_WS（换机器执行时先 cp 
 3. 点「采集历史数据」列的「采集」，选择「采集天数」（默认10天，可选1~90），把历史高峰数据写入管控表；之后每天北京时间01:00自动采集。新装的监控要经历一个完整的高峰时段后才有数据可采，之后也可执行`kubectl -n kubedoor create job --from=cronjob/kubedoor-collect collect-now`立即采集一次。
 4. 在「高峰资源管控」确认数据无误后，再按需开启「准入控制」（默认关闭）。
 5. 点顶栏「AI 助手」→「模型设置」，填写Base URL、API Key、模型名并「测试连接」，即可开始对话。
+6. （可选）在「系统管理 → 企微 AI 机器人」接入企业微信机器人，绑定成员或设置未绑定成员的默认权限，见[企业微信智能机器人](#企业微信智能机器人)。
 
 #### 生产环境提示
 
 - 🔒Web与MCP默认是HTTP，生产环境建议在Web前加HTTPS（Ingress/LB需支持WebSocket）；TLS在nginx前面终结时把`kubedoor-config`的`AUTH_COOKIE_SECURE`设为`"true"`。
 - 🚧准入控制为fail-closed，agent或master不可用时Deployment变更会被拒绝；应急执行`kubectl delete mutatingwebhookconfiguration kubedoor-admis-configuration`。卸载或重装agent前，先在「Agent管理」关闭「准入控制」。
-- 💾请把PostgreSQL数据、`kubedoor.conf`和`kubedoor.conf.ai-secrets`（与Secret `kubedoor-ai-security`一致）一起备份；更换AI加密密钥会使已保存的kubeconfig无法解密。
+- 💾请把PostgreSQL数据、`kubedoor.conf`和`kubedoor.conf.ai-secrets`（与Secret `kubedoor-ai-security`一致）一起备份；更换AI加密密钥会使已保存的kubeconfig和企微机器人凭证无法解密。
 - 📌`NAMESPACE`请保持默认的`kubedoor`，准入控制、定时任务等功能依赖这个命名空间。
 
 ---
 
 ## ♻升级说明
 
-**2.x改用PostgreSQL和脚本化部署，从1.x升级需要全新安装；2.x版本之间修改`TAG_*`后重新执行安装脚本即可（升级到2.2还要迁移账号，见下文）。**
+**2.x改用PostgreSQL和脚本化部署，从1.x升级需要全新安装；2.x版本之间修改`TAG_*`后重新执行安装脚本即可（升级到2.2要重建账号，升级到2.3会清掉2.2试用版的Istio路由数据，见下文）。**
 
 #### 从1.x（Helm）升级
 
@@ -516,6 +530,15 @@ vi kubedoor.conf        # 改 K8S_NAME 和 MASTER_WS（换机器执行时先 cp 
 
 详见[部署说明 · 账号与权限](deploy/README.md#账号与权限)。
 
+#### 从2.2.x升级到2.3
+
+2.3新增CoreDNS管理和企微智能机器人，并重构了Istio VirtualService管理；部署清单和配置项没有变化。
+
+1. 更新到最新仓库代码，在`kubedoor.conf`中把`TAG_MASTER`、`TAG_AGENT`、`TAG_WEB`、`TAG_AI`改为`2.3.0`（告警服务没有变化，`TAG_ALARM`保持`2.1.0`），执行`./install.sh master`。
+2. agent只需更换镜像：在「Agent管理」勾选集群「批量更新」到`2.3.0`，或到各集群重跑`./install.sh agent`。CoreDNS管理与网络测试、Istio的从集群删除VirtualService和查看完整现状都需要新版agent，旧版agent会提示先升级。
+3. Istio VirtualService管理改为按「Istio组」管理：master启动时会删除2.2试用版的旧表（`vs_global`、`vs_http_routes`、`k8s_cluster`），集群里的VirtualService不受影响；升级后在「ISTIO管理」菜单的全局VirtualService管理页建组，「刷新现状」后重新纳管即可。
+4. 企微智能机器人由kubedoor-ai主动连接企业微信，需要能出站访问企业微信；不配置不影响其他功能。
+
 > 2.x内部升级：master与kubedoor-ai采用Recreate策略，升级期间AI/MCP短暂不可用，开启了准入控制的集群在master重启期间Deployment变更会被拒绝，建议低峰期操作。nginx配置以subPath挂载，若Web镜像标签未变，需执行`kubectl -n kubedoor rollout restart deploy/kubedoor-web`让新配置生效。
 
 ---
@@ -529,6 +552,8 @@ vi kubedoor.conf        # 改 K8S_NAME 和 MASTER_WS（换机器执行时先 cp 
 | [部署指南](deploy/README.md) | 一个脚本 + 一份配置安装控制端与各集群agent，PostgreSQL独立部署，含常见场景、改配置与排查 |
 | [账号与权限](deploy/README.md#账号与权限) | 本地账号与LDAP、全局权限与集群授权、内置账号、操作审计与忘记口令 |
 | [AI助手](docs/ai-assistant.md) | 模型配置、资源范围、多轮对话、变更审批、全局记忆、kubeconfig直连与外部MCP |
+| [企业微信智能机器人](src/kubedoor-ai/README.md#企业微信智能机器人) | 机器人与专用模型配置、成员绑定与默认权限、集群切换与审批卡片 |
+| [Istio VirtualService管理](src/kubedoor-master/istio_route/README.md) | Istio组与组标准、按集群的hosts与域名条件、状态判断、典型流程与接口 |
 | [告警屏蔽](docs/alert-silence.md) | 屏蔽规则语法、状态、命中预览与IM【屏蔽】链接 |
 | [JVM参数管控](docs/jvm-resource-control.md) | Xms/Xmx/Xss/MaxMetaspaceSize的采集与管控，高峰期堆内存与G1 Eden使用率 |
 | [K8S资源管控功能说明](help/K8S资源管控功能说明.md) | 基于准入控制管控副本数、需求值与限制值 |

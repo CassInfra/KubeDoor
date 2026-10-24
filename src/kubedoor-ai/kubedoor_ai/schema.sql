@@ -68,6 +68,9 @@ CREATE TABLE IF NOT EXISTS kubedoor_ai_wecom_config (
     updated_by text NOT NULL,
     updated_at timestamptz NOT NULL DEFAULT now()
 );
+-- 未绑定的企微成员按这个花折账号的权限使用机器人;为空时必须先绑定
+ALTER TABLE kubedoor_ai_wecom_config ADD COLUMN IF NOT EXISTS unbound_username text
+    CHECK (unbound_username IS NULL OR char_length(unbound_username) BETWEEN 1 AND 200);
 CREATE TABLE IF NOT EXISTS kubedoor_ai_wecom_users (
     wecom_userid text PRIMARY KEY,
     username text,

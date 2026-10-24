@@ -8,11 +8,18 @@ import {
   type WeComUser
 } from "@/api/ai";
 import { getKnownClusters, getUsers, type SystemUser } from "@/api/system";
+import {
+  PERM_LABELS,
+  PERM_TAG,
+  ROLE_LABELS,
+  roleDefaultPermission
+} from "@/utils/permission";
 
 const loading = ref(false);
 const saving = ref(false);
 const testing = ref(false);
 const usersLoading = ref(false);
+const unboundSaving = ref(false);
 const config = ref<WeComConfig>({
   enabled: false,
   configured: false,
@@ -45,6 +52,34 @@ const availableClusters = computed(() => {
     return permission === "rw" || permission === "read";
   });
 });
+/** 已保存的未绑定成员默认权限账号;unbound.username 是正在编辑的值 */
+const unboundSaved = ref<string | null>(null);
+const unbound = reactive({ username: "" });
+/** 管理员账号不能作为默认权限(后端同样会拒绝) */
+const unboundCandidates = computed(() =>
+  systemUsers.value.filter(
+    item => item.enabled && item.role !== "agent" && item.role !== "admin"
+  )
+);
+const unboundUnavailable = computed(
+  () =>
+    !!unboundSaved.value &&
+    !usersLoading.value &&
+    !unboundCandidates.value.some(item => item.username === unboundSaved.value)
+);
+/** 所选账号能访问的集群,让管理员确认默认权限的范围 */
+const unboundAccess = computed(() => {
+  const user = systemUsers.value.find(
+    item => item.username === unbound.username
+  );
+  if (!user) return [];
+  return clusters.value
+    .map(env => ({
+      env,
+      permission: user.clusters?.[env] ?? roleDefaultPermission(user.role)
+    }))
+    .filter(item => item.permission !== "none");
+});
 let refreshTimer: ReturnType<typeof setInterval> | undefined;
 
 async function loadConfig() {
@@ -67,6 +102,10 @@ async function loadMappings() {
       getKnownClusters()
     ]);
     mappings.value = mappingResult.users;
+    // 正在编辑默认权限时(还没保存)不要被刷新冲掉
+    const editing = unbound.username !== (unboundSaved.value || "");
+    unboundSaved.value = mappingResult.unbound_username ?? null;
+    if (!editing) unbound.username = unboundSaved.value || "";
     systemUsers.value = userResult.data || [];
     clusters.value = (clusterResult.data || []).map(item => item.env).sort();
   } finally {
@@ -170,6 +209,26 @@ async function saveConfig() {
     );
   } finally {
     saving.value = false;
+  }
+}
+
+async function saveUnbound() {
+  unboundSaving.value = true;
+  try {
+    const result = await aiApi.saveWecomUnbound(unbound.username || null);
+    unboundSaved.value = result.unbound_username;
+    unbound.username = result.unbound_username || "";
+    ElMessage.success(
+      result.unbound_username
+        ? `未绑定成员将按 ${result.unbound_username} 的权限使用机器人。`
+        : "已关闭默认权限，未绑定成员需要先绑定。"
+    );
+  } catch (error) {
+    ElMessage.error(
+      error instanceof Error ? error.message : "保存默认权限失败"
+    );
+  } finally {
+    unboundSaving.value = false;
   }
 }
 
@@ -320,10 +379,61 @@ onBeforeUnmount(() => {
         <div>
           <h2>成员与默认集群</h2>
           <p>
-            企微成员权限始终按花折账号实时校验；未绑定成员首次发消息后会出现在列表中。
+            企微成员权限始终按花折账号实时校验：已绑定的成员用绑定的账号，未绑定的成员用下面的默认权限；未绑定成员首次发消息后会出现在列表中。
           </p>
         </div>
       </div>
+      <el-form label-width="170px" class="unbound-form">
+        <el-form-item label="未绑定成员默认权限">
+          <div class="unbound-row">
+            <el-select
+              v-model="unbound.username"
+              class="unbound-select"
+              filterable
+              clearable
+              placeholder="不开放，未绑定的成员需要先绑定"
+            >
+              <el-option
+                v-for="user in unboundCandidates"
+                :key="user.id"
+                :label="`${user.username} (${ROLE_LABELS[user.role] || user.role})`"
+                :value="user.username"
+              />
+            </el-select>
+            <el-button
+              type="primary"
+              :loading="unboundSaving"
+              :disabled="unbound.username === (unboundSaved || '')"
+              @click="saveUnbound"
+              >保存</el-button
+            >
+          </div>
+          <div class="form-tip">
+            未绑定的成员按所选花折账号的权限使用机器人（包括按集群的单独授权），可以在「用户与权限」里新建一个专用账号；不能选管理员账号。
+          </div>
+          <div v-if="unbound.username" class="unbound-access">
+            <span class="form-tip">可访问：</span>
+            <el-tag
+              v-for="item in unboundAccess"
+              :key="item.env"
+              size="small"
+              :type="PERM_TAG[item.permission]"
+              >{{ item.env }} · {{ PERM_LABELS[item.permission] }}</el-tag
+            >
+            <span v-if="!unboundAccess.length" class="form-tip"
+              >没有可访问的集群</span
+            >
+          </div>
+        </el-form-item>
+      </el-form>
+      <el-alert
+        v-if="unboundUnavailable"
+        :title="`默认权限账号 ${unboundSaved} 已停用、已删除或已改为管理员，未绑定的成员现在无法使用机器人，请重新选择。`"
+        type="warning"
+        :closable="false"
+        show-icon
+        class="unbound-alert"
+      />
       <el-table
         v-loading="usersLoading"
         :data="mappings"
@@ -339,7 +449,12 @@ onBeforeUnmount(() => {
         <el-table-column label="花折账号" min-width="150">
           <template #default="{ row }">
             <span v-if="row.username">{{ row.username }}</span>
-            <el-tag v-else type="warning" size="small">待绑定</el-tag>
+            <template v-else>
+              <el-tag type="warning" size="small">待绑定</el-tag>
+              <span v-if="unboundSaved" class="muted"
+                >默认权限 {{ unboundSaved }}</span
+              >
+            </template>
           </template>
         </el-table-column>
         <el-table-column prop="default_env" label="默认集群" min-width="140">
@@ -452,6 +567,50 @@ onBeforeUnmount(() => {
 .mapping-form {
   max-width: 820px;
   margin-top: 18px;
+}
+
+.unbound-form {
+  max-width: 820px;
+}
+
+.unbound-row {
+  display: flex;
+  gap: 8px;
+  width: 100%;
+}
+
+.unbound-select {
+  flex: 1;
+  min-width: 0;
+}
+
+.unbound-access {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+  margin-top: 6px;
+}
+
+.unbound-alert {
+  margin-bottom: 12px;
+}
+
+.form-tip {
+  margin-top: 4px;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--el-text-color-secondary);
+}
+
+.unbound-access .form-tip {
+  margin-top: 0;
+}
+
+.muted {
+  margin-left: 6px;
+  font-size: 12px;
+  color: var(--el-text-color-secondary);
 }
 
 .form-actions {

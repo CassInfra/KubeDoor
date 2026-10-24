@@ -148,6 +148,31 @@ class WeComIntegration:
             raise AIError("花折用户身份无效", 403, "identity_invalid")
         return Identity(username, permission, MappingProxyType({} if permission == "admin" else clusters))
 
+    async def unbound_username(self):
+        """未绑定成员使用的花折账号(「未绑定成员默认权限」),没设置时为 None"""
+        row = await self.service.store.one("SELECT unbound_username FROM kubedoor_ai_wecom_config WHERE singleton=true")
+        return (row or {}).get("unbound_username")
+
+    async def _member_identity(self, mapped):
+        """返回 (身份, 不能使用时回给成员的提示)。绑定了的成员用绑定的花折账号,
+        未绑定的用默认权限账号;权限都由 master 按账号实时计算。"""
+        if mapped.get("username"):
+            try:
+                return await self._identity(mapped["username"]), None
+            except AIError:
+                return None, "绑定的花折账号不存在、已停用或不可用，请联系管理员。"
+        username = await self.unbound_username()
+        if not username:
+            return None, "该企业微信成员尚未绑定花折账号，请联系管理员完成绑定。"
+        try:
+            identity = await self._identity(username)
+        except AIError:
+            identity = None
+        # 保存时已经不让选管理员账号;这里兜底账号之后被改成管理员的情况
+        if identity is None or identity.is_admin:
+            return None, "未绑定成员的默认权限当前不可用，请联系管理员绑定花折账号。"
+        return identity, None
+
     async def _reply(self, frame, content, finish=True, stream_id=None):
         if self.client and self.client.is_connected:
             await self.client.reply_stream(frame, stream_id or generate_req_id("stream"),
@@ -172,13 +197,9 @@ class WeComIntegration:
         if not text:
             await self._reply(frame, "暂不支持空消息。", True, stream_id)
             return
-        if not mapped.get("username"):
-            await self._reply(frame, "该企业微信成员尚未绑定花折账号，请联系管理员完成绑定。", True, stream_id)
-            return
-        try:
-            identity = await self._identity(mapped["username"])
-        except AIError:
-            await self._reply(frame, "绑定的花折账号不存在、已停用或不可用，请联系管理员。", True, stream_id)
+        identity, problem = await self._member_identity(mapped)
+        if problem:
+            await self._reply(frame, problem, True, stream_id)
             return
         clusters = (await self.service.bootstrap(identity))["clusters"]
         if not clusters:
@@ -230,9 +251,10 @@ class WeComIntegration:
             "ON CONFLICT(channel,channel_key) WHERE channel_key IS NOT NULL DO UPDATE SET updated_at=now() RETURNING id",
             uuid.uuid4(), identity.username, channel_key,
         )
+        # 只记会话,不改 username:用默认权限的成员仍是未绑定,管理员同时改绑也不会被覆盖回去
         await self.service.store.execute(
-            "UPDATE kubedoor_ai_wecom_users SET username=$2,session_id=$3::uuid,updated_at=now() WHERE wecom_userid=$1",
-            userid, identity.username, str(row["id"]),
+            "UPDATE kubedoor_ai_wecom_users SET session_id=$2::uuid,updated_at=now() WHERE wecom_userid=$1",
+            userid, str(row["id"]),
         )
         return str(row["id"])
 
@@ -341,7 +363,7 @@ class WeComIntegration:
             await self._reply(frame, "审批卡片已过期或不属于当前账号。")
             return
         mapped = await self._mapped_user(userid)
-        if mapped.get("username") != approval["username"]:
+        if (mapped.get("username") or await self.unbound_username()) != approval["username"]:
             await self._reply(frame, "账号绑定已变更，该审批不能继续。")
             return
         try:
@@ -431,6 +453,25 @@ class WeComIntegration:
             userid.strip(), username, env,
         )
         return {"success": True}
+
+    async def save_unbound_username(self, identity, raw):
+        username = raw.get("username")
+        if username is not None and not isinstance(username, str):
+            raise AIError("请选择花折账号")
+        username = (username or "").strip() or None
+        if username:
+            live = await self._identity(username)
+            if live.is_admin:
+                raise AIError("不能用管理员账号作为未绑定成员的默认权限")
+            if not (await self.service.bootstrap(live))["clusters"]:
+                raise AIError("该花折账号没有任何 K8S 集群访问权限", 403, "permission_denied")
+        # 还没保存过机器人配置时先插入一行空配置(不启用),机器人配置照常在「保存配置」里填
+        await self.service.store.execute(
+            "INSERT INTO kubedoor_ai_wecom_config(singleton,enabled,encrypted_config,unbound_username,updated_by) VALUES(true,false,$1,$2,$3) "
+            "ON CONFLICT(singleton) DO UPDATE SET unbound_username=EXCLUDED.unbound_username,updated_by=EXCLUDED.updated_by,updated_at=now()",
+            self.service.gateway.cipher.encrypt("wecom", {}), username, identity.username,
+        )
+        return {"unbound_username": username}
 
     async def delete_user(self, userid):
         await self.service.store.execute(

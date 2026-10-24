@@ -375,12 +375,20 @@ export const aiApi = {
   }) => request<WeComConfig>("/wecom", "PUT", data),
   testWecomProvider: (provider: AIProvider) =>
     request<Record<string, any>>("/wecom/test", "POST", { provider }),
-  wecomUsers: () => request<{ users: WeComUser[] }>("/wecom/users"),
+  wecomUsers: () =>
+    request<{ users: WeComUser[]; unbound_username: string | null }>(
+      "/wecom/users"
+    ),
   saveWecomUser: (data: {
     wecom_userid: string;
     username: string;
     default_env?: string | null;
   }) => request<{ success: boolean }>("/wecom/users", "POST", data),
+  /** 未绑定成员按这个花折账号的权限使用机器人;null 表示必须先绑定 */
+  saveWecomUnbound: (username: string | null) =>
+    request<{ unbound_username: string | null }>("/wecom/unbound", "PUT", {
+      username
+    }),
   deleteWecomUser: (userid: string) =>
     request<{ success: boolean }>(`/wecom/users/${itemPath(userid)}`, "DELETE"),
   connections: () => request<{ connections: AIConnection[] }>("/connections"),
