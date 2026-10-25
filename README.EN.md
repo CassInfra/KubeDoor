@@ -83,10 +83,12 @@ K8S Resource Overview: multi-cluster resources, at-risk nodes, and today's abnor
 
 **Compared with 1.7, 2.x is an architecture-level upgrade: the AI assistant becomes a core capability, PostgreSQL becomes the only database, and deployment becomes a single script.** The main changes are listed below, newest version first; see [Features](#features) for details.
 
-**✨2.3: WeCom bot, Istio VirtualService management, CoreDNS management**
+**✨2.3: AI assistant enhancements, WeCom bot, Istio VirtualService management, CoreDNS management**
+- 🤖**AI assistant enhancements**: long conversations keep hitting the model's prefix cache, the context is compressed automatically according to the model's window and the dialog shows how much of it is in use, the new 「AI 用量看板📊」 (AI usage dashboard) tracks usage, cache hit rate and estimated cost, and the DeepSeek thinking effort is adjustable; the assistant is aware of KubeDoor resource control, so scaling, resource and JVM changes to managed services go through the control table and are read back afterwards; sessions are searchable, the last turn can be regenerated or edited and resent, and the alert, event, Deployment and Pod menus offer one-click 「问 AI」 (Ask AI).
 - 💬**WeCom smart bot**: a WeCom bot in API mode connects to the AI assistant over a long-lived connection, so no public callback URL is needed; one-on-one chats get streaming replies, changes are approved via 「批准 / 拒绝」 (Approve / Reject) cards, and members are bound to KubeDoor accounts (unbound members can share a default permission), with cluster permissions checked live against the account.
 - 🌐**Istio VirtualService management (rebuilt)**: manage a project's VirtualServices per "Istio group": the group standard is shared by the whole group, while hosts and the domain conditions inside rules are kept per cluster; refresh the live state, compare, adopt in one click and push after previewing the diff, with cross-group conflict detection and unmodeled fields preserved as-is.
 - 🧭**CoreDNS management**: maintain custom hosts records in a table, rewriting only the changed lines; review the diff before saving, with concurrent edits detected as conflicts; check from inside the cluster whether a record has taken effect, plus DNS lookup and port tests and a Monaco 「高级编辑」 (Advanced edit).
+- Also: admission control now rewrites replica changes made directly with kubectl and similar tools to the controlled value as well (they used to be allowed through until the next rollout or restart); Pod live logs and the agent connection are more robust (log streams use a separate, capped connection pool, and large cluster listings no longer stall the agent); the console's 「关于」 (About) page now embeds the official website.
 
 **🔐2.2: Accounts and permissions**
 - **LDAP sign-in + per-cluster permissions**: a global role (Admin / Read-write / Read-only / None) plus per-user, per-cluster grants; clusters set to "None" are hidden from every page, alert and the AI assistant. Sign-in and sessions are handled by the master, and agents and Grafana also authenticate through KubeDoor.
@@ -247,14 +249,6 @@ Built for the case where the same services run in test clusters and in several p
 - 🔎**View and delete**: view the complete live object of a VirtualService in a cluster (like `kubectl get -o yaml`), or delete it from the cluster directly (with confirmation; the deleted content is kept in the audit log).
 - 🛡**Lossless, admin-only changes**: fields the editor does not model (retries, corsPolicy, redirect, fault, ...) are kept as-is, so pushing never drops configuration; viewing is filtered by per-cluster read access, and only administrators can make changes.
 - 🚸The management page for delegate VirtualServices is still under development.
-
-<details close>
-<summary>🔍Click to expand screenshots ...</summary>
-
-|<img src="screenshot/istio-vs.png" alt="Istio VirtualService management" />|
-|-|
-
-</details>
 
 📖Details: [Istio VirtualService management](src/kubedoor-master/istio_route/README.md) (Chinese; model, status rules and typical workflows)
 
@@ -539,12 +533,14 @@ See [Deployment guide · Accounts and permissions](deploy/README.md#账号与权
 
 #### Upgrading from 2.2.x to 2.3
 
-2.3 adds CoreDNS management and the WeCom smart bot, and rebuilds Istio VirtualService management; the deployment manifests and configuration options are unchanged.
+2.3 adds CoreDNS management and the WeCom smart bot, rebuilds Istio VirtualService management and enhances the AI assistant; no new settings are needed in `kubedoor.conf`.
 
-1. Update to the latest repository code, change `TAG_MASTER`, `TAG_AGENT`, `TAG_WEB` and `TAG_AI` in `kubedoor.conf` to `2.3.0` (the alarm service is unchanged, so `TAG_ALARM` stays at `2.1.0`), and run `./install.sh master`.
-2. Agents only need a new image: select the clusters in 「Agent管理」 and use 「批量更新」 (bulk update) to `2.3.0`, or re-run `./install.sh agent` in each cluster. CoreDNS management and its network tests, as well as deleting VirtualServices from a cluster and viewing their complete live state, require the new agent; older agents show a prompt to upgrade first.
+1. Update to the latest repository code, change `TAG_MASTER`, `TAG_AGENT`, `TAG_WEB` and `TAG_AI` in `kubedoor.conf` to `2.3.0` (the alarm service is unchanged, so `TAG_ALARM` stays at `2.1.0`), and run `./install.sh master`. The master, Web and AI must be upgraded together in this release (the new AI service relies on new master APIs), and this step does exactly that; it also adds `RETENTION_AI_CHECKPOINT_DAYS` to `kubedoor-config` (how many days to keep the checkpoints of old WeCom conversations, 7 by default) and imports the "KubeDoor-AI" usage dashboard into Grafana.
+2. Agents only need a new image: select the clusters in 「Agent管理」 and use 「批量更新」 (bulk update) to `2.3.0`, or re-run `./install.sh agent` in each cluster. CoreDNS management and its network tests, as well as deleting VirtualServices from a cluster and viewing their complete live state, require the new agent (older agents show a prompt to upgrade first); scheduled or recurring 「临时扩容」 (temporary scale-out) and the admission rewrite of direct replica changes also need the new agent (older agents show no prompt: scheduled tasks run as a normal scale, and direct replica changes are still allowed through).
 3. Istio VirtualService management is now organized by "Istio group": at startup the master drops the old tables of the 2.2 trial version (`vs_global`, `vs_http_routes`, `k8s_cluster`), while the VirtualServices in your clusters are not affected; after upgrading, create groups on the global VirtualService page under 「ISTIO管理」 (English UI: "ISTIO Management" → "Level1 VirtualService"), then click 「刷新现状」 (Refresh live state) and adopt them again.
 4. The WeCom smart bot connects out to WeCom from kubedoor-ai, which therefore needs outbound access to WeCom; if you do not configure the bot, nothing else is affected.
+5. **Admission control behaviour change**: in controlled namespaces, changing a managed service's `spec.replicas` directly with `kubectl edit/patch/apply` used to be allowed with the requested value until the next rollout or restart; with the new agent it is rewritten to the controlled value immediately, just like `kubectl scale`. To change the replica count for good, edit the 「指定Pod」 (pinned Pod count) value; for a short scale-out, use 「临时扩容」.
+6. The AI assistant's system prompt and tools have changed, so after the upgrade the next request in each existing conversation misses the model's prefix cache (once only).
 
 > Upgrades within 2.x: master and kubedoor-ai use the Recreate strategy, so the AI assistant and MCP are briefly unavailable during an upgrade, and in clusters with admission control enabled, Deployment changes are rejected while the master restarts; upgrade during off-peak hours. The nginx config is mounted via subPath, so if the Web image tag has not changed, run `kubectl -n kubedoor rollout restart deploy/kubedoor-web` for the new config to take effect.
 

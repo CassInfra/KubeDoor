@@ -81,10 +81,12 @@ K8S资源总览：多集群资源、风险节点、今日异常告警与事件�
 
 **相对1.7，2.x是一次架构级升级：AI助手成为核心能力，PostgreSQL成为唯一数据库，部署改为一个脚本。** 下面按版本倒序列出主要变化，详细说明见[功能](#功能)。
 
-**✨2.3：企微机器人、Istio VirtualService管理、CoreDNS管理**
+**✨2.3：AI助手增强、企微机器人、Istio VirtualService管理、CoreDNS管理**
+- 🤖**AI助手增强**：长对话持续命中模型的前缀缓存，上下文按模型窗口自动压缩、对话框显示占用比例，新增「AI 用量看板📊」统计用量、缓存命中率和估算费用，DeepSeek思考强度可调；认得花折资源管控，受管控的服务扩缩容、调整资源和JVM走管控表，执行后回读核验；会话可搜索，最后一轮可重新生成或编辑后重发，告警、事件、Deployment和Pod菜单里一键「问AI」。
 - 💬**企微智能机器人**：企业微信API模式机器人经长连接接入AI助手，无需公网回调地址；单聊流式回复，变更通过「批准 / 拒绝」卡片审批，成员绑定花折账号（未绑定的成员可统一设置默认权限），按账号实时校验集群权限。
 - 🌐**Istio VirtualService管理（重构）**：按「Istio组」管理一个项目的VirtualService，组标准全组共用，hosts和规则里的域名条件按集群维护；刷新现状、对比、一键纳管，预览差异后下发，跨组冲突检测，未建模字段原样保留。
 - 🧭**CoreDNS管理**：表格化维护hosts自定义解析，只重写改动的行；保存前展示差异、并发修改自动检测冲突，从集群内检查解析是否生效，另有解析测试、端口测试和Monaco「高级编辑」。
+- 另有：准入控制对用kubectl等直接改副本数的修改也改回管控值（以前会放行到下次发布或重启）；Pod实时日志与agent连接更稳定（日志流独立连接池并限量，大集群列表不再卡住agent）；控制台「关于」页改为内嵌官网。
 
 **🔐2.2：账号与权限**
 - **LDAP登录 + K8S集群级权限**：全局权限「管理员 / 读写 / 只读 / 无」+ 按用户×集群单独授权，「无」权限的集群在所有页面、告警和AI助手中都不可见；登录与会话改由master统一管理，agent和Grafana也统一接入KubeDoor认证。
@@ -243,14 +245,6 @@ AI 助手：
 - 🔎**查看与删除**：实时查看集群里VirtualService的完整对象（同`kubectl get -o yaml`），或直接从集群删除（二次确认，删除前的内容记入审计）。
 - 🛡**无损与权限**：未建模的字段（retries、corsPolicy、redirect、fault等）原样保留，下发不丢配置；查看按集群读权限过滤，所有修改只允许管理员。
 - 🚸委托（delegate）VirtualService的管理页面仍在开发中。
-
-<details close>
-<summary>🔍点击展开截图 ...</summary>
-
-|<img src="screenshot/istio-vs.png" alt="Istio VirtualService管理" />|
-|-|
-
-</details>
 
 📖详见：[Istio VirtualService管理说明](src/kubedoor-master/istio_route/README.md)（模型、状态判断与典型流程）
 
@@ -535,12 +529,14 @@ vi kubedoor.conf        # 改 K8S_NAME 和 MASTER_WS（换机器执行时先 cp 
 
 #### 从2.2.x升级到2.3
 
-2.3新增CoreDNS管理和企微智能机器人，并重构了Istio VirtualService管理；部署清单和配置项没有变化。
+2.3新增CoreDNS管理和企微智能机器人，重构了Istio VirtualService管理，并增强了AI助手；`kubedoor.conf`不需要新增配置。
 
-1. 更新到最新仓库代码，在`kubedoor.conf`中把`TAG_MASTER`、`TAG_AGENT`、`TAG_WEB`、`TAG_AI`改为`2.3.0`（告警服务没有变化，`TAG_ALARM`保持`2.1.0`），执行`./install.sh master`。
-2. agent只需更换镜像：在「Agent管理」勾选集群「批量更新」到`2.3.0`，或到各集群重跑`./install.sh agent`。CoreDNS管理与网络测试、Istio的从集群删除VirtualService和查看完整现状都需要新版agent，旧版agent会提示先升级。
+1. 更新到最新仓库代码，在`kubedoor.conf`中把`TAG_MASTER`、`TAG_AGENT`、`TAG_WEB`、`TAG_AI`改为`2.3.0`（告警服务没有变化，`TAG_ALARM`保持`2.1.0`），执行`./install.sh master`。master、web和AI这一版要一起升级（新的AI依赖master的新接口），这一步会一起完成；同时会在`kubedoor-config`里加上`RETENTION_AI_CHECKPOINT_DAYS`（企微旧对话的检查点保留天数，默认7），并给Grafana导入「KubeDoor-AI」用量看板。
+2. agent只需更换镜像：在「Agent管理」勾选集群「批量更新」到`2.3.0`，或到各集群重跑`./install.sh agent`。CoreDNS管理与网络测试、Istio的从集群删除VirtualService和查看完整现状都需要新版agent（旧版会提示先升级）；定时/周期执行的「临时扩容」、准入控制对直接改副本数的改写也需要新版agent（旧版不会提示：定时任务到点按普通扩缩容处理，直接改副本数仍会放行）。
 3. Istio VirtualService管理改为按「Istio组」管理：master启动时会删除2.2试用版的旧表（`vs_global`、`vs_http_routes`、`k8s_cluster`），集群里的VirtualService不受影响；升级后在「ISTIO管理」菜单的全局VirtualService管理页建组，「刷新现状」后重新纳管即可。
 4. 企微智能机器人由kubedoor-ai主动连接企业微信，需要能出站访问企业微信；不配置不影响其他功能。
+5. **准入控制的行为变化**：管控命名空间里用`kubectl edit/patch/apply`直接改受管控服务的`spec.replicas`，以前按请求的值放行、到下次发布或重启才恢复，升级agent后会立即改回管控值（和`kubectl scale`一样）。要长期改副本数请修改「指定Pod」，短时扩容用「临时扩容」。
+6. AI助手的系统提示和工具有变化，升级后每个已有会话的下一次请求不会命中模型的前缀缓存（只发生一次）。
 
 > 2.x内部升级：master与kubedoor-ai采用Recreate策略，升级期间AI/MCP短暂不可用，开启了准入控制的集群在master重启期间Deployment变更会被拒绝，建议低峰期操作。nginx配置以subPath挂载，若Web镜像标签未变，需执行`kubectl -n kubedoor rollout restart deploy/kubedoor-web`让新配置生效。
 
