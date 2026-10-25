@@ -357,3 +357,53 @@ def test_crash_recovery_keeps_dispatched_writes_unknown(harness):
         assert '"runtime_restarted"' in replay.text and '"done"' in replay.text
 
     runner.run(verify())
+
+
+def test_wecom_conversation_boundaries_use_one_locked_transaction(harness):
+    """企微会话边界的 SQL 在真实 PostgreSQL 上执行：advisory lock、空闲切换、过期审批、继续上次。"""
+    h, runner = harness
+
+    async def verify():
+        from kubedoor_ai.wecom import WeComIntegration
+        store, wecom = h.service.store, WeComIntegration(h.service)
+        userid, identity = "wx-" + uuid.uuid4().hex, Identity(h.username, "rw")
+        await store.execute("INSERT INTO kubedoor_ai_wecom_users(wecom_userid) VALUES($1)", userid)
+        try:
+            first, notices, active = await wecom._current_session(userid, identity)
+            assert (notices, active) == ([], None)
+            row = await store.one("SELECT channel,channel_key FROM kubedoor_ai_sessions WHERE id=$1::uuid", first)
+            assert row == {"channel": "wecom", "channel_key": f"{userid}:{h.username}:{first}"}
+            assert (await wecom._current_session(userid, identity))[0] == first
+
+            # 空闲 3 小时后三条消息同时到达：只建一个新对话，只有一条带提示
+            await store.execute("UPDATE kubedoor_ai_sessions SET updated_at=now()-interval '3 hours' WHERE id=$1::uuid", first)
+            results = await asyncio.gather(*(wecom._current_session(userid, identity) for _ in range(3)))
+            second = results[0][0]
+            assert second != first and {r[0] for r in results} == {second}
+            assert sum(bool(r[1]) for r in results) == 1
+            member = await store.one("SELECT session_id,previous_session_id FROM kubedoor_ai_wecom_users WHERE wecom_userid=$1", userid)
+            assert member == {"session_id": second, "previous_session_id": first}
+
+            # 继续上次：切回并刷新最后活跃时间，紧接着的消息不会被空闲切走
+            assert (await wecom._resume_previous_session(userid, identity)).startswith("已回到上一个对话（最后活跃：")
+            assert await wecom._current_session(userid, identity) == (first, [], None)
+
+            # 只剩过期审批的任务先被停止
+            run_id = str(uuid.uuid4())
+            await store.execute("INSERT INTO kubedoor_ai_runs(id,session_id,username,permission,status,scope,origin) "
+                                "VALUES($1::uuid,$2::uuid,$3,'rw','waiting_approval',$4,'wecom')", run_id, first, h.username, {"env": "cluster-a"})
+            await store.execute("INSERT INTO kubedoor_ai_actions(id,run_id,call_id,operation,source,arguments,preview,read_only,state,expires_at) "
+                                "VALUES($1::uuid,$2::uuid,$3,'delete_pod','kubedoor','{}','{}',false,'pending',now()-interval '1 minute')",
+                                str(uuid.uuid4()), run_id, run_id + ":expired")
+            session_id, notices, active = await wecom._current_session(userid, identity)
+            assert (session_id, notices, active) == (first, ["上一个待审批的操作已过期，已停止该任务。"], None)
+            assert (await store.one("SELECT status FROM kubedoor_ai_runs WHERE id=$1::uuid", run_id))["status"] == "cancelled"
+
+            # 新对话：当前对话记为上一个
+            assert await wecom._start_new_session(userid, identity) == "已开始新对话。"
+            member = await store.one("SELECT session_id,previous_session_id FROM kubedoor_ai_wecom_users WHERE wecom_userid=$1", userid)
+            assert member["previous_session_id"] == first and member["session_id"] not in (first, second)
+        finally:
+            await store.execute("DELETE FROM kubedoor_ai_wecom_users WHERE wecom_userid=$1", userid)
+
+    runner.run(verify())

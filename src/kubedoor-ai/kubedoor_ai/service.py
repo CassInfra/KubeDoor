@@ -17,6 +17,7 @@ from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 from .domain import AIError, CredentialCipher, Identity, Provider, normalize_scope, redact
 from .gateway import Gateway, PendingAction, RunContext
 from .memories import MemoryLibrary
+from .models import without_thinking
 from .runtime import Runtime, SKILLS, make_model
 from .storage import Store, pg_dsn
 
@@ -226,7 +227,7 @@ class Service:
             "不要语气词、不要多余文本，不要加粗，如果没有主题，请直接返回“闲聊”"
         )
         try:
-            model = self.runtime.model_factory(provider)
+            model = without_thinking(self.runtime.model_factory(provider))
             response = await asyncio.wait_for(
                 model.ainvoke([
                     SystemMessage(content=prompt),

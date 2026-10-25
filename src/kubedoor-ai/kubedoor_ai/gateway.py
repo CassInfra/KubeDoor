@@ -200,6 +200,7 @@ class RunContext:
     executor_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     active_calls: dict = field(default_factory=dict)
     secrets: tuple[str, ...] = ()
+    usage: dict = field(default_factory=dict)   # 本轮模型用量，见 runtime.UsageMiddleware
 
 
 @dataclass(frozen=True)

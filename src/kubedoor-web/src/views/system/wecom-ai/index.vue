@@ -1,5 +1,12 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, reactive, ref } from "vue";
+import {
+  computed,
+  onBeforeUnmount,
+  onMounted,
+  reactive,
+  ref,
+  watch
+} from "vue";
 import { ElMessage, ElMessageBox } from "element-plus";
 import {
   aiApi,
@@ -9,6 +16,12 @@ import {
   type WeComUser
 } from "@/api/ai";
 import { getKnownClusters, getUsers, type SystemUser } from "@/api/system";
+import AIModelLimitsFields from "@/components/AI/AIModelLimitsFields.vue";
+import {
+  followModelLimits,
+  modelLimitsFor,
+  type AIModelLimits
+} from "@/utils/ai";
 import {
   PERM_LABELS,
   PERM_TAG,
@@ -16,6 +29,8 @@ import {
   roleDefaultPermission
 } from "@/utils/permission";
 
+/** 企微对话空闲多少分钟后自动开新对话（0 表示关闭） */
+const DEFAULT_IDLE_MINUTES = 120;
 const loading = ref(false);
 const saving = ref(false);
 const testing = ref(false);
@@ -36,8 +51,19 @@ const form = reactive({
   bot_secret: "",
   base_url: "https://api.openai.com/v1",
   api_key: "",
-  model: ""
+  model: "",
+  session_idle_minutes: DEFAULT_IDLE_MINUTES as number | undefined
 });
+const limits = ref<AIModelLimits>(modelLimitsFor(""));
+// 模型名变化时，没手动改过的上下文设置按新模型名重新预填。
+// 同步触发：loadConfig 先设模型名、再载入已保存的值，保存的值不会被改写。
+watch(
+  () => form.model,
+  (model, previous) => {
+    limits.value = followModelLimits(limits.value, previous, model);
+  },
+  { flush: "sync" }
+);
 const mappings = ref<WeComUser[]>([]);
 const systemUsers = ref<SystemUser[]>([]);
 const clusters = ref<string[]>([]);
@@ -139,6 +165,9 @@ async function loadConfig() {
   form.bot_id = value.bot_id || "";
   form.base_url = value.base_url || "https://api.openai.com/v1";
   form.model = value.model || "";
+  limits.value = modelLimitsFor(form.model, value);
+  form.session_idle_minutes =
+    value.session_idle_minutes ?? DEFAULT_IDLE_MINUTES;
   form.bot_secret = "";
   form.api_key = "";
 }
@@ -205,7 +234,8 @@ function provider(): AIProvider {
   return {
     base_url: form.base_url.trim(),
     api_key: form.api_key,
-    model: form.model.trim()
+    model: form.model.trim(),
+    ...limits.value
   };
 }
 
@@ -247,7 +277,9 @@ async function saveConfig() {
       bot_secret: form.bot_secret || undefined,
       base_url: form.base_url.trim(),
       api_key: form.api_key || undefined,
-      model: form.model.trim()
+      model: form.model.trim(),
+      ...limits.value,
+      session_idle_minutes: form.session_idle_minutes ?? DEFAULT_IDLE_MINUTES
     });
     form.bot_secret = "";
     form.api_key = "";
@@ -420,6 +452,21 @@ onBeforeUnmount(() => {
         </el-form-item>
         <el-form-item label="模型名" required>
           <el-input v-model="form.model" placeholder="例如 gpt-4o-mini" />
+        </el-form-item>
+        <AIModelLimitsFields v-model="limits" :model="form.model" />
+        <el-form-item label="对话空闲超时（分钟）">
+          <el-input-number
+            v-model="form.session_idle_minutes"
+            :min="0"
+            :max="10080"
+            :step="30"
+            :precision="0"
+            controls-position="right"
+          />
+          <div class="form-tip">
+            距上次对话超过这个时间，成员的新消息自动进入新对话（0 表示关闭，默认
+            120）。成员也可以发送「新对话」「继续上次」手动切换。
+          </div>
         </el-form-item>
         <div class="form-actions">
           <el-button :loading="testing" @click="testModel">测试模型</el-button>

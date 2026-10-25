@@ -31,11 +31,55 @@ class KubeDoorChatDeepSeek(ChatDeepSeek):
         return payload
 
 
+def resolve_model_limits(provider: Provider, profile=None) -> tuple[int, int]:
+    """Return (max input, max output) tokens; values entered by the user win.
+
+    deepseek* and gpt* model IDs (gateway path prefixes ignored) get the
+    agreed defaults. Other models use the LangChain built-in profile passed in,
+    falling back to 1024K / 128K.
+    """
+    model_id = provider.model.lower().rsplit("/", 1)[-1]
+    if model_id.startswith("deepseek"):
+        inferred = (1_048_576, 393_216)
+    elif model_id.startswith("gpt"):
+        inferred = (1_048_576, 131_072)
+    else:
+        profile = profile if isinstance(profile, dict) else {}
+        inferred = tuple(value if type(value) is int and value > 0 else default for value, default in (
+            (profile.get("max_input_tokens"), 1_048_576), (profile.get("max_output_tokens"), 131_072)))
+    max_input = provider.max_input_tokens or inferred[0]
+    return max_input, min(provider.max_output_tokens or inferred[1], max_input)
+
+
+def apply_model_limits(model, provider: Provider):
+    """Merge the context window into the model profile without dropping its other capabilities."""
+    current = model.profile if isinstance(model.profile, dict) else {}
+    max_input, max_output = resolve_model_limits(provider, current)
+    model.profile = {**current, "max_input_tokens": max_input, "max_output_tokens": max_output}
+    return model
+
+
 def make_model(provider: Provider):
     # Apply DeepSeek's message protocol to official endpoints and compatible
     # gateways exposing DeepSeek model IDs. Other models keep their adapter.
     model_id = provider.model.lower().rsplit("/", 1)[-1]
     deepseek = urlsplit(provider.base_url).hostname == "api.deepseek.com" or model_id.startswith("deepseek-")
     adapter = KubeDoorChatDeepSeek if deepseek else ChatOpenAI
-    return adapter(model=provider.model, api_key=provider.api_key or "kubedoor-local-no-auth", base_url=provider.base_url,
-                   use_responses_api=False, streaming=True, timeout=90, max_retries=0)
+    # stream_usage: compatible providers return usage (and DeepSeek cache hits)
+    # only when asked; summarization also triggers on the reported size.
+    # user_id is never sent: DeepSeek isolates its prefix cache per user_id.
+    model = adapter(model=provider.model, api_key=provider.api_key or "kubedoor-local-no-auth", base_url=provider.base_url,
+                    use_responses_api=False, streaming=True, stream_usage=True, timeout=90, max_retries=0)
+    return apply_model_limits(model, provider)
+
+
+def without_thinking(model):
+    """A DeepSeek copy for tool-free helper calls: summaries, titles, memory drafts.
+
+    Without tools DeepSeek never sends their reasoning back as context, so
+    thinking only adds reasoning tokens and latency. The copy shares the client
+    and the context window profile. Other models are returned unchanged.
+    """
+    if not isinstance(model, KubeDoorChatDeepSeek):
+        return model
+    return model.model_copy(update={"extra_body": {**(model.extra_body or {}), "thinking": {"type": "disabled"}}})

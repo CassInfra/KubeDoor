@@ -71,6 +71,28 @@ DeepSeek 当前默认启用思考模式，无需额外配置思考开关。服�
 账号会清除缓存。服务端核对会话归属后并行读取历史与活动运行状态。
 桌面对话窗口加宽、加高并适配可用屏幕，手机保持全屏。
 
+### 上下文窗口、自动压缩与用量
+
+模型设置（网页的「模型设置」和企微专用模型）有三项上下文配置：上下文窗口、最大输出（界面上按
+K token 填写，1K = 1024）和压缩阈值（%）。按模型名自动预填：去掉网关路径前缀、不区分大小写后，
+以 `deepseek` 开头为 1024K / 384K，以 `gpt` 开头为 1024K / 128K，其他模型按 1024K / 128K
+预填并提示按实际情况填写（`gpt-4o-mini` 等旧型号实际只有 128K，要手动改小）。旧配置没有这些
+字段时由服务端推断（同样的名称规则，其他模型优先用 LangChain 内置的模型 profile）。最大输出只用于
+展示和校验，请求里不设置 `max_tokens`，沿用厂商默认。
+
+请求输入达到「上下文窗口 × 压缩阈值」（默认 50%，可设 20%–80%）时，DeepAgents 用运维专用提示
+摘要较早的消息，原文只保留最近约 10%；摘要分节保留用户目标与进展、资源准确名称、关键证据、
+变更记录（已执行 / 已批准 / 被拒绝 / 结果不确定）、未完成事项和用户约束。被替换的原文写入
+`/conversation_history/` 下的文件，模型需要时可以读回。模型返回「maximum context length」等超长
+报错时会先摘要再重试一次。模型是 DeepSeek 时，自动摘要、会话标题和记忆总结这三类不带工具的
+请求关闭思考（`thinking: disabled`），对话本身和「测试连接」保持思考模式。
+
+所有模型请求都开启流式用量（`stream_usage`）。每轮结束（完成、失败、停止，以及进入等待审批）时把
+用量写入 `kubedoor_ai_runs.usage`，并附在 `done` 事件里：`model_calls`、`input_tokens`、
+`output_tokens`、`cache_read_tokens`（DeepSeek 的 `prompt_cache_hit_tokens`）、
+`reasoning_tokens`、`last_input_tokens`（主 Agent 最近一次请求的输入，即当前上下文大小）和
+`max_input_tokens`。审批恢复后在原有用量上累加；子 Agent 的调用计入总量，摘要请求本身不计入。
+
 ## 全局记忆库
 
 所有登录用户可查看、引用全局记忆，全局读写用户（或管理员）可手动新建、编辑、删除；会话历史
@@ -211,6 +233,17 @@ DeepAgents 加载仓库内 `skills/kubedoor-k8s`，Skills 文件只读；会话�
 
 企微会话单独持久化，不会显示在网页 AI 会话列表中；网页 AI 的模型配置保持原样。Bot Secret 和模型 API Key 留空保存表示保持原密钥不变；修改 Base URL、模型或 Bot ID 后保存会重建长连接。首次接入建议先测试模型工具调用，保存启用配置后确认连接状态为「已连接」，再绑定测试账号和只读集群做单聊验收。
 
+企微只有一个聊天窗口，会话边界由服务端管理：
+
+- **空闲自动开新对话**：距当前对话最后一条消息超过「对话空闲超时」（企微配置页，默认 120 分钟，0 表示关闭），新消息进入新对话，回复开头提示「距上次对话已超过 2 小时，已开始新对话（发送「继续上次」可回到之前的对话）」。新对话不带上一个对话的摘要。当前对话有运行中的任务或未过期的待审批操作时不切换。
+- **「新对话」**（也认「新会话」「开始新对话」「清空上下文」「重新开始」「/new」「/reset」）：停止当前对话里未完成的任务，开始新对话。
+- **「继续上次」**（也认「继续上次对话」「回到上次」「/resume」）：和上一个对话互换，并刷新它的最后活跃时间，紧接着的消息不会又被空闲规则切走；上一个对话必须属于同一个花折账号。
+- **过期审批不再卡住对话**：收到新消息时，当前对话的任务如果只剩已过期的待审批操作，先自动停止它并提示；审批还没过期时回复「该会话已有任务运行或等待审批」，并提示可以发送「新对话」放弃它。
+- **欢迎卡片**：成员当天首次进入单聊时回一张卡片（当前集群、上次对话的时间和轮数），带「开始新对话」和「继续上次对话」按钮；只读本地数据库，保证 5 秒内回复。「继续上次对话」回到卡片上显示的那个对话。
+- **上下文占用提示**：上一轮最后一次请求的输入达到模型窗口的 25% 时，回答末尾的集群标注改为「—— 集群：X · 上下文 31%（发送「新对话」可重新开始）」。
+
+当前对话记在 `kubedoor_ai_wecom_users.session_id`，上一个对话记在 `previous_session_id`；旧对话保留不删，审计不受影响。同一成员的并发消息在 PostgreSQL advisory lock 内解析当前对话，只会建一个新对话。
+
 所有浏览器、Skills、工具与 MCP 入口由可信 nginx 注入 `X-Kubedoor-Token`、
 `X-User-Name`、`X-User-Permission`（全局角色 `admin`/`rw`/`read`/`none`）和
 `X-User-Clusters`（单独授权的集群 JSON，如 `{"prod":"rw","test":"none"}`）。这些值来自
@@ -266,6 +299,26 @@ GitHub 不稳定时，可在 `docker build` 时加 `--build-arg HTTPS_PROXY=http
 python -m pip install -i https://pypi.tuna.tsinghua.edu.cn/simple/ ./src/kubedoor-tools -r src/kubedoor-ai/requirements.txt
 python src/kubedoor-ai/kubedoor-ai.py
 ```
+
+## 开发约定：前缀缓存与检查点
+
+DeepSeek 等模型的上下文缓存要求请求从第一个 token 起完整匹配；命中价格只有未命中的几十分之一，
+长对话的成本和首 token 延迟都取决于它。改动运行时（系统提示、中间件、消息构造）时必须保持以下
+不变量（设计见 [design.md 3.1 节](../../docs/ai-agent-framework-study/conversation-context/design.md#31-缓存不变量)）：
+
+| 编号 | 不变量 |
+| --- | --- |
+| I1 | 系统消息（包括 DeepAgents 追加的部分）只取决于代码版本和模型的 harness profile，不随时间、用户、会话、渠道、集群、来源能力、权限、Skills 选择而变化 |
+| I2 | 工具定义（名称、描述、参数 schema、顺序）只取决于代码版本 |
+| I3 | 历史消息一旦进入检查点，之后每次请求的序列化结果逐字节相同；例外只有摘要事件（一次性替换）和异常修复（给悬空的工具调用补结果） |
+| I4 | 会变的信息只能放进当轮新增用户消息开头的 `<kubedoor_turn_context>` 块（`runtime.build_turn_context`）；子 Agent 放在它系统提示的末尾，审批恢复时沿用本轮开始时的块 |
+| I5 | 同一会话中，请求的 messages 只追加、不修改 |
+| I6 | 中间件对请求的改写必须是确定性的，不得读取时间、随机数或外部状态来修改提示或历史 |
+
+- 不启用 DeepAgents 的旧参数截断（`truncate_args_settings=None`）和工具结果清理（`ContextEditingMiddleware`）；不给 DeepSeek 传 `user_id`（会按用户隔离缓存）。
+- 中间件的 `before_model` / `after_model` 只返回内容实际改动的消息（按消息 ID 替换），没有改动时返回 `None`。messages 用 DeltaChannel 增量存储，返回整个消息列表会让检查点写入随轮数二次增长。
+- 声明式子 Agent 不继承主 Agent 的中间件覆盖，新增的中间件要同时加进子 Agent 的 `middleware`。
+- 守护测试：`tests/test_cache_stability.py`（按 DeepSeek 实际请求格式录制 payload，检查 system、tools、历史在轮次、会话、渠道、审批恢复之间逐字节稳定）、`tests/test_runtime.py` 的检查点写入用例。这两组测试失败时先修代码，不要改断言。
 
 ## 测试
 

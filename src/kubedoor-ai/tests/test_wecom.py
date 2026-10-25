@@ -1,9 +1,14 @@
+import asyncio
+import json
+from collections import defaultdict
+from contextlib import asynccontextmanager
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
 import pytest
 
-from kubedoor_ai.domain import AIError, Identity
+from kubedoor_ai.domain import BEIJING_TZ, AIError, Identity
 from kubedoor_ai.http import create_app
 from kubedoor_ai.wecom import WeComIntegration, _limit_stream
 
@@ -44,10 +49,107 @@ class Store:
         return self.events if "FROM kubedoor_ai_events" in sql else []
 
 
+class SessionStore(Store):
+    """会话边界用到的表放在内存里;transaction() 用每个成员一把锁模拟 pg_advisory_xact_lock"""
+    def __init__(self, members=None, idle_minutes=120, **kwargs):
+        super().__init__(**kwargs)
+        self.members = members or {}
+        self.sessions, self.runs = {}, {}
+        self.idle_minutes = idle_minutes
+        self.locks = defaultdict(asyncio.Lock)
+        self.member_updates = []
+        self.now = datetime.now(timezone.utc)
+
+    @asynccontextmanager
+    async def transaction(self):
+        held = []
+        try:
+            yield SessionTx(self, held)
+        finally:
+            for lock in held:
+                lock.release()
+
+    async def one(self, sql, *args):
+        if "FROM kubedoor_ai_sessions s" in sql:   # 欢迎卡片不进事务,直接读
+            return await SessionTx(self, []).one(sql, *args)
+        return await super().one(sql, *args)
+
+    async def message(self, run, role, content, tools=None):
+        return {"role": role, "content": content}
+
+    def cancel(self, run):
+        self.runs[run["id"]]["status"] = "cancelled"
+
+
+class SessionTx:
+    def __init__(self, store, held):
+        self.store, self.held = store, held
+
+    async def execute(self, sql, *args):
+        await asyncio.sleep(0)   # 让并发的消息真正交错执行
+        store = self.store
+        if "pg_advisory_xact_lock" in sql:
+            lock = store.locks[args[0]]
+            await lock.acquire()
+            self.held.append(lock)
+        elif sql.startswith("INSERT INTO kubedoor_ai_sessions"):
+            store.sessions[args[0]] = {"username": args[1], "channel_key": args[2], "updated_at": store.now, "rounds": 0}
+        elif "UPDATE kubedoor_ai_wecom_users SET session_id" in sql:
+            store.member_updates.append((sql, args))
+            store.members.setdefault(args[0], {}).update(session_id=args[1], previous_session_id=args[2])
+        elif "UPDATE kubedoor_ai_sessions SET updated_at=now()" in sql:
+            store.sessions[args[0]]["updated_at"] = store.now
+        else:
+            raise AssertionError(sql)
+
+    async def one(self, sql, *args):
+        await asyncio.sleep(0)
+        store = self.store
+        if "FROM kubedoor_ai_wecom_users" in sql:
+            return dict(store.members[args[0]]) if args[0] in store.members else None
+        if "FROM kubedoor_ai_wecom_config" in sql:
+            return {"session_idle_minutes": store.idle_minutes}
+        if "FROM kubedoor_ai_sessions s" in sql:
+            session_id, username, prefix, idle = args
+            row = store.sessions.get(session_id)
+            if not row or row["username"] != username or not row["channel_key"].startswith(prefix):
+                return None
+            return {"id": session_id, "updated_at": row["updated_at"].isoformat(), "rounds": row["rounds"],
+                    "idle": store.now - row["updated_at"] > timedelta(minutes=idle)}
+        if "FROM kubedoor_ai_runs r" in sql:
+            active = [run for run in store.runs.values() if run["session_id"] == args[0] and run["status"] in ("running", "waiting_approval")]
+            return {"id": active[-1]["id"], "status": active[-1]["status"],
+                    "approvable": any(at > store.now for at in active[-1].get("expires", []))} if active else None
+        raise AssertionError(sql)
+
+
+IDENTITY = Identity("guest", "read")
+PROVIDER_CONFIG = {"base_url": "https://llm.example/v1", "api_key": "key", "model": "model-1"}
+
+
+def own(store, session_id, *, hours_ago=0, rounds=0, username="guest"):
+    store.sessions[session_id] = {"username": username, "channel_key": f"wx-bob:{username}",
+                                  "updated_at": store.now - timedelta(hours=hours_ago), "rounds": rounds}
+
+
+def member_chat(members, **kwargs):
+    """未绑定成员 wx-bob 按默认权限账号 guest 聊天,会话表在内存里"""
+    store = SessionStore(members=members, mapping={"wecom_userid": "wx-bob", "username": None, "current_env": "prod"},
+                         unbound="guest", **kwargs)
+    master = AsyncMock(return_value={"username": "guest", "permission": "read", "clusters": {}})
+    integration, service = make_integration(store=store, master=master)
+    service.bootstrap.return_value = {"clusters": [{"env": "prod", "permission": "read"}]}
+    integration.config = PROVIDER_CONFIG
+    return integration, service, store, connect(integration)
+
+
 def make_integration(store=None, master=None):
+    store = store or Store()
     gateway = SimpleNamespace(master=master or AsyncMock(),
                               cipher=SimpleNamespace(encrypt=Mock(return_value=b"ciphertext")))
-    service = SimpleNamespace(store=store or Store(), gateway=gateway,
+    runtime = SimpleNamespace(start=Mock(),
+                              cancel=AsyncMock(side_effect=lambda run, identity: getattr(store, "cancel", lambda _: None)(run)))
+    service = SimpleNamespace(store=store, gateway=gateway, runtime=runtime, new_run=AsyncMock(),
                               bootstrap=AsyncMock(return_value={"clusters": []}),
                               decision=AsyncMock(return_value={"status": "running"}))
     return WeComIntegration(service), service
@@ -57,6 +159,7 @@ def connect(integration):
     integration.client = SimpleNamespace(
         is_connected=True,
         reply_stream=AsyncMock(),
+        reply_welcome=AsyncMock(),
         update_template_card=AsyncMock(),
     )
     return integration.client
@@ -264,14 +367,14 @@ async def test_unbound_member_can_approve_with_default_account_until_it_changes(
 
 @pytest.mark.asyncio
 async def test_new_session_never_binds_member_to_default_account():
-    store = Store()
+    store = SessionStore(members={"wx-bob": {}})
     integration, _ = make_integration(store=store)
-    session_id = await integration._get_session("wx-bob", Identity("guest", "read"),
-                                                {"wecom_userid": "wx-bob", "username": None})
-    assert session_id == "session-1"
-    sql, args = store.executes[-1]
+    session_id, notices, active = await integration._current_session("wx-bob", Identity("guest", "read"))
+    assert (notices, active) == ([], None)
+    assert store.sessions[session_id]["channel_key"] == f"wx-bob:guest:{session_id}"
+    sql, args = store.member_updates[-1]
     assert "SET session_id=" in sql and "username" not in sql
-    assert args == ("wx-bob", "session-1")
+    assert args == ("wx-bob", session_id, None)
 
 
 @pytest.mark.asyncio
@@ -283,6 +386,7 @@ async def test_cluster_menu_numbers_clusters_and_explains_switching():
     assert "1. b2c-prod-kunlun · 只读\n" in menu and "3. cassmall-kunlun · 只读（当前）" in menu
     assert "4. tx-flink-prod · 只读 · agent 离线" in menu
     assert "切换集群 序号或名称" in menu
+    assert menu.endswith("发送「新对话」重新开始，「继续上次」回到上一个对话。")
     integration._run_message.assert_not_awaited()
     assert saved_envs(store) == []
 
@@ -387,6 +491,23 @@ async def test_final_answer_names_its_cluster():
     assert final[3] is True
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("last_input, ending", [
+    (262_000, "—— 集群：prod（发送「集群」查看或切换）"),           # 25% 以下不提示
+    (262_144, "—— 集群：prod · 上下文 25%（发送「新对话」可重新开始）"),
+    (330_000, "—— 集群：prod · 上下文 31%（发送「新对话」可重新开始）"),
+])
+async def test_large_context_share_suggests_a_new_conversation(last_input, ending):
+    store = Store()
+    usage = {"model_calls": 3, "last_input_tokens": last_input, "max_input_tokens": 1_048_576}
+    store.events = [{"seq": 1, "type": "message", "data": {"content": "已完成。"}},
+                    {"seq": 2, "type": "done", "data": {"status": "completed", "usage": usage}}]
+    integration, _ = make_integration(store=store)
+    client = connect(integration)
+    await integration._watch_run({"body": {}}, "wx-bob", IDENTITY, "run-1", 0, env="prod")
+    assert last_reply(client) == "已完成。\n\n" + ending
+
+
 def test_stream_content_limit_preserves_utf8_boundaries():
     result = _limit_stream("运维" * 12000)
     assert result.encode("utf-8").decode("utf-8") == result
@@ -413,6 +534,48 @@ async def test_admin_config_never_returns_stored_bot_secret_or_model_key():
     assert "bot-secret" not in repr(result) and "model-secret" not in repr(result)
 
 
+class ConfigStore:
+    """kubedoor_ai_wecom_config 单行:加密配置 + 空闲超时列"""
+    def __init__(self):
+        self.row = None
+
+    async def one(self, sql, *args):
+        if sql.startswith("INSERT INTO kubedoor_ai_wecom_config"):
+            enabled, encrypted, username, idle, default = args
+            previous = self.row["session_idle_minutes"] if self.row else default
+            self.row = {"enabled": enabled, "encrypted_config": encrypted, "updated_by": username, "updated_at": "now",
+                        "session_idle_minutes": previous if idle is None else idle}
+            return self.row
+        assert "FROM kubedoor_ai_wecom_config" in sql
+        return self.row
+
+
+@pytest.mark.asyncio
+async def test_wecom_model_window_and_idle_timeout_are_saved_and_returned():
+    cipher = SimpleNamespace(encrypt=lambda env, value: json.dumps(value).encode(), decrypt=lambda env, data: json.loads(data))
+    integration = WeComIntegration(SimpleNamespace(store=ConfigStore(), gateway=SimpleNamespace(cipher=cipher)))
+    admin = Identity("admin", "admin")
+    assert (await integration.admin_config())["session_idle_minutes"] == 120
+    base = {"enabled": False, "bot_id": "bot-1", "base_url": "https://api.deepseek.com", "model": "deepseek-flash"}
+    saved = await integration.save_config(admin, {**base, "max_input_tokens": 262_144, "max_output_tokens": 65_536,
+                                                  "compression_ratio": 0.6, "session_idle_minutes": 90})
+    window = ("max_input_tokens", "max_output_tokens", "compression_ratio", "session_idle_minutes")
+    assert [saved[key] for key in window] == [262_144, 65_536, 0.6, 90]
+    # 不传的字段沿用已保存的值,企微提问用的 Provider 带上这些字段
+    saved = await integration.save_config(admin, base)
+    assert [saved[key] for key in window] == [262_144, 65_536, 0.6, 90]
+    assert integration._provider_settings()["max_input_tokens"] == 262_144
+    # null = 按模型推断;0 = 关闭空闲自动开新对话
+    saved = await integration.save_config(admin, {**base, "max_input_tokens": None, "max_output_tokens": None,
+                                                  "compression_ratio": None, "session_idle_minutes": 0})
+    assert [saved[key] for key in window] == [None, None, None, 0]
+    for invalid in ({"max_input_tokens": 1024}, {"max_output_tokens": 512}, {"compression_ratio": 0.9},
+                    {"session_idle_minutes": 10081}, {"session_idle_minutes": -1},
+                    {"session_idle_minutes": True}, {"session_idle_minutes": "30"}):
+        with pytest.raises(AIError):
+            await integration.save_config(admin, {**base, **invalid})
+
+
 def test_non_admin_cannot_read_or_change_wecom_settings():
     app = create_app(SimpleNamespace(), token="test-token")
     headers = {"X-Kubedoor-Token": "test-token", "X-User-Name": "reader", "X-User-Permission": "read"}
@@ -422,3 +585,253 @@ def test_non_admin_cannot_read_or_change_wecom_settings():
         assert client.get("/api/ai/wecom", headers=headers).status_code == 403
         assert client.put("/api/ai/wecom", headers=headers, json={"enabled": True}).status_code == 403
         assert client.put("/api/ai/wecom/unbound", headers=headers, json={"username": "reader"}).status_code == 403
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("idle_minutes, elapsed", [(120, "2 小时"), (90, "90 分钟")])
+async def test_idle_conversation_moves_the_next_message_to_a_new_one(idle_minutes, elapsed):
+    store = SessionStore(members={"wx-bob": {"session_id": "old"}}, idle_minutes=idle_minutes)
+    own(store, "old", hours_ago=3, rounds=12)
+    integration, _ = make_integration(store=store)
+    session_id, notices, active = await integration._current_session("wx-bob", IDENTITY)
+    assert session_id != "old" and active is None
+    assert notices == [f"距上次对话已超过 {elapsed}，已开始新对话（发送「继续上次」可回到之前的对话）"]
+    assert store.members["wx-bob"] == {"session_id": session_id, "previous_session_id": "old"}
+    assert store.sessions["old"]["rounds"] == 12   # 旧对话保留
+    assert await integration._current_session("wx-bob", IDENTITY) == (session_id, [], None)
+
+
+@pytest.mark.asyncio
+async def test_recent_conversation_or_disabled_timeout_keeps_the_conversation():
+    store = SessionStore(members={"wx-bob": {"session_id": "old"}})
+    own(store, "old", hours_ago=1)
+    integration, _ = make_integration(store=store)
+    assert await integration._current_session("wx-bob", IDENTITY) == ("old", [], None)
+    store.idle_minutes = 0
+    store.sessions["old"]["updated_at"] -= timedelta(days=30)
+    assert await integration._current_session("wx-bob", IDENTITY) == ("old", [], None)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status, expires_in", [("running", []), ("waiting_approval", [timedelta(minutes=10), timedelta(minutes=-1)])])
+async def test_running_task_or_pending_approval_keeps_an_idle_conversation(status, expires_in):
+    store = SessionStore(members={"wx-bob": {"session_id": "old"}})
+    own(store, "old", hours_ago=3)
+    store.runs["run-1"] = {"id": "run-1", "session_id": "old", "status": status, "expires": [store.now + d for d in expires_in]}
+    integration, service = make_integration(store=store)
+    session_id, notices, active = await integration._current_session("wx-bob", IDENTITY)
+    assert (session_id, notices, active["id"]) == ("old", [], "run-1")
+    service.runtime.cancel.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("hours_ago, switched", [(1, False), (3, True)])
+async def test_task_left_with_only_expired_approvals_is_stopped_before_the_new_message(hours_ago, switched):
+    store = SessionStore(members={"wx-bob": {"session_id": "old"}})
+    own(store, "old", hours_ago=hours_ago)
+    store.runs["run-1"] = {"id": "run-1", "session_id": "old", "status": "waiting_approval", "expires": [store.now - timedelta(minutes=1)]}
+    integration, service = make_integration(store=store)
+    session_id, notices, active = await integration._current_session("wx-bob", IDENTITY)
+    service.runtime.cancel.assert_awaited_once()
+    assert store.runs["run-1"]["status"] == "cancelled" and active is None
+    assert notices[0] == "上一个待审批的操作已过期，已停止该任务。"
+    assert (session_id != "old") is switched and len(notices) == 1 + switched
+
+
+@pytest.mark.asyncio
+async def test_changed_account_continues_in_a_new_conversation():
+    store = SessionStore(members={"wx-bob": {"session_id": "old"}})
+    own(store, "old", username="alice")
+    integration, _ = make_integration(store=store)
+    session_id, notices, _ = await integration._current_session("wx-bob", IDENTITY)
+    assert session_id != "old" and notices == []
+    assert store.members["wx-bob"]["previous_session_id"] == "old"
+
+
+@pytest.mark.asyncio
+async def test_concurrent_messages_open_only_one_new_conversation():
+    store = SessionStore(members={"wx-bob": {"session_id": "old"}})
+    own(store, "old", hours_ago=3)
+    integration, _ = make_integration(store=store)
+    results = await asyncio.gather(*(integration._current_session("wx-bob", IDENTITY) for _ in range(3)))
+    assert len({session_id for session_id, _, _ in results}) == 1 and len(store.sessions) == 2
+    assert sum(bool(notices) for _, notices, _ in results) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("command", ["新对话", "新会话", "开始新对话", "清空上下文", "重新开始", "/new", "/reset", "/NEW"])
+async def test_new_conversation_command_stops_the_unfinished_task(command):
+    integration, service, store, client = member_chat({"wx-bob": {"session_id": "old"}})
+    own(store, "old", rounds=3)
+    store.runs["run-1"] = {"id": "run-1", "session_id": "old", "status": "running"}
+    await integration._handle_text(text_frame("wx-bob", command))
+    assert last_reply(client) == "已开始新对话。上一个对话里未完成的任务已停止。"
+    service.runtime.cancel.assert_awaited_once()
+    assert store.members["wx-bob"]["previous_session_id"] == "old" != store.members["wx-bob"]["session_id"]
+    service.new_run.assert_not_awaited()
+    await integration._handle_text(text_frame("wx-bob", command, "message-2"))
+    assert last_reply(client) == "已开始新对话。"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("command", ["继续上次", "继续上次对话", "回到上次", "/resume", "/RESUME"])
+async def test_resume_command_returns_to_the_previous_conversation_and_keeps_it(command):
+    integration, service, store, client = member_chat({"wx-bob": {"session_id": "new", "previous_session_id": "old"}})
+    own(store, "old", hours_ago=20, rounds=12)
+    own(store, "new")
+    last_active = store.sessions["old"]["updated_at"].astimezone(BEIJING_TZ)
+    await integration._handle_text(text_frame("wx-bob", command))
+    assert last_reply(client) == f"已回到上一个对话（最后活跃：{last_active:%m-%d %H:%M}，共 12 轮）。"
+    assert store.members["wx-bob"] == {"session_id": "old", "previous_session_id": "new"}
+    # 切回时刷新了最后活跃时间：紧接着的消息不会被空闲规则切走
+    assert await integration._current_session("wx-bob", IDENTITY) == ("old", [], None)
+    service.new_run.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("previous", [None, "alice", "gone"])
+async def test_resume_refuses_missing_or_other_account_conversations(previous):
+    members = {"wx-bob": {"session_id": "new", "previous_session_id": None if previous is None else "old"}}
+    integration, _, store, client = member_chat(members)
+    own(store, "new")
+    if previous == "alice":
+        own(store, "old", username="alice")
+    await integration._handle_text(text_frame("wx-bob", "继续上次"))
+    assert last_reply(client) == "没有可以回到的对话。"
+    assert store.members == members
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status, expires_in, offered", [("waiting_approval", timedelta(minutes=10), True), ("running", None, False)])
+async def test_busy_conversation_reply_offers_a_new_conversation_for_pending_approval(status, expires_in, offered):
+    integration, service, store, client = member_chat({"wx-bob": {"session_id": "old"}})
+    own(store, "old")
+    store.runs["run-1"] = {"id": "run-1", "session_id": "old", "status": status, "expires": [store.now + expires_in] if expires_in else []}
+    await integration._handle_text(text_frame("wx-bob", "查一下 Pod"))
+    reply = last_reply(client)
+    assert reply.startswith("该会话已有任务运行或等待审批，请稍后重试。")
+    assert ("发送「新对话」可以放弃它并重新开始。" in reply) is offered
+    service.new_run.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_concurrent_run_conflict_is_reported_as_busy():
+    integration, service, store, client = member_chat({"wx-bob": {"session_id": "old"}})
+    own(store, "old")
+    service.new_run.side_effect = AIError("该会话有正在运行或等待批准的任务", 409, "run_active")
+    await integration._handle_text(text_frame("wx-bob", "查一下 Pod"))
+    assert last_reply(client) == "该会话已有任务运行或等待审批，请稍后重试。"
+
+
+@pytest.mark.asyncio
+async def test_idle_switch_notice_leads_the_streamed_answer():
+    integration, service, store, client = member_chat({"wx-bob": {"session_id": "old"}})
+    own(store, "old", hours_ago=3)
+    store.events = [{"seq": 1, "type": "message", "data": {"content": "共有 3 个 Pod。"}},
+                    {"seq": 2, "type": "done", "data": {"status": "completed"}}]
+    service.new_run.side_effect = lambda identity, sid, scope, **kwargs: ({"id": "run-1", "session_id": sid, "scope": scope}, True)
+    await integration._handle_text(text_frame("wx-bob", "有几个 Pod"))
+    session_id = store.members["wx-bob"]["session_id"]
+    assert service.new_run.await_args.args[1] == session_id != "old"
+    assert service.runtime.start.call_args.args[2].model == "model-1"
+    final = last_reply(client)
+    assert final.startswith("距上次对话已超过 2 小时，已开始新对话（发送「继续上次」可回到之前的对话）\n\n共有 3 个 Pod。")
+    assert "集群：prod" in final
+
+
+def enter_frame(userid="wx-bob", msgid="enter-1"):
+    return {"headers": {"req_id": "req-enter"}, "body": {"msgid": msgid, "from": {"userid": userid}, "chattype": "single",
+                                                          "event": {"eventtype": "enter_chat"}}}
+
+
+def card_frame(task_id, key, msgid="card-1"):
+    return {"body": {"msgid": msgid, "from": {"userid": "wx-bob"}, "event": {"task_id": task_id, "event_key": key}}}
+
+
+def welcome_card(client):
+    frame, body = client.reply_welcome.await_args.args
+    assert body["msgtype"] == "template_card"
+    return body["template_card"]
+
+
+@pytest.mark.asyncio
+async def test_welcome_card_shows_cluster_and_last_conversation_without_calling_master():
+    store = SessionStore(mapping={"wecom_userid": "wx-bob", "username": "alice", "current_env": "prod", "session_id": "old"})
+    own(store, "old", rounds=12, username="alice")
+    yesterday = datetime.now(BEIJING_TZ).replace(hour=18, minute=20, second=0, microsecond=0) - timedelta(days=1)
+    store.sessions["old"]["updated_at"] = yesterday.astimezone(timezone.utc)
+    integration, service = make_integration(store=store)
+    client = connect(integration)
+    await integration._handle_enter_chat(enter_frame())
+    card = welcome_card(client)
+    assert card["card_type"] == "button_interaction"
+    assert card["main_title"] == {"title": "花折 AI 助手", "desc": "当前集群：prod"}
+    assert card["sub_title_text"] == "上次对话：昨天 18:20，共 12 轮"
+    assert [b["key"] for b in card["button_list"]] == ["session_new", "session_resume"]
+    assert card["task_id"].startswith("session_old_")
+    service.gateway.master.assert_not_awaited()
+    service.bootstrap.assert_not_awaited()
+    # 同一事件重复投递不再回复
+    await integration._handle_enter_chat(enter_frame())
+    client.reply_welcome.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_welcome_for_unbound_members_uses_default_account_or_asks_for_binding():
+    store = SessionStore(mapping={"wecom_userid": "wx-bob", "username": None}, unbound="guest", unbound_env="test")
+    integration, _ = make_integration(store=store)
+    client = connect(integration)
+    await integration._handle_enter_chat(enter_frame())
+    card = welcome_card(client)
+    assert card["main_title"]["desc"] == "当前集群：test" and card["sub_title_text"] == "直接发送问题即可开始对话。"
+    assert [b["key"] for b in card["button_list"]] == ["session_new"] and card["task_id"].startswith("session_none_")
+
+    store.unbound = None
+    await integration._handle_enter_chat(enter_frame(msgid="enter-2"))
+    body = client.reply_welcome.await_args.args[1]
+    assert body["msgtype"] == "text" and "尚未绑定花折账号" in body["text"]["content"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("current, previous", [("old", None), ("new", "old")])
+async def test_welcome_continue_button_returns_to_the_conversation_on_the_card(current, previous):
+    # 卡片显示的是 old；用户可能先发了消息、被空闲规则切到了 new，再点「继续上次对话」
+    integration, service, store, client = member_chat({"wx-bob": {"session_id": current, "previous_session_id": previous}})
+    own(store, "old", hours_ago=20, rounds=12)
+    own(store, "new")
+    await integration._handle_card_event(card_frame("session_old_ab12cd34ef56", "session_resume"))
+    card = client.update_template_card.await_args.args[1]
+    assert card == {"card_type": "text_notice", "main_title": {"title": "继续上次对话"},
+                    "sub_title_text": "已回到上次的对话（共 12 轮），直接发送问题即可继续。", "task_id": "session_old_ab12cd34ef56"}
+    assert store.members["wx-bob"]["session_id"] == "old"
+    # 已经在 old 上时指针不变；从 new 切回时 new 成为上一个对话
+    assert store.members["wx-bob"]["previous_session_id"] == (previous if current == "old" else current)
+    assert await integration._current_session("wx-bob", IDENTITY) == ("old", [], None)
+    # 同一个按钮事件重复投递只处理一次
+    await integration._handle_card_event(card_frame("session_old_ab12cd34ef56", "session_resume"))
+    client.update_template_card.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_welcome_new_button_starts_a_conversation_and_checks_the_member_first():
+    integration, service, store, client = member_chat({"wx-bob": {"session_id": "old"}})
+    own(store, "old", rounds=3)
+    await integration._handle_card_event(card_frame("session_old_ab12cd34ef56", "session_new"))
+    card = client.update_template_card.await_args.args[1]
+    assert (card["main_title"]["title"], card["sub_title_text"]) == ("已开始新对话", "已开始新对话。")
+    assert store.members["wx-bob"]["previous_session_id"] == "old"
+
+    store.unbound = None   # 默认权限被关闭:不能再切换对话
+    await integration._handle_card_event(card_frame("session_none_ab12cd34ef56", "session_new", "card-2"))
+    card = client.update_template_card.await_args.args[1]
+    assert card["main_title"]["title"] == "无法切换对话" and "尚未绑定" in card["sub_title_text"]
+
+
+def test_friendly_time_uses_beijing_days():
+    from kubedoor_ai.wecom import _card_session, _friendly_time
+    now = datetime.now(BEIJING_TZ).replace(hour=9, minute=5, second=0, microsecond=0)
+    assert _friendly_time(now.astimezone(timezone.utc).isoformat()) == "今天 09:05"
+    assert _friendly_time(now - timedelta(days=1)) == "昨天 09:05"
+    assert _friendly_time(now - timedelta(days=3)) == f"{now - timedelta(days=3):%m-%d} 09:05"
+    assert _card_session("session_6f1c4b3e-1d2a-4c5b-9e8f-0a1b2c3d4e5f_ab12") == "6f1c4b3e-1d2a-4c5b-9e8f-0a1b2c3d4e5f"
+    assert _card_session("session_none_ab12") is None and _card_session(None) is None and _card_session("task-1") is None

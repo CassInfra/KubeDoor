@@ -4,6 +4,12 @@ export interface AIProvider {
   base_url: string;
   api_key: string;
   model: string;
+  /** 上下文窗口（token）；null 表示由服务端按模型推断 */
+  max_input_tokens?: number | null;
+  /** 最大输出（token）；null 表示由服务端按模型推断 */
+  max_output_tokens?: number | null;
+  /** 压缩阈值（0.2–0.8，上下文达到窗口的这个比例时自动摘要）；null 表示默认 0.5 */
+  compression_ratio?: number | null;
 }
 
 export interface AIResource {
@@ -146,6 +152,11 @@ export interface WeComConfig {
   bot_id?: string;
   base_url?: string;
   model?: string;
+  max_input_tokens?: number | null;
+  max_output_tokens?: number | null;
+  compression_ratio?: number | null;
+  /** 对话空闲多少分钟后，新消息自动进入新对话；0 表示关闭 */
+  session_idle_minutes?: number;
   has_bot_secret: boolean;
   has_api_key: boolean;
   updated_by?: string;
@@ -378,6 +389,10 @@ export const aiApi = {
     base_url: string;
     api_key?: string;
     model: string;
+    max_input_tokens: number | null;
+    max_output_tokens: number | null;
+    compression_ratio: number | null;
+    session_idle_minutes: number;
   }) => request<WeComConfig>("/wecom", "PUT", data),
   testWecomProvider: (provider: AIProvider) =>
     request<Record<string, any>>("/wecom/test", "POST", { provider }),

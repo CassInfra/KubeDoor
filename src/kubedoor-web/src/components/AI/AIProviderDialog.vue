@@ -3,25 +3,47 @@ import { reactive, ref, watch } from "vue";
 import { ElMessage, ElMessageBox } from "element-plus";
 import { aiApi, type AIProvider } from "@/api/ai";
 import { useAIStoreHook } from "@/store/modules/ai";
+import {
+  followModelLimits,
+  modelLimitsFor,
+  type AIModelLimits
+} from "@/utils/ai";
+import AIModelLimitsFields from "./AIModelLimitsFields.vue";
 
 const visible = defineModel<boolean>({ default: false });
 const ai = useAIStoreHook();
 const form = reactive<AIProvider>({ base_url: "", api_key: "", model: "" });
+const limits = ref<AIModelLimits>(modelLimitsFor(""));
 const testing = ref(false);
 const result = ref("");
 const successful = ref(false);
+function load() {
+  const { base_url, api_key, model } = ai.provider;
+  Object.assign(form, { base_url, api_key, model });
+  limits.value = modelLimitsFor(model, ai.provider);
+}
 watch(visible, value => {
   if (value) {
-    Object.assign(form, ai.provider);
+    load();
     result.value = "";
   }
 });
+// 模型名变化时，没手动改过的上下文设置按新模型名重新预填。
+// 同步触发：load() 先设模型名、再载入已保存的值，保存的值不会被改写。
 watch(
-  () => [form.base_url, form.api_key, form.model],
+  () => form.model,
+  (model, previous) => {
+    limits.value = followModelLimits(limits.value, previous, model);
+  },
+  { flush: "sync" }
+);
+watch(
+  () => [form.base_url, form.api_key, form.model, limits.value],
   () => {
     result.value = "";
   }
 );
+const settings = (): AIProvider => ({ ...form, ...limits.value });
 
 function valid() {
   if (!form.base_url.trim() || !form.model.trim()) {
@@ -51,7 +73,7 @@ async function test() {
   testing.value = true;
   result.value = "";
   try {
-    const response = await aiApi.testProvider({ ...form });
+    const response = await aiApi.testProvider(settings());
     successful.value = response.success !== false && response.ok !== false;
     const tools =
       response.tool_calling ??
@@ -79,7 +101,7 @@ async function test() {
 function save() {
   if (!valid()) return;
   try {
-    ai.saveProvider({ ...form });
+    ai.saveProvider(settings());
     visible.value = false;
     ElMessage.success("模型配置已保存到当前账号的浏览器存储。");
   } catch (reason) {
@@ -96,7 +118,7 @@ async function forget() {
       { type: "warning" }
     );
     ai.forgetProvider();
-    Object.assign(form, ai.provider);
+    load();
     ElMessage.success("模型配置已清除");
   } catch {
     /* Closing confirmation is not an error. */
@@ -147,6 +169,11 @@ async function forget() {
           ID，需与供应商文档或模型列表一致；页面展示名或自定义别称可能无法调用。
         </p>
       </el-form-item>
+      <AIModelLimitsFields
+        v-model="limits"
+        :model="form.model"
+        :disabled="testing"
+      />
     </el-form>
     <p class="settings-hint">
       使用兼容 OpenAI 的接口。配置仅保存到此浏览器，执行请求时发送给服务端，API

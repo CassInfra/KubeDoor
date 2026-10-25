@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import uuid
+from contextlib import asynccontextmanager
 from datetime import datetime
 from pathlib import Path
 
@@ -60,6 +61,12 @@ class Store:
     async def execute(self, sql, *args):
         return await self.pool.execute(sql, *args)
 
+    @asynccontextmanager
+    async def transaction(self):
+        """One connection inside a transaction, with the same one/fetch/execute helpers."""
+        async with self.pool.acquire() as conn, conn.transaction():
+            yield Transaction(conn)
+
     async def session(self, sid: str, identity: Identity, channel="web"):
         if channel == "web":
             row = await self.one("SELECT * FROM kubedoor_ai_sessions WHERE id=$1::uuid AND username=$2 AND channel='web'", sid, identity.username)
@@ -116,3 +123,17 @@ class Store:
 
     async def close(self):
         await self.pool.close()
+
+
+class Transaction:
+    def __init__(self, conn):
+        self.conn = conn
+
+    async def fetch(self, sql, *args):
+        return plain(await self.conn.fetch(sql, *args))
+
+    async def one(self, sql, *args):
+        return plain(await self.conn.fetchrow(sql, *args))
+
+    async def execute(self, sql, *args):
+        return await self.conn.execute(sql, *args)

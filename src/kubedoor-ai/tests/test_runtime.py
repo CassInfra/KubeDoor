@@ -2,7 +2,7 @@ import json
 from unittest.mock import AsyncMock
 
 import pytest
-from langchain_core.messages import AIMessage
+from langchain_core.messages import AIMessage, ToolMessage
 from langgraph.checkpoint.memory import InMemorySaver
 
 from kubedoor_ai.domain import CredentialCipher, Identity, Provider
@@ -63,8 +63,41 @@ async def test_secret_echo_is_removed_before_checkpoint_not_just_in_ui():
     assert "provider-private-key" not in "\n".join(checkpoints)
     state = await runtime.graph(ctx, provider).aget_state({"configurable": {"thread_id": "session-1"}})
     assert "[redacted]" in str(state.values["messages"])
+    assert "provider-private-key" not in str(state.values["messages"])
+    assert "provider-private-key" not in str(written_messages(runtime.checkpointer))
     assert "provider-private-key" not in str(runtime.store.events)
     assert "provider-private-key" not in str(runtime.store.messages)
+    await runtime.gateway.close()
+
+
+def written_messages(saver):
+    """Messages stored as writes of the delta-encoded messages channel."""
+    written = []
+    for writes in saver.writes.values():
+        for _, channel, value, _ in writes.values():
+            if channel == "messages":
+                loaded = saver.serde.loads_typed(value)
+                written.extend(loaded if isinstance(loaded, list) else [loaded])
+    return written
+
+
+@pytest.mark.asyncio
+async def test_checkpoint_writes_only_new_messages_each_turn():
+    runtime, ctx, provider = setup([AIMessage(content="答" * 2000)])
+    for index in range(12):
+        turn = RunContext({**ctx.run, "id": f"run-{index}"}, ctx.identity, secrets=ctx.secrets)
+        await runtime.run_graph(turn, provider, f"第 {index} 轮问题：" + "问" * 2000, None)
+        assert runtime.store.statuses[-1] == "completed"
+        # 每轮只新增一条用户消息和一条回答；中间件不能把整段历史再写一遍
+        assert len(written_messages(runtime.checkpointer)) == 2 * (index + 1)
+    state = await runtime.graph(ctx, provider).aget_state({"configurable": {"thread_id": "session-1"}})
+    assert len(state.values["messages"]) == 24
+    # 有消息真的被脱敏改动时，只写回改动的那一条
+    leaked = ToolMessage(content="tool echo provider-private-key", tool_call_id="call-x", id="tool-x")
+    middleware = SecretRedactionMiddleware(("provider-private-key",))
+    assert middleware.before_model({"messages": [*state.values["messages"], leaked]}, None) == {"messages": [leaked]}
+    assert leaked.content == "tool echo [redacted]"
+    assert middleware.after_model({"messages": [*state.values["messages"], leaked]}, None) is None
     await runtime.gateway.close()
 
 

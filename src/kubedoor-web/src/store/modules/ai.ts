@@ -31,8 +31,14 @@ const emptyScope = (): AIScope => ({
 const defaultProvider = (): AIProvider => ({
   base_url: "https://api.openai.com/v1",
   api_key: "",
-  model: ""
+  model: "",
+  max_input_tokens: null,
+  max_output_tokens: null,
+  compression_ratio: null
 });
+/** 浏览器里保存的上下文设置：旧数据没有这些字段时为 null，由服务端按模型推断 */
+const savedNumber = (value: unknown) =>
+  typeof value === "number" && Number.isFinite(value) ? value : null;
 const errorText = (error: unknown) =>
   error instanceof Error ? error.message : "请求失败，请稍后重试。";
 
@@ -275,7 +281,10 @@ export const useAIStore = defineStore("kubedoor-ai", () => {
     const settings = {
       base_url: value.base_url.trim().replace(/\/+$/, ""),
       api_key: value.api_key.trim(),
-      model: value.model.trim()
+      model: value.model.trim(),
+      max_input_tokens: savedNumber(value.max_input_tokens),
+      max_output_tokens: savedNumber(value.max_output_tokens),
+      compression_ratio: savedNumber(value.compression_ratio)
     };
     localStorage.setItem(providerStorageKey(owner), JSON.stringify(settings));
     provider.value = settings;
@@ -305,7 +314,10 @@ export const useAIStore = defineStore("kubedoor-ai", () => {
           provider.value = {
             base_url: saved.base_url,
             model: saved.model,
-            api_key: saved.api_key || ""
+            api_key: saved.api_key || "",
+            max_input_tokens: savedNumber(saved.max_input_tokens),
+            max_output_tokens: savedNumber(saved.max_output_tokens),
+            compression_ratio: savedNumber(saved.compression_ratio)
           };
         }
       } catch {

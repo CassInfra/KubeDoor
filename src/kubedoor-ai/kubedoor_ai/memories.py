@@ -10,7 +10,7 @@ from collections.abc import Mapping
 from langchain_core.messages import HumanMessage, SystemMessage
 
 from .domain import AIError, Provider, redact
-from .models import make_model
+from .models import make_model, without_thinking
 
 
 METADATA = "id,title,version,created_by,updated_by,created_at,updated_at"
@@ -212,7 +212,7 @@ class MemoryLibrary:
 内容将由用户编辑确认后再发布为全局记忆，当前只是草稿。保留限制和未验证事实，避免把某集群经验当作所有集群的固定规则。
 仅输出 JSON 对象，字段为 title（简体中文标题，最多 200 字符）、content（Markdown 正文，尽量不超过 8000 字符）。"""
         try:
-            model = self.model_factory(provider)
+            model = without_thinking(self.model_factory(provider))
             response = await asyncio.wait_for(model.ainvoke([
                 SystemMessage(content=prompt),
                 HumanMessage(content="输入范围说明：" + notice + "\n以下按时间顺序排列：\n\n" + "\n\n".join(selected)),

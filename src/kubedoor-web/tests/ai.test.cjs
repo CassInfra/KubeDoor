@@ -298,3 +298,63 @@ test("runs lock the cluster snapshot, drain cancellation, and permit switching w
     global.localStorage = previousStorage;
   }
 });
+
+test("context window prefill follows model-name rules and keeps hand-edited values", () => {
+  const K = 1024;
+  assert.deepEqual(utils.inferModelLimits("deepseek-flash"), {
+    max_input_tokens: 1024 * K,
+    max_output_tokens: 384 * K,
+    compression_ratio: 0.5,
+    verify: false
+  });
+  assert.equal(
+    utils.inferModelLimits(" DeepSeek/DeepSeek-V4-Pro ").max_output_tokens,
+    384 * K
+  );
+  assert.deepEqual(
+    [
+      utils.inferModelLimits("gpt-5.5").max_output_tokens,
+      utils.inferModelLimits("gpt-5.5").verify
+    ],
+    [128 * K, false]
+  );
+  // gpt-4o 等旧型号和其他模型同样按 1024K / 128K 预填，但提示按实际填写
+  for (const model of ["gpt-4o-mini", "qwen3", "openrouter/claude"])
+    assert.equal(utils.inferModelLimits(model).verify, true);
+
+  // 已保存的值优先；旧数据没有这些字段时按模型名预填
+  assert.deepEqual(utils.modelLimitsFor("deepseek-flash", null), {
+    max_input_tokens: 1024 * K,
+    max_output_tokens: 384 * K,
+    compression_ratio: 0.5
+  });
+  assert.deepEqual(
+    utils.modelLimitsFor("qwen3", {
+      max_input_tokens: 128 * K,
+      max_output_tokens: null,
+      compression_ratio: 0.6
+    }),
+    {
+      max_input_tokens: 128 * K,
+      max_output_tokens: 128 * K,
+      compression_ratio: 0.6
+    }
+  );
+
+  // 改模型名：仍是旧模型默认值的项跟着变，手动改过的保持不变
+  const prefilled = utils.modelLimitsFor("gpt-5.5", null);
+  assert.equal(
+    utils.followModelLimits(prefilled, "gpt-5.5", "deepseek-flash")
+      .max_output_tokens,
+    384 * K
+  );
+  const edited = {
+    ...prefilled,
+    max_output_tokens: 64 * K,
+    compression_ratio: 0.7
+  };
+  assert.deepEqual(
+    utils.followModelLimits(edited, "gpt-5.5", "deepseek-flash"),
+    edited
+  );
+});

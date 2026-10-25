@@ -123,6 +123,69 @@ export function safeAIText(value: unknown): string {
 export const providerStorageKey = (username: string) =>
   `kubedoor-ai:provider:${encodeURIComponent(username)}`;
 
+/**
+ * Context window defaults by model name, same rules as the AI service
+ * (models.resolve_model_limits): deepseek* 1024K / 384K, gpt* 1024K / 128K,
+ * anything else is prefilled with 1024K / 128K. `verify` marks names whose
+ * real window may be smaller (other models and older gpt-3/gpt-4 releases).
+ */
+export function inferModelLimits(model: string) {
+  const id = model.trim().toLowerCase().split("/").pop() || "";
+  const deepseek = id.startsWith("deepseek");
+  const recentGpt = id.startsWith("gpt") && !/^gpt-[34]/.test(id);
+  return {
+    max_input_tokens: 1024 * 1024,
+    max_output_tokens: (deepseek ? 384 : 128) * 1024,
+    compression_ratio: 0.5,
+    verify: !deepseek && !recentGpt
+  };
+}
+
+export interface AIModelLimits {
+  max_input_tokens: number | null;
+  max_output_tokens: number | null;
+  compression_ratio: number | null;
+}
+
+const LIMIT_KEYS = [
+  "max_input_tokens",
+  "max_output_tokens",
+  "compression_ratio"
+] as const;
+
+const validNumber = (value: unknown) =>
+  typeof value === "number" && Number.isFinite(value) ? value : null;
+
+/** Saved values win; empty values (older settings) are prefilled by name. */
+export function modelLimitsFor(
+  model: string,
+  saved?: Partial<Record<keyof AIModelLimits, unknown>> | null
+): AIModelLimits {
+  const inferred = inferModelLimits(model);
+  const result = {} as AIModelLimits;
+  for (const key of LIMIT_KEYS)
+    result[key] = validNumber(saved?.[key]) ?? inferred[key];
+  return result;
+}
+
+/**
+ * A renamed model re-prefills the values that still equal the previous
+ * model's defaults; values the user changed by hand are kept.
+ */
+export function followModelLimits(
+  values: AIModelLimits,
+  previous: string,
+  model: string
+): AIModelLimits {
+  const before = inferModelLimits(previous);
+  const after = inferModelLimits(model);
+  const result = { ...values };
+  for (const key of LIMIT_KEYS)
+    if (result[key] === null || result[key] === before[key])
+      result[key] = after[key];
+  return result;
+}
+
 /** Normalizes live events and persisted action-ledger records consistently. */
 export function normalizeAITool(value: Record<string, any>, env = "") {
   const result = value.result ?? value.output;

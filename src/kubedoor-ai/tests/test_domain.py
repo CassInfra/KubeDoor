@@ -65,6 +65,25 @@ def test_provider_validation_and_recursive_redaction():
     assert Provider.parse({"base_url": "http://localhost:11434/v1", "api_key": "", "model": "local"}).api_key == ""
 
 
+def test_provider_context_window_settings_are_optional_and_bounded():
+    base = {"base_url": "https://api.deepseek.com", "api_key": "", "model": "deepseek-flash"}
+    parsed = Provider.parse(base)
+    assert (parsed.max_input_tokens, parsed.max_output_tokens, parsed.compression_ratio) == (None, None, None)
+    parsed = Provider.parse({**base, "max_input_tokens": 262_144, "max_output_tokens": 65_536, "compression_ratio": 0.6})
+    assert (parsed.max_input_tokens, parsed.max_output_tokens, parsed.compression_ratio) == (262_144, 65_536, 0.6)
+    assert Provider.parse({**base, "max_input_tokens": None, "compression_ratio": 0.2}).compression_ratio == 0.2
+    # 企微审批恢复把 provider.__dict__ 原样传回，新字段也要能再次解析
+    assert Provider.parse(parsed.__dict__) == parsed
+    for invalid in ({"max_input_tokens": 4095}, {"max_input_tokens": 10_000_001}, {"max_input_tokens": True},
+                    {"max_input_tokens": 65536.0}, {"max_input_tokens": "65536"},
+                    {"max_output_tokens": 1023}, {"max_input_tokens": 65_536, "max_output_tokens": 65_537},
+                    {"max_output_tokens": 10_000_001},
+                    {"compression_ratio": 0.19}, {"compression_ratio": 0.81}, {"compression_ratio": True},
+                    {"compression_ratio": "0.5"}, {"compression_ratio": 50}):
+        with pytest.raises(AIError):
+            Provider.parse({**base, **invalid})
+
+
 def test_stored_resource_columns_preserve_uncollected_jvm_null():
     raw = {"meta": [{"name": "request_cpu_m"}, {"name": "limit_mem_mb"}, {"name": "jvm_xms_bytes"}], "data": [[500, 1024, None]]}
     assert table_rows(raw)["data"] == [{"request_cpu_m": 500, "limit_mem_mb": 1024, "jvm_xms_bytes": None}]

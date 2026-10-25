@@ -225,7 +225,8 @@ async def send(h, sid, message, memory_ids=None, username="alice", permission="r
 
 
 def user_messages(messages):
-    return [str(message.content) for message in messages if isinstance(message, HumanMessage)]
+    # 用户正文前面是平台注入的本轮上下文块（runtime.build_turn_context），这里只比较正文
+    return [str(message.content).split("</kubedoor_turn_context>\n\n", 1)[-1] for message in messages if isinstance(message, HumanMessage)]
 
 
 @pytest.mark.asyncio

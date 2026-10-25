@@ -10,12 +10,52 @@ from langgraph.checkpoint.memory import InMemorySaver
 
 from kubedoor_ai.domain import CredentialCipher, Identity, Provider
 from kubedoor_ai.gateway import Gateway, RunContext
-from kubedoor_ai.models import KubeDoorChatDeepSeek, make_model
+from kubedoor_ai.models import KubeDoorChatDeepSeek, make_model, resolve_model_limits
 from kubedoor_ai.runtime import Runtime, SecretRedactionMiddleware
 from fakes import FakeStore
 
 
 TOOL = {"name": "inspect_cluster", "description": "读取集群信息", "parameters": {"type": "object", "properties": {}}}
+
+
+@pytest.mark.parametrize("model,expected", [
+    ("deepseek-flash", (1_048_576, 393_216)),
+    ("deepseek/DeepSeek-V4-Pro", (1_048_576, 393_216)),
+    ("gpt-5.5", (1_048_576, 131_072)),
+    # 按模型名前缀统一设置（D5）：gpt-4o-mini 这类旧型号要用户在界面上手动改小
+    ("gpt-4o-mini", (1_048_576, 131_072)),
+    ("qwen3", (1_048_576, 131_072)),
+])
+def test_context_window_follows_model_name_rules(model, expected):
+    configured = make_model(Provider("https://gateway.example/v1", "test-only-key", model))
+    assert (configured.profile["max_input_tokens"], configured.profile["max_output_tokens"]) == expected
+    assert resolve_model_limits(Provider("https://gateway.example/v1", "", model)) == expected
+
+
+def test_other_models_use_the_langchain_builtin_profile():
+    builtin = ChatOpenAI(model="o3", api_key="test-only-key", base_url="https://gateway.example/v1").profile
+    assert isinstance(builtin.get("max_input_tokens"), int)
+    configured = make_model(Provider("https://gateway.example/v1", "test-only-key", "o3"))
+    assert configured.profile["max_input_tokens"] == builtin["max_input_tokens"]
+    assert configured.profile["max_output_tokens"] == builtin["max_output_tokens"]
+
+
+def test_entered_context_window_wins_and_output_never_exceeds_it():
+    entered = Provider("https://api.deepseek.com", "test-only-key", "deepseek-flash", 262_144, 65_536, 0.6)
+    assert resolve_model_limits(entered) == (262_144, 65_536)
+    assert make_model(entered).profile["max_input_tokens"] == 262_144
+    only_input = Provider("https://api.deepseek.com", "test-only-key", "deepseek-flash", 65_536)
+    assert resolve_model_limits(only_input) == (65_536, 65_536)
+
+
+def test_model_profile_is_merged_and_streaming_usage_is_requested():
+    builtin = KubeDoorChatDeepSeek(model="deepseek-flash", api_key="test-only-key", base_url="https://api.deepseek.com").profile
+    configured = make_model(Provider("https://api.deepseek.com", "test-only-key", "deepseek-flash"))
+    assert {k: v for k, v in configured.profile.items() if k not in ("max_input_tokens", "max_output_tokens")} == \
+        {k: v for k, v in builtin.items() if k not in ("max_input_tokens", "max_output_tokens")}
+    assert len(builtin) > 2
+    assert configured.stream_usage is True
+    assert "user" not in configured._get_request_payload([HumanMessage(content="检查")])
 
 
 @pytest.mark.parametrize("base_url,model,deepseek", [
@@ -37,7 +77,7 @@ def test_model_factory_selects_adapter_without_changing_user_endpoint(base_url, 
     assert configured.use_responses_api is False
 
 
-def sse_response(model, deltas, finish="stop"):
+def sse_response(model, deltas, finish="stop", usage=None):
     chunks = [
         {"id": "chat-test", "object": "chat.completion.chunk", "model": model,
          "created": 1, "choices": [{"index": 0, "delta": delta, "finish_reason": None}]}
@@ -45,8 +85,39 @@ def sse_response(model, deltas, finish="stop"):
     ]
     chunks.append({"id": "chat-test", "object": "chat.completion.chunk", "model": model,
                    "created": 1, "choices": [{"index": 0, "delta": {}, "finish_reason": finish}]})
+    if usage:
+        # DeepSeek sends the whole request's usage in the last chunk before [DONE].
+        chunks.append({"id": "chat-test", "object": "chat.completion.chunk", "model": model,
+                       "created": 1, "choices": [], "usage": usage})
     content = "".join("data: " + json.dumps(chunk) + "\n\n" for chunk in chunks) + "data: [DONE]\n\n"
     return httpx.Response(200, headers={"content-type": "text/event-stream"}, content=content)
+
+
+@pytest.mark.asyncio
+async def test_deepseek_cache_hits_in_the_stream_reach_run_usage():
+    requests = []
+
+    def handle(request):
+        requests.append(json.loads(request.content))
+        return sse_response("deepseek-flash", [{"role": "assistant", "reasoning_content": "核对"}, {"content": "完成"}],
+                            usage={"prompt_tokens": 1000, "completion_tokens": 50, "total_tokens": 1050,
+                                   "prompt_cache_hit_tokens": 900, "prompt_cache_miss_tokens": 100,
+                                   "prompt_tokens_details": {"cached_tokens": 900},
+                                   "completion_tokens_details": {"reasoning_tokens": 30}})
+
+    store = FakeStore()
+    gateway = Gateway(store, CredentialCipher("ab" * 32), "http://master", "internal")
+    provider = Provider("https://mock.example/v1", "test-only-key", "deepseek-flash")
+    run = RunContext({"id": "run-1", "session_id": "session-1", "scope": {"env": "cluster-a", "namespace": None, "deployment": None, "pod": None}, "skill_ids": []}, Identity("operator", "rw"), secrets=(provider.api_key,))
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as client:
+        model = KubeDoorChatDeepSeek(model=provider.model, base_url=provider.base_url, api_key=provider.api_key,
+                                    http_async_client=client, streaming=True, stream_usage=True, max_retries=0)
+        await Runtime(store, gateway, InMemorySaver(), model_factory=lambda _: model).run_graph(run, provider, "检查", None)
+    assert store.statuses[-1] == "completed"
+    assert requests[0]["stream_options"] == {"include_usage": True} and "user" not in requests[0]
+    assert store.usage["run-1"] == {"model_calls": 1, "input_tokens": 1000, "output_tokens": 50, "cache_read_tokens": 900,
+                                    "reasoning_tokens": 30, "last_input_tokens": 1000, "max_input_tokens": 1_048_576}
+    await gateway.close()
 
 
 @pytest.mark.asyncio

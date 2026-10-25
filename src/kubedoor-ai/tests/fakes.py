@@ -1,17 +1,22 @@
 import copy
+import json
 import uuid
 from datetime import datetime, timezone
+from typing import Any
 
 from langchain_core.language_models.chat_models import BaseChatModel
-from langchain_core.outputs import ChatGeneration, ChatResult
-from langchain_core.messages import AIMessage
+from langchain_core.outputs import ChatGeneration, ChatGenerationChunk, ChatResult
+from langchain_core.messages import AIMessage, AIMessageChunk
+from pydantic import Field
 from kubedoor_ai.domain import redact
+from kubedoor_ai.models import KubeDoorChatDeepSeek
 
 
 class FakeStore:
     def __init__(self):
         self.actions, self.events, self.messages = {}, [], []
         self.statuses = []
+        self.usage = {}
         self.cancelled = False
 
     async def connection(self, env):
@@ -50,6 +55,8 @@ class FakeStore:
             self.actions[args[0]].update(state="rejected", result=args[1])
         elif "cancel_requested=true" in sql:
             self.cancelled = True
+        elif "SET usage=$2" in sql:
+            self.usage[args[0]] = copy.deepcopy(args[1])
 
     async def event(self, rid, kind, data):
         self.events.append({"seq": len(self.events) + 1, "type": kind, "data": redact(copy.deepcopy(data))})
@@ -85,3 +92,37 @@ class ScriptedModel(BaseChatModel):
         response = self.responses[min(self.index, len(self.responses) - 1)].model_copy(deep=True)
         self.index += 1
         return ChatResult(generations=[ChatGeneration(message=response)])
+
+
+class RecordingDeepSeek(KubeDoorChatDeepSeek):
+    """Record each request as DeepSeek receives it, then return the next scripted reply.
+
+    Payloads are the serialized Chat Completions bodies (system, tools,
+    messages with reasoning_content), not LangChain message objects, so prefix
+    comparisons match what the provider cache sees. model_copy() variants share
+    the script and the payload list. A scripted exception is raised instead of
+    replying, e.g. a provider context-length rejection.
+    """
+    script: list[Any] = Field(default_factory=list)   # AIMessage or an Exception to raise
+    payloads: list[dict] = Field(default_factory=list)
+
+    def _reply(self, messages, stop, kwargs):
+        self.payloads.append(copy.deepcopy(self._get_request_payload(messages, stop=stop, **kwargs)))
+        assert self.script, "预设回答已用完"
+        reply = self.script.pop(0)
+        if isinstance(reply, Exception):
+            raise reply
+        return reply.model_copy(deep=True)
+
+    async def _agenerate(self, messages, stop=None, run_manager=None, **kwargs):
+        return ChatResult(generations=[ChatGeneration(message=self._reply(messages, stop, kwargs))])
+
+    async def _astream(self, messages, stop=None, run_manager=None, **kwargs):
+        message = self._reply(messages, stop, kwargs)
+        yield ChatGenerationChunk(message=AIMessageChunk(
+            content=message.content, additional_kwargs=message.additional_kwargs,
+            response_metadata={"model_provider": "deepseek", "finish_reason": "tool_calls" if message.tool_calls else "stop"},
+            usage_metadata=message.usage_metadata,
+            tool_call_chunks=[{"name": call["name"], "args": json.dumps(call["args"], ensure_ascii=False), "id": call["id"],
+                               "index": index, "type": "tool_call_chunk"} for index, call in enumerate(message.tool_calls)],
+        ))
