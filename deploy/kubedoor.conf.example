@@ -25,10 +25,10 @@ KUBE_CONTEXT=""
 
 # 镜像仓库与各组件版本
 IMAGE_REPO="swr.cn-south-1.myhuaweicloud.com/starsl.cn"
-TAG_MASTER="2.2.0"
-TAG_AGENT="2.2.0"
-TAG_WEB="2.2.0"
-TAG_AI="2.2.0"
+TAG_MASTER="2.3.0"
+TAG_AGENT="2.3.0"
+TAG_WEB="2.3.0"
+TAG_AI="2.3.0"
 TAG_ALARM="2.1.0"
 
 # 多集群指标区分用的标签 key。master 和所有 agent 必须填同一个值,
