@@ -1,7 +1,13 @@
 <script setup lang="ts">
 import { computed, ref } from "vue";
 import type { AITool } from "@/api/ai";
-import { formatAIStatus, safeAIText } from "@/utils/ai";
+import {
+  controlBadge,
+  controlPlan,
+  formatAIStatus,
+  safeAIText,
+  verificationOf
+} from "@/utils/ai";
 
 const props = defineProps<{
   tool: AITool;
@@ -17,6 +23,13 @@ const text = (value: unknown) => {
   const result = safeAIText(value);
   return props.secret ? result.split(props.secret).join("[已隐藏]") : result;
 };
+// 副本数、资源、JVM 等修改：网关按花折资源管控状态生成的执行计划和执行后回读
+const plan = computed(() => controlPlan(props.tool.preview));
+const badge = computed(() => (plan.value ? controlBadge(plan.value) : null));
+const diffSteps = computed(() =>
+  (plan.value?.steps || []).filter(step => step.diff)
+);
+const verification = computed(() => verificationOf(props.tool.result));
 const statusType = computed(() =>
   props.tool.pending || props.tool.status === "unknown"
     ? "warning"
@@ -52,6 +65,9 @@ const time = computed(() => {
       }}</span>
     </button>
     <div class="tool-meta">
+      <el-tag v-if="badge" :type="badge.type" size="small" effect="light">{{
+        badge.label
+      }}</el-tag>
       <span v-if="tool.env">集群 {{ tool.env }}</span>
       <span v-if="tool.namespace">命名空间 {{ tool.namespace }}</span>
       <span>来源 {{ tool.source || "等待工具返回" }}</span>
@@ -59,7 +75,70 @@ const time = computed(() => {
       <span v-if="tool.freshness">{{ tool.freshness }}</span>
       <span v-if="tool.truncated" class="truncated">结果已截断</span>
     </div>
+    <p
+      v-if="verification"
+      :class="[
+        'verification',
+        verification.matched === false
+          ? 'mismatch'
+          : verification.matched
+            ? 'matched'
+            : 'unchecked'
+      ]"
+    >
+      {{ verification.message }}
+    </p>
     <div v-if="expanded || tool.pending" class="tool-details">
+      <div v-if="plan" class="control-plan">
+        <p class="control-message">{{ plan.message }}</p>
+        <div class="detail-label">执行步骤</div>
+        <ol class="plan-steps">
+          <li v-for="(step, index) in plan.steps" :key="index">
+            {{ step.name }}<span class="step-target">{{ step.target }}</span>
+          </li>
+        </ol>
+        <template v-if="plan.changes.length">
+          <div class="detail-label">变化</div>
+          <div class="plan-changes">
+            <table>
+              <thead>
+                <tr>
+                  <th>范围</th>
+                  <th>项目</th>
+                  <th>当前</th>
+                  <th>目标</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr v-for="(change, index) in plan.changes" :key="index">
+                  <td>{{ change.scope }}</td>
+                  <td>{{ change.label }}</td>
+                  <td>{{ change.current }}</td>
+                  <td class="target">{{ change.target }}</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </template>
+        <ul v-if="plan.effects.length" class="plan-notes">
+          <li v-for="(effect, index) in plan.effects" :key="index">
+            {{ effect }}
+          </li>
+        </ul>
+        <ul v-if="plan.warnings.length" class="plan-notes warnings">
+          <li v-for="(warning, index) in plan.warnings" :key="index">
+            {{ warning }}
+          </li>
+        </ul>
+        <div v-for="(step, index) in diffSteps" :key="index">
+          <div class="detail-label">配置差异（{{ step.name }}）</div>
+          <pre>{{ text(step.diff) }}</pre>
+        </div>
+        <details class="plan-requests">
+          <summary>执行请求明细</summary>
+          <pre>{{ text(plan.steps.map(step => step.request)) }}</pre>
+        </details>
+      </div>
       <template v-if="tool.arguments !== undefined">
         <div class="detail-label">准确参数</div>
         <pre>{{ text(tool.arguments) }}</pre>
@@ -68,7 +147,7 @@ const time = computed(() => {
         <div class="detail-label">执行命令</div>
         <pre>{{ text(tool.command) }}</pre>
       </template>
-      <template v-if="tool.preview">
+      <template v-if="tool.preview && !plan">
         <div class="detail-label">变更预览</div>
         <pre>{{ text(tool.preview) }}</pre>
       </template>
@@ -179,6 +258,106 @@ pre {
 
 .tool-error {
   color: var(--el-color-danger);
+}
+
+.verification {
+  padding: 8px 12px;
+  margin: 0 12px 10px;
+  font-size: 12px;
+  line-height: 1.6;
+  border-radius: 5px;
+
+  &.matched {
+    color: var(--el-color-success);
+    background: var(--el-color-success-light-9);
+  }
+
+  &.mismatch {
+    color: var(--el-color-danger);
+    background: var(--el-color-danger-light-9);
+  }
+
+  &.unchecked {
+    color: var(--el-text-color-secondary);
+    background: var(--el-fill-color-light);
+  }
+}
+
+.control-plan {
+  font-size: 13px;
+}
+
+.control-message {
+  margin: 4px 0 0;
+  color: var(--el-text-color-regular);
+}
+
+.plan-steps {
+  padding-left: 20px;
+  margin: 6px 0 0;
+  list-style: decimal;
+
+  li {
+    line-height: 1.8;
+  }
+}
+
+.step-target {
+  margin-left: 8px;
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: 12px;
+  color: var(--el-text-color-secondary);
+}
+
+.plan-changes {
+  margin-top: 6px;
+  overflow-x: auto;
+
+  table {
+    width: 100%;
+    font-size: 12px;
+    border-collapse: collapse;
+  }
+
+  th,
+  td {
+    padding: 4px 8px;
+    text-align: left;
+    white-space: nowrap;
+    border-bottom: 1px solid var(--el-border-color-lighter);
+  }
+
+  th {
+    font-weight: 500;
+    color: var(--el-text-color-secondary);
+  }
+
+  .target {
+    font-weight: 600;
+    color: var(--el-color-primary);
+  }
+}
+
+.plan-notes {
+  padding-left: 18px;
+  margin: 8px 0 0;
+  line-height: 1.7;
+  color: var(--el-text-color-regular);
+  list-style: disc;
+
+  &.warnings {
+    color: var(--el-color-warning-dark-2);
+  }
+}
+
+.plan-requests {
+  margin-top: 8px;
+  font-size: 12px;
+  color: var(--el-text-color-secondary);
+
+  summary {
+    cursor: pointer;
+  }
 }
 
 .approval-actions {

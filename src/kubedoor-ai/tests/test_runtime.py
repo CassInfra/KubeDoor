@@ -10,13 +10,14 @@ from langgraph.types import Command
 from kubedoor_ai.domain import CredentialCipher, Identity, Provider
 from kubedoor_ai.gateway import Gateway, RunContext
 from kubedoor_ai.runtime import Runtime, SecretStreamRedactor, SecretRedactionMiddleware, make_model
-from fakes import FakeStore, ScriptedModel
+from fakes import FakeStore, ScriptedModel, stub_control
 
 
 def setup(responses):
     store = FakeStore()
     gateway = Gateway(store, CredentialCipher("ab" * 32), "http://master", "internal")
     gateway.execute_action = AsyncMock(return_value={"success": True, "data": {"replicas": 3}})
+    stub_control(gateway)
     saver = InMemorySaver()
     model = ScriptedModel(responses=responses)
     runtime = Runtime(store, gateway, saver, model_factory=lambda _: model)

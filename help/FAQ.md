@@ -453,11 +453,11 @@ admission webhook "kubedoor-admis.mutating.webhook" denied the request: master(a
 
 候选命名空间由该集群的 agent 实时从 K8S 读取（已排除 `kube-system`、`kubedoor`；master 会缓存 1 小时），不是来自时序库。下拉框为空并提示「获取命名空间列表失败」，一般是该集群的 agent 不在线，按上文「Agent 连接」排查。刚建的命名空间不在列表里时，先在「Deployment」页点「命名空间」旁的刷新图标，再重新打开。
 
-### Q：`kubectl scale` 或 HPA 设置的副本数被改回、在「配置」里改了却没生效？
+### Q：`kubectl scale`、`kubectl edit` 或 HPA 设置的副本数被改回、在「配置」里改了却没生效？
 
 都是预期行为：
 
-- 管控命名空间里副本数以管控表为准，经 scale 子资源的扩缩容（`kubectl scale`、HPA 等）会被改回。要长期改变副本数请修改「指定Pod」，短时扩容用「临时扩容」（5 分钟内放行）；需要 HPA 的服务不要放在管控命名空间里。
+- 管控命名空间里副本数以管控表为准：`kubectl scale`、HPA，以及用 `kubectl edit/patch/apply` 直接改 `spec.replicas`，都会被改回（直接改 `spec.replicas` 的这种需要新版 agent）。要长期改变副本数请修改「指定Pod」，短时扩容用「临时扩容」；需要 HPA 的服务不要放在管控命名空间里。
 - 在「配置」里只「保存」时改动只写入数据库，要「保存并重启」或等下次发布才会应用；删除 Pod 让它重建不会生效。
 
 更多现象见 [K8S资源管控功能说明](K8S资源管控功能说明.md) 的「常见问题」。

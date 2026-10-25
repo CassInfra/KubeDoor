@@ -410,6 +410,9 @@
                 </el-button>
                 <template #dropdown>
                   <el-dropdown-menu>
+                    <el-dropdown-item @click="askAI(alertQuestion(scope.row))"
+                      >问 AI</el-dropdown-item
+                    >
                     <el-dropdown-item @click="handleSilence(scope.row)"
                       >屏蔽</el-dropdown-item
                     >
@@ -527,10 +530,13 @@ import {
   updateOperate
 } from "@/api/alarm";
 import { useSearchStoreHook } from "@/store/modules/search";
+import { alertQuestion } from "@/utils/ai";
+import { useAskAI } from "@/utils/useAskAI";
 
 const route = useRoute();
 const router = useRouter();
 const searchStore = useSearchStoreHook();
+const askAI = useAskAI();
 
 const getArrayFromQuery = (
   value: LocationQueryValue | LocationQueryValue[] | undefined

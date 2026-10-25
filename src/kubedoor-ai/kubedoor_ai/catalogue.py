@@ -47,6 +47,11 @@ EXTRA_CATALOG = {
     "resource_max_day": ("GET", "/api/db/res/max_day", "stored", True),
     "resource_config_update": ("POST", "/api/db/res/edit", "stored", False),
     "resource_pod_count": ("POST", "/api/db/res/pod_count", "stored", False),
+    # 花折资源管控：网关按管控状态生成执行计划（control.py）。调整资源 / JVM 没有对应的单个接口，路径留空
+    "deployment_control": ("GET", "/api/ai/internal/deployment-control", "live", True),
+    "update_deployment_resources": ("POST", "", "live", False),
+    "update_deployment_jvm": ("POST", "", "live", False),
+    "resource_control_add": ("POST", "/api/db/res/add", "stored", False),
     "alert_total": ("POST", "/api/db/alert/total", "historical", True),
     "alert_detail": ("POST", "/api/db/alert/detail", "historical", True),
     "alert_detail_total": ("POST", "/api/db/alert/detail_total", "historical", True),
@@ -91,8 +96,12 @@ EXTRA_SCHEMAS = {
     "stored_namespaces": ([], {}, "当前集群已入库的命名空间；Agent 离线也可查"),
     "stored_deployments": (["namespace"], _NS, "当前集群指定命名空间已入库的 Deployment 名称；Agent 离线也可查"),
     "resource_max_day": ([], {}, "当前集群资源管控采集记录最多的日期，返回 d（YYYY-MM-DD），用于挑选历史快照日期"),
-    "resource_config_update": (["namespace", "deployment", "limit_mem_mb", "limit_cpu_m", "pod_count_manual"], {**_DEP, "limit_mem_mb": "nonnegative integer；内存 limit，单位 MB", "limit_cpu_m": "nonnegative integer；CPU limit，单位 millicores", "pod_count_manual": "nonnegative integer；人工管控副本数", "jvm_xms_bytes": "integer 0..9007199254740991 或 null；JVM Xms 字节，null 显式清除，省略保留", "jvm_xmx_bytes": "integer 0..9007199254740991 或 null；JVM Xmx 字节，null 显式清除，省略保留", "jvm_xss_bytes": "integer 0..9007199254740991 或 null；JVM Xss 字节，null 显式清除，省略保留", "jvm_max_metaspace_bytes": "integer 0..9007199254740991 或 null；JVM MaxMetaspaceSize 字节，null 显式清除，省略保留"}, "更新当前集群 Deployment 的数据库资源管控配置，需批准；仅保存配置，下一次发布或滚动重启时应用，不会立即修改在线 K8S 资源；不能把保存配置报告成已生效"),
-    "resource_pod_count": (["namespace", "deployment", "pod_count_manual"], {**_DEP, "pod_count_manual": "nonnegative integer；人工管控副本数"}, "只更新 Deployment 数据库资源管控的人工副本数，需批准；不会立即扩缩容在线 Deployment，立即扩缩容应使用 scale_deployment"),
+    "resource_config_update": (["namespace", "deployment", "limit_mem_mb", "limit_cpu_m", "pod_count_manual"], {**_DEP, "limit_mem_mb": "nonnegative integer；内存 limit，单位 MB", "limit_cpu_m": "nonnegative integer；CPU limit，单位 millicores", "pod_count_manual": "nonnegative integer；人工管控副本数", "jvm_xms_bytes": "integer 0..9007199254740991 或 null；JVM Xms 字节，null 显式清除，省略保留", "jvm_xmx_bytes": "integer 0..9007199254740991 或 null；JVM Xmx 字节，null 显式清除，省略保留", "jvm_xss_bytes": "integer 0..9007199254740991 或 null；JVM Xss 字节，null 显式清除，省略保留", "jvm_max_metaspace_bytes": "integer 0..9007199254740991 或 null；JVM MaxMetaspaceSize 字节，null 显式清除，省略保留"}, "更新已登记服务的花折资源管控配置，需批准；只保存，下一次发布或滚动重启时才应用，而且只在受管控时有用，不能报告成已生效。要立即调整用 update_deployment_resources / update_deployment_jvm"),
+    "resource_pod_count": (["namespace", "deployment", "pod_count_manual"], {**_DEP, "pod_count_manual": "nonnegative integer；人工管控副本数"}, "只更新已登记服务的管控副本数，需批准；不会立即扩缩容。立即扩缩用 scale_deployment（mode=persistent 时会同时写这里）"),
+    "deployment_control": (["namespace", "deployment"], _DEP, "查询 Deployment 是否受花折资源管控（准入控制）、原因和管控值。受管控时副本数、requests/limits、JVM 参数只能经管控表生效，直接改 K8S 会被改回；修改这些字段前先查"),
+    "update_deployment_resources": (["namespace", "deployment"], {**_DEP, "request_cpu_m": "positive integer；CPU requests，millicores", "request_mem_mb": "positive integer；内存 requests，MiB", "limit_cpu_m": "positive integer；CPU limits，millicores", "limit_mem_mb": "positive integer；内存 limits，MiB", "apply_now": "boolean；默认 true"}, "调整 Deployment 第一个容器的 requests/limits，至少传一项，需批准。网关按管控状态执行：受管控时写管控表的 limits（requests 由每日高峰期采集决定，不能改），apply_now=true 再滚动重启使其生效；不受管控时直接修改 Deployment"),
+    "update_deployment_jvm": (["namespace", "deployment"], {**_DEP, "jvm_xms_bytes": "positive integer；-Xms 字节", "jvm_xmx_bytes": "positive integer；-Xmx 字节", "jvm_xss_bytes": "positive integer；-Xss 字节", "jvm_max_metaspace_bytes": "positive integer；-XX:MaxMetaspaceSize 字节", "apply_now": "boolean；默认 true"}, "调整第一个容器 java 启动参数（args）里已有的 -Xms/-Xmx/-Xss/-XX:MaxMetaspaceSize，至少传一项，需批准。受管控时写管控表，apply_now=true 再滚动重启；不受管控时直接修改 args"),
+    "resource_control_add": (["namespace", "deployment", "pod_count_manual", "request_cpu_m", "request_mem_mb", "limit_cpu_m", "limit_mem_mb"], {**_DEP, "pod_count_manual": "nonnegative integer；管控副本数，0 表示暂不启动 Pod", "request_cpu_m": "positive integer；millicores", "request_mem_mb": "positive integer；MiB", "limit_cpu_m": "positive integer；millicores", "limit_mem_mb": "positive integer；MiB", "jvm_xms_bytes": "integer 字节，可省略", "jvm_xmx_bytes": "integer 字节，可省略", "jvm_xss_bytes": "integer 字节，可省略", "jvm_max_metaspace_bytes": "integer 字节，可省略"}, "把新服务登记到花折资源管控表，需批准；准入控制开启且命名空间纳入管控时，之后的创建、发布、重启、扩缩容按这些值改写。已登记的服务用 resource_config_update"),
     "alert_total": ([], {"startTime": _ALERT["startTime"]}, "当前集群历史告警按名称聚合，包含 firing/resolved 计数；不改变告警状态"),
     "alert_detail": ([], {**_ALERT, "page": "integer >=1；默认 1", "pageSize": "integer 1..500；默认 20"}, "分页查询当前集群已入库告警详情，可过滤 Pod、命名空间、名称、级别、状态与起始时间"),
     "alert_detail_total": ([], _ALERT, "当前集群告警过滤结果总数，与 alert_detail 使用相同过滤条件"),
@@ -111,8 +120,11 @@ _APPLY_KINDS = {
 }
 _LIST_FIELDS = {"namespaces", "node_names", "exclude_namespaces", "alertName", "status", "severity"}
 _STRUCTURED_FIELDS = {"pods", "migrations"}
-_INTEGER_FIELDS = {"replicas", "page", "pageSize", "limit", "count", "limit_mem_mb", "limit_cpu_m", "pod_count_manual"}
+_INTEGER_FIELDS = {"replicas", "page", "pageSize", "limit", "count", "limit_mem_mb", "limit_cpu_m", "pod_count_manual", "request_cpu_m", "request_mem_mb"}
 _JVM_FIELDS = {"jvm_xms_bytes", "jvm_xmx_bytes", "jvm_xss_bytes", "jvm_max_metaspace_bytes"}
+_RESOURCE_FIELDS = {"request_cpu_m", "request_mem_mb", "limit_cpu_m", "limit_mem_mb"}
+# 这些操作的 requests/limits 会原样写进 K8S 或管控表，0 没有意义
+_POSITIVE_RESOURCES = {"update_deployment_resources", "resource_control_add"}
 
 
 def _string(value, field, *, allow_empty=False):
@@ -151,13 +163,13 @@ def validate_arguments(operation: str, args: dict) -> None:
                 if field in ("namespaces", "exclude_namespaces") and "," in item:
                     raise AIError(f"{field} 每项只能指定一个命名空间")
         elif field in _INTEGER_FIELDS:
-            minimum = 1 if field in ("page", "pageSize", "limit") else 0
+            minimum = 1 if field in ("page", "pageSize", "limit") or (field in _RESOURCE_FIELDS and operation in _POSITIVE_RESOURCES) else 0
             maximum = {"pageSize": 500, "limit": 5000}.get(field)
             if type(value) is not int or value < minimum or (maximum is not None and value > maximum):
                 raise AIError(f"{field} 必须为 {minimum}..{maximum if maximum else '∞'} 的整数")
-        elif field == "simple":
+        elif field in ("simple", "apply_now"):
             if type(value) is not bool:
-                raise AIError("simple 必须为 boolean")
+                raise AIError(f"{field} 必须为 boolean")
         elif field in _JVM_FIELDS:
             if value is not None and (type(value) is not int or not 0 <= value <= 9007199254740991):
                 raise AIError(f"{field} 必须为 0..9007199254740991 的整数字节数或 null")
@@ -179,10 +191,18 @@ def validate_arguments(operation: str, args: dict) -> None:
             _string(value, field, allow_empty=field not in required)
     if operation == "node_resource_rank" and args.get("type", "cpu") not in ("cpu", "mem", "pod", "peak_cpu", "peak_mem"):
         raise AIError("type 必须为 cpu/mem/pod/peak_cpu/peak_mem")
-    if operation == "resource_config_update":
+    if operation in ("resource_config_update", "resource_control_add", "update_deployment_jvm"):
         xms, xmx = args.get("jvm_xms_bytes"), args.get("jvm_xmx_bytes")
         if xms is not None and xmx is not None and xmx > 0 and xms > xmx:
             raise AIError("Xms 不能大于 Xmx")
+    if operation == "update_deployment_resources" and not _RESOURCE_FIELDS & set(args):
+        raise AIError("update_deployment_resources 至少要传一个 requests/limits 字段")
+    if operation == "update_deployment_jvm":
+        fields = _JVM_FIELDS & set(args)
+        if not fields:
+            raise AIError("update_deployment_jvm 至少要传一个 JVM 参数")
+        if any(type(args[field]) is not int or args[field] <= 0 for field in fields):
+            raise AIError("JVM 参数必须为正整数字节数；要清除管控表里的值用 resource_config_update 传 null")
     if operation in ("resource_content", "resource_delete"):
         supported = _CONTENT_TYPES if operation == "resource_content" else _DELETE_TYPES
         if _resource_type(operation, args["resource_type"]) not in supported:
@@ -258,7 +278,7 @@ def build_request(operation: str, args: dict, env: str) -> tuple[dict, dict | No
         body = values
     elif operation == "image_tags":
         body = {**values, "k8s": env}
-    elif operation in ("resource_config_update", "resource_pod_count"):
+    elif operation in ("resource_config_update", "resource_pod_count", "resource_control_add"):
         body = {**values, "env": env}
         if operation == "resource_pod_count":
             body["deployment_name"] = body.pop("deployment")

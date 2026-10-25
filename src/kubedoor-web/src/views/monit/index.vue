@@ -576,6 +576,19 @@
                         <template #dropdown>
                           <el-dropdown-menu>
                             <el-dropdown-item
+                              @click="
+                                askAI(
+                                  podQuestion(
+                                    scope.row.env,
+                                    scope.row.namespace,
+                                    podScope.row.name,
+                                    scope.row.deployment
+                                  )
+                                )
+                              "
+                              >问 AI</el-dropdown-item
+                            >
+                            <el-dropdown-item
                               :disabled="!canWrite(scope.row.env)"
                               @click="
                                 openPodShell({
@@ -780,6 +793,18 @@
                 </el-button>
                 <template #dropdown>
                   <el-dropdown-menu>
+                    <el-dropdown-item
+                      @click="
+                        askAI(
+                          deploymentQuestion(
+                            scope.row.env,
+                            scope.row.namespace,
+                            scope.row.deployment
+                          )
+                        )
+                      "
+                      >问 AI</el-dropdown-item
+                    >
                     <el-dropdown-item @click="handleCapacity(scope.row)"
                       >扩缩容</el-dropdown-item
                     >
@@ -892,6 +917,8 @@ import {
 import { useSearchStoreHook } from "@/store/modules/search";
 import { useClusterPermission } from "@/utils/permission";
 import { openPodShell } from "@/utils/podShell";
+import { deploymentQuestion, podQuestion } from "@/utils/ai";
+import { useAskAI } from "@/utils/useAskAI";
 import PodLogViewer from "@/views/monit/components/PodLogViewer.vue";
 import * as monaco from "monaco-editor";
 import * as yaml from "js-yaml";
@@ -903,6 +930,7 @@ import {
 
 const { onChangeCapacity, onReboot, onUpdateImage } = useResource();
 const searchStore = useSearchStoreHook();
+const askAI = useAskAI();
 // 终端能在容器里执行任意命令,只读用户置灰(后端同样校验)
 const { canWrite } = useClusterPermission();
 

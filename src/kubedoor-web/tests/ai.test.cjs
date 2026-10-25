@@ -378,3 +378,166 @@ test("context share is the latest prompt over the model window", () => {
   ])
     assert.equal(utils.contextShare(usage), null);
 });
+
+test("control plans and read-back verification render from the approval preview and result", () => {
+  const preview = {
+    operation: "scale_deployment",
+    plan: {
+      control: {
+        state: "controlled",
+        controlled: true,
+        blocked: false,
+        message: "受花折资源管控"
+      },
+      steps: [
+        {
+          kind: "master",
+          name: "写入管控副本数",
+          method: "POST",
+          path: "/api/db/res/pod_count",
+          query: { env: "prod" },
+          body: { pod_count_manual: 5 }
+        },
+        {
+          kind: "k8s",
+          name: "修改 Deployment",
+          source: "agent",
+          arguments: { method: "PATCH" },
+          diff: "--- current\n+++ proposed"
+        },
+        "broken"
+      ],
+      changes: [
+        {
+          scope: "在线",
+          field: "replicas",
+          label: "副本数",
+          current: "2",
+          target: "5"
+        },
+        null
+      ],
+      effects: ["立即扩缩到 5 个副本", 1],
+      warnings: []
+    }
+  };
+  const plan = utils.controlPlan(preview);
+  assert.deepEqual(
+    plan.steps.map(step => step.target),
+    ["POST /api/db/res/pod_count", "直接修改 Deployment（经 Agent）"]
+  );
+  assert.deepEqual(plan.steps[0].request, {
+    query: { env: "prod" },
+    body: { pod_count_manual: 5 }
+  });
+  assert.equal(plan.steps[1].diff, "--- current\n+++ proposed");
+  assert.deepEqual(plan.changes, [
+    { scope: "在线", label: "副本数", current: "2", target: "5" }
+  ]);
+  assert.deepEqual(plan.effects, ["立即扩缩到 5 个副本"]);
+  assert.deepEqual(utils.controlBadge(plan), {
+    label: "受花折资源管控",
+    type: "warning"
+  });
+  assert.equal(
+    utils.controlBadge({ controlled: false, blocked: true }).type,
+    "danger"
+  );
+  assert.equal(utils.controlPlan({ command: ["kubectl"] }), null);
+  assert.equal(utils.controlPlan("text"), null);
+  const verification = utils.verificationOf({
+    verification: {
+      checked: true,
+      matched: false,
+      message: "副本数 期望 5，实际 2"
+    }
+  });
+  assert.deepEqual(verification, {
+    checked: true,
+    matched: false,
+    message: "副本数 期望 5，实际 2"
+  });
+  assert.equal(utils.verificationOf({ success: true }), null);
+  assert.equal(
+    utils.verificationOf({
+      verification: { checked: false, message: "读取不到" }
+    }).matched,
+    null
+  );
+});
+
+test("ask-AI entries preselect the resource and prefill a question with the source facts", () => {
+  const alert = utils.alertQuestion({
+    env: "prod",
+    namespace: "demo",
+    pod: "order-7d9-x",
+    alert_name: "PodOOM",
+    severity: "critical",
+    alert_status: "firing",
+    description: "内存超限",
+    count_firing: 3
+  });
+  // 告警只知道 Pod、不知道所属 Deployment：逐级的资源选择选不上 Pod，只选到命名空间，Pod 写进问题
+  assert.deepEqual(alert.scope, { env: "prod", namespace: "demo" });
+  assert.match(
+    alert.prompt,
+    /告警：PodOOM\n级别：critical\n状态：firing\nPod：order-7d9-x\n触发次数：3\n描述：内存超限/
+  );
+  const event = utils.eventQuestion("prod", [
+    "ADDED",
+    "Warning",
+    5,
+    "Deployment",
+    "",
+    "demo",
+    "order",
+    "FailedCreate",
+    "quota exceeded",
+    "t1",
+    "t2"
+  ]);
+  assert.deepEqual(event.scope, {
+    env: "prod",
+    namespace: "demo",
+    deployment: { namespace: "demo", name: "order" }
+  });
+  assert.match(
+    event.prompt,
+    /资源：Deployment demo\/order\n级别：Warning\n原因：FailedCreate\n次数：5/
+  );
+  const clusterEvent = utils.eventQuestion("prod", [
+    "ADDED",
+    "Normal",
+    1,
+    "Node",
+    "",
+    "",
+    "node-1",
+    "Ready",
+    "ok",
+    "",
+    ""
+  ]);
+  assert.deepEqual(clusterEvent.scope, {
+    env: "prod",
+    namespace: null,
+    deployment: null
+  });
+  assert.match(clusterEvent.prompt, /资源：Node node-1/);
+  assert.deepEqual(
+    utils.podQuestion("prod", "demo", "order-1", "order").scope.deployment,
+    { namespace: "demo", name: "order" }
+  );
+  assert.deepEqual(
+    utils.podQuestion("prod", "demo", "order-1", "order").scope.pod,
+    { namespace: "demo", name: "order-1" }
+  );
+  // 不属于 Deployment 的 Pod（StatefulSet 等）同样只选到命名空间
+  const orphan = utils.podQuestion("prod", "demo", "order-1");
+  assert.equal(orphan.scope.deployment, null);
+  assert.equal(orphan.scope.pod, null);
+  assert.match(
+    utils.deploymentQuestion("prod", "demo", "order").prompt,
+    /^检查 Deployment demo\/order/
+  );
+});

@@ -20,7 +20,7 @@
 | 立即滚动重启 | `restart_deployment` | `namespace`、`deployment` |
 | 指定日期时间重启一次 | `schedule_deployment_restart` | `namespace`、`deployment`、`run_at` |
 | 每天、每周或按 Cron 周期重启 | `cron_deployment_restart` | `namespace`、`deployment`、`cron` |
-| 立即扩缩容 | `scale_deployment` | `namespace`、`deployment`、`replicas` |
+| 立即扩缩容 | `scale_deployment` | `namespace`、`deployment`、`replicas`、`mode`（默认 `persistent` 永久，`temporary` 临时，见「花折资源管控」） |
 | 指定日期时间扩缩容一次 | `schedule_deployment_scale` | `namespace`、`deployment`、`replicas`、`run_at` |
 | 按 Cron 周期扩缩容 | `cron_deployment_scale` | `namespace`、`deployment`、`replicas`、`cron` |
 
@@ -44,6 +44,27 @@
 
 核对 `spec.schedule`、`spec.suspend`、`spec.timeZone`（应为 `Asia/Shanghai`；缺少该字段时提醒用户任务将按 CronJob 控制器时区执行）、目标请求和运行记录。任务注册成功不等于已经重启；到点后仍需通过 Deployment 状态、Pod 或任务记录确认执行结果。无法回读时说明核验缺失，不声称已经完成重启。
 
+## 花折资源管控（准入控制）
+
+集群开启了准入控制、命名空间在管控列表里、并且服务已登记到管控表时，Deployment「受管控」：准入 webhook 会在创建、发布、重启、扩缩容时，把**副本数、第一个容器的 requests/limits、JVM 参数（-Xms/-Xmx/-Xss/-XX:MaxMetaspaceSize）**改写成管控表的值。所以受管控时直接改 K8S 不生效（K8S 照样返回成功），只能经管控表；不受管控时改管控表也不生效，只能直接改 Deployment。
+
+修改这三类字段一律用下表的操作。网关先查管控状态再选执行方式，审批卡片写明管控状态、当前值 → 目标值和副作用：
+
+| 需求 | operation | 受管控时 | 不受管控时 |
+| --- | --- | --- | --- |
+| 扩缩容（默认永久） | `scale_deployment`，`mode=persistent` 或省略 | 先写管控副本数再扩缩，以后每次发布都按这个数 | 直接改副本数 |
+| 临时扩缩容 | `scale_deployment`，`mode=temporary` | 只临时扩缩，下次发布或重启恢复为管控值 | 和永久一样 |
+| 调整 requests/limits | `update_deployment_resources` | 只能改 limits（requests 由每日高峰期采集决定）；写管控表后立即滚动重启生效，`apply_now=false` 只保存 | 直接修改 Deployment，触发滚动更新 |
+| 调整 JVM 参数 | `update_deployment_jvm` | 写管控表后立即滚动重启生效，`apply_now=false` 只保存 | 直接修改第一个容器的 args |
+| 查是否受管控 | `deployment_control` | 返回状态、原因和管控值 | 同左 |
+
+- 用户没说临时还是永久时按永久（省略 `mode`）。定时 / 周期扩缩容到点只能临时扩缩（CronJob 写不了管控表），受管控时不能传 `mode=persistent`；要长期改副本数用 `scale_deployment` 或 `resource_pod_count`。
+- JVM 参数只能改第一个容器 args 以 `java` 开头、并且已经写明的选项；写在环境变量（如 `JAVA_OPTS`）或启动脚本里的，网关会拒绝并说明原因。
+- 受管控时用 `kubectl`、`api`、`resource_apply` 直接改副本数、资源或 JVM 会被网关拒绝（结果必然被改回），不要换个工具再试。改镜像、环境变量等其他字段照常，但只要 Pod 模板变了，准入控制就会把副本数、资源、JVM 刷回管控值。
+- 更新镜像、重启同样会刷回管控值：之前临时扩过的副本，发布或重启后会恢复，审批卡片会列出，执行前要提醒用户。
+- 管控表里没有该服务、集群又没开新服务免确认时，这个 Deployment 的创建和修改都会被准入控制拒绝，先用 `resource_control_add` 登记。已登记的服务用 `resource_config_update` 改管控配置（只保存，下次发布或重启生效），用 `resource_pod_count` 只改管控副本数。
+- 写操作结果里的 `verification` 是执行后回读：`matched=false` 时如实告诉用户实际值和原因（例如「被准入控制改写成了管控值」），不能报告成已生效。
+
 ## KubeDoor 目录操作
 
 先用目录找到已有能力，参数细节查本轮实际 schema。下表覆盖当前接入的业务工具：
@@ -51,7 +72,7 @@
 | 需求 | operation 与含义 |
 | --- | --- |
 | 入库资源与历史 | `resource_inventory`：已采集 CPU/内存 requests、limits 与 JVM；`resource_history`：指定 `date` 的每日高峰快照；`resource_max_day`：采集记录最多的日期；`stored_namespaces`、`stored_deployments`：已入库名称列表，Agent 离线仍可查询 |
-| 数据库资源管控修改 | `resource_config_update`：保存 Deployment 的 `limit_mem_mb`、`limit_cpu_m`、`pod_count_manual` 和明确指定的 JVM 字段；`resource_pod_count`：仅保存人工管控副本数。均需批准，不会自动重启或立即扩缩容，具体生效语义见下文 |
+| 资源管控 | `deployment_control`：是否受管控、原因和管控值；`update_deployment_resources`、`update_deployment_jvm`：按管控状态调整资源和 JVM；`resource_config_update`、`resource_pod_count`、`resource_control_add`：只改管控表（修改已登记服务的配置、只改管控副本数、登记新服务）。写操作均需批准，生效规则见「花折资源管控」 |
 | 监控 | `deployment_metrics`：工作负载资源指标；`metrics`：自由 MetricsQL/PromQL；`node_resource_rank`：节点 CPU、内存、Pod 与峰值排名 |
 | 集群资源列表 | `namespaces`、`services`、`configmaps`、`ingresses`、`statefulsets`、`daemonsets`、`jvm_configs`：对应页面的资源或 JVM 配置查询 |
 | 节点管理 | `nodes`：现有节点查询；`node_list`：详细节点列表（`simple=true` 仅名称）；`cordon_nodes`、`uncordon_nodes`：传 `node_names` 批量禁止或恢复新调度，不会驱逐已有 Pod |
@@ -59,7 +80,7 @@
 | 服务与入口排障 | `service_endpoints`、`service_first_port`：指定 Service 的后端或第一个端口；`ingress_rules`：指定 Ingress 的域名、路径及后端规则 |
 | 资源 YAML 编辑 | `resource_content`：按 `namespace`、`resource_type`、`resource_name` 读取接口支持的资源，含 Job/CronJob；`resource_apply`：传 `yaml_content` 和可选 `method=apply/replace/create`；`resource_delete`：删除接口支持的资源。CRD 不由这些接口支持，使用通用 K8S API；Deployment 重启调度仍使用前节专用工具 |
 | 其他工作负载变更 | `restart_statefulset`、`scale_statefulset`：立即重启或扩缩容 StatefulSet（参数 `statefulset`，扩缩容另传 `replicas`）；`restart_daemonset`：立即重启 DaemonSet（参数 `daemonset`）。这些工具不提供 Deployment 的定时、周期模式 |
-| Deployment 镜像 | `image_tags`：按现有仓库配置查询可用及当前镜像标签；`update_deployment_image`：传 `image_tag`，沿用现有 UPDATE_IMAGE 策略更新 |
+| Deployment 镜像 | `image_tags`：按现有仓库配置查询可用及当前镜像标签；`update_deployment_image`：传 `image_tag`，沿用现有 UPDATE_IMAGE 策略，只换第一个容器镜像的 tag（仓库地址不变）；改 sidecar 镜像或换仓库用通用工具 |
 | Pod 变更 | `delete_pod`：单个删除；`delete_pods`：批量传 `pods=[{namespace,pod}]`；`isolate_pod`：沿用现有隔离操作，均需批准 |
 | 日志与 JVM 诊断 | `logs`、`previous_logs`：当前或上次退出容器日志，参数 `namespace`、`pod`、`lines`（最多 5000），指定容器时用通用 Pod/log API；`jvm_mem`、`jvm_dump`、`jvm_jstack`、`jvm_jfr`：执行现有 JVM 诊断流程，需批准且可能生成或上传文件 |
 | 当前与历史事件 | `events`：实时事件，可按 `namespace`；`event_history`：入库历史事件，`start_time`、`end_time` 为包含边界的日期，可按 Kind、名称、原因、级别和消息过滤，无需在线 Agent |
@@ -69,9 +90,9 @@
 
 `resource_inventory` 中 CPU 单位为 milliCPU、内存为 MB；`jvm_xms_bytes`、`jvm_xmx_bytes`、`jvm_xss_bytes`、`jvm_max_metaspace_bytes` 为字节，`update` 说明采集时间。历史样本不是实时状态。`metrics` 传 `query`，`start/end` 同时提供为区间查询，另可传 `step`；服务端强制当前集群标签过滤。
 
-`resource_config_update` 复用 `/api/db/res/edit`，只保存数据库管控配置，**下次发布或滚动重启时应用，不自动重启，也不立即修改在线资源**。如果只修改 JVM，先用 `resource_inventory` 取得目标当前的 `limit_mem_mb`、`limit_cpu_m`、`pod_count_manual`，原样传入这三个必填字段；不得用默认值或 0 替代未取得的当前值。仅传用户要修改的 JVM 字段：省略表示保留，显式 `null` 表示清除，数字以字节计。保存后回读配置，并说明尚待后续发布或重启生效，不能报告在线 JVM 已改变。
+`resource_config_update` 复用 `/api/db/res/edit`，只保存数据库管控配置，**下次发布或滚动重启时应用，不自动重启，也不立即修改在线资源**；要立即生效用 `update_deployment_resources` / `update_deployment_jvm`。如果只修改 JVM，先用 `resource_inventory` 取得目标当前的 `limit_mem_mb`、`limit_cpu_m`、`pod_count_manual`，原样传入这三个必填字段；不得用默认值或 0 替代未取得的当前值。仅传用户要修改的 JVM 字段：省略表示保留，显式 `null` 表示清除，数字以字节计。保存后回读配置，并说明尚待后续发布或重启生效，不能报告在线 JVM 已改变。
 
-`resource_pod_count` 复用 `/api/db/res/pod_count`，仅更新数据库里的 `pod_count_manual`，不会立即改变 Deployment 副本数。用户要立即扩缩容时使用 `scale_deployment`；是否保存人工管控值依用户意图决定，不能把一次临时扩缩容默认变为长期管控配置。
+`resource_pod_count` 复用 `/api/db/res/pod_count`，仅更新数据库里的 `pod_count_manual`，不会立即改变 Deployment 副本数。要立即扩缩容用 `scale_deployment`：`mode=persistent` 会同时写管控副本数，不要自己分两步拼。
 
 资源修改、工作负载变更、节点调度和负载均衡写操作均通过网关批准。不要把 `load_balance_analyze` 当成完全无写入的查询，它会改变 master 的待执行计划。迁移清理参数从实际隔离查询结果取得，先检查替代 Pod Ready；不修改全局负载均衡配置或共享 Istio 模板。
 

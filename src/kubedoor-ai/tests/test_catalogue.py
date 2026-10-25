@@ -10,7 +10,7 @@ from unittest.mock import AsyncMock, Mock
 import httpx
 import pytest
 
-from fakes import FakeStore
+from fakes import FakeStore, control_state, stub_control
 from kubedoor_ai.catalogue import EXTRA_CATALOG, EXTRA_SCHEMAS, build_request, validate_arguments
 from kubedoor_ai.domain import AIError, CredentialCipher, Identity
 from kubedoor_ai.gateway import CATALOG, Gateway, PendingAction, RunContext
@@ -49,6 +49,8 @@ CONTRACTS = [
     ("resource_max_day", {}, "GET", "/api/db/res/max_day", {}, None),
     ("resource_config_update", {"namespace": "ops", "deployment": "app", "limit_mem_mb": 512, "limit_cpu_m": 500, "pod_count_manual": 2, "jvm_xms_bytes": 0, "jvm_xmx_bytes": None}, "POST", "/api/db/res/edit", {}, {"env": ENV, "namespace": "ops", "deployment": "app", "limit_mem_mb": 512, "limit_cpu_m": 500, "pod_count_manual": 2, "jvm_xms_bytes": 0, "jvm_xmx_bytes": None}),
     ("resource_pod_count", {"namespace": "ops", "deployment": "app", "pod_count_manual": 0}, "POST", "/api/db/res/pod_count", {}, {"env": ENV, "namespace": "ops", "deployment_name": "app", "pod_count_manual": 0}),
+    ("resource_control_add", {"namespace": "ops", "deployment": "app", "pod_count_manual": 2, "request_cpu_m": 100, "request_mem_mb": 256, "limit_cpu_m": 500, "limit_mem_mb": 512, "jvm_xmx_bytes": 268435456}, "POST", "/api/db/res/add", {}, {"env": ENV, "namespace": "ops", "deployment": "app", "pod_count_manual": 2, "request_cpu_m": 100, "request_mem_mb": 256, "limit_cpu_m": 500, "limit_mem_mb": 512, "jvm_xmx_bytes": 268435456}),
+    ("deployment_control", {"namespace": "ops", "deployment": "app"}, "GET", "/api/ai/internal/deployment-control", {"namespace": "ops", "deployment": "app"}, None),
     ("alert_total", {"startTime": "2026-10-01T00:00:00+08:00"}, "POST", "/api/db/alert/total", {}, {"startTime": "2026-10-01T00:00:00+08:00", "env": ENV}),
     ("alert_detail", {"namespace": "ops", "alertName": ["PodCrash"], "status": ["firing"], "page": 2, "pageSize": 30}, "POST", "/api/db/alert/detail", {}, {"namespace": "ops", "alertName": ["PodCrash"], "status": ["firing"], "page": 2, "pageSize": 30, "env": [ENV]}),
     ("alert_detail_total", {"namespace": "ops", "silenced": "0"}, "POST", "/api/db/alert/detail_total", {}, {"namespace": "ops", "silenced": "0", "env": [ENV]}),
@@ -105,16 +107,23 @@ MUTATIONS = {
     "delete_pods", "cordon_nodes", "uncordon_nodes", "resource_apply", "resource_delete",
     "restart_statefulset", "scale_statefulset", "restart_daemonset", "load_balance_analyze",
     "load_balance_execute", "load_balance_cleanup",
-    "resource_config_update", "resource_pod_count",
+    "resource_config_update", "resource_pod_count", "resource_control_add",
+    "update_deployment_resources", "update_deployment_jvm",
+}
+# 按管控状态生成计划的写操作没有单个接口合同，冻结测试用这里的参数
+PLANNED_ARGS = {
+    "update_deployment_resources": {"namespace": "ops", "deployment": "app", "limit_mem_mb": 2048},
+    "update_deployment_jvm": {"namespace": "ops", "deployment": "app", "jvm_xmx_bytes": 1024 ** 3},
 }
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("operation", sorted(MUTATIONS))
 async def test_business_mutations_freeze_and_require_write_permission(operation):
-    args = copy.deepcopy(next(row[1] for row in CONTRACTS if row[0] == operation))
+    args = copy.deepcopy(PLANNED_ARGS.get(operation) or next(row[1] for row in CONTRACTS if row[0] == operation))
     gateway = Gateway(FakeStore(), CredentialCipher("ab" * 32), "http://master", "internal")
     gateway.execute_action = AsyncMock()
+    stub_control(gateway, control_state("unregistered" if operation == "resource_control_add" else "controlled"))
     try:
         with pytest.raises(AIError) as denied:
             await gateway.invoke(context("read"), operation, args, call_id="denied", mcp=True)

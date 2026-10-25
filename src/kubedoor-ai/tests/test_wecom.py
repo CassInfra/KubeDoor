@@ -10,7 +10,7 @@ import pytest
 
 from kubedoor_ai.domain import BEIJING_TZ, AIError, Identity
 from kubedoor_ai.http import create_app
-from kubedoor_ai.wecom import WeComIntegration, _limit_stream, _retention_days
+from kubedoor_ai.wecom import WeComIntegration, _approval_summary, _approval_text, _limit_stream, _retention_days
 
 
 class Store:
@@ -919,3 +919,33 @@ async def test_old_welcome_card_cannot_continue_a_purged_conversation():
     await integration._handle_card_event(card_frame("session_old_ab12cd34ef56", "session_resume"))
     assert client.update_template_card.await_args.args[1]["sub_title_text"] == "该对话已不可用，直接发送问题即可开始新对话。"
     assert store.members["wx-bob"] == {"session_id": "new", "previous_session_id": None}
+
+
+PLANNED_APPROVAL = {
+    "name": "scale_deployment", "env": "prod", "arguments": {"namespace": "demo", "deployment": "app", "replicas": 5},
+    "preview": {"plan": {
+        "control": {"controlled": True, "blocked": False, "message": "受花折资源管控：准入控制会改写副本数"},
+        "steps": [{"kind": "master", "name": "写入管控副本数"}, {"kind": "master", "name": "扩缩容"}],
+        "changes": [{"scope": "在线", "label": "副本数", "current": "2", "target": "5"},
+                    {"scope": "管控表", "label": "管控副本数（指定 Pod）", "current": "-1（按 AI 推荐 / 当日 Pod）", "target": "5"}],
+        "effects": ["管控副本数写为 5：以后每次发布、重启都按 5 个副本"], "warnings": ["之前临时扩过的副本会恢复"]}},
+}
+
+
+def test_approval_text_shows_control_steps_changes_and_effects_above_the_card():
+    text = _approval_text(PLANNED_APPROVAL)
+    assert text.startswith("**待审批：扩缩容**（集群 prod）") and "目标：demo/app" in text
+    assert "管控：受花折资源管控" in text and "1. 写入管控副本数\n2. 扩缩容" in text
+    assert "- 在线 副本数：2 → 5" in text and "- ⚠️ 之前临时扩过的副本会恢复" in text
+    summary = _approval_summary(PLANNED_APPROVAL)
+    assert summary.startswith("demo/app · 受花折资源管控 · 副本数 2→5") and len(summary) <= 140
+
+
+def test_approval_without_a_plan_shows_the_command_or_diff():
+    event = {"name": "kubectl", "env": "prod", "arguments": {"argv": ["set", "image", "deployment/app", "app=app:v2"]},
+             "preview": {"command": ["kubectl", "set", "image", "deployment/app", "app=app:v2"]}}
+    assert "```\nkubectl set image deployment/app app=app:v2\n```" in _approval_text(event)
+    assert _approval_summary(event) == "kubectl set image deployment/app app=app:v2"
+    diff = {"name": "api", "env": "prod", "arguments": {}, "preview": {"diff": "-a\n+b" + "x" * 3000}}
+    detail = _approval_text(diff).split("```\n", 1)[1]
+    assert len(detail) < 1600 and detail.startswith("-a\n+b")

@@ -364,11 +364,28 @@ Agent 创建的定时、周期 CronJob 设置了 `spec.timeZone: Asia/Shanghai`�
 Xms、Xmx、Xss、MaxMetaspaceSize。它表示管控或已采集数据，不能当成实时进程值；
 null 表示未采集。工具卡显示来源、查询时间、数据类型及截断情况。
 
+副本数、requests/limits 和 JVM 参数受 KubeDoor 资源管控（准入控制）约束：集群开启准入控制、
+命名空间在管控列表里、服务已登记到管控表时，准入会把这三类值改写成管控表的值，直接改
+Deployment 不生效（K8S 照样返回成功）；不受管控时反过来，改管控表不生效。所以 AI 修改
+这三类值前先查该服务是否受管控，再选执行方式：
+
+| 操作 | 受管控 | 不受管控 |
+| --- | --- | --- |
+| `scale_deployment` | 默认永久：先写管控表的「指定Pod」再扩缩容；`mode=temporary` 是临时扩缩容，下次发布或重启恢复管控值 | 直接改副本数 |
+| `schedule_deployment_scale`、`cron_deployment_scale` | 到点只能临时扩缩容 | 同左 |
+| `update_deployment_resources` | 只能改 limits（requests 由每日高峰期采集决定）：写管控表，默认随后滚动重启 | 直接改第一个容器的 resources |
+| `update_deployment_jvm` | 写管控表，默认随后滚动重启 | 直接替换第一个容器启动参数里已有的 JVM 选项 |
+
+审批卡片显示管控状态、执行步骤、「当前 → 目标」变化和影响；执行后回读 Deployment，与期望
+不一致（例如被准入改回了管控值）时会标出来。受管控的服务用 kubectl 等通用工具直接改这三类值，
+会在批准前被拒绝。准入规则见 [K8S资源管控功能说明](../help/K8S资源管控功能说明.md)。
+
 `resource_config_update` 复用资源管控编辑接口，保存 Deployment 的数据库配置，
 在下次发布或滚动重启时应用，不自动重启。仅调整 JVM 时先读取现有配置，保留
 必填的 `limit_mem_mb`、`limit_cpu_m`、`pod_count_manual` 当前值；JVM 字段省略
 表示保留，显式 `null` 表示清除。`resource_pod_count` 仅保存数据库人工管控副本数，
 立即扩缩容应使用 `scale_deployment`，不能把数据库保存成功当成在线资源已生效。
+服务不受管控时这两个操作照样能保存，但不会生效，卡片上会提示。
 
 查询自动执行。修改、未知 CLI 和 Pod 命令先展示目标、参数或差异，默认人工批准后
 执行；勾选“自动批准执行”后由页面提交批准，仍经过现有后端审批、权限和集群边界检查。
@@ -390,6 +407,7 @@ VictoriaMetrics 的自由 MetricsQL 查询经 master 网关使用现有 `PROM_UR
 | “检查这个 Pod 为什么重启，结合异常日志和事件分析” | 日志、上次退出日志、Pod 状态、事件和监控，必要时执行经批准的 Pod 内诊断 |
 | “每天凌晨 2 点重启 demo 的 order-service” | Deployment 周期重启接口；核实任务是否已有，K8S 1.25 以下的集群还需核实控制器时区 |
 | “在指定日期时间把这个 Deployment 扩到 3 个副本” | Deployment 定时扩缩容接口；提交后回读任务，执行时间语义见前文 |
+| “把 order-api 扩到 5 个副本” | 先查是否受资源管控：受管控时写「指定Pod」再扩缩容，不受管控时直接改；执行后回读核验 |
 | “检查 Istio 代理状态与当前 VirtualService 配置” | 受控 istioctl 或 Kubernetes CRD API；不修改平台共享数据库模板 |
 
 ## 权限与执行边界

@@ -13,6 +13,10 @@ import utils
 from func_manager.jvm_config import replace_jvm_flags
 
 
+def _quiet(*_args, **_kwargs):
+    """dry-run 请求不发 IM 通知"""
+
+
 class AdmisService:
     def __init__(self, apps_v1_api, core_v1_api, admission_api, request_futures):
         self.apps_v1 = apps_v1_api
@@ -57,11 +61,17 @@ class AdmisService:
         uid = request_info['request']['uid']
         namespace = obj['metadata']['namespace']
         deployment_name = obj['metadata']['name']
-        logger.info(f"admis:【{utils.PROM_K8S_TAG_VALUE}】【{namespace}】【{deployment_name}】收到请求{obj}")
+        # dry-run(如 AI 审批前的 server dry-run 预检)照常算出改写结果,但不发 IM:这次修改不一定会执行
+        dry_run = request_info['request'].get('dryRun') is True
+        notify = _quiet if dry_run else utils.send_msg
+        logger.info(f"admis:【{utils.PROM_K8S_TAG_VALUE}】【{namespace}】【{deployment_name}】收到{'dry-run ' if dry_run else ''}请求{obj}")
 
         annotations = obj.get('metadata', {}).get('annotations', {})
         scale_temp = annotations.get('scale.temp')
-        if scale_temp:
+        # 只认这次请求新写入的标记(花折的临时扩缩容每次都写入当前时间):对象上原有的标记哪怕还在 5 分钟内,
+        # 也不能顺带放行别人直接改的副本数
+        old_annotations = ((old_object or {}).get('metadata') or {}).get('annotations') or {}
+        if scale_temp and scale_temp != old_annotations.get('scale.temp'):
             try:
                 time_part = scale_temp.split('@')[0]
                 temp_time = datetime.strptime(time_part, "%Y-%m-%d %H:%M:%S")
@@ -83,7 +93,7 @@ class AdmisService:
                 logger.warning(f"解析scale.temp时间失败: {exc}")
 
         if self.ws_conn is None or self.ws_conn.closed:
-            utils.send_msg(
+            notify(
                 f"admis:【{utils.PROM_K8S_TAG_VALUE}】【{namespace}】【{deployment_name}】连接 kubedoor-master 失败"
             )
             return web.json_response(self._admis_fail(uid, 503, "连接 kubedoor-master 失败"))
@@ -101,7 +111,7 @@ class AdmisService:
             # 连接已断开 / 发送超时:和没连上 master 一样处理,别把 future 留在 request_futures 里
             self.request_futures.pop(uid, None)
             logger.error(f"admis 请求发送到 master 失败: {exc}")
-            utils.send_msg(
+            notify(
                 f"admis:【{utils.PROM_K8S_TAG_VALUE}】【{namespace}】【{deployment_name}】连接 kubedoor-master 失败"
             )
             return web.json_response(self._admis_fail(uid, 503, "连接 kubedoor-master 失败"))
@@ -111,13 +121,13 @@ class AdmisService:
         except asyncio.TimeoutError:
             if uid in self.request_futures:
                 del self.request_futures[uid]
-            utils.send_msg(
+            notify(
                 f"admis:【{utils.PROM_K8S_TAG_VALUE}】【{namespace}】【{deployment_name}】连接 kubedoor-master 响应超时"
             )
             return web.json_response(self._admis_fail(uid, 504, "等待 kubedoor-master 响应超时"))
 
         if len(result) == 2:
-            utils.send_msg(f"admis:【{utils.PROM_K8S_TAG_VALUE}】【{namespace}】【{deployment_name}】{result[1]}")
+            notify(f"admis:【{utils.PROM_K8S_TAG_VALUE}】【{namespace}】【{deployment_name}】{result[1]}")
             if result[0] == 200:
                 return web.json_response(self._admis_pass(uid))
             return web.json_response(self._admis_fail(uid, result[0], result[1]))
@@ -154,14 +164,14 @@ class AdmisService:
                     f"admis:【{utils.PROM_K8S_TAG_VALUE}】【{namespace}】【{deployment_name}】收到scale请求，仅修改replicas为: {replicas}"
                 )
                 logger.info(admis_msg)
-                utils.send_msg(admis_msg)
+                notify(admis_msg)
                 return web.json_response(self._scale_only(uid, replicas))
             if kind == 'Deployment' and operation == 'CREATE':
                 admis_msg = (
                     f"admis:【{utils.PROM_K8S_TAG_VALUE}】【{namespace}】【{deployment_name}】收到 create 请求，修改所有参数"
                 )
                 logger.info(admis_msg)
-                utils.send_msg(f'{admis_msg}\n{deploy_baseinfo}\n固定节点均衡: {scheduler}')
+                notify(f'{admis_msg}\n{deploy_baseinfo}\n固定节点均衡: {scheduler}')
                 resources_dict = obj['spec']['template']['spec']['containers'][0].get('resources', {}) or {}
                 resources_dict.setdefault('requests', {})
                 resources_dict.setdefault('limits', {})
@@ -181,6 +191,7 @@ class AdmisService:
                         jvm_config,
                         strategy_config,
                         spec.get("strategy"),
+                        notify,
                     )
                 )
             if (
@@ -195,7 +206,7 @@ class AdmisService:
                     f"admis:【{utils.PROM_K8S_TAG_VALUE}】【{namespace}】【{deployment_name}】收到 update 请求，修改所有参数"
                 )
                 logger.info(admis_msg)
-                utils.send_msg(f'{admis_msg}\n{deploy_baseinfo}\n固定节点均衡: {scheduler}')
+                notify(f'{admis_msg}\n{deploy_baseinfo}\n固定节点均衡: {scheduler}')
                 resources_dict = obj['spec']['template']['spec']['containers'][0].get('resources', {}) or {}
                 resources_dict.setdefault('requests', {})
                 resources_dict.setdefault('limits', {})
@@ -215,6 +226,7 @@ class AdmisService:
                         jvm_config,
                         strategy_config,
                         spec.get("strategy"),
+                        notify,
                     )
                 )
             if (
@@ -236,7 +248,7 @@ class AdmisService:
                     f"admis:【{utils.PROM_K8S_TAG_VALUE}】【{namespace}】【{deployment_name}】收到 update 请求，仅修改replicas为: {replicas}"
                 )
                 logger.info(admis_msg)
-                utils.send_msg(admis_msg)
+                notify(admis_msg)
                 return web.json_response(self._scale_only(uid, replicas))
             if (
                 kind == 'Deployment'
@@ -249,16 +261,25 @@ class AdmisService:
                     f"admis:【{utils.PROM_K8S_TAG_VALUE}】【{namespace}】【{deployment_name}】template 和 replicas 没变，不处理"
                 )
                 return web.json_response(self._admis_pass(uid))
+            if kind == 'Deployment' and operation == 'UPDATE' and spec.get('replicas') != old_spec.get('replicas'):
+                # 模板、滚动策略都没变,只改了副本数(kubectl patch / edit / apply 直接改 spec.replicas):
+                # 和 Scale 子资源一样改成管控值。以前落到下面的「不符合预设判断条件」直接放行,绕开了管控
+                admis_msg = (
+                    f"admis:【{utils.PROM_K8S_TAG_VALUE}】【{namespace}】【{deployment_name}】收到只改副本数的 update 请求，仅修改replicas为: {replicas}"
+                )
+                logger.info(admis_msg)
+                notify(admis_msg)
+                return web.json_response(self._scale_only(uid, replicas))
 
             admis_msg = (
                 f"admis:【{utils.PROM_K8S_TAG_VALUE}】【{namespace}】【{deployment_name}】不符合预设判断条件: {kind} {operation}，直接放行"
             )
             logger.error(admis_msg)
-            utils.send_msg(admis_msg)
+            notify(admis_msg)
             return web.json_response(self._admis_pass(uid))
         except Exception as exc:
             logger.exception(f"【{namespace}】【{deployment_name}】Webhook 处理错误：{exc}")
-            utils.send_msg(f"admis:【{utils.PROM_K8S_TAG_VALUE}】【{namespace}】【{deployment_name}】处理错误：{exc}")
+            notify(f"admis:【{utils.PROM_K8S_TAG_VALUE}】【{namespace}】【{deployment_name}】处理错误：{exc}")
             return web.json_response({"error": str(exc)}, status=500)
 
     async def _update_namespace_label(self, namespace_name, action):
@@ -369,6 +390,7 @@ class AdmisService:
         jvm_config=None,
         strategy_config=None,
         strategy_object=None,
+        notify=utils.send_msg,
     ):
         change_list = []
         scheduler_enabled = bool(scheduler)
@@ -413,19 +435,19 @@ class AdmisService:
         if request_cpu_m > 0:
             resources_dict["requests"]["cpu"] = f"{request_cpu_m}m"
         else:
-            utils.send_msg(f"admis:【{utils.PROM_K8S_TAG_VALUE}】【{namespace}】【{deployment_name}】未配置 request_cpu_m")
+            notify(f"admis:【{utils.PROM_K8S_TAG_VALUE}】【{namespace}】【{deployment_name}】未配置 request_cpu_m")
         if request_mem_mb > 0:
             resources_dict["requests"]["memory"] = f"{request_mem_mb}Mi"
         else:
-            utils.send_msg(f"admis:【{utils.PROM_K8S_TAG_VALUE}】【{namespace}】【{deployment_name}】未配置 request_mem_mb")
+            notify(f"admis:【{utils.PROM_K8S_TAG_VALUE}】【{namespace}】【{deployment_name}】未配置 request_mem_mb")
         if limit_cpu_m > 0:
             resources_dict["limits"]["cpu"] = f"{limit_cpu_m}m"
         else:
-            utils.send_msg(f"admis:【{utils.PROM_K8S_TAG_VALUE}】【{namespace}】【{deployment_name}】未配置 limit_cpu_m")
+            notify(f"admis:【{utils.PROM_K8S_TAG_VALUE}】【{namespace}】【{deployment_name}】未配置 limit_cpu_m")
         if limit_mem_mb > 0:
             resources_dict["limits"]["memory"] = f"{limit_mem_mb}Mi"
         else:
-            utils.send_msg(f"admis:【{utils.PROM_K8S_TAG_VALUE}】【{namespace}】【{deployment_name}】未配置 limit_mem_mb")
+            notify(f"admis:【{utils.PROM_K8S_TAG_VALUE}】【{namespace}】【{deployment_name}】未配置 limit_mem_mb")
         logger.info(f"改后：{resources_dict}")
         change_list.append(
             {

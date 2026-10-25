@@ -345,7 +345,7 @@ class WeComIntegration:
             return None
         return await tx.one(
             "SELECT s.id,s.updated_at,now()-s.updated_at > make_interval(mins => $4::int) AS idle,"
-            "(SELECT count(*) FROM kubedoor_ai_messages m WHERE m.session_id=s.id AND m.role='user') AS rounds "
+            "(SELECT count(*) FROM kubedoor_ai_messages m WHERE m.session_id=s.id AND m.role='user' AND m.replaced_at IS NULL) AS rounds "
             "FROM kubedoor_ai_sessions s WHERE s.id=$1::uuid AND s.username=$2 AND s.channel='wecom' AND starts_with(s.channel_key,$3) "
             "AND s.checkpoint_purged_at IS NULL",
             session_id, identity.username, f"{userid}:", idle,
@@ -508,7 +508,8 @@ class WeComIntegration:
                     content += data["content"]
                     updated = True
                 elif kind == "approval":
-                    await self._reply(frame, _with_notice(notice, (content + "\n\n操作需要审批，请查看下方审批卡片。").strip()), True, stream_id)
+                    # 卡片只放得下一行摘要：完整的管控状态、步骤、变化和差异写在卡片上方
+                    await self._reply(frame, _with_notice(notice, (content + "\n\n" + _approval_text(data)).strip()), True, stream_id)
                     await self._send_approval(frame, userid, identity, run_id, data, cursor)
                     return
                 elif kind == "message" and isinstance(data.get("content"), str):
@@ -549,12 +550,12 @@ class WeComIntegration:
             "RETURNING task_id", task_id, action_id, run_id, userid, identity.username, run["session_id"], after, action["expires_at"],
         )
         env = run["scope"]["env"]
-        title = f"{action['operation']} / {env}"
-        details = action.get("preview") or {}
-        summary = details.get("command") or details.get("diff") or json.dumps(action.get("arguments") or {}, ensure_ascii=False)
-        summary = _clip(str(summary).replace("\n", " "), 140)
-        card = {"card_type": "button_interaction", "main_title": {"title": "K8S 操作待审批", "desc": _clip(title, 40)},
-                "sub_title_text": summary or "请核对操作内容后决定。",
+        preview = action.get("preview") or {}
+        detail = {"name": action["operation"], "env": env, "arguments": action.get("arguments"), "preview": preview,
+                  "command": preview.get("command"), "diff": preview.get("diff")}
+        name = OPERATION_NAMES.get(action["operation"], action["operation"])
+        card = {"card_type": "button_interaction", "main_title": {"title": "K8S 操作待审批", "desc": _clip(f"{name} / {env}", 40)},
+                "sub_title_text": _approval_summary(detail) or "请核对操作内容后决定。",
                 "button_list": [{"text": "批准", "key": "approve", "style": 1},
                                 {"text": "拒绝", "key": "reject", "style": 2}],
                 "task_id": task_id}
@@ -777,6 +778,90 @@ class WeComIntegration:
 
 def _clip(value, limit):
     return value if len(value) <= limit else value[:limit - 1] + "…"
+
+
+# 审批说明和卡片里的操作中文名，没列出的显示原名
+OPERATION_NAMES = {
+    "scale_deployment": "扩缩容", "restart_deployment": "滚动重启", "update_deployment_image": "更新镜像",
+    "update_deployment_resources": "调整 requests/limits", "update_deployment_jvm": "调整 JVM 参数",
+    "resource_config_update": "修改管控配置", "resource_pod_count": "修改管控副本数", "resource_control_add": "登记到资源管控",
+    "schedule_deployment_scale": "定时扩缩容", "cron_deployment_scale": "周期扩缩容",
+    "schedule_deployment_restart": "定时重启", "cron_deployment_restart": "周期重启",
+    "delete_pod": "删除 Pod", "delete_pods": "批量删除 Pod", "isolate_pod": "隔离 Pod",
+    "resource_apply": "应用 YAML", "resource_delete": "删除资源",
+    "kubectl": "kubectl 命令", "api": "K8S API 请求", "istioctl": "istioctl 命令", "pod_exec": "Pod 内执行命令",
+}
+# 审批说明里命令 / 差异最多展示的字数，完整内容在网页的审批记录里
+APPROVAL_DETAIL_LIMIT = 1500
+
+
+def _approval_target(event):
+    arguments = event.get("arguments") if isinstance(event.get("arguments"), dict) else {}
+    namespace = arguments.get("namespace")
+    name = next((arguments[key] for key in ("deployment", "pod", "statefulset", "daemonset", "resource_name") if arguments.get(key)), None)
+    return f"{namespace}/{name}" if namespace and name else str(name or namespace or "")
+
+
+def _approval_plan(event):
+    preview = event.get("preview") if isinstance(event.get("preview"), dict) else {}
+    plan = preview.get("plan")
+    return plan if isinstance(plan, dict) and isinstance(plan.get("steps"), list) else None
+
+
+def _control_label(plan):
+    control = plan.get("control") or {}
+    if control.get("blocked"):
+        return "未登记管控，修改会被拒绝"
+    return "受花折资源管控" if control.get("controlled") else "不受花折资源管控"
+
+
+def _approval_detail(event):
+    """命令、差异或参数原文：没有执行计划的操作靠它让成员看清要执行什么"""
+    plan = _approval_plan(event)
+    if plan:
+        return "\n".join(step["diff"] for step in plan["steps"] if isinstance(step, dict) and step.get("diff"))
+    preview = event.get("preview") if isinstance(event.get("preview"), dict) else {}
+    detail = event.get("command") or preview.get("command") or event.get("diff") or preview.get("diff")
+    if isinstance(detail, list):
+        detail = " ".join(map(str, detail))
+    return str(detail) if detail else json.dumps(event.get("arguments") or {}, ensure_ascii=False, indent=2)
+
+
+def _approval_summary(event):
+    """卡片副标题，一行：目标、管控状态和主要变化；没有计划时是命令或参数"""
+    plan = _approval_plan(event)
+    if not plan:
+        return _clip(_approval_detail(event).replace("\n", " "), 140)
+    changes = [f"{c.get('label')} {c.get('current')}→{c.get('target')}" for c in plan.get("changes") or [] if isinstance(c, dict)]
+    return _clip(" · ".join(part for part in (_approval_target(event), _control_label(plan), *changes[:3]) if part), 140)
+
+
+def _approval_text(event):
+    """卡片上方的完整说明（Markdown）：卡片放不下的管控状态、步骤、变化、影响和差异"""
+    name = OPERATION_NAMES.get(event.get("name"), event.get("name") or "操作")
+    lines = [f"**待审批：{name}**（集群 {event.get('env') or '-'}）"]
+    target = _approval_target(event)
+    if target:
+        lines.append(f"目标：{target}")
+    plan = _approval_plan(event)
+    if plan:
+        message = (plan.get("control") or {}).get("message")
+        lines.append(f"管控：{_control_label(plan)}" + (f"（{message}）" if message else ""))
+        steps = [step for step in plan["steps"] if isinstance(step, dict)]
+        if steps:
+            lines += ["步骤："] + [f"{index}. {step.get('name')}" for index, step in enumerate(steps, 1)]
+        changes = [c for c in plan.get("changes") or [] if isinstance(c, dict)]
+        if changes:
+            lines += ["变化："] + [f"- {c.get('scope')} {c.get('label')}：{c.get('current')} → {c.get('target')}" for c in changes]
+        for title, items, mark in (("影响：", plan.get("effects"), "-"), ("注意：", plan.get("warnings"), "- ⚠️")):
+            items = [item for item in items or [] if isinstance(item, str)]
+            if items:
+                lines += [title] + [f"{mark} {item}" for item in items]
+    detail = _approval_detail(event)
+    if detail:
+        lines.append("```\n" + _clip(detail, APPROVAL_DETAIL_LIMIT).replace("```", "'''") + "\n```")
+    lines.append("请核对后在下方卡片批准或拒绝。")
+    return "\n".join(lines)
 
 
 def _retention_days():

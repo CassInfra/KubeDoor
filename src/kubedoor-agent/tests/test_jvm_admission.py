@@ -1,6 +1,7 @@
 import base64
 import copy
 import json
+from datetime import datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -27,7 +28,7 @@ def review(args, operation="UPDATE", kind="Deployment", strategy=None):
 
 async def run_review(
     admission_module, payload, jvm_config=None, legacy=False, scheduler=False,
-    existing_max_unavailable="10%",
+    existing_max_unavailable="10%", master_result=None,
 ):
     futures = {}
     service = admission_module.AdmisService(None, None, None, futures)
@@ -36,6 +37,8 @@ async def run_review(
     result = [2, -1, 4, 100, 128, 2000, 2048, scheduler]
     if not legacy:
         result.append(jvm_config or {})
+    if master_result is not None:
+        result = master_result
     service._get_pod_label_and_max_unavailable = AsyncMock(return_value={
         "app_label_value": "service", "maxUnavailable_value": existing_max_unavailable,
     })
@@ -49,7 +52,8 @@ async def run_review(
     service.set_ws_conn(SimpleNamespace(closed=False, send_json=send))
     response = await service.admis_mutate(SimpleNamespace(json=AsyncMock(return_value=payload)))
     envelope = json.loads(response.body)
-    patch = json.loads(base64.b64decode(envelope["response"]["patch"]))
+    raw_patch = envelope["response"].get("patch")
+    patch = json.loads(base64.b64decode(raw_patch)) if raw_patch else None
     return envelope, patch, sent
 
 
@@ -99,6 +103,21 @@ async def test_admission_rechecks_exact_java_gate(admission_module, args):
 async def test_scale_with_new_contract_still_only_patches_replicas(admission_module):
     _, patch, _ = await run_review(admission_module, review([], kind="Scale"), {"jvm_xmx_bytes": 1024 ** 3})
     assert patch == [{"op": "replace", "path": "/spec/replicas", "value": 4}]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", ["Deployment", "Scale"])
+async def test_dry_run_is_rewritten_the_same_but_sends_no_message(admission_module, kind):
+    # AI 审批前的 server dry-run 也会经过 webhook:改写结果照常,IM 不能提前通知一个可能被拒绝的修改
+    payload = review(["java", "-Xmx256m", "-jar", "app.jar"], kind=kind)
+    _, patch, _ = await run_review(admission_module, payload, {"jvm_xmx_bytes": 1024 ** 3})
+    assert admission_module.utils.send_msg.called
+    admission_module.utils.send_msg.reset_mock()
+    dry = copy.deepcopy(payload)
+    dry["request"]["dryRun"] = True
+    _, dry_patch, _ = await run_review(admission_module, dry, {"jvm_xmx_bytes": 1024 ** 3})
+    assert dry_patch == patch
+    assert not admission_module.utils.send_msg.called
 
 
 @pytest.mark.asyncio
@@ -273,3 +292,81 @@ async def test_temporary_scale_shortcut_does_not_apply_rollout_config(admission_
     envelope = json.loads(response.body)
     assert envelope["response"]["allowed"] is True
     assert "patch" not in envelope["response"]
+
+
+def replicas_only(payload, replicas=5):
+    """模板和滚动策略都不变,只改副本数(kubectl patch / edit / apply 直接改 spec.replicas)"""
+    obj, old = payload["request"]["object"], payload["request"]["oldObject"]
+    old["spec"] = copy.deepcopy(obj["spec"])
+    obj["spec"]["replicas"] = replicas
+    return obj, old
+
+
+def scale_temp(minutes_ago):
+    """花折临时扩缩容写的标记:时间@原副本数-->目标副本数"""
+    return f"{(datetime.now() - timedelta(minutes=minutes_ago)).strftime('%Y-%m-%d %H:%M:%S')}@2-->5"
+
+
+@pytest.mark.asyncio
+async def test_replicas_only_update_is_rewritten_to_the_control_value(admission_module):
+    # 以前落到「不符合预设判断条件」直接放行:受管控的服务直接 patch 副本数就绕开了管控,要到下次发布、重启才改回
+    payload = review(["java", "-Xmx256m"])
+    replicas_only(payload)
+    envelope, patch, _ = await run_review(admission_module, payload)
+    assert envelope["response"]["allowed"] is True
+    assert patch == [{"op": "replace", "path": "/spec/replicas", "value": 4}]
+    assert "只改副本数" in admission_module.utils.send_msg.call_args.args[0]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("case", ["kept_fresh", "kept_stale", "written_stale"])
+async def test_scale_temp_must_be_freshly_written_by_this_request(admission_module, case):
+    # 对象上原有的标记(哪怕还在 5 分钟内)不能顺带放行别人直接改的副本数;超过 5 分钟的新标记也不行
+    fresh, stale = scale_temp(0), scale_temp(6)
+    old_marker, new_marker = {
+        "kept_fresh": (fresh, fresh), "kept_stale": (stale, stale), "written_stale": (None, stale),
+    }[case]
+    payload = review(["java", "-Xmx256m"])
+    obj, old = replicas_only(payload)
+    obj["metadata"]["annotations"] = {"scale.temp": new_marker}
+    if old_marker:
+        old["metadata"]["annotations"] = {"scale.temp": old_marker}
+    _, patch, _ = await run_review(admission_module, payload)
+    assert patch == [{"op": "replace", "path": "/spec/replicas", "value": 4}]
+
+
+@pytest.mark.asyncio
+async def test_temporary_scale_replacing_an_old_marker_still_passes(admission_module):
+    payload = review(["java", "-Xmx256m"])
+    obj, old = replicas_only(payload)
+    old["metadata"]["annotations"] = {"scale.temp": scale_temp(30)}
+    obj["metadata"]["annotations"] = {"scale.temp": scale_temp(0)}
+    envelope, patch, sent = await run_review(admission_module, payload)
+    assert envelope["response"]["allowed"] is True and patch is None and sent == []
+
+
+@pytest.mark.asyncio
+async def test_replicas_change_outside_control_and_unchanged_spec_pass_untouched(admission_module):
+    outside = review(["java", "-Xmx256m"])
+    replicas_only(outside)
+    envelope, patch, _ = await run_review(admission_module, outside, master_result=[200, "非管控命名空间，直接放行"])
+    assert envelope["response"]["allowed"] is True and patch is None
+    # 只改标签、注解(Deployment 控制器每次发布也会改 revision 注解):副本数没变就不动
+    labels_only = review(["java", "-Xmx256m"])
+    obj, _ = replicas_only(labels_only, replicas=2)
+    obj["metadata"]["labels"] = {"owner": "team"}
+    envelope, patch, _ = await run_review(admission_module, labels_only)
+    assert envelope["response"]["allowed"] is True and patch is None
+
+
+@pytest.mark.asyncio
+async def test_scheduler_mode_replicas_change_still_gets_the_control_value(admission_module):
+    # 开了固定节点均衡时滚动策略的变化照旧放行,副本数仍改成管控值
+    payload = review(
+        ["java", "-Xmx256m"],
+        strategy={"type": "RollingUpdate", "rollingUpdate": {"maxUnavailable": 1, "maxSurge": 1}},
+    )
+    _, old = replicas_only(payload)
+    old["spec"]["strategy"]["rollingUpdate"]["maxSurge"] = 2
+    _, patch, _ = await run_review(admission_module, payload, scheduler=True)
+    assert patch == [{"op": "replace", "path": "/spec/replicas", "value": 4}]

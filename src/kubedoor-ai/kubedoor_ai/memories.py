@@ -183,7 +183,7 @@ class MemoryLibrary:
         rows = await self.store.fetch(
             "SELECT m.id,m.role,m.content,m.scope,m.tools,m.memories,m.created_at "
             "FROM kubedoor_ai_messages m JOIN kubedoor_ai_runs r ON r.id=m.run_id "
-            "WHERE m.session_id=$1::uuid AND r.status='completed' ORDER BY m.created_at DESC,m.id DESC LIMIT $2",
+            "WHERE m.session_id=$1::uuid AND m.replaced_at IS NULL AND r.status='completed' ORDER BY m.created_at DESC,m.id DESC LIMIT $2",
             sid, SUMMARY_MESSAGES + 1,
         )
         if not rows:

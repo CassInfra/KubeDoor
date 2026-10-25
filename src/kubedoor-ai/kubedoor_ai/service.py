@@ -132,6 +132,18 @@ def _provider_failure(exc, provider=None, stage="request"):
     return AIError(message, response_status, code, details)
 
 
+def search_snippet(content, text, radius=40):
+    """命中关键字前后各 radius 个字，换行压成空格"""
+    if not isinstance(content, str) or not content:
+        return ""
+    flat = " ".join(content.split())
+    index = flat.lower().find(text.lower())
+    if index < 0:
+        return flat[:radius * 2] + ("…" if len(flat) > radius * 2 else "")
+    start, end = max(0, index - radius), min(len(flat), index + len(text) + radius)
+    return ("…" if start else "") + flat[start:end] + ("…" if end < len(flat) else "")
+
+
 class Service:
     def __init__(self, store, gateway, runtime, stack=None):
         self.store, self.gateway, self.runtime, self.stack = store, gateway, runtime, stack
@@ -291,7 +303,7 @@ class Service:
         # system prompt or a separate run-level memory snapshot.
         memories = await self.memory_library.resolve([] if memory_ids is None else memory_ids)
         try:
-            run = await self.store.one("INSERT INTO kubedoor_ai_runs(id,session_id,username,permission,status,scope,origin,skill_ids,idempotency_key) VALUES($1::uuid,$2::uuid,$3,$4,'running',$5,$6,$7,$8) RETURNING *", str(uuid.uuid4()), session_id, identity.username, identity.permission_for(scope["env"]), scope, origin, skills, key)
+            run = await self.store.one("INSERT INTO kubedoor_ai_runs(id,session_id,username,permission,status,scope,origin,skill_ids,idempotency_key,rewindable) VALUES($1::uuid,$2::uuid,$3,$4,'running',$5,$6,$7,$8,true) RETURNING *", str(uuid.uuid4()), session_id, identity.username, identity.permission_for(scope["env"]), scope, origin, skills, key)
         except asyncpg.UniqueViolationError:
             if key:
                 existing = await self.store.one("SELECT * FROM kubedoor_ai_runs WHERE session_id=$1::uuid AND idempotency_key=$2", session_id, key)
@@ -302,6 +314,45 @@ class Service:
         if memories:
             run["_memories"] = memories
         return run, True
+
+    async def search_sessions(self, identity, text):
+        """按标题和消息内容搜索本人的网页会话，附上最近一条命中消息的片段"""
+        pattern = "%" + text.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
+        rows = await self.store.fetch(
+            "SELECT s.id,s.title,s.created_at,s.updated_at,"
+            "(SELECT m.content FROM kubedoor_ai_messages m WHERE m.session_id=s.id AND m.replaced_at IS NULL AND m.content ILIKE $2 "
+            "ORDER BY m.created_at DESC LIMIT 1) AS matched "
+            "FROM kubedoor_ai_sessions s WHERE s.username=$1 AND s.channel='web' AND (s.title ILIKE $2 OR EXISTS "
+            "(SELECT 1 FROM kubedoor_ai_messages m WHERE m.session_id=s.id AND m.replaced_at IS NULL AND m.content ILIKE $2)) "
+            "ORDER BY s.updated_at DESC LIMIT 50", identity.username, pattern)
+        for row in rows:
+            row["snippet"] = search_snippet(row.pop("matched", None), text)
+        return rows
+
+    async def replaceable_turn(self, identity, sid):
+        """重新生成 / 编辑后重发前的检查，返回被替换那一轮的 run id。
+
+        只能替换最后一轮，而且这一轮不能已经改过集群（AI 会忘掉这次修改、可能再做一遍），
+        也不能触发过上下文压缩（摘要事件指向的位置会错开）。
+        """
+        await self.store.session(sid, identity)
+        if await self.store.one("SELECT id FROM kubedoor_ai_runs WHERE session_id=$1::uuid AND status IN ('running','waiting_approval') LIMIT 1", sid):
+            raise AIError("会话里还有进行中或等待批准的任务，先停止或等它结束", 409, "run_active")
+        last = await self.store.one(
+            "SELECT m.run_id,r.usage,r.rewindable FROM kubedoor_ai_messages m JOIN kubedoor_ai_runs r ON r.id=m.run_id "
+            "WHERE m.session_id=$1::uuid AND m.role='user' AND m.replaced_at IS NULL ORDER BY m.created_at DESC,m.id DESC LIMIT 1", sid)
+        if not last:
+            raise AIError("没有可以重新生成的消息", 409, "nothing_to_replace")
+        if not last["rewindable"]:
+            raise AIError("这条消息来自升级前的版本，不能重新生成，请直接继续提问", 409, "turn_not_rewindable")
+        if await self.store.one(
+                "SELECT id FROM kubedoor_ai_actions WHERE run_id=$1::uuid AND read_only=false AND "
+                "(state NOT IN ('rejected','failed','pending') OR result->'error'->>'code' IN ('partial_failure','outcome_unknown')) LIMIT 1",
+                last["run_id"]):
+            raise AIError("这一轮已经执行过修改操作，重新生成会让 AI 忘掉这次修改、可能重复执行；请直接继续提问", 409, "turn_has_writes")
+        if ((last["usage"] or {}).get("summary_calls") or 0) > 0:
+            raise AIError("这一轮触发了上下文压缩，不能重新生成，请直接继续提问", 409, "turn_compacted")
+        return last["run_id"]
 
     async def session_detail(self, identity, sid):
         session = await self.store.session(sid, identity)
@@ -314,7 +365,7 @@ class Service:
 
         # Ownership must be established before starting either data query.
         # History can load while the independent active-run/approval chain runs.
-        messages_task = asyncio.create_task(self.store.fetch("SELECT id,role,content,scope,tools,memories,created_at FROM kubedoor_ai_messages WHERE session_id=$1::uuid ORDER BY created_at,id", sid))
+        messages_task = asyncio.create_task(self.store.fetch("SELECT id,role,content,scope,tools,memories,created_at FROM kubedoor_ai_messages WHERE session_id=$1::uuid AND replaced_at IS NULL ORDER BY created_at,id", sid))
         active_task = asyncio.create_task(active_run())
         # 最近一轮的用量：网页按「最近一次输入 ÷ 模型窗口」显示上下文占用
         usage_task = asyncio.create_task(self.store.one("SELECT usage FROM kubedoor_ai_runs WHERE session_id=$1::uuid AND usage IS NOT NULL ORDER BY created_at DESC LIMIT 1", sid))

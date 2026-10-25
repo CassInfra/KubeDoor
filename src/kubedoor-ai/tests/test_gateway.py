@@ -6,7 +6,7 @@ import pytest
 
 from kubedoor_ai.domain import AIError, CredentialCipher, Identity
 from kubedoor_ai.gateway import Gateway, PendingAction, RunContext
-from fakes import FakeStore
+from fakes import FakeStore, stub_control
 from kubedoor_ai.storage import Store
 
 
@@ -19,7 +19,7 @@ def gateway():
     store = FakeStore()
     gateway = Gateway(store, CredentialCipher("ab" * 32), "http://fixed-master", "service-secret")
     gateway.execute_action = AsyncMock(return_value={"success": True, "data": {"replicas": 3}})
-    return gateway
+    return stub_control(gateway)
 
 
 @pytest.mark.asyncio

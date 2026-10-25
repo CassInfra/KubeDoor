@@ -174,7 +174,7 @@
 <line x1="292" y1="350" x2="552" y2="350" stroke="#a78bfa" stroke-opacity="0.35"/>
 <text x="292" y="372" font-size="13" data-box="ai"><tspan fill="#e2e8f0">DeepAgents · Skills · 子 Agent 并行排查</tspan></text>
 <text x="292" y="394" font-size="13" data-box="ai"><tspan fill="#e2e8f0">统一工具 </tspan><tspan fill="#f0abfc" class="mono">kubedoor_tool</tspan><tspan fill="#e2e8f0">：</tspan></text>
-<text x="292" y="416" font-size="13" data-box="ai"><tspan fill="#e2e8f0">63 个业务操作 + 5 类通用执行器</tspan></text>
+<text x="292" y="416" font-size="13" data-box="ai"><tspan fill="#e2e8f0">67 个业务操作 + 5 类通用执行器</tspan></text>
 <text x="292" y="438" font-size="13" data-box="ai"><tspan fill="#a5b4fc">API · kubectl · istioctl · 诊断 · Pod exec</tspan></text>
 <text x="292" y="460" font-size="13" data-box="ai"><tspan fill="#e2e8f0">只读查询自动执行，变更需审批后执行</tspan></text>
 <text x="292" y="482" font-size="13" data-box="ai"><tspan fill="#e2e8f0">冻结参数 · 变更预览 · 审计入库</tspan></text>

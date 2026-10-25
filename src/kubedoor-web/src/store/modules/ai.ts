@@ -69,6 +69,8 @@ export const useAIStore = defineStore("kubedoor-ai", () => {
   const activeRun = ref<AIRun | null>(null);
   /** 当前会话最近一轮的用量（会话详情和 done 事件带回），用来显示上下文占用 */
   const contextUsage = ref<AIUsage | null>(null);
+  /** 页面上「问 AI」预填的问题，对话框取走后清空 */
+  const pendingInput = ref("");
   const submitting = ref(false);
   const deciding = ref("");
   const cancelling = ref(false);
@@ -972,20 +974,36 @@ export const useAIStore = defineStore("kubedoor-ai", () => {
     }
   }
 
-  async function send(message: string) {
+  /**
+   * replaceLast：重新生成 / 编辑后重发，服务端替换最后一轮；
+   * scope / memoryIds 不传时用当前选择（重新生成时沿用原来那一轮的）
+   */
+  async function send(
+    message: string,
+    options: {
+      replaceLast?: boolean;
+      scope?: AIScope;
+      memoryIds?: string[];
+    } = {}
+  ) {
     if (busy.value || !message.trim()) return;
     if (!sessionReady.value)
       throw new Error("正在核验会话状态，请稍后发送；可以继续输入或切换会话。");
     if (!configured.value)
       throw new Error("请先配置模型的 Base URL 和模型名。");
-    if (!scope.value.env || !clusterAvailable.value)
+    const target = options.scope ?? scope.value;
+    if (
+      !target.env ||
+      !bootstrap.value?.clusters.some(cluster => cluster.env === target.env)
+    )
       throw new Error("请选择已登记的 K8S 集群。");
     error.value = "";
     streamError.value = "";
     const firstUserMessage = !messages.value.some(
       messageItem => messageItem.role === "user"
     );
-    const memoryIds = selectedMemories.value.map(item => item.id);
+    const memoryIds =
+      options.memoryIds ?? selectedMemories.value.map(item => item.id);
     if (!sessionId.value) {
       // Automatic first-send drafts keep the pending references. Explicit new
       // chats and session switches still clear them in beginSelection.
@@ -995,7 +1013,7 @@ export const useAIStore = defineStore("kubedoor-ai", () => {
     }
     submitting.value = true;
     const submission = ++submissionGeneration;
-    const snapshot: AIScope = JSON.parse(JSON.stringify(scope.value));
+    const snapshot: AIScope = JSON.parse(JSON.stringify(target));
     const username = owner;
     try {
       const draft = sessions.value.find(
@@ -1023,7 +1041,8 @@ export const useAIStore = defineStore("kubedoor-ai", () => {
           scope: snapshot,
           provider: { ...provider.value },
           skill_ids: [...skillIds.value],
-          memory_ids: memoryIds
+          memory_ids: memoryIds,
+          ...(options.replaceLast ? { replace_last: true } : {})
         },
         newAIId()
       );
@@ -1033,7 +1052,12 @@ export const useAIStore = defineStore("kubedoor-ai", () => {
         submission !== submissionGeneration
       )
         return;
-      selectedMemories.value = [];
+      if (!options.memoryIds) selectedMemories.value = [];
+      if (options.replaceLast) {
+        // 服务端已把最后一轮标成被替换：界面上同样去掉，从那一轮的用户消息起
+        const index = messages.value.map(item => item.role).lastIndexOf("user");
+        if (index >= 0) messages.value.splice(index);
+      }
       const userMessage = run.message || {
         id: newAIId(),
         role: "user",
@@ -1073,6 +1097,35 @@ export const useAIStore = defineStore("kubedoor-ai", () => {
     } finally {
       if (submission === submissionGeneration) submitting.value = false;
     }
+  }
+
+  /** 重新生成最后一轮：沿用那一轮的问题、集群范围和引用的记忆 */
+  async function regenerate() {
+    const last = [...messages.value]
+      .reverse()
+      .find(item => item.role === "user");
+    if (!last) return;
+    await send(last.content, {
+      replaceLast: true,
+      scope: last.scope?.env ? last.scope : scope.value,
+      memoryIds: (last.memories || []).map(item => item.id).filter(Boolean)
+    });
+  }
+
+  /**
+   * 页面上的「问 AI」：打开对话框，新开一个会话并选好资源范围，问题放进输入框，
+   * 由用户确认后再发送（不自动消耗模型调用）
+   */
+  async function ask(request: { scope: Partial<AIScope>; prompt: string }) {
+    await open();
+    if (!bootstrap.value?.enabled) return;
+    if (!busy.value) {
+      await createSession();
+      const env = request.scope.env;
+      if (env && bootstrap.value.clusters.some(cluster => cluster.env === env))
+        changeScope({ ...emptyScope(), ...request.scope });
+    }
+    pendingInput.value = request.prompt;
   }
 
   async function decide(actionId: string, decision: "approve" | "reject") {
@@ -1208,6 +1261,9 @@ export const useAIStore = defineStore("kubedoor-ai", () => {
     removeSelectedMemory,
     summarizeMemory,
     send,
+    regenerate,
+    ask,
+    pendingInput,
     decide,
     cancel
   };

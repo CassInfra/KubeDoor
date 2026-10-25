@@ -11,7 +11,7 @@ from langchain_core.messages import AIMessage, SystemMessage, ToolMessage
 from langgraph.checkpoint.memory import InMemorySaver
 from pydantic import Field
 
-from fakes import FakeStore, ScriptedModel
+from fakes import FakeStore, ScriptedModel, control_state, deployment
 import kubedoor_ai.gateway as gateway_module
 from kubedoor_ai.domain import AIError, BEIJING_TZ, CredentialCipher, Identity, Provider
 from kubedoor_ai.gateway import Gateway, PendingAction, RunContext, tool_catalog, validate_deployment_change
@@ -44,15 +44,24 @@ def context(permission="rw", **scope):
 
 @pytest_asyncio.fixture
 async def master_gateway():
+    """假 master：管控状态查询和只读 Deployment 单独应答，calls 只记业务接口请求"""
     calls = []
     response = {"message": "ok"}
+    fake = {"control": control_state(), "deployment": deployment()}
 
     def handle(request):
+        if request.url.path == "/api/ai/internal/deployment-control":
+            return httpx.Response(200, json={"success": True, "data": fake["control"]})
+        if request.url.path == "/api/ai/internal/agent-execute":
+            payload = json.loads(request.content)
+            assert payload["arguments"]["method"] == "GET" and payload["approved"] is False
+            return httpx.Response(200, json={"success": True, "data": fake["deployment"]})
         calls.append(request)
         return httpx.Response(response.get("_http_status", 200), json={key: value for key, value in response.items() if key != "_http_status"})
 
     client = httpx.AsyncClient(transport=httpx.MockTransport(handle))
     gateway = Gateway(FakeStore(), CredentialCipher("ab" * 32), "http://fixed-master", "test-service-token", http=client)
+    gateway.fake = fake
     yield gateway, calls, response
     await gateway.close()
 
@@ -79,14 +88,14 @@ async def test_schedules_use_existing_master_interface_after_approval(master_gat
     action, approval = await propose(gateway, ctx, operation, arguments)
     assert calls == [], "Preparing an approval must not submit a CronJob."
 
-    deployment = {"namespace": "demo", "deployment_name": "deploy-demo-order"}
+    target = {"namespace": "demo", "deployment_name": "deploy-demo-order"}
     if kind == "scale":
-        deployment["num"] = 3
-    body = {"type": kind, "service": {"deployment_list": [deployment], "node_scheduler": []}, "time": time, "cron": cron}
-    assert approval["preview"]["method"] == "POST"
-    assert approval["preview"]["path"] == "/api/cron"
-    assert approval["preview"]["query"] == {"env": "cluster-a"}
-    assert approval["preview"]["body"] == body
+        target["num"] = 3
+    body = {"type": kind, "service": {"deployment_list": [target], "node_scheduler": []}, "time": time, "cron": cron}
+    # 定时 / 周期扩缩容到点只能临时扩缩（CronJob 写不了 master 的管控表），一律带 temp
+    query = {"env": "cluster-a", **({"temp": "true"} if kind == "scale" else {})}
+    step = approval["preview"]["plan"]["steps"][0]
+    assert (step["method"], step["path"], step["query"], step["body"]) == ("POST", "/api/cron", query, body)
 
     result = await gateway.dispatch(ctx, action)
     assert result["success"] is True
@@ -97,7 +106,7 @@ async def test_schedules_use_existing_master_interface_after_approval(master_gat
     assert request.method == "POST"
     assert request.url.host == "fixed-master"
     assert request.url.path == "/api/cron"
-    assert dict(request.url.params) == {"env": "cluster-a"}
+    assert dict(request.url.params) == query
     assert request.headers["X-Kubedoor-Token"] == "test-service-token"
     assert request.headers["X-User-Name"] == "operator"
     assert request.headers["X-User-Permission"] == "rw"
@@ -115,10 +124,10 @@ async def test_immediate_operations_use_current_agent_object_contract(master_gat
     assert calls == []
     result = await gateway.dispatch(ctx, action)
     assert result["success"] is True
-    deployment = {"namespace": "demo", "deployment_name": "deploy-demo-order"}
+    target = {"namespace": "demo", "deployment_name": "deploy-demo-order"}
     if num is not None:
-        deployment["num"] = num
-    assert decoded_body(calls[0]) == {"deployment_list": [deployment], "node_scheduler": []}
+        target["num"] = num
+    assert decoded_body(calls[0]) == {"deployment_list": [target], "node_scheduler": []}
     assert calls[0].url.path == ("/api/restart" if num is None else "/api/scale")
 
 
@@ -128,9 +137,9 @@ async def test_explicit_target_wins_over_selector_and_frozen_arguments_do_not_dr
     ctx = context()
     arguments = {"namespace": "other-ns", "deployment": "other-app", "cron": "0 2 * * *", "replicas": 4}
     action, approval = await propose(gateway, ctx, "cron_deployment_scale", arguments)
-    expected = copy.deepcopy(approval["preview"]["body"])
+    expected = copy.deepcopy(approval["preview"]["plan"]["steps"][0]["body"])
     arguments.update(namespace="changed", deployment="changed", cron="* * * * *", replicas=99)
-    approval["preview"]["body"]["service"]["deployment_list"][0]["num"] = 100
+    approval["preview"]["plan"]["steps"][0]["body"]["service"]["deployment_list"][0]["num"] = 100
     assert calls == []
     result = await gateway.dispatch(ctx, action)
     assert result["success"] is True

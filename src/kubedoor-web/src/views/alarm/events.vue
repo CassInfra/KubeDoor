@@ -381,6 +381,17 @@
             {{ row[12] }}
           </template>
         </el-table-column>
+        <el-table-column label="操作" width="80" align="center" fixed="right">
+          <template #default="{ row }">
+            <el-button
+              link
+              type="primary"
+              size="small"
+              @click="askAI(eventQuestion(selectedK8s, row))"
+              >问 AI</el-button
+            >
+          </template>
+        </el-table-column>
       </el-table>
     </div>
 
@@ -407,7 +418,10 @@ import {
   type EventMenuData
 } from "@/api/alarm";
 import { useSearchStoreHook } from "@/store/modules/search";
+import { eventQuestion } from "@/utils/ai";
+import { useAskAI } from "@/utils/useAskAI";
 const searchStore = useSearchStoreHook();
+const askAI = useAskAI();
 const route = useRoute();
 const router = useRouter();
 

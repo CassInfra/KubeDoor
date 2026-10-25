@@ -220,9 +220,12 @@ async def patch_deployment_replicas_with_retry(
             )
 
             if temp_flag == "true" or del_scale_temp == 1:
-                # 使用 strategic merge patch 格式
+                # 使用 strategic merge patch 格式。注解只带 scale.temp:临时扩缩容写入的新标记,或 None(删掉旧标记)。
+                # 缩容 + add_label 时 deployment_ref 是重新读出来的,带的是集群里的旧注解,用它会丢掉新标记,
+                # 准入控制就不认这次临时扩缩容,把副本数改回管控值
+                scale_temp = (deployment_obj.metadata.annotations or {}).get("scale.temp")
                 patch_body = {
-                    "metadata": {"annotations": deployment_ref.metadata.annotations},
+                    "metadata": {"annotations": {"scale.temp": scale_temp}},
                     "spec": {"replicas": target_replicas}
                 }
                 await apps_v1_api.patch_namespaced_deployment(deployment_name, namespace, patch_body)

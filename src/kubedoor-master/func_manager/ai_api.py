@@ -24,6 +24,7 @@ from aiohttp import web
 
 from auth import audit
 from auth.context import client_ip
+from func_manager.deployment_control import deployment_control as control_status, valid_target
 
 
 def authorize(request):
@@ -224,8 +225,20 @@ def register_routes(app, clients, utils):
                                   "query": params["query"], "cluster": body["env"],
                                   "start": params.get("start"), "end": params.get("end"), "truncated": False})
 
+    async def deployment_control(request):
+        # AI 改副本数、资源、JVM 前先问这里:受花折资源管控时只能经管控表生效,直接改会被准入控制改回
+        principal = authorize(request)
+        env = request.query.get("env", "")
+        namespace, deployment = request.query.get("namespace", ""), request.query.get("deployment", "")
+        require_cluster(principal, env)
+        if not valid_target(namespace, deployment):
+            raise web.HTTPBadRequest(text="namespace 和 deployment 必须是合法的 K8S 名称")
+        data = await control_status(clients, agent_rpc, utils.pg_fetchrow, env, namespace, deployment, principal.username)
+        return web.json_response({"success": True, "data": data})
+
     app.router.add_get("/api/ai/internal/bootstrap", bootstrap)
     app.router.add_get("/api/ai/internal/identity", identity)
     app.router.add_post("/api/ai/internal/agent-execute", execute)
     app.router.add_post("/api/ai/internal/agent-cancel", cancel)
     app.router.add_post("/api/ai/internal/metrics", metrics)
+    app.router.add_get("/api/ai/internal/deployment-control", deployment_control)

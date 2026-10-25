@@ -73,6 +73,19 @@ DeepSeek 默认启用思考模式（强度 high）。模型设置里的「思考
 账号会清除缓存。服务端核对会话归属后并行读取历史与活动运行状态。
 桌面对话窗口加宽、加高并适配可用屏幕，手机保持全屏。
 
+会话列表上方可以搜索：按标题和消息内容匹配本人的网页会话（`GET /api/ai/sessions?q=`，最多 50 个），
+结果显示最近一条命中消息的片段。
+
+最后一轮可以「重新生成」（同样的问题、集群范围和引用的记忆再问一次）或「编辑」后重发
+（`POST /api/ai/sessions/{id}/runs` 带 `replace_last: true`）。只能替换最后一轮，而且这一轮不能已经
+执行过修改操作（AI 会忘掉这次修改、可能重复执行），也不能触发过上下文压缩；升级前的旧轮次不支持。
+替换时从那一轮的用户消息（检查点里固定 id `user-<run id>`）起用 `RemoveMessage` 删掉，历史回到上一轮
+结束时，前缀和原来逐字节相同，照样命中缓存；被替换的消息在库里标记 `replaced_at`，保留用于追溯、不再显示。
+
+告警详情、K8S 事件、Deployment 和 Pod 的操作菜单里有「问 AI」：打开 AI 助手、新开一个会话、预选集群和
+资源（只知道 Pod、不知道所属 Deployment 时选到命名空间），把告警或事件原文整理成问题放进输入框，
+由用户确认后再发送。
+
 ### 上下文窗口、自动压缩与用量
 
 模型设置（网页的「模型设置」和企微专用模型）有三项上下文配置：上下文窗口、最大输出（界面上按
@@ -180,11 +193,37 @@ Xms、Xmx、Xss、MaxMetaspace 等已入库 JVM 参数；它表示采集或管�
 使用现有 `PROM_URL`，保留 tenant 路径并强制限定当前 K8S 标签。普通 Prometheus
 继续使用已有指标接口。工具结果标注来源、观测时间、数据类型和截断情况。
 
-`resource_config_update` 保存 Deployment 的数据库资源/JVM 管控配置，下次发布或
-滚动重启时应用，不自动重启。仅改 JVM 时先查询并保留必填的 `limit_mem_mb`、
-`limit_cpu_m`、`pod_count_manual` 当前值；JVM 字段省略保留、显式 `null` 清除。
-`resource_pod_count` 仅保存数据库人工管控副本数，立即扩缩容仍使用
-`scale_deployment`。数据库保存成功与在线资源生效须分别确认。
+### 花折资源管控（准入控制）
+
+集群开启准入控制、命名空间在管控列表里、服务已登记到管控表时，Deployment「受管控」：准入 webhook
+会在创建、发布、重启、扩缩容时，把副本数、第一个容器的 requests/limits、JVM 参数（-Xms/-Xmx/-Xss/
+-XX:MaxMetaspaceSize）改写成管控表的值。受管控时直接改 K8S 不生效（K8S 照样返回成功），不受管控时
+改管控表也不生效。所以这三类修改由网关按管控状态选择执行方式（`kubedoor_ai/control.py`）：
+
+| 操作 | 受管控 | 不受管控 |
+| --- | --- | --- |
+| `scale_deployment`（`mode` 默认 `persistent`） | 永久：先写管控副本数再扩缩；`temporary`：带 `temp` 临时扩缩，下次发布或重启恢复管控值 | 直接改副本数 |
+| `schedule/cron_deployment_scale` | 到点只能临时扩缩（CronJob 写不了管控表），不能传 `mode=persistent` | 同左，一律带 `temp` |
+| `update_deployment_resources` | 只能改 limits（requests 由每日高峰期采集决定）：写管控表，`apply_now`（默认 true）再滚动重启 | 直接 patch 第一个容器的 resources |
+| `update_deployment_jvm` | 写管控表，`apply_now` 再滚动重启 | 直接替换第一个容器 java args 里已有的选项 |
+| `update_deployment_image`、`restart_deployment` | 照常执行，卡片列出准入控制会刷回管控值的副本数、资源、JVM | 照常执行 |
+| `resource_config_update`、`resource_pod_count` | 只写管控表，下次发布或重启生效 | 允许，卡片提示保存后不会生效 |
+| `resource_control_add` | 登记新服务（已登记的拒绝） | 同左，提示开启准入后才应用 |
+
+管控状态来自 master 的 `/api/ai/internal/deployment-control`（判断规则同准入热路径，agent 在线时再实时
+核实 webhook 是否存在、命名空间是否带 `kubedoor-ignore` 标签），目录里对应只读操作 `deployment_control`。
+准备阶段把管控状态、在线值和执行步骤冻结进审批预览（不受管控时直接修改的步骤先做 server dry-run，带
+resourceVersion 前置条件和 diff）；执行前再查一次管控状态和管控表，审批期间被改过就不执行。执行后回读
+Deployment，结果里的 `verification` 写明是否和期望一致，不一致时注明「被准入控制改写成了管控值」。
+
+受管控的 Deployment，用 `kubectl`、`api`、`resource_apply` 直接改副本数、requests/limits 或 JVM 参数会在
+审批前被拒绝（结果必然被改回），并提示改用上表的操作；按标签或 `--all` 批量修改时，只要命名空间在准入
+控制管辖内就拒绝。改镜像、环境变量等其他字段不受影响。管控表里没有该服务、又没开新服务免确认时，
+这个 Deployment 的创建和修改都会被准入拒绝，先用 `resource_control_add` 登记。
+
+`resource_config_update` 仅改 JVM 时先查询并保留必填的 `limit_mem_mb`、`limit_cpu_m`、`pod_count_manual`
+当前值；JVM 字段省略保留、显式 `null` 清除。`update_deployment_image` 只换第一个容器镜像的 tag（仓库
+地址、端口保留），改 sidecar 镜像或换仓库用通用工具。
 
 旧 Agent 仍可提供原有目录接口；通用工具要求 Agent 在线且声明 `ai_tools` 能力，
 未具备该能力时会提示升级。已登记的离线集群仍可查询 PostgreSQL 历史资源、JVM
@@ -195,6 +234,9 @@ Xms、Xmx、Xss、MaxMetaspace 等已入库 JVM 参数；它表示采集或管�
 只读查询自动执行；修改、未知 CLI 与 Pod exec 先冻结目标、参数、预检结果和差异，
 展示给用户批准后执行。批准与执行使用同一动作 ID 和持久化派发记录，不会在写失败后
 自动换来源重试。停止或取消无法撤销 Kubernetes 已接受的修改，应查询实际状态确认结果。
+副本数、资源、JVM 这类按管控状态生成计划的操作，审批卡片显示管控状态、执行步骤、「当前 → 目标」
+变化表、影响和注意事项，执行后显示回读核验结果。企业微信的审批卡片只放得下一行摘要，完整说明
+（管控状态、步骤、变化、影响、命令或差异）写在卡片正上方的回复里。
 
 在 Web 工作台的 Kubeconfig 列上传自包含 YAML/JSON，选择 context、测试连接后保存。
 支持多 context、静态 token 和内嵌证书；仅读写用户可上传、测试、替换或删除。
@@ -341,6 +383,7 @@ DeepSeek 等模型的上下文缓存要求请求从第一个 token 起完整匹�
 - 不要每次调用模型都扫描整个历史：消息在产生时处理一次，之后不再改动。key 脱敏就是这样做的：用户消息构造时脱敏，模型输出在 `wrap_model_call`、工具结果在 `wrap_tool_call` 里脱敏（工具结果可能是 `ToolMessage`，也可能装在 `Command` 的状态更新里）。全量扫描的耗时随对话增长，2 MB 历史时每次约 0.2 秒，而且阻塞 event loop。
 - 摘要、会话标题、记忆总结这类不带工具的辅助请求用 `models.without_thinking` 关闭思考；摘要请求不经过 agent 中间件，它的用量靠回调（`SummaryUsageCallback`）记录。
 - 声明式子 Agent 不继承主 Agent 的中间件覆盖，新增的中间件要同时加进子 Agent 的 `middleware`。
+- 每轮用户消息在检查点里的 id 固定为 `user-<run id>`，重新生成 / 编辑后重发靠它找到要删掉的那一轮，不要改这个格式；只有 `kubedoor_ai_runs.rewindable=true` 的 run 才有。
 - 守护测试：`tests/test_cache_stability.py`（按 DeepSeek 实际请求格式录制 payload，检查 system、tools、历史在轮次、会话、渠道、审批恢复之间逐字节稳定）、`tests/test_summarization.py`（摘要只让前缀变化一次）、`tests/test_runtime.py` 的检查点写入用例。这几组测试失败时先修代码，不要改断言。
 
 ## 测试

@@ -402,6 +402,19 @@
                   <template #dropdown>
                     <el-dropdown-menu>
                       <el-dropdown-item
+                        @click="
+                          askAI(
+                            podQuestion(
+                              searchForm.env,
+                              podScope.row.namespace,
+                              podScope.row.name,
+                              extractDeploymentName(podScope.row.controlled_by)
+                            )
+                          )
+                        "
+                        >问 AI</el-dropdown-item
+                      >
+                      <el-dropdown-item
                         :disabled="!canWrite(searchForm.env)"
                         @click="
                           openPodShell({
@@ -724,6 +737,8 @@ import { updateServiceContent, getServiceContent } from "@/api/service";
 import { useSearchStoreHook } from "@/store/modules/search";
 import { useClusterPermission } from "@/utils/permission";
 import { openPodShell } from "@/utils/podShell";
+import { podQuestion } from "@/utils/ai";
+import { useAskAI } from "@/utils/useAskAI";
 import PodLogViewer from "@/views/monit/components/PodLogViewer.vue";
 import * as monaco from "monaco-editor";
 import * as yaml from "js-yaml";
@@ -741,6 +756,7 @@ interface SearchForm {
 }
 
 const searchStore = useSearchStoreHook();
+const askAI = useAskAI();
 // 终端能在容器里执行任意命令,只读用户置灰(后端同样校验)
 const { canWrite } = useClusterPermission();
 

@@ -487,22 +487,13 @@ async def cron(request):
     time_expr = request_info.get("time")
     type_expr = request_info.get("type")
     service = request_info.get("service")
-    add_label = request.query.get("add_label")
-    scheduler = request.query.get("scheduler")
     deployment_name = service['deployment_list'][0].get("deployment_name")
     name_pre = f"{type_expr}-{'once' if time_expr else 'cron'}-{deployment_name}"
     job_type = "once" if time_expr else "cron"
     cron_new = f"{time_expr[4]} {time_expr[3]} {time_expr[2]} {time_expr[1]} *" if time_expr else cron_expr
     service['deployment_list'][0]["job_name"] = name_pre
     service['deployment_list'][0]["job_type"] = job_type
-
-    if add_label:
-        url = f"https://kubedoor-agent.kubedoor/api/{type_expr}?add_label={add_label}"
-    else:
-        url = f"https://kubedoor-agent.kubedoor/api/{type_expr}"
-
-    if scheduler:
-        url = f"{url}?scheduler={scheduler}"
+    url = utils.cron_callback_url(type_expr, request.query)
     cronjob = client.V1CronJob(
         metadata=client.V1ObjectMeta(name=name_pre),
         spec=client.V1CronJobSpec(

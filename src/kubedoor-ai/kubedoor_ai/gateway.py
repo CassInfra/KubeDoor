@@ -16,6 +16,8 @@ from langgraph.types import interrupt
 
 from .domain import AIError, CredentialCipher, Identity, beijing_now, redact, utc_now
 from .catalogue import EXTRA_CATALOG, EXTRA_SCHEMAS, build_request, validate_arguments
+from .control import (OUTSIDE_ADMISSION, PLANNED, STEP_NAMES, build_plan, changed_fields, check_target, control_drift,
+                      deployment_edits, deployment_path, main_step, rejection, snapshot, verify)
 
 
 # Logical operations are a closed catalogue: the model cannot choose URLs or
@@ -72,6 +74,8 @@ def validate_deployment_change(operation: str, args: dict):
     if operation == "scale_deployment" or DEPLOYMENT_SCHEDULES.get(operation, (None,))[0] == "scale":
         if type(args.get("replicas")) is not int or args["replicas"] < 0:
             raise AIError("replicas 必须为非负整数")
+        if args.get("mode", "persistent") not in ("persistent", "temporary"):
+            raise AIError("mode 必须为 persistent（永久）或 temporary（临时）")
     if "scheduler" in args and type(args["scheduler"]) is not bool:
         raise AIError("scheduler 必须为布尔值")
     nodes = args.get("node_scheduler", [])
@@ -151,7 +155,7 @@ def tool_catalog() -> list[dict]:
         "logs": (["namespace", "pod"], {"namespace": "string", "pod": "string", "lines": "integer 1..5000"}, "最新 Pod 日志；指定容器用通用 api Pod/log"),
         "previous_logs": (["namespace", "pod"], {"namespace": "string", "pod": "string", "lines": "integer 1..5000"}, "Pod 上一次退出容器的日志"),
         "metrics": (["query"], {"query": "MetricsQL/PromQL string", "start": "RFC3339 or UNIX seconds", "end": "RFC3339 or UNIX seconds", "step": "positive seconds"}, "即时查询；start/end 同时传为范围查询；服务器强制集群标签过滤"),
-        "scale_deployment": (["namespace", "deployment", "replicas"], {"namespace": "string", "deployment": "string", "replicas": "nonnegative integer", "scheduler": "boolean optional", "node_scheduler": "string[] optional; requires scheduler=true"}, "Deployment 立即扩缩容；定时一次用 schedule_deployment_scale，周期执行用 cron_deployment_scale；需批准"),
+        "scale_deployment": (["namespace", "deployment", "replicas"], {"namespace": "string", "deployment": "string", "replicas": "nonnegative integer", "mode": "persistent（默认，永久）/temporary（临时）", "scheduler": "boolean optional", "node_scheduler": "string[] optional; requires scheduler=true"}, "Deployment 立即扩缩容，需批准。网关按花折资源管控状态执行：受管控时 persistent 同时写入管控副本数（以后每次发布都按它），temporary 只临时扩缩（下次发布或重启恢复管控值）；不受管控时直接改副本数。定时一次用 schedule_deployment_scale，周期执行用 cron_deployment_scale"),
         "restart_deployment": (["namespace", "deployment"], {"namespace": "string", "deployment": "string", "scheduler": "boolean optional", "node_scheduler": "string[] optional"}, "立即滚动重启 Deployment；指定日期执行用 schedule_deployment_restart，每日等重复执行用 cron_deployment_restart；需批准"),
         "update_deployment_image": (["namespace", "deployment", "image_tag"], {"namespace": "string", "deployment": "string", "image_tag": "string"}, "更新镜像标签，沿用 UPDATE_IMAGE 策略，需批准"),
     }
@@ -163,6 +167,7 @@ def tool_catalog() -> list[dict]:
         if action_type == "scale":
             required.append("replicas")
             arguments["replicas"] = "nonnegative integer"
+            arguments["mode"] = "可省略；受花折资源管控时到点只能临时扩缩（不写管控表，下次发布恢复管控值），不能传 persistent"
         arguments.update(scheduler="boolean optional", node_scheduler="string[] optional; requires scheduler=true")
         schemas[name] = (required, arguments, f"{'指定日期时间执行一次' if trigger == 'once' else '按 Cron 重复执行'}的 Deployment {'重启' if action_type == 'restart' else '扩缩容'}；复用页面 /api/cron 注册任务，禁止用于 Pod/StatefulSet/DaemonSet，无需另写实现 YAML；创建不等于已执行；按北京时间执行（CronJob spec.timeZone=Asia/Shanghai），需批准")
     result = []
@@ -188,6 +193,20 @@ def guard_scope(scope: dict, operation: str, arguments: dict, read_only: bool):
             raise AIError("工具试图操作其他集群", 403, "scope_violation")
     # Namespace/deployment/Pod are defaults, never authorization boundaries.
     # CLI kubeconfig/context/server override flags are checked by the executor.
+
+
+# 写请求已经发出、但无法证明是否生效的错误：不能当作已知失败去重试
+UNKNOWN_ERRORS = frozenset({"timeout", "cancelled", "canceled", "execution_timeout", "connection_error", "transport_error",
+                            "execution_error", "command_failed", "output_limit", "tool_error"})
+
+
+def write_outcome_unknown(error):
+    if not isinstance(error, dict):
+        return False
+    code, status = str(error.get("code", "")).lower(), error.get("status")
+    # Transport status=0 and HTTP 5xx cannot prove a mutation was rejected.
+    # Validation/auth 4xx responses remain a known failure that can be fixed.
+    return code in UNKNOWN_ERRORS or (code == "api_error" and (not isinstance(status, int) or not 400 <= status < 500))
 
 
 @dataclass
@@ -301,6 +320,9 @@ class Gateway:
 
     async def prepare(self, ctx, source, operation, arguments, call_id):
         env = ctx.run["scope"]["env"]
+        if source == "kubedoor" and operation in PLANNED:
+            plan = await self.prepare_plan(ctx, operation, arguments, call_id)
+            return {"success": True, "arguments": copy.deepcopy(arguments), "preview": {"operation": operation, "env": env, "arguments": arguments, "plan": plan}, "read_only": False}
         if source == "kubedoor":
             query, body = self.catalog_request(operation, arguments, env)
             return {"success": True, "arguments": copy.deepcopy(arguments), "preview": {"operation": operation, "env": env, "arguments": arguments, "method": CATALOG[operation][0], "path": CATALOG[operation][1], "query": query, "body": body}, "read_only": self.read_only(operation, arguments)}
@@ -325,7 +347,7 @@ class Gateway:
             args.setdefault("namespace", ns)
         if source == "kubedoor":
             selected_dep, selected_pod = scope.get("deployment"), scope.get("pod")
-            if selected_dep and (operation in DEPLOYMENT_CHANGES or operation in ("pods", "update_deployment_image", "resource_inventory", "resource_config_update", "resource_pod_count", "image_tags", "node_resource_rank", "cci_schedule_profile")):
+            if selected_dep and (operation in DEPLOYMENT_CHANGES or operation in ("pods", "update_deployment_image", "resource_inventory", "resource_config_update", "resource_pod_count", "image_tags", "node_resource_rank", "cci_schedule_profile", "deployment_control", "update_deployment_resources", "update_deployment_jvm", "resource_control_add")):
                 args.setdefault("deployment", selected_dep["name"])
                 args.setdefault("namespace", selected_dep["namespace"])
             if selected_pod and operation in ("logs", "previous_logs", "delete_pod", "isolate_pod", "jvm_mem", "jvm_dump", "jvm_jstack", "jvm_jfr"):
@@ -349,6 +371,8 @@ class Gateway:
         call_id = call_id or f"{ctx.run['id']}:{uuid.uuid4().hex}"
         action = await self.store.one("SELECT * FROM kubedoor_ai_actions WHERE call_id=$1", call_id)
         if not action:
+            if not read_only:
+                await self.guard_direct_edits(ctx, source, operation, args)
             prepared = await self.prepare(ctx, source, operation, args, call_id) if not read_only else {"arguments": args, "preview": {"operation": operation, "arguments": args}, "read_only": True}
             if prepared.get("success") is False:
                 return prepared
@@ -414,12 +438,7 @@ class Gateway:
         error = result.get("error")
         if isinstance(error, str):
             result["error"] = error = {"code": "tool_failed", "message": error}
-        error_code = str(error.get("code", "")).lower() if isinstance(error, dict) else ""
-        api_status = error.get("status") if isinstance(error, dict) else None
-        # Transport status=0 and HTTP 5xx cannot prove a mutation was rejected.
-        # Validation/auth 4xx responses remain a known failure that can be fixed.
-        api_unknown = error_code == "api_error" and (not isinstance(api_status, int) or not 400 <= api_status < 500)
-        if not action["read_only"] and isinstance(error, dict) and (api_unknown or error_code in {"timeout", "cancelled", "canceled", "execution_timeout", "connection_error", "transport_error", "execution_error", "command_failed", "output_limit", "tool_error"}):
+        if not action["read_only"] and write_outcome_unknown(error):
             result["error"] = {"code": "outcome_unknown", "upstream_code": error.get("code"), "upstream_error": error, "message": "写请求已经提交但结果未知或部分执行，请查询实际状态；不会自动重放。"}
         result.setdefault("source", action["source"])
         result.setdefault("observed_at", utc_now())
@@ -464,6 +483,10 @@ class Gateway:
     async def execute_action(self, ctx, action):
         source, operation, args = action["source"], action["operation"], action["arguments"]
         env = ctx.run["scope"]["env"]
+        if source == "kubedoor" and (action.get("preview") or {}).get("plan"):
+            return await self.execute_plan(ctx, action)
+        if source == "kubedoor" and not CATALOG[operation][1]:
+            raise AIError("该操作要先按管控状态生成执行计划，请重新提出", 409, "plan_missing")
         if source == "direct":
             return await (await self.executor(ctx, source, action.get("preview", {}).get("credential_fingerprint"), action.get("connection_revision"))).execute(operation, args, call_id=action["call_id"], timeout=120)
         if source == "agent":
@@ -487,6 +510,167 @@ class Gateway:
                                   "time_zone": "Asia/Shanghai", "registered": True, "executed": False}
         result = table_rows(result)
         return {**result, "success": result.get("success", True), "freshness": freshness, "observed_at": utc_now(), "source": "kubedoor", "truncated": False}
+
+    # ---- 花折资源管控：按管控状态生成计划、拦截直接修改、执行后回读（规则在 control.py）----
+
+    async def deployment_control(self, ctx, namespace, name):
+        try:
+            result = await self.master(ctx.identity, "GET", "/api/ai/internal/deployment-control",
+                                       {"env": ctx.run["scope"]["env"], "namespace": namespace, "deployment": name})
+        except AIError as exc:
+            raise AIError(f"无法确认花折资源管控状态：{exc}", exc.status, "control_unavailable") from None
+        return result["data"]
+
+    async def k8s_source(self, ctx):
+        return "direct" if await self.store.connection(ctx.run["scope"]["env"]) else "agent"
+
+    async def k8s_call(self, ctx, source, arguments, call_id, phase="execute", approved=False, timeout=60, expected=None):
+        """网关自己发起的 K8S API 调用（读 Deployment、管控计划里的直接修改），通道和通用 api 工具一致"""
+        if source == "direct":
+            executor = await self.executor(ctx, "direct", *(expected or (None, None)))
+            if phase == "prepare":
+                return await executor.prepare("api", arguments, timeout=timeout)
+            return await executor.execute("api", arguments, call_id=call_id, timeout=timeout)
+        return await self.master(ctx.identity, "POST", "/api/ai/internal/agent-execute", {"env": ctx.run["scope"]["env"]},
+                                 {"operation": "api", "arguments": arguments, "call_id": call_id, "phase": phase,
+                                  "approved": approved, "timeout": timeout}, allow_failure=True)
+
+    async def read_deployment(self, ctx, namespace, name):
+        """只读读取在线 Deployment：返回对象；不存在返回 {}；读不到（没有可用通道等）返回 None"""
+        try:
+            source = await self.k8s_source(ctx)
+            result = await self.k8s_call(ctx, source, {"method": "GET", "path": deployment_path(namespace, name)},
+                                         f"{ctx.run['id']}:read:{uuid.uuid4().hex}", timeout=30)
+        except AIError:
+            return None
+        if not isinstance(result, dict):
+            return None
+        if result.get("success") and isinstance(result.get("data"), dict):
+            return result["data"]
+        error = result.get("error") or {}
+        return {} if isinstance(error, dict) and (error.get("code") == "NOT_FOUND" or error.get("status") == 404) else None
+
+    async def prepare_plan(self, ctx, operation, args, call_id):
+        env = ctx.run["scope"]["env"]
+        namespace, name = args.get("namespace"), args.get("deployment")
+        check_target(namespace, name)
+        control = await self.deployment_control(ctx, namespace, name)
+        live = None
+        if operation not in ("resource_config_update", "resource_pod_count", "resource_control_add"):
+            raw = await self.read_deployment(ctx, namespace, name)
+            if raw == {}:
+                raise AIError(f"Deployment {namespace}/{name} 不存在", 404, "deployment_not_found")
+            live = snapshot(raw) if raw else None
+        step = None
+        if operation in STEP_NAMES:
+            query, body = self.catalog_request(operation, args, env)
+            step = main_step(operation, *CATALOG[operation][:2], query, body)
+        plan = build_plan(operation, args, env, control, live, step)
+        for index, item in enumerate(plan["steps"]):
+            if item["kind"] == "k8s":
+                plan["steps"][index] = await self.prepare_k8s_step(ctx, item, f"{call_id}:k8s{index}")
+        return plan
+
+    async def prepare_k8s_step(self, ctx, step, call_id):
+        """直接修改 Deployment 的步骤先做 server dry-run：冻结 resourceVersion，审批卡片上给出 diff"""
+        source = await self.k8s_source(ctx)
+        try:
+            prepared = await self.k8s_call(ctx, source, step["arguments"], call_id, phase="prepare")
+        except AIError as exc:
+            raise AIError(f"不受管控时要直接修改 Deployment，需要在线且已升级的 Agent 或已配置的 kubeconfig：{exc}", exc.status, "k8s_unavailable") from None
+        if not isinstance(prepared, dict) or prepared.get("success") is False:
+            error = (prepared or {}).get("error") if isinstance(prepared, dict) else None
+            message = error.get("message") if isinstance(error, dict) else error
+            raise AIError(f"修改 Deployment 的预检没有通过：{message or '未知错误'}", 409, "k8s_prepare_failed")
+        step = {**step, "source": source, "call_id": call_id, "arguments": prepared.get("arguments", step["arguments"]),
+                "diff": (prepared.get("preview") or {}).get("diff")}
+        if source == "direct":
+            binding = await self.executor_binding(ctx, "direct")
+            step.update(credential_fingerprint=binding.fingerprint, connection_revision=binding.revision)
+        return step
+
+    async def run_step(self, ctx, step):
+        try:
+            if step["kind"] == "master":
+                return await self.master(ctx.identity, step["method"], step["path"], step["query"], step["body"], allow_failure=True)
+            expected = (step.get("credential_fingerprint"), step.get("connection_revision")) if step["source"] == "direct" else None
+            return await self.k8s_call(ctx, step["source"], step["arguments"], step["call_id"], approved=True, timeout=120, expected=expected)
+        except AIError as exc:
+            return {"success": False, "error": {"code": "API_ERROR", "status": exc.status, "message": str(exc)}}
+
+    async def execute_plan(self, ctx, action):
+        plan, args = action["preview"]["plan"], action["arguments"]
+        current = await self.deployment_control(ctx, args["namespace"], args["deployment"])
+        drift = control_drift(plan["control"], current)
+        if drift:
+            return {"success": False, "source": "kubedoor",
+                    "error": {"code": "control_changed", "message": f"{drift}，没有执行任何修改；请重新查询后再提出操作"}}
+        done = []
+        for step in plan["steps"]:
+            result = await self.run_step(ctx, step)
+            ok = isinstance(result, dict) and result.get("success", True) and not result.get("error") and not result.get("error_list")
+            if ok:
+                done.append(step["name"])
+                continue
+            error = result.get("error") if isinstance(result, dict) else None
+            if isinstance(error, dict):
+                detail = error.get("message")
+            elif error:
+                detail = str(error)
+            else:
+                detail = result.get("message") if isinstance(result, dict) else None
+            finished = f"已完成：{'、'.join(done)}" if done else "此前没有已完成的步骤"
+            failure = {"success": False, "source": "kubedoor", "steps": done}
+            if isinstance(result, dict) and result.get("error_list"):
+                failure["error_list"] = result["error_list"]
+                failure["error"] = {"code": "partial_failure", "message": f"「{step['name']}」返回失败项目，请核验实际状态，不应重复提交整批操作；{finished}"}
+            elif write_outcome_unknown(error):
+                failure["error"] = {"code": "outcome_unknown", "upstream_code": error.get("code"), "upstream_error": error,
+                                    "message": f"「{step['name']}」已提交但结果未知：{detail or '未知错误'}；{finished}。请先查询实际状态，不会自动重放"}
+            elif done:
+                failure["error"] = {"code": "partial_failure", "upstream_error": error,
+                                    "message": f"「{step['name']}」失败：{detail or '未知错误'}；{finished}。请先查询实际状态，不要直接重试"}
+            else:
+                # 第一步就是已知失败（如 4xx 校验）：保留上游错误码和状态，修正参数后可以重新提出
+                failure["error"] = {**(error if isinstance(error, dict) else {"code": "step_failed"}),
+                                    "message": f"「{step['name']}」失败：{detail or '未知错误'}；{finished}"}
+            return failure
+        result = {"success": True, "source": "kubedoor", "steps": done, "control": plan["control"]["state"],
+                  "observed_at": utc_now(), "truncated": False}
+        if action["operation"] in DEPLOYMENT_SCHEDULES:
+            action_type, trigger = DEPLOYMENT_SCHEDULES[action["operation"]]
+            result["schedule"] = {"resource_type": "Deployment", "namespace": args["namespace"], "deployment": args["deployment"],
+                                  "task_namespace": "kubedoor", "task_name": f"{action_type}-{trigger}-{args['deployment']}",
+                                  "kind": trigger, "run_at": args.get("run_at"), "cron": args.get("cron"),
+                                  "time_zone": "Asia/Shanghai", "registered": True, "executed": False}
+        if plan.get("expect"):
+            raw = await self.read_deployment(ctx, args["namespace"], args["deployment"])
+            result["verification"] = verify(plan, raw or None)
+        return result
+
+    async def guard_direct_edits(self, ctx, source, operation, args):
+        """直接改受管控 Deployment 的副本数、资源、JVM 会被准入控制改回：拒绝，提示改用管控感知的操作"""
+        for edit in deployment_edits(source, operation, args):
+            name = edit.get("name")
+            # 按标签或 --all 批量修改时，用一个不存在的名字只判断命名空间是否在准入控制管辖内
+            probe = name or "kubedoor-selector-probe"
+            try:
+                check_target(edit["namespace"], probe)
+            except AIError:
+                continue   # 名称不合法时 K8S 自己会拒绝
+            control = await self.deployment_control(ctx, edit["namespace"], probe)
+            if name is None:
+                if control["state"] not in OUTSIDE_ADMISSION and edit.get("fields"):
+                    raise rejection(edit, edit["fields"], control, operation)
+                continue
+            if not control["controlled"]:
+                continue
+            raw = await self.read_deployment(ctx, edit["namespace"], name)
+            if raw == {}:
+                continue   # 还不存在：是新建，按管控值创建本来就是预期
+            fields = changed_fields(edit, raw or None)
+            if fields:
+                raise rejection(edit, fields, control, operation)
 
     async def cancel(self, ctx):
         ctx.cancelled.set()

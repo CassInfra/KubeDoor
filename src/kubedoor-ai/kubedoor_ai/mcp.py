@@ -58,9 +58,9 @@ def create_mcp(service, token):
     async def restart_deployment(namespace: str, deployment: str, k8s: str) -> dict:
         return await invoke("restart_deployment", k8s, namespace, deployment)
 
-    @server.tool(description="扩缩容 Deployment；需要浏览器批准")
-    async def scale_deployment(namespace: str, deployment: str, replicas: int, k8s: str) -> dict:
-        return await invoke("scale_deployment", k8s, namespace, deployment, replicas=replicas)
+    @server.tool(description="扩缩容 Deployment；需要浏览器批准。mode=persistent（默认）受花折资源管控时同时写入管控副本数，temporary 只临时扩缩")
+    async def scale_deployment(namespace: str, deployment: str, replicas: int, k8s: str, mode: str = "persistent") -> dict:
+        return await invoke("scale_deployment", k8s, namespace, deployment, replicas=replicas, mode=mode)
 
     @server.tool(description="更新 Deployment 镜像标签，沿用 KubeDoor 权限策略，需要批准")
     async def update_deployment(namespace: str, deployment: str, image_tag: str, k8s: str) -> dict:

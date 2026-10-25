@@ -18,7 +18,7 @@ from deepagents.middleware.summarization import SummarizationMiddleware
 from langchain.tools import ToolRuntime, tool
 from langchain.agents.middleware import AgentMiddleware
 from langchain_core.callbacks import BaseCallbackHandler
-from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, ToolMessage
+from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, RemoveMessage, ToolMessage
 from langgraph.types import Command
 
 from .domain import AIError, Identity, Provider, beijing_now, redact, redact_values
@@ -37,6 +37,7 @@ SYSTEM_PROMPT = """你是 KubeDoor 的 Kubernetes 运维助手，使用简体中
 立即重启 Deployment 用 restart_deployment；指定日期执行一次用 schedule_deployment_restart(run_at)；每天/每周等重复执行用 cron_deployment_restart(cron)，每天凌晨2点为 0 2 * * *。扩缩容分别对应 scale_deployment、schedule_deployment_scale、cron_deployment_scale。定时与周期工具仅针对 Deployment，不接受 Pod、StatefulSet 或 DaemonSet。
 以上调度工具复用页面 /api/cron；不得为了同一功能另写 CronJob/RBAC/脚本 YAML。先核实 Deployment 和同名任务，注册后用 resource_content 回读 CronJob；创建任务不等于已重启。现有任务接口不做 upsert，不能默认删除或覆盖同名任务。定时与周期任务按北京时间执行：agent 创建的 CronJob 固定 spec.timeZone=Asia/Shanghai，run_at 与 Cron 都按北京时间填写和解释；回读时核对 spec.timeZone，如果缺少该字段（旧版 agent 或 K8S 低于 1.25 会忽略），要提醒用户任务将按 CronJob 控制器时区执行。不要声称远期年份已保证。
 resource_inventory 返回 CPU/内存 requests/limits 及四个已入库 JVM 参数。
+修改 Deployment 的副本数、requests/limits、JVM 参数用 scale_deployment（mode 默认 persistent 永久，用户明确说临时才传 temporary）、update_deployment_resources、update_deployment_jvm：网关按花折资源管控（准入控制）状态选择执行方式，受管控时用通用工具直接改这些字段会被拒绝。写操作结果里的 verification 是执行后回读，不一致（例如被准入控制改写成管控值）时如实说明，不能说已生效。
 stored/historical 数据不是实时状态，null JVM 字段表示未采集，不等于 0；有疑点或用户要求核验时用 direct 的 Kubernetes API/CLI 实时查询。
 根据本轮上下文块中的来源能力选择工具；agent 通用工具仅在 online=true 且 ai_tools=true 时可用。缺少 kubeconfig 时可用已升级在线 agent；agent 不在线或未升级且 kubeconfig 可用时用 direct。数据库、master 目录及指标查询仍可独立使用，目录内 live 操作需要在线 Agent。
 source=kubedoor 的 operation 使用目录名；source=direct/agent 的 operation 使用 api/kubectl/istioctl/diagnostic/pod_exec。
@@ -420,6 +421,19 @@ class Runtime:
         self.tasks[run["id"]] = task
         task.add_done_callback(lambda _: self.tasks.pop(run["id"], None))
 
+    async def rewind(self, graph, config, run_id):
+        """Regenerate / edit: drop the replaced turn, from its user message on.
+
+        RemoveMessage writes one small delta and the remaining history is the
+        byte-identical prefix sent before, so the new turn still hits the
+        prefix cache. A turn that failed before reaching the checkpoint leaves
+        nothing to remove.
+        """
+        messages = (await graph.aget_state(config)).values.get("messages", [])
+        start = next((index for index, message in enumerate(messages) if message.id == f"user-{run_id}"), None)
+        if start is not None:
+            await graph.aupdate_state(config, {"messages": [RemoveMessage(id=message.id) for message in messages[start:]]}, as_node="tools")
+
     async def save_usage(self, ctx):
         """Persist the run's usage before its done event; resumes keep adding to it."""
         await self.store.execute("UPDATE kubedoor_ai_runs SET usage=$2 WHERE id=$1::uuid", ctx.run["id"], ctx.usage)
@@ -440,6 +454,8 @@ class Runtime:
             if resume is None:
                 turn_context = build_turn_context(run)
                 graph = self.graph(ctx, provider, turn_context)
+                if run.get("_rewind"):
+                    await self.rewind(graph, config, run["_rewind"])
                 # A crashed/cancelled turn can leave unanswered assistant tool
                 # calls in its checkpoint. Close those calls with an explicit
                 # uncertain result before accepting the next user message;
@@ -459,9 +475,11 @@ class Runtime:
                 if unresolved:
                     await graph.aupdate_state(config, {"messages": [ToolMessage(content=json.dumps({"success": False, "error": {"code": "previous_run_interrupted", "message": "上一轮任务中断；已提交修改需实时核验，不能重放。"}}, ensure_ascii=False), tool_call_id=call["id"]) for call in unresolved]}, as_node="tools")
                 # The turn context leads the new user message and is checkpointed
-                # with it, so later requests resend it byte for byte.
+                # with it, so later requests resend it byte for byte. The fixed id
+                # lets a regenerate / edit find this turn again (rewind); ids are
+                # not part of the model request.
                 body = escape_turn_context(build_memory_message(message, run.get("_memories", [])))
-                graph_input = {"messages": [HumanMessage(content=redact(turn_context + "\n\n" + body, ctx.secrets))]}
+                graph_input = {"messages": [HumanMessage(content=redact(turn_context + "\n\n" + body, ctx.secrets), id=f"user-{rid}")]}
             else:
                 # An approval resume adds no user message. Children keep the
                 # context block of the turn being resumed, so their prompt (and

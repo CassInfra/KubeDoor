@@ -9,6 +9,7 @@ from kubernetes_asyncio.client.rest import ApiException
 from loguru import logger
 
 import utils
+from kubedoor_tools.workload import replace_image_tag
 
 
 class DeploymentMonitor:
@@ -275,8 +276,8 @@ async def update_image(request, apps_v1: AppsV1Api, deployment_monitor: Optional
 
         deployment = await apps_v1.read_namespaced_deployment(deployment_name, namespace)
         current_image = deployment.spec.template.spec.containers[0].image
-        image_name = current_image.split(':')[0]
-        new_image = f"{image_name}:{new_image_tag}"
+        # 仓库地址可能带端口(harbor:5000/app:v1),只换最后一段的 tag
+        new_image = replace_image_tag(current_image, new_image_tag)
         deployment.spec.template.spec.containers[0].image = new_image
 
         await apps_v1.patch_namespaced_deployment(name=deployment_name, namespace=namespace, body=deployment)

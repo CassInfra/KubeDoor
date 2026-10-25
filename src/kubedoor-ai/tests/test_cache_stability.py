@@ -93,10 +93,12 @@ class Harness:
         self.monkeypatch.setattr(runtime_module, "utc_now", lambda: moment.astimezone(timezone.utc).isoformat(), raising=False)
 
     async def turn(self, session, run_id, message, moment, *, scope=None, capabilities=ONLINE, origin="chat",
-                   skill_ids=(), resume=None, usage=None):
+                   skill_ids=(), resume=None, usage=None, rewind=None):
         self.at(moment)
         run = {"id": run_id, "session_id": session, "scope": scope or SCOPE, "skill_ids": list(skill_ids),
                "origin": origin, "capabilities": capabilities, "usage": usage}
+        if rewind:
+            run["_rewind"] = rewind
         ctx = RunContext(run, Identity("operator", "rw"), secrets=(self.provider.api_key,))
         start = len(self.model.payloads)
         await self.runtime.run_graph(ctx, self.provider, message, resume)

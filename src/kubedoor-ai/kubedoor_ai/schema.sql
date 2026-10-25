@@ -29,12 +29,16 @@ CREATE UNIQUE INDEX IF NOT EXISTS kubedoor_ai_one_active_run ON kubedoor_ai_runs
     WHERE status IN ('running', 'waiting_approval');
 -- 本轮模型用量（runtime.UsageMiddleware）：调用次数、输入/输出/缓存命中/推理 token、最近一次输入和模型窗口
 ALTER TABLE kubedoor_ai_runs ADD COLUMN IF NOT EXISTS usage jsonb;
+-- 这一轮的用户消息在检查点里的 id 是 user-<run id>，重新生成 / 编辑后重发靠它找到要删掉的那一轮；之前的旧 run 没有
+ALTER TABLE kubedoor_ai_runs ADD COLUMN IF NOT EXISTS rewindable boolean NOT NULL DEFAULT false;
 CREATE TABLE IF NOT EXISTS kubedoor_ai_messages (
     id uuid PRIMARY KEY, session_id uuid NOT NULL REFERENCES kubedoor_ai_sessions(id) ON DELETE CASCADE,
     run_id uuid REFERENCES kubedoor_ai_runs(id) ON DELETE SET NULL,
     role text NOT NULL, content text NOT NULL, scope jsonb, tools jsonb,
     created_at timestamptz NOT NULL DEFAULT now()
 );
+-- 被重新生成 / 编辑后重发替换掉的那一轮消息：保留用于追溯，不再显示
+ALTER TABLE kubedoor_ai_messages ADD COLUMN IF NOT EXISTS replaced_at timestamptz;
 CREATE TABLE IF NOT EXISTS kubedoor_ai_events (
     run_id uuid NOT NULL REFERENCES kubedoor_ai_runs(id) ON DELETE CASCADE,
     seq bigint NOT NULL, type text NOT NULL, data jsonb NOT NULL,

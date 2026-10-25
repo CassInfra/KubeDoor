@@ -114,16 +114,15 @@ kubectl label namespace <ns> kubedoor-ignore-       # 取消豁免
 |---|---|---|---|
 | 新建Deployment | `kubectl apply/create`、发布系统首次发布 | 副本数、第一个容器的需求值/限制值、JVM参数全部改为管控值，其余按你的 | 新建 |
 | 修改Pod模板（镜像、环境变量、启动参数、资源、重启注解等） | 发布系统、`kubectl set image`、`kubectl rollout restart/undo`、KubeDoor「重启」「更新」（更新镜像）「保存并重启」 | 同上，并与你的其它修改合并；你改的需求值/限制值会被管控值覆盖（管控表里未配置的项除外） | 会 |
-| 经scale子资源改副本数 | `kubectl scale`、HPA、KubeDoor「扩缩容」、AI助手发起的扩缩容 | **只把副本数改为管控值**，其它不变 | 不会 |
-| 直接改Deployment的`spec.replicas`，Pod模板不变 | `kubectl edit`、只改replicas的`kubectl apply/patch` | **按你的值放行**，不改写；下次发布或重启时恢复为管控值 | 不会 |
+| 只改副本数（经scale子资源，或直接改Deployment的`spec.replicas`、Pod模板不变） | `kubectl scale`、HPA、`kubectl edit`、只改replicas的`kubectl apply/patch`、KubeDoor「扩缩容」 | **只把副本数改为管控值**，其它不变 | 不会 |
 | Pod模板和副本数都没变 | 只改Deployment自身的labels/annotations、`kubectl rollout pause/resume` | 原样放行 | 不会 |
-| KubeDoor「临时扩容」 | 见「临时扩容豁免」 | 5分钟内直接放行 | 不会 |
+| KubeDoor「临时扩容」 | 见「临时扩容豁免」 | 直接放行 | 不会 |
 
 要点：
 
-- `kubectl scale`会显示scaled，但实际副本数是管控值。要长期改变副本数，请修改「指定Pod」：Deployment页的「扩缩容」（不勾「临时扩容」）会先把目标副本数写入「指定Pod」再扩缩容；也可以在「高峰资源管控」页的「配置」里修改。
+- `kubectl scale`、`kubectl edit/patch`都会显示修改成功，但实际副本数是管控值。直接改`spec.replicas`的这种需要新版agent：旧版agent会按你的值放行，到下次发布或重启才恢复。要长期改变副本数，请修改「指定Pod」：Deployment页的「扩缩容」（不勾「临时扩容」）会先把目标副本数写入「指定Pod」再扩缩容；也可以在「高峰资源管控」页的「配置」里修改。
 - **HPA与管控冲突**：HPA也是通过scale子资源调整副本，在管控命名空间里每次都会被改回管控值（并且每次都发通知）。需要HPA的服务不要放在管控命名空间里。
-- AI助手发起的扩缩容不会写「指定Pod」，在管控命名空间里同样会被改回（做过临时扩容后的第一次除外，见「临时扩容豁免」），需要先修改「指定Pod」。
+- AI助手扩缩容前会先查该服务是否受管控：受管控时默认和Deployment页的「扩缩容」一样，先写「指定Pod」再扩缩容；说明是临时的才按「临时扩容」处理。不受管控时直接改Deployment。用kubectl等通用工具直接改受管控服务的副本数、资源或JVM参数，会在批准前就被拒绝。
 - 命名空间没有勾选为管控时一律放行、不改写；服务不在管控表时的处理见「未管控的服务」。
 
 ## 🧮取值规则
@@ -186,7 +185,7 @@ kubectl label namespace <ns> kubedoor-ignore-       # 取消豁免
 - 行内「配置」：可以改「指定Pod」「限制CPUm」「限制内存M」和已采集的JVM参数；「需求CPUm」「需求内存M」来自采集，不能改。
 - 「配置」窗口的按钮：「保存并扩缩容」「保存并重启」「保存」「取消」。只「保存」时改动只写入数据库（窗口提示「⚠️需求值与限制值的调整，仅在[开启管控]后执行重启时才会应用到微服务，否则改动仅会写入数据库。」），下次发布或重启时才应用；删除Pod让它重建不会生效。
 - 勾选多行可以「批量扩缩容」「批量重启」：勾选多个服务时立即依次执行，可设「间隔时间」（秒）；只勾选一个服务时（以及「保存并扩缩容」「保存并重启」）可选执行类型「立即执行」「定时执行」「周期执行」。
-- 也可以让AI助手修改（需要在Web上批准），同样在下次发布或重启时生效，见[AI助手说明](../docs/ai-assistant.md)。
+- 也可以让AI助手修改（需要在Web上批准）：只改管控值（如「指定Pod」、JVM参数）时同样在下次发布或重启时生效；让它扩缩容、调整资源或JVM参数时，默认保存后立即扩缩容或滚动重启，见[AI助手说明](../docs/ai-assistant.md)。
 
 ## 🆕未管控的服务
 
@@ -208,10 +207,10 @@ kubectl label namespace <ns> kubedoor-ignore-       # 取消豁免
 ## ⏱临时扩容豁免
 
 - 入口：Deployment页「操作」→「扩缩容」，在「微服务扩缩容」窗口勾选「临时扩容」；或展开Deployment的Pod明细，「隔离」时勾选「临时扩容1个Pod」。
-- KubeDoor会给Deployment写注解`scale.temp`（格式`时间@原副本数-->新副本数`）并直接修改副本数。准入看到**5分钟内**的`scale.temp`、且这次只改副本数时直接放行，不查管控表，也不发准入通知。
-- 临时扩容**不写**「指定Pod」，之后的发布、重启或经scale子资源的扩缩容都会恢复为管控值。
-- 临时扩容留下的`scale.temp`注解会在下一次非临时的KubeDoor扩缩容（含AI助手、定时/周期任务发起的）时被清除；这一次KubeDoor直接修改Deployment、不经scale子资源，准入按「直接改`spec.replicas`」处理，按请求的副本数放行。
-- 只对「立即执行」有效：选「定时执行」「周期执行」时，到点后按普通扩缩容处理，在管控命名空间里会被改成管控值。
+- KubeDoor会给Deployment写注解`scale.temp`（格式`时间@原副本数-->新副本数`）并直接修改副本数。准入看到这次请求**新写入**的、**5分钟内**的`scale.temp`，并且这次只改副本数时直接放行，不查管控表，也不发准入通知。Deployment上原来就有的`scale.temp`不算：临时扩容之后再用kubectl等直接改副本数，照样改成管控值。
+- 临时扩容**不写**「指定Pod」，之后的发布、重启或其它改副本数的操作都会恢复为管控值。
+- 临时扩容留下的`scale.temp`注解会在下一次非临时的KubeDoor扩缩容（含AI助手、定时/周期任务发起的）时被清除；这一次KubeDoor直接修改Deployment、不经scale子资源，副本数同样改为管控值。
+- 「定时执行」「周期执行」也可以勾选「临时扩容」，到点时写入新的`scale.temp`再扩缩容。需要新版agent：旧版agent到点会丢掉「临时扩容」开关，按普通扩缩容处理，在管控命名空间里被改成管控值。
 
 ## 🔔通知
 
@@ -221,7 +220,7 @@ kubectl label namespace <ns> kubedoor-ignore-       # 取消豁免
 |---|---|
 | 收到 create 请求，修改所有参数／收到 update 请求，修改所有参数（附「副本数:…, 请求CPU:…m, 请求内存:…MB, 限制CPU:…m, 限制内存:…MB」和「固定节点均衡: False」） | 新建或Pod模板变更，已按管控值改写 |
 | 收到scale请求，仅修改replicas为: N | scale子资源扩缩容，副本数改为N |
-| 不符合预设判断条件: Deployment UPDATE，直接放行 | 只改了`spec.replicas`，按你的值放行 |
+| 收到只改副本数的 update 请求，仅修改replicas为: N | 直接改了`spec.replicas`（Pod模板不变），副本数改为N |
 | 未配置 request_cpu_m（或request_mem_mb、limit_cpu_m、limit_mem_mb） | 该项未配置，保留原值 |
 | 非管控命名空间，直接放行 | 命名空间没有勾选管控（每次变更都会发） |
 | master(admis)返回: 新服务免确认已启用… | 未登记的服务被放行 |
@@ -230,7 +229,7 @@ kubectl label namespace <ns> kubedoor-ignore-       # 取消豁免
 | 处理错误：<异常> | agent处理出错，请求被拒绝 |
 
 - KubeDoor扩缩容后的通知「… has been scaled! 原副本数 --> 目标副本数」显示的是请求的目标数，管控命名空间里实际副本数以准入结果为准。
-- 带server-side dry-run的请求（如`kubectl apply --dry-run=server`、AI助手执行写操作前的预检）也会经过准入并发通知。
+- 带server-side dry-run的请求（如`kubectl apply --dry-run=server`、AI助手执行写操作前的预检）也会经过准入、照常改写，但不发通知（旧版agent会发）。
 - 采集时自动入表的新服务通知由master的机器人发送。
 
 ## 🚨可用性与应急
@@ -244,7 +243,7 @@ kubectl label namespace <ns> kubedoor-ignore-       # 取消豁免
 | master 30秒内没有响应 | `denied the request: 等待 kubedoor-master 响应超时`，或webhook调用超时 |
 | 数据库查询失败 | `denied the request: 查询数据库异常` |
 
-唯一的例外是5分钟内的KubeDoor「临时扩容」（不经过master）。
+唯一的例外是KubeDoor「临时扩容」本身（准入只看这次写入的`scale.temp`，不经过master）。
 
 **应急处理**：
 
@@ -274,7 +273,7 @@ kubectl -n kubedoor logs deploy/kubedoor-agent | grep admis
 假设集群`prod-a`的命名空间`demo`已开启管控，服务`deploy-demo-api`在管控表中：指定Pod=4，需求CPUm=500，限制CPUm=2000，需求内存M=1024，限制内存M=2048。
 
 1. **kubectl扩容**：执行`kubectl -n demo scale deploy/deploy-demo-api --replicas=10`，命令显示scaled，实际副本数被改为**4**，通知「收到scale请求，仅修改replicas为: 4」。正确做法：在Deployment页「扩缩容」把「指定Pod」调到10（会写入管控表）；短时扩容用「临时扩容」。
-2. **kubectl edit改副本**：只把`spec.replicas`改为10，按10放行，通知「不符合预设判断条件: Deployment UPDATE，直接放行」；下一次发布或重启时恢复为4。
+2. **kubectl edit改副本**：只把`spec.replicas`改为10，命令显示成功，实际副本数被改为**4**，通知「收到只改副本数的 update 请求，仅修改replicas为: 4」。
 3. **发布新镜像**：发布系统修改镜像后，新镜像保留，副本数改为4，第一个容器的requests改为`cpu: 500m`、`memory: 1024Mi`，limits改为`cpu: 2000m`、`memory: 2048Mi`；如果已采集JVM参数，`-Xmx`等也改为库里的值。通知「收到 update 请求，修改所有参数」，并附「副本数:4, 请求CPU:500m, 请求内存:1024MB, 限制CPU:2000m, 限制内存:2048MB」。
 4. **未登记的新服务**：「新服务免确认」关闭时，`kubectl apply`新服务`deploy-demo-new`失败，报错中包含：
 
@@ -289,7 +288,7 @@ kubectl -n kubedoor logs deploy/kubedoor-agent | grep admis
 | 现象 | 原因与处理 |
 |---|---|
 | 发布报「…请先新增服务。」 | 服务未登记且「新服务免确认」关闭，见「未管控的服务」 |
-| `kubectl scale`或HPA设置的副本数被改回 | 副本数以管控表为准，修改「指定Pod」或用「临时扩容」 |
+| `kubectl scale`、`kubectl edit/patch`或HPA设置的副本数被改回 | 副本数以管控表为准，修改「指定Pod」或用「临时扩容」 |
 | 在「配置」里改了，Pod没变 | 只写入了数据库，「保存并重启」或下次发布才会应用 |
 | 发布清单里改的`-Xmx`被改回 | 库里的JVM参数优先，在「配置」里修改 |
 | 新登记的服务被缩到0个副本 | 「指定Pod」填了0，或旧版本新增时填了-1（当前版本已拦截）；在「配置」里改成期望副本数 |

@@ -132,6 +132,40 @@ async def test_bootstrap_hides_clusters_without_permission_and_execute_checks_cl
 
 
 @pytest.mark.asyncio
+async def test_deployment_control_checks_cluster_and_names_and_verifies_through_agent(monkeypatch):
+    monkeypatch.setenv("AI_INTERNAL_TOKEN", "secret-test-token")
+    rows = {"k8s_agent_status": {"admission": True, "admission_namespace": '["team"]', "nms_not_confirm": False, "scheduler": False},
+            "k8s_res_control": None}
+
+    async def pg_fetchrow(sql, *args):
+        return next(row for table, row in rows.items() if table in sql)
+
+    sent = []
+
+    class Socket:
+        async def send_json(self, packet):
+            sent.append(packet)
+            found = packet["arguments"]["path"].endswith("kubedoor-admis-configuration")
+            clients["staging"]["response_queue"][packet["request_id"]] = {"success": True, "data": {"metadata": {}}} if found else \
+                {"success": True, "data": {"metadata": {"labels": {}}}}
+            clients["staging"]["response_events"][packet["request_id"]].set()
+
+    clients = {"staging": {"online": True, "ai_tools": True, "ws": Socket()}}
+    utils = SimpleNamespace(get_k8s_names=AsyncMock(return_value=["staging"]), pg_fetchrow=pg_fetchrow,
+                            PROM_TYPE="", PROM_K8S_TAG_KEY="k8s")
+    app = internal_app(monkeypatch, clients, utils)
+    headers = {"X-Kubedoor-Token": "secret-test-token", "X-User-Name": "limited"}
+    async with TestClient(TestServer(app)) as client:
+        assert (await client.get("/api/ai/internal/deployment-control?env=secret&namespace=team&deployment=api", headers=headers)).status == 403
+        assert (await client.get("/api/ai/internal/deployment-control?env=staging&namespace=../x&deployment=api", headers=headers)).status == 400
+        body = await (await client.get("/api/ai/internal/deployment-control?env=staging&namespace=team&deployment=api", headers=headers)).json()
+        # 只读集群也能查;核实走 agent 的只读 api GET
+        assert body["data"]["state"] == "unregistered_blocked" and body["data"]["blocked"] is True
+        assert body["data"]["admission"]["webhook_present"] is True and body["data"]["admission"]["namespace_ignored"] is False
+        assert {packet["permission"] for packet in sent} == {"read"}
+
+
+@pytest.mark.asyncio
 async def test_rpc_registers_before_fast_reply_and_never_replays_timeout():
     connection = {"online": True}
     packets = []

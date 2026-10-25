@@ -132,6 +132,8 @@ export interface AISession {
   /** 最近一轮的用量，用来显示上下文占用 */
   usage?: AIUsage | null;
   draft?: boolean;
+  /** 搜索结果里命中的那段消息 */
+  snippet?: string;
 }
 
 export interface AIRun {
@@ -303,7 +305,11 @@ export const aiApi = {
       signal
     );
   },
-  sessions: () => request<{ sessions: AISession[] }>("/sessions"),
+  /** query 非空时按标题和消息内容搜索本人的会话 */
+  sessions: (query = "") =>
+    request<{ sessions: AISession[] }>(
+      query ? `/sessions?q=${encodeURIComponent(query)}` : "/sessions"
+    ),
   createSession: (key: string, title = "新会话") =>
     request<AISession>("/sessions", "POST", { title }, key),
   session: (id: string, signal?: AbortSignal) =>
@@ -325,6 +331,8 @@ export const aiApi = {
       provider: AIProvider;
       skill_ids?: string[];
       memory_ids?: string[];
+      /** 重新生成 / 编辑后重发：替换最后一轮 */
+      replace_last?: boolean;
     },
     key: string
   ) =>
