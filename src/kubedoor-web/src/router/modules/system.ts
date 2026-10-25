@@ -1,4 +1,4 @@
-// 系统管理:用户与集群授权、LDAP、操作审计,只对管理员开放(后端 /api/admin/* 同样只认管理员)
+// 系统管理:用户与集群授权、LDAP、企微 AI 机器人、AI 用量看板、操作审计,只对管理员开放(后端 /api/admin/* 同样只认管理员)
 export default {
   path: "/system",
   redirect: "/system/users",
@@ -33,6 +33,16 @@ export default {
       component: () => import("@/views/system/wecom-ai/index.vue"),
       meta: {
         title: "企微 AI 机器人",
+        roles: ["admin"]
+      }
+    },
+    {
+      path: "/system/ai-usage",
+      name: "SystemAIUsage",
+      component: () => import("@/views/system/ai-usage/index.vue"),
+      meta: {
+        title: "AI 用量看板📊",
+        // Grafana 看板(KubeDoor-AI),管理员本来就能看到全部集群
         roles: ["admin"]
       }
     },

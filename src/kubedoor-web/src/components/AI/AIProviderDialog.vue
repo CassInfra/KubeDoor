@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { reactive, ref, watch } from "vue";
 import { ElMessage, ElMessageBox } from "element-plus";
-import { aiApi, type AIProvider } from "@/api/ai";
+import { aiApi, type AIProvider, type AIReasoningEffort } from "@/api/ai";
 import { useAIStoreHook } from "@/store/modules/ai";
 import {
   followModelLimits,
@@ -9,11 +9,13 @@ import {
   type AIModelLimits
 } from "@/utils/ai";
 import AIModelLimitsFields from "./AIModelLimitsFields.vue";
+import AIReasoningEffortField from "./AIReasoningEffortField.vue";
 
 const visible = defineModel<boolean>({ default: false });
 const ai = useAIStoreHook();
 const form = reactive<AIProvider>({ base_url: "", api_key: "", model: "" });
 const limits = ref<AIModelLimits>(modelLimitsFor(""));
+const effort = ref<AIReasoningEffort | null>(null);
 const testing = ref(false);
 const result = ref("");
 const successful = ref(false);
@@ -21,6 +23,7 @@ function load() {
   const { base_url, api_key, model } = ai.provider;
   Object.assign(form, { base_url, api_key, model });
   limits.value = modelLimitsFor(model, ai.provider);
+  effort.value = ai.provider.reasoning_effort ?? null;
 }
 watch(visible, value => {
   if (value) {
@@ -38,12 +41,16 @@ watch(
   { flush: "sync" }
 );
 watch(
-  () => [form.base_url, form.api_key, form.model, limits.value],
+  () => [form.base_url, form.api_key, form.model, limits.value, effort.value],
   () => {
     result.value = "";
   }
 );
-const settings = (): AIProvider => ({ ...form, ...limits.value });
+const settings = (): AIProvider => ({
+  ...form,
+  ...limits.value,
+  reasoning_effort: effort.value
+});
 
 function valid() {
   if (!form.base_url.trim() || !form.model.trim()) {
@@ -174,6 +181,7 @@ async function forget() {
         :model="form.model"
         :disabled="testing"
       />
+      <AIReasoningEffortField v-model="effort" :disabled="testing" />
     </el-form>
     <p class="settings-hint">
       使用兼容 OpenAI 的接口。配置仅保存到此浏览器，执行请求时发送给服务端，API

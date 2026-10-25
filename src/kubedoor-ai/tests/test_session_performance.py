@@ -33,11 +33,12 @@ ACTION = {
 class QueryPool:
     """Use the real Store's SQL and authorization, with controllable local I/O."""
 
-    def __init__(self, active=ACTIVE, owner="owner"):
+    def __init__(self, active=ACTIVE, owner="owner", usage=None):
         self.active = copy.deepcopy(active)
         self.owner = owner
+        self.usage = usage
         self.calls = []
-        self.started = {name: asyncio.Event() for name in ("owner", "history", "active", "pending", "create", "patch", "delete")}
+        self.started = {name: asyncio.Event() for name in ("owner", "history", "active", "usage", "pending", "create", "patch", "delete")}
         self.gates = {}
         self.failures = {}
         self.cancelled = set()
@@ -64,6 +65,9 @@ class QueryPool:
         if "FROM kubedoor_ai_sessions" in sql:
             await self.wait_query("owner", sql, args)
             return copy.deepcopy(SESSION) if args == ("session-1", self.owner) else None
+        if "usage IS NOT NULL" in sql:
+            await self.wait_query("usage", sql, args)
+            return {"usage": copy.deepcopy(self.usage)} if self.usage else None
         if "FROM kubedoor_ai_runs" in sql:
             await self.wait_query("active", sql, args)
             return copy.deepcopy(self.active)
@@ -145,7 +149,8 @@ async def test_history_and_recovered_pending_approval_keep_existing_response_fie
     active = {**ACTIVE, "status": status}
     pool = QueryPool(active=active)
     result = await service_for(pool).session_detail(Identity("owner", "read"), "session-1")
-    assert set(result) == set(SESSION) | {"messages", "active_run"}
+    assert set(result) == set(SESSION) | {"messages", "active_run", "usage"}
+    assert result["usage"] is None
     assert result["id"] == SESSION["id"]
     assert result["username"] == "owner"
     assert result["created_at"] == NOW.isoformat()
@@ -159,7 +164,7 @@ async def test_history_and_recovered_pending_approval_keep_existing_response_fie
         }],
     }
     assert "internal-fingerprint" not in str(result)
-    assert set(call[0] for call in pool.calls) == {"owner", "history", "active", "pending"}
+    assert set(call[0] for call in pool.calls) == {"owner", "history", "active", "usage", "pending"}
     assert next(call[2] for call in pool.calls if call[0] == "pending") == ("run-1",)
     assert "waiting_approval" in next(call[1] for call in pool.calls if call[0] == "active")
 
@@ -170,7 +175,17 @@ async def test_session_without_active_run_does_not_fetch_pending_actions():
     result = await service_for(pool).session_detail(Identity("owner", "rw"), "session-1")
     assert result["active_run"] is None
     assert len(result["messages"]) == 2
-    assert set(call[0] for call in pool.calls) == {"owner", "history", "active"}
+    assert set(call[0] for call in pool.calls) == {"owner", "history", "active", "usage"}
+
+
+@pytest.mark.asyncio
+async def test_session_detail_carries_the_latest_run_usage_for_the_context_share():
+    usage = {"model_calls": 3, "last_input_tokens": 330_000, "max_input_tokens": 1_048_576}
+    pool = QueryPool(active=None, usage=usage)
+    result = await service_for(pool).session_detail(Identity("owner", "rw"), "session-1")
+    assert result["usage"] == usage
+    sql, args = next((call[1], call[2]) for call in pool.calls if call[0] == "usage")
+    assert "ORDER BY created_at DESC LIMIT 1" in sql and args == ("session-1",)
 
 
 @pytest.mark.asyncio
@@ -245,7 +260,7 @@ def test_real_http_session_get_checks_owner_once_and_restores_pending_actions():
     assert response.status_code == 200
     assert response.json()["active_run"]["pending_actions"][0]["action_id"] == "action-1"
     assert [call[0] for call in pool.calls].count("owner") == 1
-    assert set(call[0] for call in pool.calls) == {"owner", "history", "active", "pending"}
+    assert set(call[0] for call in pool.calls) == {"owner", "history", "active", "usage", "pending"}
 
 
 @pytest.mark.parametrize("headers,expected", [({}, 401), ({**HTTP_HEADERS, "X-User-Name": "other-user"}, 404)])
@@ -287,6 +302,6 @@ def test_real_http_owner_delete_keeps_cleanup_and_single_ownership_check():
     assert response.status_code == 200
     assert response.json() == {"success": True}
     assert [call[0] for call in pool.calls].count("owner") == 1
-    assert set(call[0] for call in pool.calls) == {"owner", "history", "active", "delete"}
+    assert set(call[0] for call in pool.calls) == {"owner", "history", "active", "usage", "delete"}
     assert next(call[2] for call in pool.calls if call[0] == "delete") == ("session-1",)
     service.runtime.checkpointer.adelete_thread.assert_awaited_once_with("session-1")

@@ -21,7 +21,7 @@ from fastmcp import Client
 from fastmcp.client.transports import SSETransport, StreamableHttpTransport
 from langchain_core.messages import AIMessage
 
-from kubedoor_ai.domain import Identity
+from kubedoor_ai.domain import Identity, Provider
 from kubedoor_ai.gateway import RunContext
 from kubedoor_ai.http import create_app
 from kubedoor_ai.service import Service
@@ -374,6 +374,8 @@ def test_wecom_conversation_boundaries_use_one_locked_transaction(harness):
             row = await store.one("SELECT channel,channel_key FROM kubedoor_ai_sessions WHERE id=$1::uuid", first)
             assert row == {"channel": "wecom", "channel_key": f"{userid}:{h.username}:{first}"}
             assert (await wecom._current_session(userid, identity))[0] == first
+            await store.execute("INSERT INTO kubedoor_ai_messages(id,session_id,role,content) VALUES($1::uuid,$2::uuid,'user','查询 Pod')",
+                                str(uuid.uuid4()), first)
 
             # 空闲 3 小时后三条消息同时到达：只建一个新对话，只有一条带提示
             await store.execute("UPDATE kubedoor_ai_sessions SET updated_at=now()-interval '3 hours' WHERE id=$1::uuid", first)
@@ -403,6 +405,42 @@ def test_wecom_conversation_boundaries_use_one_locked_transaction(harness):
             assert await wecom._start_new_session(userid, identity) == "已开始新对话。"
             member = await store.one("SELECT session_id,previous_session_id FROM kubedoor_ai_wecom_users WHERE wecom_userid=$1", userid)
             assert member["previous_session_id"] == first and member["session_id"] not in (first, second)
+        finally:
+            await store.execute("DELETE FROM kubedoor_ai_wecom_users WHERE wecom_userid=$1", userid)
+
+    runner.run(verify())
+
+
+def test_unreachable_old_wecom_conversation_loses_its_checkpoint_but_keeps_messages(harness):
+    h, runner = harness
+
+    async def verify():
+        from kubedoor_ai.wecom import WeComIntegration
+        store, wecom, checkpointer = h.service.store, WeComIntegration(h.service), h.service.runtime.checkpointer
+        userid, identity = "wx-" + uuid.uuid4().hex, Identity(h.username, "rw")
+        await store.execute("INSERT INTO kubedoor_ai_wecom_users(wecom_userid) VALUES($1)", userid)
+        try:
+            old, _, _ = await wecom._current_session(userid, identity)
+            h.model(AIMessage(content="查过了，一切正常"))
+            run, _ = await h.service.new_run(identity, old, {"env": "cluster-a"}, origin="wecom", channel="wecom")
+            await store.message(run, "user", "查一下")
+            await h.service.runtime.run_graph(RunContext(run, identity), Provider.parse(PROVIDER), "查一下", None)
+            assert await checkpointer.aget_tuple({"configurable": {"thread_id": old}}) is not None
+            # 两次「新对话」（中间那个对话有消息）之后，old 既不是当前对话也不是上一个对话
+            await wecom._start_new_session(userid, identity)
+            middle = (await store.one("SELECT session_id FROM kubedoor_ai_wecom_users WHERE wecom_userid=$1", userid))["session_id"]
+            await store.execute("INSERT INTO kubedoor_ai_messages(id,session_id,role,content) VALUES($1::uuid,$2::uuid,'user','再问一句')",
+                                str(uuid.uuid4()), middle)
+            await wecom._start_new_session(userid, identity)
+            await store.execute("UPDATE kubedoor_ai_sessions SET updated_at=now()-interval '8 days' WHERE id=ANY($1::uuid[])", [old, middle])
+            assert await wecom.purge_checkpoints(7) >= 1
+            assert await checkpointer.aget_tuple({"configurable": {"thread_id": old}}) is None
+            row = await store.one("SELECT checkpoint_purged_at,(SELECT count(*) FROM kubedoor_ai_messages m WHERE m.session_id=s.id) AS messages "
+                                  "FROM kubedoor_ai_sessions s WHERE id=$1::uuid", old)
+            assert row["checkpoint_purged_at"] and row["messages"] == 2   # 消息记录保留用于审计
+            # 上一个对话（middle）还能「继续上次」，不清理；旧卡片切不回已清理的 old
+            assert (await store.one("SELECT checkpoint_purged_at FROM kubedoor_ai_sessions WHERE id=$1::uuid", middle))["checkpoint_purged_at"] is None
+            assert await wecom._continue_session(userid, identity, old) == "该对话已不可用，直接发送问题即可开始新对话。"
         finally:
             await store.execute("DELETE FROM kubedoor_ai_wecom_users WHERE wecom_userid=$1", userid)
 

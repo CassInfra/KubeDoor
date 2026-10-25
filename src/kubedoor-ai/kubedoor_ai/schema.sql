@@ -14,6 +14,8 @@ ALTER TABLE kubedoor_ai_sessions ADD COLUMN IF NOT EXISTS channel text NOT NULL 
 ALTER TABLE kubedoor_ai_sessions ADD COLUMN IF NOT EXISTS channel_key text;
 CREATE INDEX IF NOT EXISTS kubedoor_ai_sessions_channel ON kubedoor_ai_sessions(channel, updated_at DESC);
 CREATE UNIQUE INDEX IF NOT EXISTS kubedoor_ai_sessions_channel_key ON kubedoor_ai_sessions(channel, channel_key) WHERE channel_key IS NOT NULL;
+-- 已删除 LangGraph 检查点的时间(企微里再也不会继续的旧对话,wecom.py 定期清理);会话和消息记录保留,不能再继续
+ALTER TABLE kubedoor_ai_sessions ADD COLUMN IF NOT EXISTS checkpoint_purged_at timestamptz;
 CREATE TABLE IF NOT EXISTS kubedoor_ai_runs (
     id uuid PRIMARY KEY, session_id uuid NOT NULL REFERENCES kubedoor_ai_sessions(id) ON DELETE CASCADE,
     username text NOT NULL, permission text NOT NULL, status text NOT NULL,

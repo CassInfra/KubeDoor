@@ -42,6 +42,8 @@ data:
   RETENTION_ALERTS_DAYS: "365"
   RETENTION_RESOURCES_DAYS: "365"
   RETENTION_AUDIT_DAYS: "180"
+  # 企微里再也不会继续的旧 AI 对话,多少天后删除它的检查点(kubedoor-ai 每 6 小时清理一次,消息记录保留);0 表示不清理
+  RETENTION_AI_CHECKPOINT_DAYS: "7"
   # 节点终端临时 pod 用的镜像(需含 nsenter),master 开终端时下发给 agent。
   # 留空 = 用 agent 内置的默认镜像(registry.cn-shenzhen.aliyuncs.com/starsl/alpine:3);
   # 集群拉不到时换成内网仓库里的镜像,改完重启 master 即可,不用动各集群的 agent

@@ -11,12 +11,14 @@ import { ElMessage, ElMessageBox } from "element-plus";
 import {
   aiApi,
   type AIProvider,
+  type AIReasoningEffort,
   type WeComConfig,
   type WeComUnbound,
   type WeComUser
 } from "@/api/ai";
 import { getKnownClusters, getUsers, type SystemUser } from "@/api/system";
 import AIModelLimitsFields from "@/components/AI/AIModelLimitsFields.vue";
+import AIReasoningEffortField from "@/components/AI/AIReasoningEffortField.vue";
 import {
   followModelLimits,
   modelLimitsFor,
@@ -55,6 +57,7 @@ const form = reactive({
   session_idle_minutes: DEFAULT_IDLE_MINUTES as number | undefined
 });
 const limits = ref<AIModelLimits>(modelLimitsFor(""));
+const effort = ref<AIReasoningEffort | null>(null);
 // 模型名变化时，没手动改过的上下文设置按新模型名重新预填。
 // 同步触发：loadConfig 先设模型名、再载入已保存的值，保存的值不会被改写。
 watch(
@@ -166,6 +169,7 @@ async function loadConfig() {
   form.base_url = value.base_url || "https://api.openai.com/v1";
   form.model = value.model || "";
   limits.value = modelLimitsFor(form.model, value);
+  effort.value = value.reasoning_effort ?? null;
   form.session_idle_minutes =
     value.session_idle_minutes ?? DEFAULT_IDLE_MINUTES;
   form.bot_secret = "";
@@ -235,7 +239,8 @@ function provider(): AIProvider {
     base_url: form.base_url.trim(),
     api_key: form.api_key,
     model: form.model.trim(),
-    ...limits.value
+    ...limits.value,
+    reasoning_effort: effort.value
   };
 }
 
@@ -279,6 +284,7 @@ async function saveConfig() {
       api_key: form.api_key || undefined,
       model: form.model.trim(),
       ...limits.value,
+      reasoning_effort: effort.value,
       session_idle_minutes: form.session_idle_minutes ?? DEFAULT_IDLE_MINUTES
     });
     form.bot_secret = "";
@@ -454,6 +460,7 @@ onBeforeUnmount(() => {
           <el-input v-model="form.model" placeholder="例如 gpt-4o-mini" />
         </el-form-item>
         <AIModelLimitsFields v-model="limits" :model="form.model" />
+        <AIReasoningEffortField v-model="effort" />
         <el-form-item label="对话空闲超时（分钟）">
           <el-input-number
             v-model="form.session_idle_minutes"

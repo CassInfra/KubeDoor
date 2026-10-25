@@ -4,7 +4,8 @@
 
 三层检查:
   1. 语法    —— 按 postgres 方言解析,展开 Grafana 变量后再解析。
-  2. 列名    —— 用 db.sql 里 k8s_resources 的真实列做 qualify,拼错的列会被揪出来。
+  2. 列名    —— 用建表脚本里的真实列做 qualify(master db.sql 的 k8s_resources,
+                AI schema.sql 的 kubedoor_ai_runs / kubedoor_ai_sessions),拼错的列会被揪出来。
   3. 整数除法 —— ClickHouse 的 / 永远是浮点除法,PostgreSQL 的 integer/integer 是
                 整除。原看板里有若干 x/1000,搬过来如果两边都是整型会静默算出 0。
 
@@ -24,6 +25,9 @@ from sqlglot.optimizer.qualify import qualify
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 DASH_DIR = ROOT / 'dashboards'
 DB_SQL = ROOT.parent / 'src' / 'kubedoor-master' / 'db.sql'
+AI_SQL = ROOT.parent / 'src' / 'kubedoor-ai' / 'kubedoor_ai' / 'schema.sql'
+# 看板查询的表:(建表脚本, 表名)
+TABLES = [(DB_SQL, 'k8s_resources'), (AI_SQL, 'kubedoor_ai_runs'), (AI_SQL, 'kubedoor_ai_sessions')]
 
 SUBST = [
     ('${table}', 'k8s_resources'),
@@ -31,34 +35,56 @@ SUBST = [
     ('${namespace}', "namespace = 'default'"),
     ('${deployment}', "deployment = 'my-app'"),
     ('${maxday}', '2026-09-17 12:00:00+00'),
-    ('$__timeFilter(date)', "date BETWEEN '2026-08-19 00:00:00+00' AND '2026-09-18 00:00:00+00'"),
+    ('${channel:sqlstring}', "'web', 'wecom'"),
 ]
+# $__timeFilter(列) 展开成该列的时间范围
+TIME_RANGE = "BETWEEN '2026-08-19 00:00:00+00' AND '2026-09-18 00:00:00+00'"
+# 建表语句里的表级约束,不是列
+CONSTRAINTS = {'unique', 'primary', 'constraint', 'check', 'foreign', 'exclude'}
 
 # PostgreSQL 里做整除的类型
 INT_TYPES = {'smallint', 'integer', 'int', 'int2', 'int4', 'int8', 'bigint'}
 
 
-def load_schema():
-    """从 db.sql 解析出 k8s_resources 的列定义"""
-    sql = DB_SQL.read_text(encoding='utf-8')
-    m = re.search(r'CREATE TABLE IF NOT EXISTS k8s_resources \((.*?)\n\);', sql, re.S)
+def split_top_level(body):
+    """按不在括号里的逗号切开建表语句的各项(一行可以写好几列)"""
+    items, depth, start = [], 0, 0
+    for i, ch in enumerate(body):
+        if ch == '(':
+            depth += 1
+        elif ch == ')':
+            depth -= 1
+        elif ch == ',' and depth == 0:
+            items.append(body[start:i])
+            start = i + 1
+    items.append(body[start:])
+    return items
+
+
+def table_columns(path, table):
+    """建表语句 + 后来 ALTER TABLE ... ADD COLUMN IF NOT EXISTS 补的列"""
+    sql = re.sub(r'--[^\n]*', '', path.read_text(encoding='utf-8'))
+    m = re.search(rf'CREATE TABLE IF NOT EXISTS {table} \((.*?)\n\);', sql, re.S)
     if not m:
-        raise SystemExit(f"没能从 {DB_SQL} 里找到 k8s_resources 的建表语句")
+        raise SystemExit(f"没能从 {path} 里找到 {table} 的建表语句")
     cols = {}
-    for line in m.group(1).split('\n'):
-        line = line.split('--')[0].strip().rstrip(',')
-        if not line:
-            continue
-        parts = line.split()
-        if len(parts) >= 2:
-            cols[parts[0]] = parts[1].upper()
+    for item in split_top_level(m.group(1)):
+        col = re.match(r'\s*(\w+)\s+(\w+)', item)
+        if col and col.group(1).lower() not in CONSTRAINTS:
+            cols[col.group(1)] = col.group(2).upper()
+    for name, typ in re.findall(rf'ALTER TABLE {table} ADD COLUMN IF NOT EXISTS (\w+) (\w+)', sql):
+        cols.setdefault(name, typ.upper())
     return cols
+
+
+def load_schema():
+    return {table: table_columns(path, table) for path, table in TABLES}
 
 
 def expand(sql):
     for k, v in SUBST:
         sql = sql.replace(k, v)
-    return sql
+    return re.sub(r'\$__timeFilter\(([^)]+)\)', rf'\1 {TIME_RANGE}', sql)
 
 
 def collect(dash):
@@ -116,9 +142,15 @@ def find_int_division(tree, cols):
 
 
 def main():
-    cols = load_schema()
-    print(f"k8s_resources 列定义({len(cols)} 列):{', '.join(f'{k}:{v}' for k, v in list(cols.items())[:6])} ...\n")
-    schema = {'k8s_resources': cols}
+    schema = load_schema()
+    for table, cols in schema.items():
+        print(f"{table} 列定义({len(cols)} 列):{', '.join(f'{k}:{v}' for k, v in list(cols.items())[:6])} ...")
+    print()
+    # 整除检查只看列名;各表同名的列类型一致(id、created_at 之类)
+    types = {}
+    for cols in schema.values():
+        for name, typ in cols.items():
+            types.setdefault(name.lower(), typ)
 
     total = syn_fail = col_fail = div_warn = 0
     for path in sorted(DASH_DIR.glob('*.json')):
@@ -149,7 +181,7 @@ def main():
                         col_fail += 1
                         status.append(f"列FAIL: {msg}")
 
-            bad = find_int_division(tree, cols)
+            bad = find_int_division(tree, types)
             if bad:
                 div_warn += len(bad)
                 status.append("整除风险: " + "; ".join(bad))

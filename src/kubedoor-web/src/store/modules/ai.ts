@@ -10,9 +10,11 @@ import {
   type AIMemorySummary,
   type AIMessage,
   type AIProvider,
+  type AIReasoningEffort,
   type AIRun,
   type AIScope,
-  type AISession
+  type AISession,
+  type AIUsage
 } from "@/api/ai";
 import {
   isTerminalRun,
@@ -34,11 +36,16 @@ const defaultProvider = (): AIProvider => ({
   model: "",
   max_input_tokens: null,
   max_output_tokens: null,
-  compression_ratio: null
+  compression_ratio: null,
+  reasoning_effort: null
 });
 /** 浏览器里保存的上下文设置：旧数据没有这些字段时为 null，由服务端按模型推断 */
 const savedNumber = (value: unknown) =>
   typeof value === "number" && Number.isFinite(value) ? value : null;
+const savedEffort = (value: unknown): AIReasoningEffort | null =>
+  value === "off" || value === "low" || value === "high" || value === "max"
+    ? value
+    : null;
 const errorText = (error: unknown) =>
   error instanceof Error ? error.message : "请求失败，请稍后重试。";
 
@@ -60,6 +67,8 @@ export const useAIStore = defineStore("kubedoor-ai", () => {
   const summarizingMemory = ref(false);
   const autoApprove = ref(false);
   const activeRun = ref<AIRun | null>(null);
+  /** 当前会话最近一轮的用量（会话详情和 done 事件带回），用来显示上下文占用 */
+  const contextUsage = ref<AIUsage | null>(null);
   const submitting = ref(false);
   const deciding = ref("");
   const cancelling = ref(false);
@@ -284,7 +293,8 @@ export const useAIStore = defineStore("kubedoor-ai", () => {
       model: value.model.trim(),
       max_input_tokens: savedNumber(value.max_input_tokens),
       max_output_tokens: savedNumber(value.max_output_tokens),
-      compression_ratio: savedNumber(value.compression_ratio)
+      compression_ratio: savedNumber(value.compression_ratio),
+      reasoning_effort: savedEffort(value.reasoning_effort)
     };
     localStorage.setItem(providerStorageKey(owner), JSON.stringify(settings));
     provider.value = settings;
@@ -317,7 +327,8 @@ export const useAIStore = defineStore("kubedoor-ai", () => {
             api_key: saved.api_key || "",
             max_input_tokens: savedNumber(saved.max_input_tokens),
             max_output_tokens: savedNumber(saved.max_output_tokens),
-            compression_ratio: savedNumber(saved.compression_ratio)
+            compression_ratio: savedNumber(saved.compression_ratio),
+            reasoning_effort: savedEffort(saved.reasoning_effort)
           };
         }
       } catch {
@@ -467,6 +478,7 @@ export const useAIStore = defineStore("kubedoor-ai", () => {
 
   function showHistory(data: AISession) {
     messages.value = data.messages || [];
+    contextUsage.value = data.usage ?? null;
     const lastScope = [...messages.value]
       .reverse()
       .find(message => message.scope)?.scope;
@@ -487,6 +499,7 @@ export const useAIStore = defineStore("kubedoor-ai", () => {
     sessionId.value = id;
     selectedMemories.value = [];
     activeRun.value = null;
+    contextUsage.value = null;
     assistantId = "";
     lastSeq.value = 0;
     streamState.value = "idle";
@@ -857,6 +870,9 @@ export const useAIStore = defineStore("kubedoor-ai", () => {
       );
       if (activeRun.value) activeRun.value.status = "failed";
     } else if (event.type === "done") {
+      // 每轮结束带上这一轮的用量：最近一次输入 ÷ 模型窗口就是当前上下文占用
+      if (data.usage && typeof data.usage === "object")
+        contextUsage.value = data.usage as AIUsage;
       if (replayed) return;
       runStatusRevision++;
       approvalReady.value = false;
@@ -1160,6 +1176,7 @@ export const useAIStore = defineStore("kubedoor-ai", () => {
     selectedMemories,
     summarizingMemory,
     activeRun,
+    contextUsage,
     submitting,
     deciding,
     cancelling,

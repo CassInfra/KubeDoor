@@ -132,13 +132,13 @@ K8S Resource Overview: multi-cluster resources, at-risk nodes, and today's abnor
 
 **Click 「AI 助手」 (AI Assistant) in the middle of the top bar, select a cluster and describe the problem in one sentence: queries run automatically, changes are approved before they run, and every step is traceable.** The same tools, permissions and approvals are also available to the WeCom bot and to external MCP clients such as Cursor and Claude Code.
 
-- 🧠**Bring your own model**: enter the Base URL, API Key and model name in 「模型设置」 (Model Settings); 「测试连接」 (Test Connection) runs a real tool-calling test. Any OpenAI-compatible Chat Completions API works (including self-hosted models without authentication), with dedicated support for DeepSeek thinking mode. The model configuration is stored only in your own browser.
+- 🧠**Bring your own model**: enter the Base URL, API Key and model name in 「模型设置」 (Model Settings); 「测试连接」 (Test Connection) runs a real tool-calling test. Any OpenAI-compatible Chat Completions API works (including self-hosted models without authentication), with dedicated support for DeepSeek thinking mode (adjustable thinking effort); the context window and compression threshold are prefilled from the model name and can be changed. The model configuration is stored only in your own browser.
 - 🎯**Resource context**: first choose a 「K8S 集群」 (K8S cluster) — each turn only operates on the selected cluster — then optionally narrow it down to a namespace, Deployment or Pod.
 - 🧰**One governed tool**: every cluster operation goes through a single tool, `kubedoor_tool`, which covers **63 KubeDoor business operations** (37 read-only, 26 write) and **5 kinds of generic executors** (K8S API/CRD, kubectl, istioctl, diagnostic commands, Pod exec); existing KubeDoor APIs take precedence.
 - 🔌**Multiple connection modes**: existing KubeDoor APIs, the agent's in-cluster identity (no kubeconfig needed), or a direct connection with a kubeconfig that an admin uploads in 「Agent管理」 (Agent Management; English UI: "Workbench"), stored encrypted; historical and monitoring data can still be queried while the agent is offline.
 - ⏰**Immediate / scheduled / periodic operations**: Deployment restarts and scaling can run immediately, at a set time, or periodically on a Cron schedule; when the time-series database is VictoriaMetrics, the AI can also write MetricsQL to query metrics (restricted to the current cluster).
 - 📝**Global memory**: 「总结为记忆」 (Summarize as memory) turns a conversation into a memory; once it is saved as a global memory, every logged-in user can bring it into their questions as needed.
-- 🧩**Powered by DeepAgents**: a built-in 「KubeDoor K8S 运维」 (KubeDoor K8S Ops) Skill, sub-agents that investigate in parallel and automatic context compression; sessions are stored on the server (visible only to you), with streaming replies and resume after disconnects, and tasks keep running after you close the dialog.
+- 🧩**Powered by DeepAgents**: a built-in 「KubeDoor K8S 运维」 (KubeDoor K8S Ops) Skill, sub-agents that investigate in parallel and automatic context compression (the dialog header shows how much of the context is in use); the system prompt and history stay stable, so long conversations keep hitting the model's prefix cache; sessions are stored on the server (visible only to you), with streaming replies and resume after disconnects, and tasks keep running after you close the dialog.
 
 #### 💬WeCom Smart Bot
 
@@ -301,7 +301,7 @@ Built for the case where the same services run in test clusters and in several p
 
 - 🖥**Resource overview**: 「K8S资源总览」 (English UI: "K8s Overview") switches between all clusters and a single cluster, showing resource counts, at-risk nodes and the highest usage/allocation rates, plus today's Top 10 abnormal Pod alerts, the Top 10 abnormal K8S events and the alert trend of the last 10 days.
 - 🌊**Unified time-series database**: use the bundled single-node VictoriaMetrics, or connect an existing Prometheus/VictoriaMetrics; kube-state-metrics and node-exporter already running in the cluster can be reused.
-- 📊**Grafana dashboards**: 「K8S监控看板📊」 (K8S Monitoring Dashboard; English UI: "Resource K8S"), 「节点监控看板📊」 (Node Monitoring Dashboard; English UI: "Resource Node") and 「高峰资源看板📊」 (Peak Resource Dashboard; English UI: "Resource Statistics") are embedded in the Web UI and imported automatically at installation.
+- 📊**Grafana dashboards**: 「K8S监控看板📊」 (K8S Monitoring Dashboard; English UI: "Resource K8S"), 「节点监控看板📊」 (Node Monitoring Dashboard; English UI: "Resource Node") and 「高峰资源看板📊」 (Peak Resource Dashboard; English UI: "Resource Statistics") are embedded in the Web UI and imported automatically at installation; admins also get 「系统管理 → AI 用量看板📊」 (System → AI usage dashboard) with the AI assistant's token usage, cache hit rate, context size and estimated cost.
 
 <details close>
 <summary>🔍Click to expand screenshots ...</summary>

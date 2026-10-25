@@ -103,6 +103,7 @@ class Provider:
     max_input_tokens: int | None = None     # 用户填写的上下文窗口；None 表示按模型推断
     max_output_tokens: int | None = None    # 用户填写的最大输出；None 表示按模型推断
     compression_ratio: float | None = None  # 压缩阈值（0.2–0.8）；None 表示默认 0.5
+    reasoning_effort: str | None = None     # DeepSeek 思考强度 off/low/high/max；None 表示用模型默认（high）
 
     @classmethod
     def parse(cls, raw: dict) -> "Provider":
@@ -116,7 +117,17 @@ class Provider:
             raise AIError("API key 必须为字符串，最多 8192 字符")
         if not isinstance(model, str) or not model.strip() or len(model) > 256:
             raise AIError("模型名不能为空")
-        return cls(base_url, key, model.strip(), *parse_model_limits(raw))
+        return cls(base_url, key, model.strip(), *parse_model_limits(raw), parse_reasoning_effort(raw))
+
+
+REASONING_EFFORTS = ("off", "low", "high", "max")
+
+
+def parse_reasoning_effort(raw: Mapping) -> str | None:
+    effort = raw.get("reasoning_effort")
+    if effort is not None and effort not in REASONING_EFFORTS:
+        raise AIError("思考强度只能是 off、low、high、max")
+    return effort
 
 
 def parse_model_limits(raw: Mapping) -> tuple[int | None, int | None, float | None]:

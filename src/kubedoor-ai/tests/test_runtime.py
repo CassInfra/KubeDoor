@@ -2,8 +2,10 @@ import json
 from unittest.mock import AsyncMock
 
 import pytest
+from langchain.agents.middleware import AgentMiddleware
 from langchain_core.messages import AIMessage, ToolMessage
 from langgraph.checkpoint.memory import InMemorySaver
+from langgraph.types import Command
 
 from kubedoor_ai.domain import CredentialCipher, Identity, Provider
 from kubedoor_ai.gateway import Gateway, RunContext
@@ -92,13 +94,23 @@ async def test_checkpoint_writes_only_new_messages_each_turn():
         assert len(written_messages(runtime.checkpointer)) == 2 * (index + 1)
     state = await runtime.graph(ctx, provider).aget_state({"configurable": {"thread_id": "session-1"}})
     assert len(state.values["messages"]) == 24
-    # 有消息真的被脱敏改动时，只写回改动的那一条
-    leaked = ToolMessage(content="tool echo provider-private-key", tool_call_id="call-x", id="tool-x")
-    middleware = SecretRedactionMiddleware(("provider-private-key",))
-    assert middleware.before_model({"messages": [*state.values["messages"], leaked]}, None) == {"messages": [leaked]}
-    assert leaked.content == "tool echo [redacted]"
-    assert middleware.after_model({"messages": [*state.values["messages"], leaked]}, None) is None
     await runtime.gateway.close()
+
+
+@pytest.mark.asyncio
+async def test_tool_results_are_scrubbed_once_when_created_and_history_is_never_rescanned():
+    middleware = SecretRedactionMiddleware(("provider-private-key",))
+    leaked = ToolMessage(content="tool echo provider-private-key", tool_call_id="call-x", id="tool-x")
+    assert await middleware.awrap_tool_call(None, AsyncMock(return_value=leaked)) is leaked
+    assert leaked.content == "tool echo [redacted]"
+    # DeepAgents 的文件、子 Agent 工具把 ToolMessage 放在 Command 的状态更新里返回
+    nested = ToolMessage(content="password=hunter2 provider-private-key", tool_call_id="call-y")
+    command = Command(update={"messages": [nested], "files": {}})
+    assert await middleware.awrap_tool_call(None, AsyncMock(return_value=command)) is command
+    assert "hunter2" not in nested.content and "provider-private-key" not in nested.content
+    # 每次模型调用前后重扫全部历史的开销随对话增长；只在消息产生时处理
+    assert SecretRedactionMiddleware.before_model is AgentMiddleware.before_model
+    assert SecretRedactionMiddleware.after_model is AgentMiddleware.after_model
 
 
 @pytest.mark.asyncio

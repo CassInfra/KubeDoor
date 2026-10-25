@@ -121,7 +121,8 @@ class RecordingDeepSeek(KubeDoorChatDeepSeek):
         message = self._reply(messages, stop, kwargs)
         yield ChatGenerationChunk(message=AIMessageChunk(
             content=message.content, additional_kwargs=message.additional_kwargs,
-            response_metadata={"model_provider": "deepseek", "finish_reason": "tool_calls" if message.tool_calls else "stop"},
+            response_metadata={"model_provider": "deepseek", "finish_reason": "tool_calls" if message.tool_calls else "stop",
+                               **message.response_metadata},
             usage_metadata=message.usage_metadata,
             tool_call_chunks=[{"name": call["name"], "args": json.dumps(call["args"], ensure_ascii=False), "id": call["id"],
                                "index": index, "type": "tool_call_chunk"} for index, call in enumerate(message.tool_calls)],

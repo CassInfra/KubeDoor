@@ -17,7 +17,8 @@ from deepagents.backends import CompositeBackend, FilesystemBackend, StateBacken
 from deepagents.middleware.summarization import SummarizationMiddleware
 from langchain.tools import ToolRuntime, tool
 from langchain.agents.middleware import AgentMiddleware
-from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+from langchain_core.callbacks import BaseCallbackHandler
+from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, ToolMessage
 from langgraph.types import Command
 
 from .domain import AIError, Identity, Provider, beijing_now, redact, redact_values
@@ -61,6 +62,14 @@ DEFAULT_COMPRESSION_RATIO = 0.5
 SUMMARY_KEEP_RATIO = 0.10
 # runs.usage counters; max_input_tokens is added from the model profile.
 USAGE_FIELDS = ("model_calls", "input_tokens", "output_tokens", "cache_read_tokens", "reasoning_tokens", "last_input_tokens")
+# 服务端因自身原因打断生成（资源不足等）时原样重发一次：前缀不变，能命中缓存
+RETRY_FINISH_REASONS = {"insufficient_system_resource", "aborted"}
+FINISH_NOTICES = {
+    "length": "（模型输出达到长度上限，回答被截断；可以让我继续，或者把问题拆小一些。）",
+    "insufficient_system_resource": "（模型服务资源不足，生成被中断，回答可能不完整，请稍后重试。）",
+    "aborted": "（模型服务中断了这次生成，回答可能不完整，请稍后重试。）",
+    "content_filter": "（部分内容被模型服务的内容过滤拦截。）",
+}
 # str.format template: {messages} is the only placeholder, keep other braces out.
 OPS_SUMMARY_PROMPT = """<role>
 Kubernetes 运维对话的上下文整理助手
@@ -149,11 +158,15 @@ def latest_turn_context(messages):
     return None
 
 
-def summarization(model, backend, provider):
+def summarization(model, backend, provider, ctx=None):
     """Replace the DeepAgents default compaction (matched by name) for one agent stack."""
+    # The summary request has no tools, so DeepSeek thinking is switched off.
+    summary_model = without_thinking(model)
+    if ctx is not None:
+        # DeepAgents calls the summary model directly, bypassing agent middleware.
+        summary_model = summary_model.model_copy(update={"callbacks": [SummaryUsageCallback(ctx)]})
     return SummarizationMiddleware(
-        # The summary request has no tools, so DeepSeek thinking is switched off.
-        model=without_thinking(model), backend=backend,
+        model=summary_model, backend=backend,
         trigger=("fraction", provider.compression_ratio or DEFAULT_COMPRESSION_RATIO),
         keep=("fraction", SUMMARY_KEEP_RATIO),
         # Older write_file/edit_file arguments are otherwise clipped again on
@@ -213,12 +226,14 @@ class SecretStreamRedactor:
 
 
 class SecretRedactionMiddleware(AgentMiddleware):
-    """Scrub messages before the SDK checkpoints model output or tool args.
+    """Scrub each message once, when it is created, before the SDK checkpoints it.
 
-    before_model/after_model return only the messages that scrubbing changed
-    (None when nothing changed). The messages channel checkpoints every write
-    as a delta, so returning the whole list would store the full history twice
-    per model call and make checkpoint growth quadratic in the turn count.
+    Model output is scrubbed in wrap_model_call and tool results in
+    wrap_tool_call; the user message is built already redacted (run_graph).
+    History is never scanned again: a full pass on every model call grows with
+    the conversation (about 0.2 s per call at 2 MB of messages, blocking the
+    event loop), and messages already sent must stay byte-identical anyway
+    (cache invariant I3).
     """
     def __init__(self, secrets):
         self.secrets = secrets
@@ -246,6 +261,14 @@ class SecretRedactionMiddleware(AgentMiddleware):
                 changed.append(message)
         return changed
 
+    def scrub_tool_result(self, result):
+        """A tool returns its ToolMessage directly or inside a Command state update."""
+        if isinstance(result, ToolMessage):
+            self.scrub({"messages": [result]})
+        elif isinstance(result, Command) and isinstance(result.update, dict) and isinstance(result.update.get("messages"), list):
+            self.scrub({"messages": [m for m in result.update["messages"] if isinstance(m, BaseMessage)]})
+        return result
+
     def wrap_model_call(self, request, handler):
         response = handler(request)
         self.scrub({"messages": response.result})
@@ -256,22 +279,63 @@ class SecretRedactionMiddleware(AgentMiddleware):
         self.scrub({"messages": response.result})
         return response
 
-    def before_model(self, state, runtime):
-        changed = self.scrub(state)
-        return {"messages": changed} if changed else None
+    def wrap_tool_call(self, request, handler):
+        return self.scrub_tool_result(handler(request))
 
-    def after_model(self, state, runtime):
-        changed = self.scrub(state)
-        return {"messages": changed} if changed else None
+    async def awrap_tool_call(self, request, handler):
+        return self.scrub_tool_result(await handler(request))
+
+
+def finish_reason(message):
+    return (getattr(message, "response_metadata", None) or {}).get("finish_reason")
+
+
+class SummaryUsageCallback(BaseCallbackHandler):
+    """Count compactions and their token usage in the run (summary_* fields of runs.usage)."""
+    run_inline = True
+
+    def __init__(self, ctx):
+        self.ctx = ctx
+
+    def on_llm_end(self, response, **kwargs):
+        usage = self.ctx.usage
+        for generations in response.generations:
+            for generation in generations:
+                reported = getattr(getattr(generation, "message", None), "usage_metadata", None) or {}
+                usage["summary_calls"] = usage.get("summary_calls", 0) + 1
+                usage["summary_input_tokens"] = usage.get("summary_input_tokens", 0) + (reported.get("input_tokens") or 0)
+                usage["summary_output_tokens"] = usage.get("summary_output_tokens", 0) + (reported.get("output_tokens") or 0)
+
+
+class GenerationRetryMiddleware(AgentMiddleware):
+    """Resend a model request once when the provider cut the generation short.
+
+    DeepSeek reports finish_reason=insufficient_system_resource when backend
+    capacity interrupts a reply. The repeated request has the same prefix, so
+    it is cached; tokens already streamed are superseded by the final message
+    event. A second interruption is kept and noted in the answer instead.
+    """
+    def wrap_model_call(self, request, handler):
+        response = handler(request)
+        if any(finish_reason(m) in RETRY_FINISH_REASONS for m in response.result):
+            response = handler(request)
+        return response
+
+    async def awrap_model_call(self, request, handler):
+        response = await handler(request)
+        if any(finish_reason(m) in RETRY_FINISH_REASONS for m in response.result):
+            response = await handler(request)
+        return response
 
 
 class UsageMiddleware(AgentMiddleware):
     """Add provider-reported token usage of every model call to the run.
 
     Read-only: it never changes the request or the response. The summary call
-    made inside SummarizationMiddleware bypasses agent middleware and is not
-    counted. Only the primary agent's latest input size is the conversation's
-    current context size; subagent calls just add to the totals.
+    made inside SummarizationMiddleware bypasses agent middleware; it is
+    counted separately by SummaryUsageCallback (summary_* fields). Only the
+    primary agent's latest input size is the conversation's current context
+    size; subagent calls just add to the totals.
     """
     def __init__(self, ctx, primary=True):
         self.ctx, self.primary = ctx, primary
@@ -331,7 +395,7 @@ class Runtime:
 
         # Test doubles and custom factories get the same context window profile.
         model = apply_model_limits(self.model_factory(provider), provider)
-        ctx.usage["max_input_tokens"] = model.profile["max_input_tokens"]
+        ctx.usage.update(max_input_tokens=model.profile["max_input_tokens"], model=provider.model)
         sanitizer = SecretRedactionMiddleware(ctx.secrets)
         backend = CompositeBackend(default=StateBackend(), routes={"/skills/": FilesystemBackend(SKILLS_ROOT, virtual_mode=True)})
         prompt = static_system_prompt()
@@ -343,9 +407,9 @@ class Runtime:
         return create_deep_agent(model=model, tools=[kubedoor_tool], system_prompt=prompt,
                                  backend=backend, skills=["/skills/"],
                                  permissions=[FilesystemPermission(operations=["write"], paths=["/skills/**"], mode="deny")],
-                                 checkpointer=self.checkpointer, middleware=[summarization(model, backend, provider), sanitizer, UsageMiddleware(ctx)],
+                                 checkpointer=self.checkpointer, middleware=[summarization(model, backend, provider, ctx), sanitizer, GenerationRetryMiddleware(), UsageMiddleware(ctx)],
                                  subagents=[{"name": "general-purpose", "description": "在当前资源范围内并行调查 Kubernetes 问题，使用统一网关与 Skills。", "system_prompt": child_prompt, "model": model, "tools": [kubedoor_tool],
-                                             "middleware": [summarization(model, backend, provider), sanitizer, UsageMiddleware(ctx, primary=False)]}])
+                                             "middleware": [summarization(model, backend, provider, ctx), sanitizer, GenerationRetryMiddleware(), UsageMiddleware(ctx, primary=False)]}])
 
     def start(self, run, identity, provider, message=None, resume=None):
         if run["id"] in self.tasks:
@@ -434,8 +498,15 @@ class Runtime:
                 return
             snapshot = await graph.aget_state(config)
             messages = snapshot.values.get("messages", [])
-            last = next((m for m in reversed(messages) if isinstance(m, AIMessage) and not m.tool_calls and text_content(m)), None)
+            # Only this turn's replies: a turn without a text answer must not
+            # show the previous turn's answer again.
+            start = next((i for i in range(len(messages) - 1, -1, -1) if isinstance(messages[i], HumanMessage)), -1) + 1
+            replies = [m for m in messages[start:] if isinstance(m, AIMessage)]
+            last = next((m for m in reversed(replies) if not m.tool_calls and text_content(m)), None)
             content = redact(text_content(last), ctx.secrets) if last else "本轮操作已结束。"
+            notice = FINISH_NOTICES.get(finish_reason(replies[-1])) if replies else None
+            if notice:
+                content += "\n\n" + notice
             tools = await self.store.fetch("SELECT id AS action_id,operation AS name,source,state,arguments,preview,result FROM kubedoor_ai_actions WHERE run_id=$1::uuid ORDER BY created_at", rid)
             saved = await self.store.message(run, "assistant", content, tools)
             await self.store.event(rid, "message", saved)

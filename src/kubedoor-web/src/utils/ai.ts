@@ -123,6 +123,23 @@ export function safeAIText(value: unknown): string {
 export const providerStorageKey = (username: string) =>
   `kubedoor-ai:provider:${encodeURIComponent(username)}`;
 
+/** Context share at which the UI suggests a new session (same as the WeCom hint). */
+export const CONTEXT_HINT_RATIO = 0.25;
+
+/** Latest prompt size of the main agent divided by the model window, or null. */
+export function contextShare(
+  usage?: { last_input_tokens?: number; max_input_tokens?: number } | null
+) {
+  const used = usage?.last_input_tokens;
+  const window = usage?.max_input_tokens;
+  return typeof used === "number" &&
+    typeof window === "number" &&
+    used > 0 &&
+    window > 0
+    ? used / window
+    : null;
+}
+
 /**
  * Context window defaults by model name, same rules as the AI service
  * (models.resolve_model_limits): deepseek* 1024K / 384K, gpt* 1024K / 128K,

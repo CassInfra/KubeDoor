@@ -79,9 +79,12 @@ def test_provider_context_window_settings_are_optional_and_bounded():
                     {"max_output_tokens": 1023}, {"max_input_tokens": 65_536, "max_output_tokens": 65_537},
                     {"max_output_tokens": 10_000_001},
                     {"compression_ratio": 0.19}, {"compression_ratio": 0.81}, {"compression_ratio": True},
-                    {"compression_ratio": "0.5"}, {"compression_ratio": 50}):
+                    {"compression_ratio": "0.5"}, {"compression_ratio": 50},
+                    {"reasoning_effort": "medium"}, {"reasoning_effort": "none"}, {"reasoning_effort": True}):
         with pytest.raises(AIError):
             Provider.parse({**base, **invalid})
+    for effort in (None, "off", "low", "high", "max"):
+        assert Provider.parse({**base, "reasoning_effort": effort}).reasoning_effort == effort
 
 
 def test_stored_resource_columns_preserve_uncollected_jvm_null():

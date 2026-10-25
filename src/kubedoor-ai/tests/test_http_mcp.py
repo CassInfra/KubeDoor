@@ -168,6 +168,19 @@ async def test_provider_probe_uses_runtime_default_and_checks_actual_named_call(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("usage, warned", [
+    (None, True),
+    ({"input_tokens": 120, "output_tokens": 8, "total_tokens": 128}, False),
+])
+async def test_provider_probe_warns_when_the_gateway_returns_no_usage(monkeypatch, usage, warned):
+    call = [{"name": "kubedoor_connection_probe", "args": {}, "id": "probe", "type": "tool_call"}]
+    probe_model(monkeypatch, result=AIMessage(content="", tool_calls=call, usage_metadata=usage))
+    result = await Service(None, None, None).test_provider(PROVIDER)
+    assert result["tool_calling"] is True and result["usage_reported"] is not warned
+    assert ("stream_options" in result.get("warning", "")) is warned
+
+
+@pytest.mark.asyncio
 async def test_actual_sdk_probe_sends_one_correct_endpoint_without_forced_tool_choice(monkeypatch):
     from langchain_openai import ChatOpenAI
     requests = []

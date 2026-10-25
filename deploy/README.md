@@ -166,7 +166,7 @@ ENABLE_GRAFANA="false"
 ENABLE_MCP="false"
 ```
 
-脚本会自动把 nginx 里对应的反向代理段删掉,不会留下指向空服务的配置导致 nginx 起不来。关掉 Grafana 后,Web 上三个"…看板📊"菜单仍然显示,打开是 404。之前已经装过的组件不会因为开关改成 `false` 而被删除,要手动删(如 `kubectl -n kubedoor delete deploy/kubedoor-dash svc/kubedoor-dash`)。AI 助手是必装组件,没有开关。
+脚本会自动把 nginx 里对应的反向代理段删掉,不会留下指向空服务的配置导致 nginx 起不来。关掉 Grafana 后,Web 上的"…看板📊"菜单(包括系统管理下的「AI 用量看板📊」)仍然显示,打开是 404。之前已经装过的组件不会因为开关改成 `false` 而被删除,要手动删(如 `kubectl -n kubedoor delete deploy/kubedoor-dash svc/kubedoor-dash`)。AI 助手是必装组件,没有开关。
 
 ### 离线 / 内网环境
 
@@ -191,7 +191,7 @@ ENABLE_MCP="false"
 - 首次安装想直接用自己的口令,在 `kubedoor.conf` 里填 `KUBEDOOR_INIT_ADMIN_PASSWORD` / `KUBEDOOR_INIT_AGENT_PASSWORD`(只在首次建账号时生效)。
 - 改镜像有个例外:只读用户在 `UPDATE_IMAGE_JSON` 配置的集群、时段和账号白名单内也可以改镜像,见[镜像更新配置说明](../help/K8S微服务镜像更新配置说明.md)。
 - 查看 Secret 内容需要该集群的读写权限(和 K8S 内置的 view 角色一样,只读不含 Secret)。
-- Grafana 看板做不到按集群隔离,所以**只对能看到全部集群的账号开放**(对任何集群设了「无」的账号看不到三个看板菜单,直接访问 `/grafana/` 返回 403);KubeDoor 管理员在 Grafana 里是 Admin,其他人是 Viewer。Grafana 的 PostgreSQL 数据源用的是 `PG_USER`,Viewer 也能借数据源查询库里的数据;对此敏感时可以给 Grafana 单独建一个只读 PG 账号(只授权看板用到的 `k8s_*` 表),改 `deploy/manifests/master/35-grafana.yaml` 里的数据源账号。
+- Grafana 看板做不到按集群隔离,所以**只对能看到全部集群的账号开放**(对任何集群设了「无」的账号看不到看板菜单,直接访问 `/grafana/` 返回 403;「AI 用量看板📊」在系统管理下,只有管理员能看到);KubeDoor 管理员在 Grafana 里是 Admin,其他人是 Viewer。Grafana 的 PostgreSQL 数据源用的是 `PG_USER`,Viewer 也能借数据源查询库里的数据;对此敏感时可以给 Grafana 单独建一个只读 PG 账号(只授权看板用到的 `k8s_*` 表,AI 用量看板另外要 `kubedoor_ai_runs`、`kubedoor_ai_sessions`),改 `deploy/manifests/master/35-grafana.yaml` 里的数据源账号。
 - 本地账号的口令用 scrypt 哈希并加了 pepper(由 `AI_ENCRYPTION_KEY` 派生,不在数据库里),LDAP 绑定口令也用这个密钥加密存储:数据库泄露也无法离线破解口令。**`AI_ENCRYPTION_KEY` 要和数据库一起备份**,丢了本地账号的口令就对不上了,只能用下面的命令重置。
 - 登录、账号与权限变更、所有写操作(含越权被拒)都记在「系统管理 → 操作审计」里,默认保留 180 天(`RETENTION_AUDIT_DAYS`)。
 - 登录有效期:不勾「7 天内免登录」时 12 小时、空闲 4 小时自动退出;勾选时 7 天。同一账号 + 来源 IP 连续 5 次口令错误锁定 15 分钟。这些参数都在 `kubedoor-config` 里(`AUTH_*`)。
@@ -238,7 +238,7 @@ kubectl -n kubedoor rollout restart deploy/vmalert
 | `RETENTION_RESOURCES_DAYS` | 高峰期资源快照 `k8s_resources` | 365 天 |
 | `RETENTION_AUDIT_DAYS` | 操作审计 `audit_logs` | 180 天 |
 
-设为 `0` 表示不清理。
+设为 `0` 表示不清理。另外 `RETENTION_AI_CHECKPOINT_DAYS`(默认 7 天)由 kubedoor-ai 每 6 小时清理一次:企微里再也不会继续的旧 AI 对话删除它的检查点(LangGraph checkpoint),会话和消息记录保留。
 
 节点终端(节点管理页的「终端」)会在该节点所在集群的 `kubedoor` 命名空间临时起一个特权 pod,默认镜像 `registry.cn-shenzhen.aliyuncs.com/starsl/alpine:3` 已内置在 agent 里。集群拉不到这个镜像时,在 `kubedoor-config` 里设置 `NODE_SHELL_IMAGE`(需含 `nsenter`,比如内网仓库里的 alpine)并重启 master,之后开终端时由 master 下发给 agent,不用改各集群的 agent。
 
@@ -289,6 +289,7 @@ nginx 启动时要解析上游 service 的域名。如果是刚部署的瞬间 s
   ```
   前提是在 Web 的"Agent管理"里给这个集群开了"自动采集"并设置了高峰时段。
 - KubeDoor-K8S 和 KubeDoor-Node 查的是 Prometheus,没数据就去查 vmagent 有没有正常远程写。
+- KubeDoor-AI(AI 用量看板)查的是 PostgreSQL 里 AI 助手每轮记录的用量(`kubedoor_ai_runs.usage`),升级到带这个看板的版本之后的对话才有数据。
 
 ---
 

@@ -65,11 +65,18 @@ def make_model(provider: Provider):
     model_id = provider.model.lower().rsplit("/", 1)[-1]
     deepseek = urlsplit(provider.base_url).hostname == "api.deepseek.com" or model_id.startswith("deepseek-")
     adapter = KubeDoorChatDeepSeek if deepseek else ChatOpenAI
+    # DeepSeek thinking effort; unset keeps the provider default (high) and an
+    # unchanged request body.
+    options = {}
+    if adapter is KubeDoorChatDeepSeek and provider.reasoning_effort == "off":
+        options["extra_body"] = {"thinking": {"type": "disabled"}}
+    elif adapter is KubeDoorChatDeepSeek and provider.reasoning_effort:
+        options["reasoning_effort"] = provider.reasoning_effort
     # stream_usage: compatible providers return usage (and DeepSeek cache hits)
     # only when asked; summarization also triggers on the reported size.
     # user_id is never sent: DeepSeek isolates its prefix cache per user_id.
     model = adapter(model=provider.model, api_key=provider.api_key or "kubedoor-local-no-auth", base_url=provider.base_url,
-                    use_responses_api=False, streaming=True, stream_usage=True, timeout=90, max_retries=0)
+                    use_responses_api=False, streaming=True, stream_usage=True, timeout=90, max_retries=0, **options)
     return apply_model_limits(model, provider)
 
 
@@ -82,4 +89,5 @@ def without_thinking(model):
     """
     if not isinstance(model, KubeDoorChatDeepSeek):
         return model
-    return model.model_copy(update={"extra_body": {**(model.extra_body or {}), "thinking": {"type": "disabled"}}})
+    return model.model_copy(update={"extra_body": {**(model.extra_body or {}), "thinking": {"type": "disabled"}},
+                                    "reasoning_effort": None})

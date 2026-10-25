@@ -1,5 +1,8 @@
 import { createSseParser, type SseFrame } from "@/utils/ai";
 
+/** DeepSeek 思考强度；null 表示用模型默认（high），请求里不带参数 */
+export type AIReasoningEffort = "off" | "low" | "high" | "max";
+
 export interface AIProvider {
   base_url: string;
   api_key: string;
@@ -10,6 +13,7 @@ export interface AIProvider {
   max_output_tokens?: number | null;
   /** 压缩阈值（0.2–0.8，上下文达到窗口的这个比例时自动摘要）；null 表示默认 0.5 */
   compression_ratio?: number | null;
+  reasoning_effort?: AIReasoningEffort | null;
 }
 
 export interface AIResource {
@@ -106,6 +110,18 @@ export interface AIMemoryDraft {
   content: string;
 }
 
+/** 一轮的模型用量（kubedoor_ai_runs.usage，done 事件里也会带上） */
+export interface AIUsage {
+  model_calls?: number;
+  input_tokens?: number;
+  output_tokens?: number;
+  cache_read_tokens?: number;
+  reasoning_tokens?: number;
+  /** 主 Agent 最近一次请求的输入，即当前上下文大小 */
+  last_input_tokens?: number;
+  max_input_tokens?: number;
+}
+
 export interface AISession {
   id: string;
   title: string;
@@ -113,6 +129,8 @@ export interface AISession {
   updated_at?: string;
   messages?: AIMessage[];
   active_run?: AIRun | string | null;
+  /** 最近一轮的用量，用来显示上下文占用 */
+  usage?: AIUsage | null;
   draft?: boolean;
 }
 
@@ -155,6 +173,7 @@ export interface WeComConfig {
   max_input_tokens?: number | null;
   max_output_tokens?: number | null;
   compression_ratio?: number | null;
+  reasoning_effort?: AIReasoningEffort | null;
   /** 对话空闲多少分钟后，新消息自动进入新对话；0 表示关闭 */
   session_idle_minutes?: number;
   has_bot_secret: boolean;
@@ -392,6 +411,7 @@ export const aiApi = {
     max_input_tokens: number | null;
     max_output_tokens: number | null;
     compression_ratio: number | null;
+    reasoning_effort: AIReasoningEffort | null;
     session_idle_minutes: number;
   }) => request<WeComConfig>("/wecom", "PUT", data),
   testWecomProvider: (provider: AIProvider) =>

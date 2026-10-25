@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import re
 import secrets
 import time
@@ -13,7 +14,7 @@ from types import MappingProxyType
 
 from aibot import WSClient, WSClientOptions, generate_req_id
 
-from .domain import BEIJING_TZ, AIError, Identity, Provider, parse_model_limits, redact
+from .domain import BEIJING_TZ, AIError, Identity, Provider, parse_model_limits, parse_reasoning_effort, redact
 
 LOGGER = logging.getLogger(__name__)
 CHANNEL = "wecom"
@@ -28,7 +29,18 @@ DEFAULT_IDLE_MINUTES = 120
 # 上下文占用(最近一次输入 ÷ 模型窗口)达到这个比例时,回答末尾提示可以开新对话
 CONTEXT_HINT_RATIO = 0.25
 BUSY_HINT = "该会话已有任务运行或等待审批，请稍后重试。"
-PROVIDER_KEYS = ("base_url", "api_key", "model", "max_input_tokens", "max_output_tokens", "compression_ratio")
+PROVIDER_KEYS = ("base_url", "api_key", "model", "max_input_tokens", "max_output_tokens", "compression_ratio", "reasoning_effort")
+# 企微里再也不会继续的旧对话(不是任何成员的当前对话或上一个对话、没有进行中的任务),
+# 最后活跃超过 RETENTION_AI_CHECKPOINT_DAYS 天后删除检查点;会话和消息记录保留用于审计
+DEFAULT_RETENTION_DAYS = 7
+PURGE_BATCH = 200
+PURGE_FIRST_DELAY = 300
+PURGE_INTERVAL = 6 * 3600
+DEAD_WECOM_SESSION = (
+    "s.channel='wecom' AND s.checkpoint_purged_at IS NULL AND s.updated_at < now() - make_interval(days => $1::int) "
+    "AND NOT EXISTS (SELECT 1 FROM kubedoor_ai_wecom_users u WHERE u.session_id=s.id OR u.previous_session_id=s.id) "
+    "AND NOT EXISTS (SELECT 1 FROM kubedoor_ai_runs r WHERE r.session_id=s.id AND r.status IN ('running','waiting_approval'))"
+)
 PERMISSION_LABELS = {"rw": "读写", "read": "只读"}
 
 
@@ -58,6 +70,47 @@ class WeComIntegration:
 
     async def start(self):
         await self.reload()
+        # 机器人停用后旧对话照样要清理,不依赖长连接
+        self._spawn(self._purge_loop(), "wecom-checkpoint-retention")
+
+    async def purge_checkpoints(self, days, limit=PURGE_BATCH):
+        """删除企微里再也不会继续的旧对话的 LangGraph 检查点,返回删除的对话数。
+
+        整条线程删除,不涉及 DeltaChannel 只能从快照重放的问题。每个对话在它成员的
+        锁里再确认一次并打上标记:旧欢迎卡片的「继续上次对话」看到标记会拒绝,
+        不会切回一个已经没有检查点的对话。
+        """
+        if days <= 0:
+            return 0
+        store = self.service.store
+        rows = await store.fetch(
+            "SELECT s.id,s.channel_key FROM kubedoor_ai_sessions s WHERE " + DEAD_WECOM_SESSION
+            + " ORDER BY s.updated_at LIMIT $2", days, limit,
+        )
+        purged = 0
+        for row in rows:
+            userid = (row["channel_key"] or "").split(":", 1)[0]
+            async with store.transaction() as tx:
+                await tx.execute("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", f"wecom:{userid}")
+                if not await tx.one("SELECT s.id FROM kubedoor_ai_sessions s WHERE s.id=$2::uuid AND " + DEAD_WECOM_SESSION, days, row["id"]):
+                    continue
+                await self.service.runtime.checkpointer.adelete_thread(row["id"])
+                await tx.execute("UPDATE kubedoor_ai_sessions SET checkpoint_purged_at=now() WHERE id=$1::uuid", row["id"])
+            purged += 1
+        return purged
+
+    async def _purge_loop(self):
+        days = _retention_days()
+        if days <= 0:
+            return
+        await asyncio.sleep(PURGE_FIRST_DELAY)
+        while True:
+            try:
+                while await self.purge_checkpoints(days) == PURGE_BATCH:
+                    pass
+            except Exception as exc:
+                LOGGER.warning("企微旧对话检查点清理失败: %s", type(exc).__name__)
+            await asyncio.sleep(PURGE_INTERVAL)
 
     async def close(self):
         for task in list(self._tasks):
@@ -220,6 +273,9 @@ class WeComIntegration:
         if not text:
             await self._reply(frame, "暂不支持空消息。", True, stream_id)
             return
+        if text.lower() in NEW_SESSION_COMMANDS | RESUME_COMMANDS:
+            await self._reply(frame, await self._switch_command(userid, mapped, text.lower()), True, stream_id)
+            return
         identity, default_env, problem = await self._member_identity(mapped)
         if problem:
             await self._reply(frame, problem, True, stream_id)
@@ -234,12 +290,6 @@ class WeComIntegration:
         current = mapped.get("current_env") or default_env
         if current not in names:
             current = None
-        if text.lower() in NEW_SESSION_COMMANDS:
-            await self._reply(frame, await self._start_new_session(userid, identity), True, stream_id)
-            return
-        if text.lower() in RESUME_COMMANDS:
-            await self._reply(frame, await self._resume_previous_session(userid, identity), True, stream_id)
-            return
         if text.lower() in MENU_COMMANDS:
             await self._reply(frame, _cluster_menu(clusters, current), True, stream_id)
             return
@@ -296,7 +346,8 @@ class WeComIntegration:
         return await tx.one(
             "SELECT s.id,s.updated_at,now()-s.updated_at > make_interval(mins => $4::int) AS idle,"
             "(SELECT count(*) FROM kubedoor_ai_messages m WHERE m.session_id=s.id AND m.role='user') AS rounds "
-            "FROM kubedoor_ai_sessions s WHERE s.id=$1::uuid AND s.username=$2 AND s.channel='wecom' AND starts_with(s.channel_key,$3)",
+            "FROM kubedoor_ai_sessions s WHERE s.id=$1::uuid AND s.username=$2 AND s.channel='wecom' AND starts_with(s.channel_key,$3) "
+            "AND s.checkpoint_purged_at IS NULL",
             session_id, identity.username, f"{userid}:", idle,
         )
 
@@ -335,24 +386,46 @@ class WeComIntegration:
                 return await self._open_session(tx, userid, identity, member.get("session_id")), notices, None
             run = await self._active_run(tx, current["id"])
             if run and run["status"] == "waiting_approval" and not run["approvable"]:
+                # 等待审批的任务不在进程里运行,停止它只是几条更新,放在锁里免得并发消息重复停止
                 await self.service.runtime.cancel(run, identity)
                 notices.append("上一个待审批的操作已过期，已停止该任务。")
                 run = None
-            if run is None and idle > 0 and current["idle"]:
+            # 空对话(比如刚发过「新对话」)空闲再久也不用换,换了反而把真正的上一个对话挤掉
+            if run is None and idle > 0 and current["idle"] and current["rounds"]:
                 session_id = await self._open_session(tx, userid, identity, current["id"])
                 notices.append(f"距上次对话已超过 {_idle_text(idle)}，已开始新对话（发送「继续上次」可回到之前的对话）")
                 return session_id, notices, None
             return current["id"], notices, run
 
     async def _start_new_session(self, userid, identity):
-        """「新对话」:停止当前对话里进行中的任务,再开一个新对话"""
+        """「新对话」:开一个新对话,再停止原对话里进行中的任务"""
         async with self.service.store.transaction() as tx:
             member, _, current = await self._session_state(tx, userid, identity)
             run = await self._active_run(tx, current["id"]) if current else None
-            if run:
-                await self.service.runtime.cancel(run, identity)
-            await self._open_session(tx, userid, identity, member.get("session_id"))
+            # 当前对话还没有消息就直接用它,保留真正的上一个对话给「继续上次」
+            if not (current and not current["rounds"] and run is None):
+                await self._open_session(tx, userid, identity, member.get("session_id"))
+        if run:
+            # 停止运行中的任务可能要等 agent 侧取消,放在锁和事务外面,不挡这个成员的其他消息
+            await self.service.runtime.cancel(run, identity)
         return "已开始新对话。" + ("上一个对话里未完成的任务已停止。" if run else "")
+
+    async def _switch_identity(self, mapped):
+        """切换对话只用本地记着的花折账号名,不调 master:切换不授予任何权限,下一次提问照常完整校验。
+        返回 (只有账号名的身份, 不能使用时回给成员的提示)"""
+        username = mapped.get("username") or (await self.unbound_setting())["unbound_username"]
+        if not username:
+            return None, "该企业微信成员尚未绑定花折账号，请联系管理员完成绑定。"
+        return Identity(username, "none"), None
+
+    async def _switch_command(self, userid, mapped, command):
+        """「新对话」「继续上次」及别名"""
+        identity, problem = await self._switch_identity(mapped)
+        if problem:
+            return problem
+        if command in NEW_SESSION_COMMANDS:
+            return await self._start_new_session(userid, identity)
+        return await self._resume_previous_session(userid, identity)
 
     async def _resume_previous_session(self, userid, identity):
         """「继续上次」:和上一个对话互换;上一个对话必须属于同一个花折账号"""
@@ -527,10 +600,10 @@ class WeComIntegration:
         return {"msgtype": "template_card", "template_card": card}
 
     async def _handle_session_card(self, frame, body, userid, task_id, choice):
-        """欢迎卡片的「开始新对话」「继续上次对话」按钮,处理完把卡片换成文本通知"""
+        """欢迎卡片的「开始新对话」「继续上次对话」按钮,处理完把卡片换成文本通知(企微要求 5 秒内)"""
         if not await self._claim_message(body, userid, "session"):
             return
-        identity, _, problem = await self._member_identity(await self._mapped_user(userid))
+        identity, problem = await self._switch_identity(await self._mapped_user(userid))
         if problem:
             title, detail = "无法切换对话", problem
         elif choice == "session_new":
@@ -597,7 +670,7 @@ class WeComIntegration:
         return {**self.status, "enabled": row["enabled"], "bot_id": config.get("bot_id", ""),
                 "base_url": config.get("base_url", ""), "model": config.get("model", ""),
                 "max_input_tokens": config.get("max_input_tokens"), "max_output_tokens": config.get("max_output_tokens"),
-                "compression_ratio": config.get("compression_ratio"),
+                "compression_ratio": config.get("compression_ratio"), "reasoning_effort": config.get("reasoning_effort"),
                 "session_idle_minutes": row.get("session_idle_minutes", DEFAULT_IDLE_MINUTES),
                 "has_bot_secret": bool(config.get("bot_secret")), "has_api_key": bool(config.get("api_key")),
                 "updated_by": row["updated_by"], "updated_at": row["updated_at"]}
@@ -612,10 +685,11 @@ class WeComIntegration:
                   "api_key": raw.get("api_key") or current.get("api_key", ""),
                   "model": raw.get("model", current.get("model", "")),
                   "enabled": raw.get("enabled") is True}
-        # 上下文窗口、最大输出、压缩阈值:不传沿用已保存的值,null 表示按模型推断
-        for key in ("max_input_tokens", "max_output_tokens", "compression_ratio"):
+        # 上下文窗口、最大输出、压缩阈值、思考强度:不传沿用已保存的值,null 表示按模型推断 / 用模型默认
+        for key in ("max_input_tokens", "max_output_tokens", "compression_ratio", "reasoning_effort"):
             config[key] = raw.get(key, current.get(key))
         parse_model_limits(config)
+        parse_reasoning_effort(config)
         idle = raw.get("session_idle_minutes")
         if idle is not None and (type(idle) is not int or not 0 <= idle <= 10080):
             raise AIError("对话空闲超时必须为 0–10080 之间的整数（分钟），0 表示关闭")
@@ -703,6 +777,14 @@ class WeComIntegration:
 
 def _clip(value, limit):
     return value if len(value) <= limit else value[:limit - 1] + "…"
+
+
+def _retention_days():
+    """kubedoor-config 里的 RETENTION_AI_CHECKPOINT_DAYS;0 = 不清理,填错按默认值"""
+    try:
+        return max(0, int(os.getenv("RETENTION_AI_CHECKPOINT_DAYS", DEFAULT_RETENTION_DAYS)))
+    except ValueError:
+        return DEFAULT_RETENTION_DAYS
 
 
 def _pick_cluster(target, names):

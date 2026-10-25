@@ -13,7 +13,8 @@ from test_cache_stability import FIRST_TIME, SECOND_TIME, SCOPE, Harness, answer
 
 # 固定前缀（system + tools）约 8.3K 近似 token；20K 窗口的 50% 阈值是 10K
 SMALL = Provider("https://api.deepseek.com", "test-only-key", "deepseek-flash", max_input_tokens=20_000, compression_ratio=0.5)
-SUMMARY = AIMessage(content="## 用户的目标和当前进展\n排查 order 服务（已摘要）")
+SUMMARY = AIMessage(content="## 用户的目标和当前进展\n排查 order 服务（已摘要）",
+                    usage_metadata={"input_tokens": 1500, "output_tokens": 120, "total_tokens": 1620})
 
 
 class ContextLengthExceeded(Exception):
@@ -41,6 +42,10 @@ async def test_summarizes_at_the_window_fraction_and_keeps_the_new_prefix_stable
         assert after["messages"][2]["content"].endswith("查" * 4000)
         # 摘要只让前缀变化一次，之后的请求只追加
         assert_appends(after, follow)
+        # 摘要请求不经过 agent 中间件，用 callback 计入这一轮的用量（看板上的压缩次数）
+        usage = harness.store.usage["run-2"]
+        assert (usage["summary_calls"], usage["summary_input_tokens"], usage["summary_output_tokens"]) == (1, 1500, 120)
+        assert usage["model_calls"] == 2 and "summary_calls" not in harness.store.usage["run-1"]
     finally:
         await harness.close()
 

@@ -199,9 +199,16 @@ class Service:
             async with asyncio.timeout(50):
                 response = await model.bind_tools([PROBE_TOOL]).ainvoke(prompt, config={"callbacks": []})
             called = any(isinstance(call, dict) and call.get("name") == PROBE_TOOL["name"] and isinstance(call.get("args"), dict) for call in (getattr(response, "tool_calls", None) or []))
-            result = {"success": True, "tool_calling": called, "model": provider.model, "base_url": provider.base_url}
+            # 没有用量时压缩只能靠近似计数（不含推理内容），用量统计也是 0；少数网关不支持 stream_options
+            usage_reported = bool((getattr(response, "usage_metadata", None) or {}).get("input_tokens"))
+            result = {"success": True, "tool_calling": called, "usage_reported": usage_reported, "model": provider.model, "base_url": provider.base_url}
+            problems = []
             if not called:
-                result["warning"] = "连接成功，但未返回有效工具调用；请确认所选模型及网关支持 function/tool calling。"
+                problems.append("未返回有效工具调用，请确认所选模型及网关支持 function/tool calling")
+            if not usage_reported:
+                problems.append("没有返回 token 用量（可能不支持 stream_options），上下文压缩只能按估算触发，用量统计会缺失")
+            if problems:
+                result["warning"] = "连接成功，但" + "；".join(problems) + "。"
             return redact(result, (provider.api_key,))
         except Exception as exc:
             raise _provider_failure(exc, provider, stage) from None
@@ -309,17 +316,20 @@ class Service:
         # History can load while the independent active-run/approval chain runs.
         messages_task = asyncio.create_task(self.store.fetch("SELECT id,role,content,scope,tools,memories,created_at FROM kubedoor_ai_messages WHERE session_id=$1::uuid ORDER BY created_at,id", sid))
         active_task = asyncio.create_task(active_run())
+        # 最近一轮的用量：网页按「最近一次输入 ÷ 模型窗口」显示上下文占用
+        usage_task = asyncio.create_task(self.store.one("SELECT usage FROM kubedoor_ai_runs WHERE session_id=$1::uuid AND usage IS NOT NULL ORDER BY created_at DESC LIMIT 1", sid))
         try:
-            messages, active = await asyncio.gather(messages_task, active_task)
+            messages, active, latest = await asyncio.gather(messages_task, active_task, usage_task)
         except BaseException:
             # gather does not cancel a sibling when the other query fails.
             # Finish cancellation so disconnected requests leave no DB work behind.
-            messages_task.cancel()
-            active_task.cancel()
-            await asyncio.gather(messages_task, active_task, return_exceptions=True)
+            for task in (messages_task, active_task, usage_task):
+                task.cancel()
+            await asyncio.gather(messages_task, active_task, usage_task, return_exceptions=True)
             raise
         session["messages"] = messages
         session["active_run"] = active
+        session["usage"] = (latest or {}).get("usage")
         return session
 
     async def decision(self, identity, rid, body):

@@ -358,3 +358,23 @@ test("context window prefill follows model-name rules and keeps hand-edited valu
     edited
   );
 });
+
+test("context share is the latest prompt over the model window", () => {
+  assert.equal(
+    utils.contextShare({
+      last_input_tokens: 262144,
+      max_input_tokens: 1048576
+    }),
+    0.25
+  );
+  assert.equal(utils.CONTEXT_HINT_RATIO, 0.25);
+  // 旧会话、MCP 或还没跑完第一轮：没有用量就不显示
+  for (const usage of [
+    null,
+    undefined,
+    {},
+    { last_input_tokens: 0, max_input_tokens: 1048576 },
+    { last_input_tokens: 1000 }
+  ])
+    assert.equal(utils.contextShare(usage), null);
+});

@@ -10,7 +10,7 @@ import pytest
 
 from kubedoor_ai.domain import BEIJING_TZ, AIError, Identity
 from kubedoor_ai.http import create_app
-from kubedoor_ai.wecom import WeComIntegration, _limit_stream
+from kubedoor_ai.wecom import WeComIntegration, _limit_stream, _retention_days
 
 
 class Store:
@@ -58,6 +58,7 @@ class SessionStore(Store):
         self.idle_minutes = idle_minutes
         self.locks = defaultdict(asyncio.Lock)
         self.member_updates = []
+        self.cancelled_while_locked = []
         self.now = datetime.now(timezone.utc)
 
     @asynccontextmanager
@@ -78,6 +79,8 @@ class SessionStore(Store):
         return {"role": role, "content": content}
 
     def cancel(self, run):
+        # 记下停止任务时是否还持有成员锁:运行中的任务要在锁外停止
+        self.cancelled_while_locked.append(any(lock.locked() for lock in self.locks.values()))
         self.runs[run["id"]]["status"] = "cancelled"
 
 
@@ -112,7 +115,7 @@ class SessionTx:
         if "FROM kubedoor_ai_sessions s" in sql:
             session_id, username, prefix, idle = args
             row = store.sessions.get(session_id)
-            if not row or row["username"] != username or not row["channel_key"].startswith(prefix):
+            if not row or row.get("purged") or row["username"] != username or not row["channel_key"].startswith(prefix):
                 return None
             return {"id": session_id, "updated_at": row["updated_at"].isoformat(), "rounds": row["rounds"],
                     "idle": store.now - row["updated_at"] > timedelta(minutes=idle)}
@@ -558,20 +561,23 @@ async def test_wecom_model_window_and_idle_timeout_are_saved_and_returned():
     assert (await integration.admin_config())["session_idle_minutes"] == 120
     base = {"enabled": False, "bot_id": "bot-1", "base_url": "https://api.deepseek.com", "model": "deepseek-flash"}
     saved = await integration.save_config(admin, {**base, "max_input_tokens": 262_144, "max_output_tokens": 65_536,
-                                                  "compression_ratio": 0.6, "session_idle_minutes": 90})
-    window = ("max_input_tokens", "max_output_tokens", "compression_ratio", "session_idle_minutes")
-    assert [saved[key] for key in window] == [262_144, 65_536, 0.6, 90]
+                                                  "compression_ratio": 0.6, "session_idle_minutes": 90,
+                                                  "reasoning_effort": "low"})
+    window = ("max_input_tokens", "max_output_tokens", "compression_ratio", "session_idle_minutes", "reasoning_effort")
+    assert [saved[key] for key in window] == [262_144, 65_536, 0.6, 90, "low"]
     # 不传的字段沿用已保存的值,企微提问用的 Provider 带上这些字段
     saved = await integration.save_config(admin, base)
-    assert [saved[key] for key in window] == [262_144, 65_536, 0.6, 90]
+    assert [saved[key] for key in window] == [262_144, 65_536, 0.6, 90, "low"]
     assert integration._provider_settings()["max_input_tokens"] == 262_144
-    # null = 按模型推断;0 = 关闭空闲自动开新对话
+    assert integration._provider_settings()["reasoning_effort"] == "low"
+    # null = 按模型推断 / 用模型默认;0 = 关闭空闲自动开新对话
     saved = await integration.save_config(admin, {**base, "max_input_tokens": None, "max_output_tokens": None,
-                                                  "compression_ratio": None, "session_idle_minutes": 0})
-    assert [saved[key] for key in window] == [None, None, None, 0]
+                                                  "compression_ratio": None, "session_idle_minutes": 0,
+                                                  "reasoning_effort": None})
+    assert [saved[key] for key in window] == [None, None, None, 0, None]
     for invalid in ({"max_input_tokens": 1024}, {"max_output_tokens": 512}, {"compression_ratio": 0.9},
                     {"session_idle_minutes": 10081}, {"session_idle_minutes": -1},
-                    {"session_idle_minutes": True}, {"session_idle_minutes": "30"}):
+                    {"session_idle_minutes": True}, {"session_idle_minutes": "30"}, {"reasoning_effort": "medium"}):
         with pytest.raises(AIError):
             await integration.save_config(admin, {**base, **invalid})
 
@@ -604,12 +610,22 @@ async def test_idle_conversation_moves_the_next_message_to_a_new_one(idle_minute
 @pytest.mark.asyncio
 async def test_recent_conversation_or_disabled_timeout_keeps_the_conversation():
     store = SessionStore(members={"wx-bob": {"session_id": "old"}})
-    own(store, "old", hours_ago=1)
+    own(store, "old", hours_ago=1, rounds=3)
     integration, _ = make_integration(store=store)
     assert await integration._current_session("wx-bob", IDENTITY) == ("old", [], None)
     store.idle_minutes = 0
     store.sessions["old"]["updated_at"] -= timedelta(days=30)
     assert await integration._current_session("wx-bob", IDENTITY) == ("old", [], None)
+
+
+@pytest.mark.asyncio
+async def test_idle_but_empty_conversation_is_kept_so_the_previous_one_stays_reachable():
+    # 刚发过「新对话」然后离开:新对话还是空的，再来消息时继续用它，不要把真正的上一个对话挤掉
+    store = SessionStore(members={"wx-bob": {"session_id": "empty", "previous_session_id": "old"}})
+    own(store, "empty", hours_ago=5)
+    integration, _ = make_integration(store=store)
+    assert await integration._current_session("wx-bob", IDENTITY) == ("empty", [], None)
+    assert store.members["wx-bob"] == {"session_id": "empty", "previous_session_id": "old"}
 
 
 @pytest.mark.asyncio
@@ -628,12 +644,13 @@ async def test_running_task_or_pending_approval_keeps_an_idle_conversation(statu
 @pytest.mark.parametrize("hours_ago, switched", [(1, False), (3, True)])
 async def test_task_left_with_only_expired_approvals_is_stopped_before_the_new_message(hours_ago, switched):
     store = SessionStore(members={"wx-bob": {"session_id": "old"}})
-    own(store, "old", hours_ago=hours_ago)
+    own(store, "old", hours_ago=hours_ago, rounds=2)
     store.runs["run-1"] = {"id": "run-1", "session_id": "old", "status": "waiting_approval", "expires": [store.now - timedelta(minutes=1)]}
     integration, service = make_integration(store=store)
     session_id, notices, active = await integration._current_session("wx-bob", IDENTITY)
     service.runtime.cancel.assert_awaited_once()
     assert store.runs["run-1"]["status"] == "cancelled" and active is None
+    assert store.cancelled_while_locked == [True]   # 不在进程里运行，停止很快，在锁内完成免得重复停止
     assert notices[0] == "上一个待审批的操作已过期，已停止该任务。"
     assert (session_id != "old") is switched and len(notices) == 1 + switched
 
@@ -651,7 +668,7 @@ async def test_changed_account_continues_in_a_new_conversation():
 @pytest.mark.asyncio
 async def test_concurrent_messages_open_only_one_new_conversation():
     store = SessionStore(members={"wx-bob": {"session_id": "old"}})
-    own(store, "old", hours_ago=3)
+    own(store, "old", hours_ago=3, rounds=5)
     integration, _ = make_integration(store=store)
     results = await asyncio.gather(*(integration._current_session("wx-bob", IDENTITY) for _ in range(3)))
     assert len({session_id for session_id, _, _ in results}) == 1 and len(store.sessions) == 2
@@ -667,10 +684,17 @@ async def test_new_conversation_command_stops_the_unfinished_task(command):
     await integration._handle_text(text_frame("wx-bob", command))
     assert last_reply(client) == "已开始新对话。上一个对话里未完成的任务已停止。"
     service.runtime.cancel.assert_awaited_once()
+    assert store.cancelled_while_locked == [False]   # 运行中的任务在锁和事务外停止
     assert store.members["wx-bob"]["previous_session_id"] == "old" != store.members["wx-bob"]["session_id"]
     service.new_run.assert_not_awaited()
+    # 切换对话只用本地账号名，不调 master
+    service.gateway.master.assert_not_awaited()
+    service.bootstrap.assert_not_awaited()
+    # 新对话还是空的时候再发一次：直接用它，「继续上次」仍然回到 old
+    members = dict(store.members["wx-bob"])
     await integration._handle_text(text_frame("wx-bob", command, "message-2"))
     assert last_reply(client) == "已开始新对话。"
+    assert store.members["wx-bob"] == members and len(store.sessions) == 2
 
 
 @pytest.mark.asyncio
@@ -686,6 +710,7 @@ async def test_resume_command_returns_to_the_previous_conversation_and_keeps_it(
     # 切回时刷新了最后活跃时间：紧接着的消息不会被空闲规则切走
     assert await integration._current_session("wx-bob", IDENTITY) == ("old", [], None)
     service.new_run.assert_not_awaited()
+    service.gateway.master.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -726,7 +751,7 @@ async def test_concurrent_run_conflict_is_reported_as_busy():
 @pytest.mark.asyncio
 async def test_idle_switch_notice_leads_the_streamed_answer():
     integration, service, store, client = member_chat({"wx-bob": {"session_id": "old"}})
-    own(store, "old", hours_ago=3)
+    own(store, "old", hours_ago=3, rounds=4)
     store.events = [{"seq": 1, "type": "message", "data": {"content": "共有 3 个 Pod。"}},
                     {"seq": 2, "type": "done", "data": {"status": "completed"}}]
     service.new_run.side_effect = lambda identity, sid, scope, **kwargs: ({"id": "run-1", "session_id": sid, "scope": scope}, True)
@@ -820,6 +845,7 @@ async def test_welcome_new_button_starts_a_conversation_and_checks_the_member_fi
     card = client.update_template_card.await_args.args[1]
     assert (card["main_title"]["title"], card["sub_title_text"]) == ("已开始新对话", "已开始新对话。")
     assert store.members["wx-bob"]["previous_session_id"] == "old"
+    service.gateway.master.assert_not_awaited()   # 按钮只读本地账号，保证 5 秒内更新卡片
 
     store.unbound = None   # 默认权限被关闭:不能再切换对话
     await integration._handle_card_event(card_frame("session_none_ab12cd34ef56", "session_new", "card-2"))
@@ -835,3 +861,61 @@ def test_friendly_time_uses_beijing_days():
     assert _friendly_time(now - timedelta(days=3)) == f"{now - timedelta(days=3):%m-%d} 09:05"
     assert _card_session("session_6f1c4b3e-1d2a-4c5b-9e8f-0a1b2c3d4e5f_ab12") == "6f1c4b3e-1d2a-4c5b-9e8f-0a1b2c3d4e5f"
     assert _card_session("session_none_ab12") is None and _card_session(None) is None and _card_session("task-1") is None
+
+
+@pytest.mark.parametrize("value, days", [(None, 7), ("30", 30), ("0", 0), ("-3", 0), ("seven", 7)])
+def test_checkpoint_retention_days_come_from_kubedoor_config(monkeypatch, value, days):
+    if value is None:
+        monkeypatch.delenv("RETENTION_AI_CHECKPOINT_DAYS", raising=False)
+    else:
+        monkeypatch.setenv("RETENTION_AI_CHECKPOINT_DAYS", value)
+    assert _retention_days() == days
+
+
+class PurgeStore:
+    """候选对话 + 在成员锁里再确认一次;dead 是再确认时仍然可删的对话"""
+    def __init__(self, candidates, dead):
+        self.candidates, self.dead = candidates, dead
+        self.calls = []
+
+    async def fetch(self, sql, *args):
+        assert "checkpoint_purged_at IS NULL" in sql and "previous_session_id=s.id" in sql and "waiting_approval" in sql
+        self.calls.append(("candidates", args))
+        return [{"id": sid, "channel_key": key} for sid, key in self.candidates]
+
+    @asynccontextmanager
+    async def transaction(self):
+        yield self
+
+    async def execute(self, sql, *args):
+        self.calls.append(("lock" if "pg_advisory_xact_lock" in sql else "mark", args))
+
+    async def one(self, sql, *args):
+        self.calls.append(("recheck", args))
+        return {"id": args[1]} if args[1] in self.dead else None
+
+
+@pytest.mark.asyncio
+async def test_unreachable_old_wecom_conversations_lose_only_their_checkpoints():
+    # s2 在两次查询之间又被切回（比如旧欢迎卡片），锁里再确认时不能删
+    store = PurgeStore([("s1", "wx-a:alice:s1"), ("s2", "wx-b:bob")], dead={"s1"})
+    checkpointer = SimpleNamespace(adelete_thread=AsyncMock())
+    integration = WeComIntegration(SimpleNamespace(store=store, runtime=SimpleNamespace(checkpointer=checkpointer)))
+    assert await integration.purge_checkpoints(7) == 1
+    checkpointer.adelete_thread.assert_awaited_once_with("s1")
+    assert store.calls == [("candidates", (7, 200)),
+                           ("lock", ("wecom:wx-a",)), ("recheck", (7, "s1")), ("mark", ("s1",)),
+                           ("lock", ("wecom:wx-b",)), ("recheck", (7, "s2"))]
+    store.calls.clear()
+    assert await integration.purge_checkpoints(0) == 0 and store.calls == []
+
+
+@pytest.mark.asyncio
+async def test_old_welcome_card_cannot_continue_a_purged_conversation():
+    integration, _, store, client = member_chat({"wx-bob": {"session_id": "new", "previous_session_id": None}})
+    own(store, "new")
+    own(store, "old", hours_ago=24 * 9, rounds=12)
+    store.sessions["old"]["purged"] = True
+    await integration._handle_card_event(card_frame("session_old_ab12cd34ef56", "session_resume"))
+    assert client.update_template_card.await_args.args[1]["sub_title_text"] == "该对话已不可用，直接发送问题即可开始新对话。"
+    assert store.members["wx-bob"] == {"session_id": "new", "previous_session_id": None}

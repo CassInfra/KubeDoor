@@ -27,7 +27,7 @@ async def test_run_usage_adds_every_model_call_including_the_child_agent(monkeyp
     try:
         await harness.turn("session-1", "run-1", "检查资源", FIRST_TIME)
         expected = {"model_calls": 4, "input_tokens": 4100, "output_tokens": 180, "cache_read_tokens": 2200,
-                    "reasoning_tokens": 50, "last_input_tokens": 1400, "max_input_tokens": 1_048_576}
+                    "reasoning_tokens": 50, "last_input_tokens": 1400, "max_input_tokens": 1_048_576, "model": "deepseek-flash"}
         assert harness.store.usage["run-1"] == expected
         assert done(harness.store) == {"status": "completed", "usage": expected}
     finally:
@@ -46,7 +46,8 @@ async def test_usage_is_saved_at_approval_and_resumed_runs_keep_adding(monkeypat
         await harness.turn("session-1", "run-1", None, SECOND_TIME, resume=harness.pending_interrupt(), usage=paused)
         assert harness.store.usage["run-1"] == {"model_calls": 2, "input_tokens": 2100, "output_tokens": 90,
                                                 "cache_read_tokens": 1000, "reasoning_tokens": 15,
-                                                "last_input_tokens": 1100, "max_input_tokens": 1_048_576}
+                                                "last_input_tokens": 1100, "max_input_tokens": 1_048_576,
+                                                "model": "deepseek-flash"}
         assert done(harness.store)["usage"] == harness.store.usage["run-1"]
     finally:
         await harness.close()

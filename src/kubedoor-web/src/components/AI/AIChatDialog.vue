@@ -3,7 +3,7 @@ import { computed, nextTick, ref, watch } from "vue";
 import { useMediaQuery } from "@vueuse/core";
 import { ElMessage, ElMessageBox } from "element-plus";
 import { useAIStoreHook } from "@/store/modules/ai";
-import { formatAIStatus } from "@/utils/ai";
+import { CONTEXT_HINT_RATIO, contextShare, formatAIStatus } from "@/utils/ai";
 import type { AIMessage, AISession, AIMemoryDraft } from "@/api/ai";
 import AIScopeSelector from "./AIScopeSelector.vue";
 import AIProviderDialog from "./AIProviderDialog.vue";
@@ -32,6 +32,29 @@ const selectedSession = computed(() =>
 const skillLabel = (name: string) =>
   ai.bootstrap?.skills.find(skill => (skill.id || skill.name) === name)?.name ||
   name;
+// 上下文占用 = 最近一次请求的输入 ÷ 模型窗口；较大时提示新建会话
+const contextPercent = computed(() => {
+  const share = contextShare(ai.contextUsage);
+  return share === null ? null : Math.floor(share * 100);
+});
+const contextLarge = computed(
+  () => (contextShare(ai.contextUsage) ?? 0) >= CONTEXT_HINT_RATIO
+);
+// 和模型设置里的「K token」同一单位（1K = 1024）
+const tokensText = (value = 0) =>
+  value >= 1024 ? `${Math.round(value / 1024)}K` : String(value);
+const contextTip = computed(() => {
+  const usage = ai.contextUsage;
+  if (!usage) return "";
+  const hit = usage.input_tokens
+    ? `；本轮输入命中缓存 ${Math.round(((usage.cache_read_tokens || 0) / usage.input_tokens) * 100)}%`
+    : "";
+  return (
+    `最近一次请求输入 ${tokensText(usage.last_input_tokens)} token，模型窗口 ${tokensText(usage.max_input_tokens)} token${hit}。` +
+    (contextLarge.value ? "上下文较大时回答更慢，可以新建会话重新开始；" : "") +
+    "达到压缩阈值后会自动摘要较早的对话。"
+  );
+});
 const canSend = computed(
   () =>
     !!input.value.trim() &&
@@ -269,6 +292,18 @@ const timestamp = (value?: string) => {
         <span v-if="ai.bootstrap?.username" class="ai-owner">{{
           ai.bootstrap.username
         }}</span>
+        <el-tooltip
+          v-if="contextPercent !== null"
+          :content="contextTip"
+          placement="bottom"
+        >
+          <el-tag
+            size="small"
+            effect="plain"
+            :type="contextLarge ? 'warning' : 'info'"
+            >上下文 {{ contextPercent }}%</el-tag
+          >
+        </el-tooltip>
         <div class="header-actions">
           <el-button
             v-if="mobile"

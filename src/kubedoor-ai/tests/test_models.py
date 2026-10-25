@@ -10,7 +10,7 @@ from langgraph.checkpoint.memory import InMemorySaver
 
 from kubedoor_ai.domain import CredentialCipher, Identity, Provider
 from kubedoor_ai.gateway import Gateway, RunContext
-from kubedoor_ai.models import KubeDoorChatDeepSeek, make_model, resolve_model_limits
+from kubedoor_ai.models import KubeDoorChatDeepSeek, make_model, resolve_model_limits, without_thinking
 from kubedoor_ai.runtime import Runtime, SecretRedactionMiddleware
 from fakes import FakeStore
 
@@ -56,6 +56,23 @@ def test_model_profile_is_merged_and_streaming_usage_is_requested():
     assert len(builtin) > 2
     assert configured.stream_usage is True
     assert "user" not in configured._get_request_payload([HumanMessage(content="检查")])
+
+
+@pytest.mark.parametrize("model, effort, expected", [
+    ("deepseek-flash", None, {}),                                            # 默认:请求体和以前完全一样
+    ("deepseek-flash", "off", {"extra_body": {"thinking": {"type": "disabled"}}}),
+    ("deepseek-flash", "low", {"reasoning_effort": "low"}),
+    ("deepseek-flash", "max", {"reasoning_effort": "max"}),
+    ("gpt-5.5", "low", {}),                                                  # 只对 DeepSeek 生效
+])
+def test_thinking_effort_only_changes_deepseek_requests(model, effort, expected):
+    configured = make_model(Provider("https://gateway.example/v1", "test-only-key", model, reasoning_effort=effort))
+    payload = configured._get_request_payload([HumanMessage(content="检查")])
+    assert {k: payload[k] for k in ("extra_body", "reasoning_effort") if k in payload} == expected
+    # 摘要、标题这类辅助调用一律关闭思考，不带强度参数
+    helper = without_thinking(configured)._get_request_payload([HumanMessage(content="检查")])
+    if isinstance(configured, KubeDoorChatDeepSeek):
+        assert helper["extra_body"] == {"thinking": {"type": "disabled"}} and "reasoning_effort" not in helper
 
 
 @pytest.mark.parametrize("base_url,model,deepseek", [
@@ -116,7 +133,8 @@ async def test_deepseek_cache_hits_in_the_stream_reach_run_usage():
     assert store.statuses[-1] == "completed"
     assert requests[0]["stream_options"] == {"include_usage": True} and "user" not in requests[0]
     assert store.usage["run-1"] == {"model_calls": 1, "input_tokens": 1000, "output_tokens": 50, "cache_read_tokens": 900,
-                                    "reasoning_tokens": 30, "last_input_tokens": 1000, "max_input_tokens": 1_048_576}
+                                    "reasoning_tokens": 30, "last_input_tokens": 1000, "max_input_tokens": 1_048_576,
+                                    "model": "deepseek-flash"}
     await gateway.close()
 
 
@@ -238,4 +256,27 @@ async def test_actual_deepagent_restores_thinking_from_checkpoint_for_a_new_run(
         assert [m["reasoning_content"] for m in historical] == ["读取资源 [redacted]", "核对监控"]
         snapshot = await runtime.graph(second, provider).aget_state({"configurable": {"thread_id": "session-1"}})
         assert "test-only-key" not in str(snapshot.values)
+    await gateway.close()
+
+
+@pytest.mark.asyncio
+async def test_streamed_insufficient_resource_finish_is_resent_once():
+    requests = []
+
+    def handle(request):
+        requests.append(json.loads(request.content))
+        if len(requests) == 1:
+            return sse_response("deepseek-flash", [{"role": "assistant", "content": "生成到一半"}], finish="insufficient_system_resource")
+        return sse_response("deepseek-flash", [{"role": "assistant", "content": "完整回答"}])
+
+    store = FakeStore()
+    gateway = Gateway(store, CredentialCipher("ab" * 32), "http://master", "internal")
+    provider = Provider("https://mock.example/v1", "test-only-key", "deepseek-flash")
+    run = RunContext({"id": "run-1", "session_id": "session-1", "scope": {"env": "cluster-a", "namespace": None, "deployment": None, "pod": None}, "skill_ids": []}, Identity("operator", "rw"), secrets=(provider.api_key,))
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as client:
+        model = KubeDoorChatDeepSeek(model=provider.model, base_url=provider.base_url, api_key=provider.api_key,
+                                    http_async_client=client, streaming=True, max_retries=0)
+        await Runtime(store, gateway, InMemorySaver(), model_factory=lambda _: model).run_graph(run, provider, "检查", None)
+    assert len(requests) == 2 and requests[0]["messages"] == requests[1]["messages"]
+    assert store.messages[-1]["content"] == "完整回答"
     await gateway.close()

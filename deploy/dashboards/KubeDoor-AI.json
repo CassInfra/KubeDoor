@@ -1,0 +1,1221 @@
+{
+  "annotations": {
+    "list": [
+      {
+        "builtIn": 1,
+        "datasource": {
+          "type": "grafana",
+          "uid": "-- Grafana --"
+        },
+        "enable": true,
+        "hide": true,
+        "iconColor": "rgba(0, 211, 255, 1)",
+        "name": "Annotations & Alerts",
+        "type": "dashboard"
+      }
+    ]
+  },
+  "description": "KubeDoor AI 助手（网页、企业微信）每轮的模型用量、缓存命中率、上下文占用和压缩次数，数据来自 kubedoor_ai_runs.usage",
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "id": null,
+  "links": [
+    {
+      "asDropdown": false,
+      "icon": "question",
+      "includeVars": false,
+      "keepTime": false,
+      "tags": [],
+      "targetBlank": true,
+      "title": "GitHub",
+      "tooltip": "",
+      "type": "link",
+      "url": "https://github.com/CassInfra/KubeDoor"
+    }
+  ],
+  "panels": [
+    {
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 0
+      },
+      "id": 1,
+      "panels": [],
+      "title": "AI 助手用量总览（只统计有用量记录的轮次；网页、企微、MCP 共用）",
+      "type": "row"
+    },
+    {
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "KubeDoor-Postgres"
+      },
+      "description": "",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 1,
+        "w": 4,
+        "h": 4
+      },
+      "id": 2,
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "showPercentChange": false,
+        "textMode": "value_and_name",
+        "wideLayout": true
+      },
+      "pluginVersion": "11.4.0",
+      "targets": [
+        {
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "KubeDoor-Postgres"
+          },
+          "editorMode": "code",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "WITH runs AS (\n  SELECT r.created_at, r.username, s.channel, COALESCE(r.usage->>'model', '未记录') AS model,\n         COALESCE((r.usage->>'model_calls')::bigint, 0) AS model_calls,\n         COALESCE((r.usage->>'input_tokens')::bigint, 0) AS input_tokens,\n         COALESCE((r.usage->>'cache_read_tokens')::bigint, 0) AS cache_read_tokens,\n         COALESCE((r.usage->>'output_tokens')::bigint, 0) AS output_tokens,\n         COALESCE((r.usage->>'reasoning_tokens')::bigint, 0) AS reasoning_tokens,\n         COALESCE((r.usage->>'last_input_tokens')::bigint, 0) AS last_input_tokens,\n         NULLIF((r.usage->>'max_input_tokens')::bigint, 0) AS max_input_tokens,\n         COALESCE((r.usage->>'summary_calls')::bigint, 0) AS summary_calls,\n         COALESCE((r.usage->>'summary_input_tokens')::bigint, 0) AS summary_input_tokens,\n         COALESCE((r.usage->>'summary_output_tokens')::bigint, 0) AS summary_output_tokens\n  FROM kubedoor_ai_runs r JOIN kubedoor_ai_sessions s ON s.id = r.session_id\n  WHERE r.usage IS NOT NULL AND $__timeFilter(r.created_at) AND s.channel IN (${channel:sqlstring})\n)\nSELECT count(*) AS \"对话轮数\" FROM runs",
+          "refId": "A",
+          "sql": {
+            "columns": [
+              {
+                "parameters": [],
+                "type": "function"
+              }
+            ],
+            "groupBy": [],
+            "limit": 50
+          }
+        }
+      ],
+      "title": "对话轮数",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "KubeDoor-Postgres"
+      },
+      "description": "主 Agent 和子 Agent 的模型请求次数，不含摘要请求",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "x": 4,
+        "y": 1,
+        "w": 4,
+        "h": 4
+      },
+      "id": 3,
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "showPercentChange": false,
+        "textMode": "value_and_name",
+        "wideLayout": true
+      },
+      "pluginVersion": "11.4.0",
+      "targets": [
+        {
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "KubeDoor-Postgres"
+          },
+          "editorMode": "code",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "WITH runs AS (\n  SELECT r.created_at, r.username, s.channel, COALESCE(r.usage->>'model', '未记录') AS model,\n         COALESCE((r.usage->>'model_calls')::bigint, 0) AS model_calls,\n         COALESCE((r.usage->>'input_tokens')::bigint, 0) AS input_tokens,\n         COALESCE((r.usage->>'cache_read_tokens')::bigint, 0) AS cache_read_tokens,\n         COALESCE((r.usage->>'output_tokens')::bigint, 0) AS output_tokens,\n         COALESCE((r.usage->>'reasoning_tokens')::bigint, 0) AS reasoning_tokens,\n         COALESCE((r.usage->>'last_input_tokens')::bigint, 0) AS last_input_tokens,\n         NULLIF((r.usage->>'max_input_tokens')::bigint, 0) AS max_input_tokens,\n         COALESCE((r.usage->>'summary_calls')::bigint, 0) AS summary_calls,\n         COALESCE((r.usage->>'summary_input_tokens')::bigint, 0) AS summary_input_tokens,\n         COALESCE((r.usage->>'summary_output_tokens')::bigint, 0) AS summary_output_tokens\n  FROM kubedoor_ai_runs r JOIN kubedoor_ai_sessions s ON s.id = r.session_id\n  WHERE r.usage IS NOT NULL AND $__timeFilter(r.created_at) AND s.channel IN (${channel:sqlstring})\n)\nSELECT sum(model_calls) AS \"模型调用\" FROM runs",
+          "refId": "A",
+          "sql": {
+            "columns": [
+              {
+                "parameters": [],
+                "type": "function"
+              }
+            ],
+            "groupBy": [],
+            "limit": 50
+          }
+        }
+      ],
+      "title": "模型调用",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "KubeDoor-Postgres"
+      },
+      "description": "",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "x": 8,
+        "y": 1,
+        "w": 4,
+        "h": 4
+      },
+      "id": 4,
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "showPercentChange": false,
+        "textMode": "value_and_name",
+        "wideLayout": true
+      },
+      "pluginVersion": "11.4.0",
+      "targets": [
+        {
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "KubeDoor-Postgres"
+          },
+          "editorMode": "code",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "WITH runs AS (\n  SELECT r.created_at, r.username, s.channel, COALESCE(r.usage->>'model', '未记录') AS model,\n         COALESCE((r.usage->>'model_calls')::bigint, 0) AS model_calls,\n         COALESCE((r.usage->>'input_tokens')::bigint, 0) AS input_tokens,\n         COALESCE((r.usage->>'cache_read_tokens')::bigint, 0) AS cache_read_tokens,\n         COALESCE((r.usage->>'output_tokens')::bigint, 0) AS output_tokens,\n         COALESCE((r.usage->>'reasoning_tokens')::bigint, 0) AS reasoning_tokens,\n         COALESCE((r.usage->>'last_input_tokens')::bigint, 0) AS last_input_tokens,\n         NULLIF((r.usage->>'max_input_tokens')::bigint, 0) AS max_input_tokens,\n         COALESCE((r.usage->>'summary_calls')::bigint, 0) AS summary_calls,\n         COALESCE((r.usage->>'summary_input_tokens')::bigint, 0) AS summary_input_tokens,\n         COALESCE((r.usage->>'summary_output_tokens')::bigint, 0) AS summary_output_tokens\n  FROM kubedoor_ai_runs r JOIN kubedoor_ai_sessions s ON s.id = r.session_id\n  WHERE r.usage IS NOT NULL AND $__timeFilter(r.created_at) AND s.channel IN (${channel:sqlstring})\n)\nSELECT sum(input_tokens) AS \"输入 token\" FROM runs",
+          "refId": "A",
+          "sql": {
+            "columns": [
+              {
+                "parameters": [],
+                "type": "function"
+              }
+            ],
+            "groupBy": [],
+            "limit": 50
+          }
+        }
+      ],
+      "title": "输入 token",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "KubeDoor-Postgres"
+      },
+      "description": "输入 token 中命中前缀缓存的比例（DeepSeek prompt_cache_hit_tokens）。命中价格只有未命中的约 1/50",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 0.7
+              },
+              {
+                "color": "green",
+                "value": 0.9
+              }
+            ]
+          },
+          "unit": "percentunit",
+          "max": 1,
+          "min": 0
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 1,
+        "w": 4,
+        "h": 4
+      },
+      "id": 5,
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "showPercentChange": false,
+        "textMode": "value_and_name",
+        "wideLayout": true
+      },
+      "pluginVersion": "11.4.0",
+      "targets": [
+        {
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "KubeDoor-Postgres"
+          },
+          "editorMode": "code",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "WITH runs AS (\n  SELECT r.created_at, r.username, s.channel, COALESCE(r.usage->>'model', '未记录') AS model,\n         COALESCE((r.usage->>'model_calls')::bigint, 0) AS model_calls,\n         COALESCE((r.usage->>'input_tokens')::bigint, 0) AS input_tokens,\n         COALESCE((r.usage->>'cache_read_tokens')::bigint, 0) AS cache_read_tokens,\n         COALESCE((r.usage->>'output_tokens')::bigint, 0) AS output_tokens,\n         COALESCE((r.usage->>'reasoning_tokens')::bigint, 0) AS reasoning_tokens,\n         COALESCE((r.usage->>'last_input_tokens')::bigint, 0) AS last_input_tokens,\n         NULLIF((r.usage->>'max_input_tokens')::bigint, 0) AS max_input_tokens,\n         COALESCE((r.usage->>'summary_calls')::bigint, 0) AS summary_calls,\n         COALESCE((r.usage->>'summary_input_tokens')::bigint, 0) AS summary_input_tokens,\n         COALESCE((r.usage->>'summary_output_tokens')::bigint, 0) AS summary_output_tokens\n  FROM kubedoor_ai_runs r JOIN kubedoor_ai_sessions s ON s.id = r.session_id\n  WHERE r.usage IS NOT NULL AND $__timeFilter(r.created_at) AND s.channel IN (${channel:sqlstring})\n)\nSELECT sum(cache_read_tokens)::float / NULLIF(sum(input_tokens), 0) AS \"缓存命中率\" FROM runs",
+          "refId": "A",
+          "sql": {
+            "columns": [
+              {
+                "parameters": [],
+                "type": "function"
+              }
+            ],
+            "groupBy": [],
+            "limit": 50
+          }
+        }
+      ],
+      "title": "缓存命中率",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "KubeDoor-Postgres"
+      },
+      "description": "含推理 token",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "x": 16,
+        "y": 1,
+        "w": 4,
+        "h": 4
+      },
+      "id": 6,
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "showPercentChange": false,
+        "textMode": "value_and_name",
+        "wideLayout": true
+      },
+      "pluginVersion": "11.4.0",
+      "targets": [
+        {
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "KubeDoor-Postgres"
+          },
+          "editorMode": "code",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "WITH runs AS (\n  SELECT r.created_at, r.username, s.channel, COALESCE(r.usage->>'model', '未记录') AS model,\n         COALESCE((r.usage->>'model_calls')::bigint, 0) AS model_calls,\n         COALESCE((r.usage->>'input_tokens')::bigint, 0) AS input_tokens,\n         COALESCE((r.usage->>'cache_read_tokens')::bigint, 0) AS cache_read_tokens,\n         COALESCE((r.usage->>'output_tokens')::bigint, 0) AS output_tokens,\n         COALESCE((r.usage->>'reasoning_tokens')::bigint, 0) AS reasoning_tokens,\n         COALESCE((r.usage->>'last_input_tokens')::bigint, 0) AS last_input_tokens,\n         NULLIF((r.usage->>'max_input_tokens')::bigint, 0) AS max_input_tokens,\n         COALESCE((r.usage->>'summary_calls')::bigint, 0) AS summary_calls,\n         COALESCE((r.usage->>'summary_input_tokens')::bigint, 0) AS summary_input_tokens,\n         COALESCE((r.usage->>'summary_output_tokens')::bigint, 0) AS summary_output_tokens\n  FROM kubedoor_ai_runs r JOIN kubedoor_ai_sessions s ON s.id = r.session_id\n  WHERE r.usage IS NOT NULL AND $__timeFilter(r.created_at) AND s.channel IN (${channel:sqlstring})\n)\nSELECT sum(output_tokens) AS \"输出 token\" FROM runs",
+          "refId": "A",
+          "sql": {
+            "columns": [
+              {
+                "parameters": [],
+                "type": "function"
+              }
+            ],
+            "groupBy": [],
+            "limit": 50
+          }
+        }
+      ],
+      "title": "输出 token",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "KubeDoor-Postgres"
+      },
+      "description": "按 deepseek-flash 空闲时段价格估算：缓存命中 0.02、未命中 1、输出 4 元/百万 token，摘要请求按未命中计；高峰时段价格翻倍。用别的模型或价格变了，管理员编辑面板改 SQL 里的单价",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "unit": "currencyCNY"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "x": 20,
+        "y": 1,
+        "w": 4,
+        "h": 4
+      },
+      "id": 7,
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "showPercentChange": false,
+        "textMode": "value_and_name",
+        "wideLayout": true
+      },
+      "pluginVersion": "11.4.0",
+      "targets": [
+        {
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "KubeDoor-Postgres"
+          },
+          "editorMode": "code",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "WITH runs AS (\n  SELECT r.created_at, r.username, s.channel, COALESCE(r.usage->>'model', '未记录') AS model,\n         COALESCE((r.usage->>'model_calls')::bigint, 0) AS model_calls,\n         COALESCE((r.usage->>'input_tokens')::bigint, 0) AS input_tokens,\n         COALESCE((r.usage->>'cache_read_tokens')::bigint, 0) AS cache_read_tokens,\n         COALESCE((r.usage->>'output_tokens')::bigint, 0) AS output_tokens,\n         COALESCE((r.usage->>'reasoning_tokens')::bigint, 0) AS reasoning_tokens,\n         COALESCE((r.usage->>'last_input_tokens')::bigint, 0) AS last_input_tokens,\n         NULLIF((r.usage->>'max_input_tokens')::bigint, 0) AS max_input_tokens,\n         COALESCE((r.usage->>'summary_calls')::bigint, 0) AS summary_calls,\n         COALESCE((r.usage->>'summary_input_tokens')::bigint, 0) AS summary_input_tokens,\n         COALESCE((r.usage->>'summary_output_tokens')::bigint, 0) AS summary_output_tokens\n  FROM kubedoor_ai_runs r JOIN kubedoor_ai_sessions s ON s.id = r.session_id\n  WHERE r.usage IS NOT NULL AND $__timeFilter(r.created_at) AND s.channel IN (${channel:sqlstring})\n)\nSELECT (sum(cache_read_tokens) * 0.02 + sum(input_tokens - cache_read_tokens) * 1 + sum(output_tokens) * 4 + sum(summary_input_tokens) * 1 + sum(summary_output_tokens) * 4) / 1000000.0 AS \"估算费用\" FROM runs",
+          "refId": "A",
+          "sql": {
+            "columns": [
+              {
+                "parameters": [],
+                "type": "function"
+              }
+            ],
+            "groupBy": [],
+            "limit": 50
+          }
+        }
+      ],
+      "title": "估算费用（元）",
+      "type": "stat"
+    },
+    {
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 5
+      },
+      "id": 8,
+      "panels": [],
+      "title": "趋势",
+      "type": "row"
+    },
+    {
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "KubeDoor-Postgres"
+      },
+      "description": "未命中的部分按全价计费：系统提示改版后的第一次请求、每轮新增的内容、摘要后的第一次请求",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "unit": "short",
+          "custom": {
+            "drawStyle": "bars",
+            "fillOpacity": 80,
+            "stacking": {
+              "group": "A",
+              "mode": "normal"
+            },
+            "lineWidth": 1,
+            "barAlignment": 0,
+            "showPoints": "never",
+            "axisSoftMin": 0
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "命中"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "green",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "未命中"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "orange",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 6,
+        "w": 12,
+        "h": 8
+      },
+      "id": 9,
+      "options": {
+        "legend": {
+          "calcs": [
+            "sum"
+          ],
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "pluginVersion": "11.4.0",
+      "targets": [
+        {
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "KubeDoor-Postgres"
+          },
+          "editorMode": "code",
+          "format": "time_series",
+          "rawQuery": true,
+          "rawSql": "WITH runs AS (\n  SELECT r.created_at, r.username, s.channel, COALESCE(r.usage->>'model', '未记录') AS model,\n         COALESCE((r.usage->>'model_calls')::bigint, 0) AS model_calls,\n         COALESCE((r.usage->>'input_tokens')::bigint, 0) AS input_tokens,\n         COALESCE((r.usage->>'cache_read_tokens')::bigint, 0) AS cache_read_tokens,\n         COALESCE((r.usage->>'output_tokens')::bigint, 0) AS output_tokens,\n         COALESCE((r.usage->>'reasoning_tokens')::bigint, 0) AS reasoning_tokens,\n         COALESCE((r.usage->>'last_input_tokens')::bigint, 0) AS last_input_tokens,\n         NULLIF((r.usage->>'max_input_tokens')::bigint, 0) AS max_input_tokens,\n         COALESCE((r.usage->>'summary_calls')::bigint, 0) AS summary_calls,\n         COALESCE((r.usage->>'summary_input_tokens')::bigint, 0) AS summary_input_tokens,\n         COALESCE((r.usage->>'summary_output_tokens')::bigint, 0) AS summary_output_tokens\n  FROM kubedoor_ai_runs r JOIN kubedoor_ai_sessions s ON s.id = r.session_id\n  WHERE r.usage IS NOT NULL AND $__timeFilter(r.created_at) AND s.channel IN (${channel:sqlstring})\n)\nSELECT date_trunc('day', created_at AT TIME ZONE 'Asia/Shanghai') AT TIME ZONE 'Asia/Shanghai' AS \"time\", sum(cache_read_tokens) AS \"命中\", sum(input_tokens - cache_read_tokens) AS \"未命中\"\nFROM runs GROUP BY 1 ORDER BY 1",
+          "refId": "A",
+          "sql": {
+            "columns": [
+              {
+                "parameters": [],
+                "type": "function"
+              }
+            ],
+            "groupBy": [],
+            "limit": 50
+          }
+        }
+      ],
+      "title": "每日输入 token：命中 / 未命中",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "KubeDoor-Postgres"
+      },
+      "description": "长期明显下降时，检查系统提示、工具定义或中间件是否引入了每轮都变的内容（缓存不变量）",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "unit": "percentunit",
+          "min": 0,
+          "max": 1,
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 10,
+            "showPoints": "always",
+            "pointSize": 5
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 6,
+        "w": 12,
+        "h": 8
+      },
+      "id": 10,
+      "options": {
+        "legend": {
+          "calcs": [
+            "mean"
+          ],
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "pluginVersion": "11.4.0",
+      "targets": [
+        {
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "KubeDoor-Postgres"
+          },
+          "editorMode": "code",
+          "format": "time_series",
+          "rawQuery": true,
+          "rawSql": "WITH runs AS (\n  SELECT r.created_at, r.username, s.channel, COALESCE(r.usage->>'model', '未记录') AS model,\n         COALESCE((r.usage->>'model_calls')::bigint, 0) AS model_calls,\n         COALESCE((r.usage->>'input_tokens')::bigint, 0) AS input_tokens,\n         COALESCE((r.usage->>'cache_read_tokens')::bigint, 0) AS cache_read_tokens,\n         COALESCE((r.usage->>'output_tokens')::bigint, 0) AS output_tokens,\n         COALESCE((r.usage->>'reasoning_tokens')::bigint, 0) AS reasoning_tokens,\n         COALESCE((r.usage->>'last_input_tokens')::bigint, 0) AS last_input_tokens,\n         NULLIF((r.usage->>'max_input_tokens')::bigint, 0) AS max_input_tokens,\n         COALESCE((r.usage->>'summary_calls')::bigint, 0) AS summary_calls,\n         COALESCE((r.usage->>'summary_input_tokens')::bigint, 0) AS summary_input_tokens,\n         COALESCE((r.usage->>'summary_output_tokens')::bigint, 0) AS summary_output_tokens\n  FROM kubedoor_ai_runs r JOIN kubedoor_ai_sessions s ON s.id = r.session_id\n  WHERE r.usage IS NOT NULL AND $__timeFilter(r.created_at) AND s.channel IN (${channel:sqlstring})\n)\nSELECT date_trunc('day', created_at AT TIME ZONE 'Asia/Shanghai') AT TIME ZONE 'Asia/Shanghai' AS \"time\", sum(cache_read_tokens)::float / NULLIF(sum(input_tokens), 0) AS \"缓存命中率\"\nFROM runs GROUP BY 1 ORDER BY 1",
+          "refId": "A",
+          "sql": {
+            "columns": [
+              {
+                "parameters": [],
+                "type": "function"
+              }
+            ],
+            "groupBy": [],
+            "limit": 50
+          }
+        }
+      ],
+      "title": "每日缓存命中率",
+      "type": "timeseries"
+    },
+    {
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 14
+      },
+      "id": 11,
+      "panels": [],
+      "title": "上下文与压缩",
+      "type": "row"
+    },
+    {
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "KubeDoor-Postgres"
+      },
+      "description": "企微在 25% 以上会提示「新对话」；达到压缩阈值（默认 50%）会自动摘要。用来判断压缩阈值的默认值是否合适",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 15,
+        "w": 9,
+        "h": 8
+      },
+      "id": 12,
+      "options": {
+        "barWidth": 0.6,
+        "groupWidth": 0.7,
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": false
+        },
+        "orientation": "auto",
+        "showValue": "auto",
+        "stacking": "none",
+        "tooltip": {
+          "mode": "single",
+          "sort": "none"
+        },
+        "xTickLabelRotation": 0
+      },
+      "pluginVersion": "11.4.0",
+      "targets": [
+        {
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "KubeDoor-Postgres"
+          },
+          "editorMode": "code",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "WITH runs AS (\n  SELECT r.created_at, r.username, s.channel, COALESCE(r.usage->>'model', '未记录') AS model,\n         COALESCE((r.usage->>'model_calls')::bigint, 0) AS model_calls,\n         COALESCE((r.usage->>'input_tokens')::bigint, 0) AS input_tokens,\n         COALESCE((r.usage->>'cache_read_tokens')::bigint, 0) AS cache_read_tokens,\n         COALESCE((r.usage->>'output_tokens')::bigint, 0) AS output_tokens,\n         COALESCE((r.usage->>'reasoning_tokens')::bigint, 0) AS reasoning_tokens,\n         COALESCE((r.usage->>'last_input_tokens')::bigint, 0) AS last_input_tokens,\n         NULLIF((r.usage->>'max_input_tokens')::bigint, 0) AS max_input_tokens,\n         COALESCE((r.usage->>'summary_calls')::bigint, 0) AS summary_calls,\n         COALESCE((r.usage->>'summary_input_tokens')::bigint, 0) AS summary_input_tokens,\n         COALESCE((r.usage->>'summary_output_tokens')::bigint, 0) AS summary_output_tokens\n  FROM kubedoor_ai_runs r JOIN kubedoor_ai_sessions s ON s.id = r.session_id\n  WHERE r.usage IS NOT NULL AND $__timeFilter(r.created_at) AND s.channel IN (${channel:sqlstring})\n)\n, shares AS (\n  SELECT last_input_tokens::float / max_input_tokens AS share FROM runs WHERE max_input_tokens IS NOT NULL AND last_input_tokens > 0\n)\nSELECT bucket AS \"占用\", count(*) AS \"轮数\" FROM (\n  SELECT CASE WHEN share < 0.05 THEN '1. <5%' WHEN share < 0.1 THEN '2. 5%–10%' WHEN share < 0.25 THEN '3. 10%–25%'\n              WHEN share < 0.5 THEN '4. 25%–50%' ELSE '5. ≥50%' END AS bucket FROM shares\n) t GROUP BY bucket ORDER BY bucket",
+          "refId": "A",
+          "sql": {
+            "columns": [
+              {
+                "parameters": [],
+                "type": "function"
+              }
+            ],
+            "groupBy": [],
+            "limit": 50
+          }
+        }
+      ],
+      "title": "上下文占用分布（每轮最后一次请求的输入 ÷ 模型窗口）",
+      "type": "barchart"
+    },
+    {
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "KubeDoor-Postgres"
+      },
+      "description": "每轮最后一次请求的输入 token",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "x": 9,
+        "y": 15,
+        "w": 5,
+        "h": 8
+      },
+      "id": 13,
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "orientation": "vertical",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "showPercentChange": false,
+        "textMode": "value_and_name",
+        "wideLayout": true
+      },
+      "pluginVersion": "11.4.0",
+      "targets": [
+        {
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "KubeDoor-Postgres"
+          },
+          "editorMode": "code",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "WITH runs AS (\n  SELECT r.created_at, r.username, s.channel, COALESCE(r.usage->>'model', '未记录') AS model,\n         COALESCE((r.usage->>'model_calls')::bigint, 0) AS model_calls,\n         COALESCE((r.usage->>'input_tokens')::bigint, 0) AS input_tokens,\n         COALESCE((r.usage->>'cache_read_tokens')::bigint, 0) AS cache_read_tokens,\n         COALESCE((r.usage->>'output_tokens')::bigint, 0) AS output_tokens,\n         COALESCE((r.usage->>'reasoning_tokens')::bigint, 0) AS reasoning_tokens,\n         COALESCE((r.usage->>'last_input_tokens')::bigint, 0) AS last_input_tokens,\n         NULLIF((r.usage->>'max_input_tokens')::bigint, 0) AS max_input_tokens,\n         COALESCE((r.usage->>'summary_calls')::bigint, 0) AS summary_calls,\n         COALESCE((r.usage->>'summary_input_tokens')::bigint, 0) AS summary_input_tokens,\n         COALESCE((r.usage->>'summary_output_tokens')::bigint, 0) AS summary_output_tokens\n  FROM kubedoor_ai_runs r JOIN kubedoor_ai_sessions s ON s.id = r.session_id\n  WHERE r.usage IS NOT NULL AND $__timeFilter(r.created_at) AND s.channel IN (${channel:sqlstring})\n)\nSELECT max(last_input_tokens) AS \"最大\", percentile_cont(0.95) WITHIN GROUP (ORDER BY last_input_tokens) AS \"P95\", percentile_cont(0.5) WITHIN GROUP (ORDER BY last_input_tokens) AS \"中位数\"\nFROM runs WHERE last_input_tokens > 0",
+          "refId": "A",
+          "sql": {
+            "columns": [
+              {
+                "parameters": [],
+                "type": "function"
+              }
+            ],
+            "groupBy": [],
+            "limit": 50
+          }
+        }
+      ],
+      "title": "上下文大小",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "KubeDoor-Postgres"
+      },
+      "description": "每次压缩会让整段上下文未命中缓存一次；压缩很少说明阈值偏高、很频繁说明偏低",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "unit": "short",
+          "custom": {
+            "drawStyle": "bars",
+            "fillOpacity": 80,
+            "lineWidth": 1,
+            "showPoints": "never",
+            "axisSoftMin": 0
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "x": 14,
+        "y": 15,
+        "w": 10,
+        "h": 8
+      },
+      "id": 14,
+      "options": {
+        "legend": {
+          "calcs": [
+            "sum"
+          ],
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "pluginVersion": "11.4.0",
+      "targets": [
+        {
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "KubeDoor-Postgres"
+          },
+          "editorMode": "code",
+          "format": "time_series",
+          "rawQuery": true,
+          "rawSql": "WITH runs AS (\n  SELECT r.created_at, r.username, s.channel, COALESCE(r.usage->>'model', '未记录') AS model,\n         COALESCE((r.usage->>'model_calls')::bigint, 0) AS model_calls,\n         COALESCE((r.usage->>'input_tokens')::bigint, 0) AS input_tokens,\n         COALESCE((r.usage->>'cache_read_tokens')::bigint, 0) AS cache_read_tokens,\n         COALESCE((r.usage->>'output_tokens')::bigint, 0) AS output_tokens,\n         COALESCE((r.usage->>'reasoning_tokens')::bigint, 0) AS reasoning_tokens,\n         COALESCE((r.usage->>'last_input_tokens')::bigint, 0) AS last_input_tokens,\n         NULLIF((r.usage->>'max_input_tokens')::bigint, 0) AS max_input_tokens,\n         COALESCE((r.usage->>'summary_calls')::bigint, 0) AS summary_calls,\n         COALESCE((r.usage->>'summary_input_tokens')::bigint, 0) AS summary_input_tokens,\n         COALESCE((r.usage->>'summary_output_tokens')::bigint, 0) AS summary_output_tokens\n  FROM kubedoor_ai_runs r JOIN kubedoor_ai_sessions s ON s.id = r.session_id\n  WHERE r.usage IS NOT NULL AND $__timeFilter(r.created_at) AND s.channel IN (${channel:sqlstring})\n)\nSELECT date_trunc('day', created_at AT TIME ZONE 'Asia/Shanghai') AT TIME ZONE 'Asia/Shanghai' AS \"time\", sum(summary_calls) AS \"压缩次数\", count(*) AS \"对话轮数\"\nFROM runs GROUP BY 1 ORDER BY 1",
+          "refId": "A",
+          "sql": {
+            "columns": [
+              {
+                "parameters": [],
+                "type": "function"
+              }
+            ],
+            "groupBy": [],
+            "limit": 50
+          }
+        }
+      ],
+      "title": "每日压缩次数与轮数",
+      "type": "timeseries"
+    },
+    {
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 23
+      },
+      "id": 15,
+      "panels": [],
+      "title": "明细",
+      "type": "row"
+    },
+    {
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "KubeDoor-Postgres"
+      },
+      "description": "channel：web 是网页 AI 助手，wecom 是企业微信机器人",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "命中率"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "percentunit"
+              },
+              {
+                "id": "decimals",
+                "value": 1
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "估算费用"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "currencyCNY"
+              },
+              {
+                "id": "decimals",
+                "value": 3
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 24,
+        "w": 12,
+        "h": 10
+      },
+      "id": 16,
+      "options": {
+        "cellHeight": "sm",
+        "footer": {
+          "show": false,
+          "reducer": [
+            "sum"
+          ],
+          "countRows": false
+        },
+        "showHeader": true
+      },
+      "pluginVersion": "11.4.0",
+      "targets": [
+        {
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "KubeDoor-Postgres"
+          },
+          "editorMode": "code",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "WITH runs AS (\n  SELECT r.created_at, r.username, s.channel, COALESCE(r.usage->>'model', '未记录') AS model,\n         COALESCE((r.usage->>'model_calls')::bigint, 0) AS model_calls,\n         COALESCE((r.usage->>'input_tokens')::bigint, 0) AS input_tokens,\n         COALESCE((r.usage->>'cache_read_tokens')::bigint, 0) AS cache_read_tokens,\n         COALESCE((r.usage->>'output_tokens')::bigint, 0) AS output_tokens,\n         COALESCE((r.usage->>'reasoning_tokens')::bigint, 0) AS reasoning_tokens,\n         COALESCE((r.usage->>'last_input_tokens')::bigint, 0) AS last_input_tokens,\n         NULLIF((r.usage->>'max_input_tokens')::bigint, 0) AS max_input_tokens,\n         COALESCE((r.usage->>'summary_calls')::bigint, 0) AS summary_calls,\n         COALESCE((r.usage->>'summary_input_tokens')::bigint, 0) AS summary_input_tokens,\n         COALESCE((r.usage->>'summary_output_tokens')::bigint, 0) AS summary_output_tokens\n  FROM kubedoor_ai_runs r JOIN kubedoor_ai_sessions s ON s.id = r.session_id\n  WHERE r.usage IS NOT NULL AND $__timeFilter(r.created_at) AND s.channel IN (${channel:sqlstring})\n)\nSELECT channel AS \"渠道\", model AS \"模型\", count(*) AS \"轮数\", sum(model_calls) AS \"调用\",\n       sum(input_tokens) AS \"输入\", sum(cache_read_tokens)::float / NULLIF(sum(input_tokens), 0) AS \"命中率\", sum(output_tokens) AS \"输出\", sum(reasoning_tokens) AS \"推理\",\n       sum(summary_calls) AS \"压缩\", (sum(cache_read_tokens) * 0.02 + sum(input_tokens - cache_read_tokens) * 1 + sum(output_tokens) * 4 + sum(summary_input_tokens) * 1 + sum(summary_output_tokens) * 4) / 1000000.0 AS \"估算费用\"\nFROM runs GROUP BY channel, model ORDER BY sum(input_tokens) DESC",
+          "refId": "A",
+          "sql": {
+            "columns": [
+              {
+                "parameters": [],
+                "type": "function"
+              }
+            ],
+            "groupBy": [],
+            "limit": 50
+          }
+        }
+      ],
+      "title": "按渠道和模型",
+      "type": "table"
+    },
+    {
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "KubeDoor-Postgres"
+      },
+      "description": "企微未绑定成员按默认权限账号统计",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "命中率"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "percentunit"
+              },
+              {
+                "id": "decimals",
+                "value": 1
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "估算费用"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "currencyCNY"
+              },
+              {
+                "id": "decimals",
+                "value": 3
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 24,
+        "w": 12,
+        "h": 10
+      },
+      "id": 17,
+      "options": {
+        "cellHeight": "sm",
+        "footer": {
+          "show": false,
+          "reducer": [
+            "sum"
+          ],
+          "countRows": false
+        },
+        "showHeader": true
+      },
+      "pluginVersion": "11.4.0",
+      "targets": [
+        {
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "KubeDoor-Postgres"
+          },
+          "editorMode": "code",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "WITH runs AS (\n  SELECT r.created_at, r.username, s.channel, COALESCE(r.usage->>'model', '未记录') AS model,\n         COALESCE((r.usage->>'model_calls')::bigint, 0) AS model_calls,\n         COALESCE((r.usage->>'input_tokens')::bigint, 0) AS input_tokens,\n         COALESCE((r.usage->>'cache_read_tokens')::bigint, 0) AS cache_read_tokens,\n         COALESCE((r.usage->>'output_tokens')::bigint, 0) AS output_tokens,\n         COALESCE((r.usage->>'reasoning_tokens')::bigint, 0) AS reasoning_tokens,\n         COALESCE((r.usage->>'last_input_tokens')::bigint, 0) AS last_input_tokens,\n         NULLIF((r.usage->>'max_input_tokens')::bigint, 0) AS max_input_tokens,\n         COALESCE((r.usage->>'summary_calls')::bigint, 0) AS summary_calls,\n         COALESCE((r.usage->>'summary_input_tokens')::bigint, 0) AS summary_input_tokens,\n         COALESCE((r.usage->>'summary_output_tokens')::bigint, 0) AS summary_output_tokens\n  FROM kubedoor_ai_runs r JOIN kubedoor_ai_sessions s ON s.id = r.session_id\n  WHERE r.usage IS NOT NULL AND $__timeFilter(r.created_at) AND s.channel IN (${channel:sqlstring})\n)\nSELECT username AS \"花折账号\", count(*) AS \"轮数\", sum(input_tokens) AS \"输入\", sum(cache_read_tokens)::float / NULLIF(sum(input_tokens), 0) AS \"命中率\",\n       max(last_input_tokens) AS \"最大上下文\", sum(summary_calls) AS \"压缩\", (sum(cache_read_tokens) * 0.02 + sum(input_tokens - cache_read_tokens) * 1 + sum(output_tokens) * 4 + sum(summary_input_tokens) * 1 + sum(summary_output_tokens) * 4) / 1000000.0 AS \"估算费用\"\nFROM runs GROUP BY username ORDER BY sum(input_tokens) DESC LIMIT 20",
+          "refId": "A",
+          "sql": {
+            "columns": [
+              {
+                "parameters": [],
+                "type": "function"
+              }
+            ],
+            "groupBy": [],
+            "limit": 50
+          }
+        }
+      ],
+      "title": "账号用量 Top 20",
+      "type": "table"
+    }
+  ],
+  "refresh": "",
+  "schemaVersion": 40,
+  "tags": [
+    "StarsL.cn"
+  ],
+  "templating": {
+    "list": [
+      {
+        "current": {},
+        "datasource": {
+          "type": "grafana-postgresql-datasource",
+          "uid": "KubeDoor-Postgres"
+        },
+        "definition": "SELECT DISTINCT channel FROM kubedoor_ai_sessions ORDER BY 1",
+        "includeAll": true,
+        "label": "渠道",
+        "multi": true,
+        "name": "channel",
+        "options": [],
+        "query": "SELECT DISTINCT channel FROM kubedoor_ai_sessions ORDER BY 1",
+        "refresh": 1,
+        "regex": "",
+        "sort": 1,
+        "type": "query"
+      }
+    ]
+  },
+  "time": {
+    "from": "now-7d",
+    "to": "now"
+  },
+  "timepicker": {},
+  "timezone": "Asia/Shanghai",
+  "title": "KubeDoor-AI助手用量与缓存命中看板",
+  "uid": "KubeDoor-AI",
+  "version": 1,
+  "weekStart": ""
+}

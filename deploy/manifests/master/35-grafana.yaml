@@ -2,6 +2,7 @@
 #   KubeDoor-Dash  -> PostgreSQL(每日高峰时段资源数据分析)
 #   KubeDoor-K8S   -> Prometheus(集群/工作负载监控)
 #   KubeDoor-Node  -> Prometheus(节点监控)
+#   KubeDoor-AI    -> PostgreSQL(AI 助手用量与缓存命中)
 #
 # Grafana 自身不暴露 NodePort,统一通过 kubedoor-web 的 /grafana/ 访问。
 # 登录由 KubeDoor 负责:nginx 用 auth_request 问 master 校验登录会话,再以 auth proxy 方式
@@ -42,7 +43,7 @@ data:
   datasources.yaml: |
     apiVersion: 1
     datasources:
-      # 统一数据库。KubeDoor-Dash 看板的全部面板都查这里。
+      # 统一数据库。KubeDoor-Dash、KubeDoor-AI 看板的全部面板都查这里。
       - name: KubeDoor-Postgres
         uid: KubeDoor-Postgres
         type: grafana-postgresql-datasource
