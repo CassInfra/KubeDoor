@@ -5,6 +5,7 @@ import {
   aiApi,
   type AIProvider,
   type WeComConfig,
+  type WeComUnbound,
   type WeComUser
 } from "@/api/ai";
 import { getKnownClusters, getUsers, type SystemUser } from "@/api/system";
@@ -40,7 +41,16 @@ const form = reactive({
 const mappings = ref<WeComUser[]>([]);
 const systemUsers = ref<SystemUser[]>([]);
 const clusters = ref<string[]>([]);
-const mapping = reactive({ wecom_userid: "", username: "", default_env: "" });
+/** 默认集群的「无」:成员要先切换集群(或在提问里写出集群全名)才能提问 */
+const NO_CLUSTER = "__none__";
+const NO_CLUSTER_LABEL = "无（先切换集群才能提问）";
+const envOrNull = (value: string) =>
+  value && value !== NO_CLUSTER ? value : null;
+const mapping = reactive({
+  wecom_userid: "",
+  username: "",
+  default_env: NO_CLUSTER
+});
 const availableClusters = computed(() => {
   const user = systemUsers.value.find(
     item => item.username === mapping.username
@@ -52,9 +62,18 @@ const availableClusters = computed(() => {
     return permission === "rw" || permission === "read";
   });
 });
-/** 已保存的未绑定成员默认权限账号;unbound.username 是正在编辑的值 */
-const unboundSaved = ref<string | null>(null);
-const unbound = reactive({ username: "" });
+/** 已保存的未绑定成员默认权限(账号 + 默认集群);unbound 是正在编辑的值 */
+const unboundSaved = ref<WeComUnbound>({
+  unbound_username: null,
+  unbound_default_env: null
+});
+const unbound = reactive({ username: "", default_env: NO_CLUSTER });
+const unboundDirty = computed(
+  () =>
+    unbound.username !== (unboundSaved.value.unbound_username || "") ||
+    (unbound.username ? envOrNull(unbound.default_env) : null) !==
+      unboundSaved.value.unbound_default_env
+);
 /** 管理员账号不能作为默认权限(后端同样会拒绝) */
 const unboundCandidates = computed(() =>
   systemUsers.value.filter(
@@ -63,11 +82,13 @@ const unboundCandidates = computed(() =>
 );
 const unboundUnavailable = computed(
   () =>
-    !!unboundSaved.value &&
+    !!unboundSaved.value.unbound_username &&
     !usersLoading.value &&
-    !unboundCandidates.value.some(item => item.username === unboundSaved.value)
+    !unboundCandidates.value.some(
+      item => item.username === unboundSaved.value.unbound_username
+    )
 );
-/** 所选账号能访问的集群,让管理员确认默认权限的范围 */
+/** 所选账号能访问的集群,让管理员确认默认权限的范围,也是默认集群的选项 */
 const unboundAccess = computed(() => {
   const user = systemUsers.value.find(
     item => item.username === unbound.username
@@ -80,6 +101,35 @@ const unboundAccess = computed(() => {
     }))
     .filter(item => item.permission !== "none");
 });
+/** 已保存的默认集群不在该账号可访问的范围里了:成员会被要求先切换集群 */
+const unboundEnvUnavailable = computed(() => {
+  const { unbound_username: username, unbound_default_env: env } =
+    unboundSaved.value;
+  return (
+    !!env &&
+    !usersLoading.value &&
+    unbound.username === username &&
+    !unboundAccess.value.some(item => item.env === env)
+  );
+});
+
+function resetUnbound() {
+  unbound.username = unboundSaved.value.unbound_username || "";
+  unbound.default_env = unboundSaved.value.unbound_default_env || NO_CLUSTER;
+}
+
+function onUnboundUserChange() {
+  if (!unboundAccess.value.some(item => item.env === unbound.default_env))
+    unbound.default_env = NO_CLUSTER;
+}
+
+/** 成员没切换过集群时用的集群:绑定的看自己的默认集群,未绑定的看默认权限里的 */
+function defaultEnvOf(row: WeComUser) {
+  if (row.username) return row.default_env;
+  return unboundSaved.value.unbound_username
+    ? unboundSaved.value.unbound_default_env
+    : null;
+}
 let refreshTimer: ReturnType<typeof setInterval> | undefined;
 
 async function loadConfig() {
@@ -103,9 +153,12 @@ async function loadMappings() {
     ]);
     mappings.value = mappingResult.users;
     // 正在编辑默认权限时(还没保存)不要被刷新冲掉
-    const editing = unbound.username !== (unboundSaved.value || "");
-    unboundSaved.value = mappingResult.unbound_username ?? null;
-    if (!editing) unbound.username = unboundSaved.value || "";
+    const editing = unboundDirty.value;
+    unboundSaved.value = {
+      unbound_username: mappingResult.unbound_username ?? null,
+      unbound_default_env: mappingResult.unbound_default_env ?? null
+    };
+    if (!editing) resetUnbound();
     systemUsers.value = userResult.data || [];
     clusters.value = (clusterResult.data || []).map(item => item.env).sort();
   } finally {
@@ -215,12 +268,15 @@ async function saveConfig() {
 async function saveUnbound() {
   unboundSaving.value = true;
   try {
-    const result = await aiApi.saveWecomUnbound(unbound.username || null);
-    unboundSaved.value = result.unbound_username;
-    unbound.username = result.unbound_username || "";
+    const result = await aiApi.saveWecomUnbound(
+      unbound.username || null,
+      unbound.username ? envOrNull(unbound.default_env) : null
+    );
+    unboundSaved.value = result;
+    resetUnbound();
     ElMessage.success(
       result.unbound_username
-        ? `未绑定成员将按 ${result.unbound_username} 的权限使用机器人。`
+        ? `未绑定成员将按 ${result.unbound_username} 的权限使用机器人，默认集群：${result.unbound_default_env || "无"}。`
         : "已关闭默认权限，未绑定成员需要先绑定。"
     );
   } catch (error) {
@@ -235,7 +291,7 @@ async function saveUnbound() {
 function editMapping(row: WeComUser) {
   mapping.wecom_userid = row.wecom_userid;
   mapping.username = row.username || "";
-  mapping.default_env = row.default_env || "";
+  mapping.default_env = row.default_env || NO_CLUSTER;
 }
 
 async function saveMapping() {
@@ -247,11 +303,11 @@ async function saveMapping() {
     await aiApi.saveWecomUser({
       wecom_userid: mapping.wecom_userid.trim(),
       username: mapping.username,
-      default_env: mapping.default_env || null
+      default_env: envOrNull(mapping.default_env)
     });
     mapping.wecom_userid = "";
     mapping.username = "";
-    mapping.default_env = "";
+    mapping.default_env = NO_CLUSTER;
     await loadMappings();
     ElMessage.success("成员映射已保存。");
   } catch (error) {
@@ -385,29 +441,20 @@ onBeforeUnmount(() => {
       </div>
       <el-form label-width="170px" class="unbound-form">
         <el-form-item label="未绑定成员默认权限">
-          <div class="unbound-row">
-            <el-select
-              v-model="unbound.username"
-              class="unbound-select"
-              filterable
-              clearable
-              placeholder="不开放，未绑定的成员需要先绑定"
-            >
-              <el-option
-                v-for="user in unboundCandidates"
-                :key="user.id"
-                :label="`${user.username} (${ROLE_LABELS[user.role] || user.role})`"
-                :value="user.username"
-              />
-            </el-select>
-            <el-button
-              type="primary"
-              :loading="unboundSaving"
-              :disabled="unbound.username === (unboundSaved || '')"
-              @click="saveUnbound"
-              >保存</el-button
-            >
-          </div>
+          <el-select
+            v-model="unbound.username"
+            filterable
+            clearable
+            placeholder="不开放，未绑定的成员需要先绑定"
+            @change="onUnboundUserChange"
+          >
+            <el-option
+              v-for="user in unboundCandidates"
+              :key="user.id"
+              :label="`${user.username} (${ROLE_LABELS[user.role] || user.role})`"
+              :value="user.username"
+            />
+          </el-select>
           <div class="form-tip">
             未绑定的成员按所选花折账号的权限使用机器人（包括按集群的单独授权），可以在「用户与权限」里新建一个专用账号；不能选管理员账号。
           </div>
@@ -425,10 +472,45 @@ onBeforeUnmount(() => {
             >
           </div>
         </el-form-item>
+        <el-form-item label="默认集群">
+          <el-select
+            v-model="unbound.default_env"
+            :disabled="!unbound.username"
+          >
+            <el-option :label="NO_CLUSTER_LABEL" :value="NO_CLUSTER" />
+            <el-option
+              v-for="item in unboundAccess"
+              :key="item.env"
+              :label="item.env"
+              :value="item.env"
+            />
+          </el-select>
+          <div class="form-tip">
+            未绑定成员没切换过集群时在这个集群上提问；选「无」时，成员要先发「切换集群
+            序号或名称」，或在提问里写出集群全名。
+          </div>
+        </el-form-item>
+        <div class="form-actions">
+          <el-button
+            type="primary"
+            :loading="unboundSaving"
+            :disabled="!unboundDirty"
+            @click="saveUnbound"
+            >保存默认权限</el-button
+          >
+        </div>
       </el-form>
       <el-alert
         v-if="unboundUnavailable"
-        :title="`默认权限账号 ${unboundSaved} 已停用、已删除或已改为管理员，未绑定的成员现在无法使用机器人，请重新选择。`"
+        :title="`默认权限账号 ${unboundSaved.unbound_username} 已停用、已删除或已改为管理员，未绑定的成员现在无法使用机器人，请重新选择。`"
+        type="warning"
+        :closable="false"
+        show-icon
+        class="unbound-alert"
+      />
+      <el-alert
+        v-else-if="unboundEnvUnavailable"
+        :title="`默认集群 ${unboundSaved.unbound_default_env} 已不在该账号可访问的范围内，未绑定的成员要先切换集群才能提问，请重新选择。`"
         type="warning"
         :closable="false"
         show-icon
@@ -451,20 +533,22 @@ onBeforeUnmount(() => {
             <span v-if="row.username">{{ row.username }}</span>
             <template v-else>
               <el-tag type="warning" size="small">待绑定</el-tag>
-              <span v-if="unboundSaved" class="muted"
-                >默认权限 {{ unboundSaved }}</span
+              <span v-if="unboundSaved.unbound_username" class="muted"
+                >默认权限 {{ unboundSaved.unbound_username }}</span
               >
             </template>
           </template>
         </el-table-column>
-        <el-table-column prop="default_env" label="默认集群" min-width="140">
+        <el-table-column label="默认集群" min-width="140">
           <template #default="{ row }">{{
-            row.default_env || "未设置"
+            row.username || unboundSaved.unbound_username
+              ? defaultEnvOf(row) || "无"
+              : "—"
           }}</template>
         </el-table-column>
-        <el-table-column prop="current_env" label="当前集群" min-width="140">
+        <el-table-column label="当前集群" min-width="140">
           <template #default="{ row }">{{
-            row.current_env || row.default_env || "未选择"
+            row.current_env || defaultEnvOf(row) || "未选择"
           }}</template>
         </el-table-column>
         <el-table-column prop="pending_approvals" label="待审批" width="90" />
@@ -497,7 +581,7 @@ onBeforeUnmount(() => {
             filterable
             clearable
             placeholder="选择已启用的花折账号"
-            @change="mapping.default_env = ''"
+            @change="mapping.default_env = NO_CLUSTER"
           >
             <el-option
               v-for="user in systemUsers.filter(
@@ -510,11 +594,8 @@ onBeforeUnmount(() => {
           </el-select>
         </el-form-item>
         <el-form-item label="默认集群">
-          <el-select
-            v-model="mapping.default_env"
-            clearable
-            placeholder="首次对话使用的集群"
-          >
+          <el-select v-model="mapping.default_env">
+            <el-option :label="NO_CLUSTER_LABEL" :value="NO_CLUSTER" />
             <el-option
               v-for="env in availableClusters"
               :key="env"
@@ -571,17 +652,7 @@ onBeforeUnmount(() => {
 
 .unbound-form {
   max-width: 820px;
-}
-
-.unbound-row {
-  display: flex;
-  gap: 8px;
-  width: 100%;
-}
-
-.unbound-select {
-  flex: 1;
-  min-width: 0;
+  margin-bottom: 18px;
 }
 
 .unbound-access {

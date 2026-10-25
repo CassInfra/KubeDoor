@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 import secrets
 import time
 import uuid
@@ -16,6 +17,10 @@ from .domain import AIError, Identity, Provider, redact
 LOGGER = logging.getLogger(__name__)
 CHANNEL = "wecom"
 MAX_STREAM_BYTES = 18000
+# 查看集群列表的命令;切换命令:「切换集群 2」「切换到：cassmall-kunlun」「/切换集群 flink」
+MENU_COMMANDS = {"集群", "当前集群", "查看集群", "集群列表", "切换集群", "帮助", "help", "?", "？"}
+SWITCH_COMMAND = re.compile(r"^/?(切换到集群|切换集群|切换到|切换)\s*[:：]?\s*(\S+)$")
+PERMISSION_LABELS = {"rw": "读写", "read": "只读"}
 
 
 class _SdkLogger:
@@ -154,30 +159,32 @@ class WeComIntegration:
             raise AIError("花折用户身份无效", 403, "identity_invalid")
         return Identity(username, permission, MappingProxyType({} if permission == "admin" else clusters))
 
-    async def unbound_username(self):
-        """未绑定成员使用的花折账号(「未绑定成员默认权限」),没设置时为 None"""
-        row = await self.service.store.one("SELECT unbound_username FROM kubedoor_ai_wecom_config WHERE singleton=true")
-        return (row or {}).get("unbound_username")
+    async def unbound_setting(self):
+        """未绑定成员的默认权限账号和默认集群:没设账号 = 必须先绑定,没设集群 = 先选集群才能提问"""
+        row = await self.service.store.one(
+            "SELECT unbound_username,unbound_default_env FROM kubedoor_ai_wecom_config WHERE singleton=true"
+        ) or {}
+        return {"unbound_username": row.get("unbound_username"), "unbound_default_env": row.get("unbound_default_env")}
 
     async def _member_identity(self, mapped):
-        """返回 (身份, 不能使用时回给成员的提示)。绑定了的成员用绑定的花折账号,
-        未绑定的用默认权限账号;权限都由 master 按账号实时计算。"""
+        """返回 (身份, 默认集群, 不能使用时回给成员的提示)。绑定了的成员用绑定的花折账号和他的默认集群,
+        未绑定的用默认权限账号和默认集群;权限都由 master 按账号实时计算。"""
         if mapped.get("username"):
             try:
-                return await self._identity(mapped["username"]), None
+                return await self._identity(mapped["username"]), mapped.get("default_env"), None
             except AIError:
-                return None, "绑定的花折账号不存在、已停用或不可用，请联系管理员。"
-        username = await self.unbound_username()
-        if not username:
-            return None, "该企业微信成员尚未绑定花折账号，请联系管理员完成绑定。"
+                return None, None, "绑定的花折账号不存在、已停用或不可用，请联系管理员。"
+        setting = await self.unbound_setting()
+        if not setting["unbound_username"]:
+            return None, None, "该企业微信成员尚未绑定花折账号，请联系管理员完成绑定。"
         try:
-            identity = await self._identity(username)
+            identity = await self._identity(setting["unbound_username"])
         except AIError:
             identity = None
         # 保存时已经不让选管理员账号;这里兜底账号之后被改成管理员的情况
         if identity is None or identity.is_admin:
-            return None, "未绑定成员的默认权限当前不可用，请联系管理员绑定花折账号。"
-        return identity, None
+            return None, None, "未绑定成员的默认权限当前不可用，请联系管理员绑定花折账号。"
+        return identity, setting["unbound_default_env"], None
 
     async def _reply(self, frame, content, finish=True, stream_id=None):
         if self.client and self.client.is_connected:
@@ -203,44 +210,55 @@ class WeComIntegration:
         if not text:
             await self._reply(frame, "暂不支持空消息。", True, stream_id)
             return
-        identity, problem = await self._member_identity(mapped)
+        identity, default_env, problem = await self._member_identity(mapped)
         if problem:
             await self._reply(frame, problem, True, stream_id)
             return
-        clusters = (await self.service.bootstrap(identity))["clusters"]
+        clusters = [item for item in (await self.service.bootstrap(identity))["clusters"]
+                    if item.get("permission") in ("rw", "read")]
         if not clusters:
             await self._reply(frame, "当前花折账号没有任何 K8S 集群访问权限。", True, stream_id)
             return
-        if text in ("当前集群", "查看集群"):
-            await self._reply(frame, f"当前集群：{mapped.get('current_env') or mapped.get('default_env') or '未选择'}\n可访问：" + "、".join(item["env"] for item in clusters), True, stream_id)
+        names = [item["env"] for item in clusters]
+        # 当前集群 = 成员自己切换过的,否则用默认集群;都没有(默认集群选了「无」)就要先选,不替成员挑
+        current = mapped.get("current_env") or default_env
+        if current not in names:
+            current = None
+        if text.lower() in MENU_COMMANDS:
+            await self._reply(frame, _cluster_menu(clusters, current), True, stream_id)
             return
-        if text.startswith("切换集群 "):
-            env = text[len("切换集群 "):].strip()
-            if env not in {item["env"] for item in clusters}:
-                await self._reply(frame, "该集群不存在或当前账号无权访问。", True, stream_id)
-                return
-            await self.service.store.execute(
-                "UPDATE kubedoor_ai_wecom_users SET current_env=$2,updated_at=now() WHERE wecom_userid=$1", userid, env,
-            )
-            await self._reply(frame, f"已切换到集群：{env}", True, stream_id)
-            return
-        envs = {item["env"] for item in clusters}
-        env = mapped.get("current_env") or mapped.get("default_env")
-        if env not in envs:
-            env = next((item["env"] for item in clusters if item.get("permission") in ("rw", "read")), None)
+        switch = SWITCH_COMMAND.match(text)
+        if switch:
+            target = switch.group(2)
+            env, candidates = _pick_cluster(target, names)
             if env:
-                await self.service.store.execute(
-                    "UPDATE kubedoor_ai_wecom_users SET current_env=$2,updated_at=now() WHERE wecom_userid=$1",
-                    userid, env,
-                )
-        if env is None:
-            await self._reply(frame, "当前账号没有可访问的 K8S 集群。", True, stream_id)
+                await self._set_current_env(userid, env)
+                await self._reply(frame, f"已切换到集群：{env}，之后的提问都在这个集群上执行。", True, stream_id)
+                return
+            # 只写了「切换 / 切换到」又对不上任何集群的(如「切换镜像到 v2」)是普通提问,交给 AI
+            if "集群" in switch.group(1) or candidates:
+                hint = (f"「{target}」匹配到多个集群：{'、'.join(candidates)}，请写完整名称或序号。"
+                        if candidates else f"没有找到集群「{target}」。")
+                await self._reply(frame, hint + "\n\n" + _cluster_menu(clusters, current), True, stream_id)
+                return
+        status = None
+        mentioned = _mentioned_cluster(text, names)
+        if mentioned and mentioned != current:
+            current, status = mentioned, f"已切换到集群 {mentioned}，正在分析请求..."
+            await self._set_current_env(userid, mentioned)
+        if current is None:
+            await self._reply(frame, "还没有选择集群，请先选一个再提问。\n\n" + _cluster_menu(clusters, None), True, stream_id)
             return
         try:
-            await self._run_message(frame, userid, mapped, identity, env, text, stream_id)
+            await self._run_message(frame, userid, mapped, identity, current, text, stream_id, status=status)
         except Exception as exc:
             LOGGER.warning("企业微信消息处理失败: %s", type(exc).__name__)
             await self._reply(frame, "处理失败，请检查花折 AI 服务状态后重试。", True, stream_id)
+
+    async def _set_current_env(self, userid, env):
+        await self.service.store.execute(
+            "UPDATE kubedoor_ai_wecom_users SET current_env=$2,updated_at=now() WHERE wecom_userid=$1", userid, env,
+        )
 
     async def _get_session(self, userid, identity, mapped):
         channel_key = f"{userid}:{identity.username}"
@@ -264,7 +282,7 @@ class WeComIntegration:
         )
         return str(row["id"])
 
-    async def _run_message(self, frame, userid, mapped, identity, env, text, stream_id):
+    async def _run_message(self, frame, userid, mapped, identity, env, text, stream_id, status=None):
         session_id = await self._get_session(userid, identity, mapped)
         provider = Provider.parse({key: self.config[key] for key in ("base_url", "api_key", "model")})
         run, created = await self.service.new_run(
@@ -277,11 +295,13 @@ class WeComIntegration:
         clean = redact(text, (provider.api_key,))
         await self.service.store.message(run, "user", clean)
         self.service.runtime.start(run, identity, provider, clean)
-        await self._watch_run(frame, userid, identity, run["id"], 0, stream_id=stream_id)
+        await self._watch_run(frame, userid, identity, run["id"], 0, stream_id=stream_id, env=env,
+                              status=status or f"正在分析请求（集群：{env}）...")
 
-    async def _watch_run(self, frame, userid, identity, run_id, after, stream_id=None):
+    async def _watch_run(self, frame, userid, identity, run_id, after, stream_id=None, env=None,
+                         status="正在分析请求..."):
         stream_id = stream_id or generate_req_id("stream")
-        content = "正在分析请求..."
+        content = status
         await self._reply(frame, content, False, stream_id)
         cursor = after
         last_send = time.monotonic()
@@ -306,14 +326,14 @@ class WeComIntegration:
                     content = data["content"]
                     updated = True
                 elif kind == "done":
-                    await self._reply(frame, content.strip() or "本轮操作已结束。", True, stream_id)
+                    await self._reply(frame, _with_cluster(content.strip() or "本轮操作已结束。", env), True, stream_id)
                     return
             if updated and (time.monotonic() - last_send >= 0.7 or not rows):
                 await self._reply(frame, _limit_stream(content), False, stream_id)
                 last_send = time.monotonic()
             run = await self.service.store.one("SELECT status,event_seq FROM kubedoor_ai_runs WHERE id=$1::uuid", run_id)
             if not run or run["status"] in ("completed", "failed", "cancelled") and cursor >= run["event_seq"]:
-                await self._reply(frame, content.strip() or "本轮操作已结束。", True, stream_id)
+                await self._reply(frame, _with_cluster(content.strip() or "本轮操作已结束。", env), True, stream_id)
                 return
             idle += 1
             if idle > 1200:
@@ -369,14 +389,15 @@ class WeComIntegration:
             await self._reply(frame, "审批卡片已过期或不属于当前账号。")
             return
         mapped = await self._mapped_user(userid)
-        if (mapped.get("username") or await self.unbound_username()) != approval["username"]:
+        if (mapped.get("username") or (await self.unbound_setting())["unbound_username"]) != approval["username"]:
             await self._reply(frame, "账号绑定已变更，该审批不能继续。")
             return
         try:
             identity = await self._identity(approval["username"])
-            if not identity.can_read((await self.service.store.one(
+            env = (await self.service.store.one(
                 "SELECT scope->>'env' AS env FROM kubedoor_ai_runs WHERE id=$1::uuid", approval["run_id"],
-            ) or {}).get("env")):
+            ) or {}).get("env")
+            if not identity.can_read(env):
                 await self._reply(frame, "该账号已失去目标集群权限，不能批准此操作。")
                 return
             provider = Provider.parse({key: self.config[key] for key in ("base_url", "api_key", "model")})
@@ -388,7 +409,8 @@ class WeComIntegration:
             with suppress(Exception):
                 await self.client.update_template_card(frame, card)
             if result.get("status") == "running":
-                self._spawn(self._watch_run(frame, userid, identity, approval["run_id"], approval["resume_after_seq"]), "wecom-run-resume")
+                self._spawn(self._watch_run(frame, userid, identity, approval["run_id"], approval["resume_after_seq"],
+                                            env=env), "wecom-run-resume")
         except AIError as exc:
             await self._reply(frame, str(exc))
         except Exception as exc:
@@ -460,24 +482,32 @@ class WeComIntegration:
         )
         return {"success": True}
 
-    async def save_unbound_username(self, identity, raw):
-        username = raw.get("username")
+    async def save_unbound(self, identity, raw):
+        """保存未绑定成员的默认权限账号和默认集群(集群为空 = 「无」,成员要先选集群才能提问)"""
+        username, env = raw.get("username"), raw.get("default_env")
         if username is not None and not isinstance(username, str):
             raise AIError("请选择花折账号")
+        if env is not None and not isinstance(env, str):
+            raise AIError("默认集群无效")
         username = (username or "").strip() or None
+        env = ((env or "").strip() or None) if username else None
         if username:
             live = await self._identity(username)
             if live.is_admin:
                 raise AIError("不能用管理员账号作为未绑定成员的默认权限")
-            if not (await self.service.bootstrap(live))["clusters"]:
+            visible = {item["env"] for item in (await self.service.bootstrap(live))["clusters"]}
+            if not visible:
                 raise AIError("该花折账号没有任何 K8S 集群访问权限", 403, "permission_denied")
+            if env is not None and env not in visible:
+                raise AIError("默认集群不存在或该账号无权访问", 403, "permission_denied")
         # 还没保存过机器人配置时先插入一行空配置(不启用),机器人配置照常在「保存配置」里填
         await self.service.store.execute(
-            "INSERT INTO kubedoor_ai_wecom_config(singleton,enabled,encrypted_config,unbound_username,updated_by) VALUES(true,false,$1,$2,$3) "
-            "ON CONFLICT(singleton) DO UPDATE SET unbound_username=EXCLUDED.unbound_username,updated_by=EXCLUDED.updated_by,updated_at=now()",
-            self.service.gateway.cipher.encrypt("wecom", {}), username, identity.username,
+            "INSERT INTO kubedoor_ai_wecom_config(singleton,enabled,encrypted_config,unbound_username,unbound_default_env,updated_by) "
+            "VALUES(true,false,$1,$2,$3,$4) ON CONFLICT(singleton) DO UPDATE SET unbound_username=EXCLUDED.unbound_username,"
+            "unbound_default_env=EXCLUDED.unbound_default_env,updated_by=EXCLUDED.updated_by,updated_at=now()",
+            self.service.gateway.cipher.encrypt("wecom", {}), username, env, identity.username,
         )
-        return {"unbound_username": username}
+        return {"unbound_username": username, "unbound_default_env": env}
 
     async def delete_user(self, userid):
         await self.service.store.execute(
@@ -488,6 +518,42 @@ class WeComIntegration:
 
 def _clip(value, limit):
     return value if len(value) <= limit else value[:limit - 1] + "…"
+
+
+def _pick_cluster(target, names):
+    """按序号、完整名称(不区分大小写)或唯一的部分名称找集群,返回 (集群, 有歧义时的候选)"""
+    if target.isdigit():
+        index = int(target)
+        return (names[index - 1] if 1 <= index <= len(names) else None), []
+    lowered = target.lower()
+    for name in names:
+        if name.lower() == lowered:
+            return name, []
+    partial = [name for name in names if lowered in name.lower()]
+    return (partial[0], []) if len(partial) == 1 else (None, partial)
+
+
+def _mentioned_cluster(text, names):
+    """提问里写出了完整名称、且只写了一个的集群(集群名只含字母、数字、- 和 _,前后不能紧挨这些字符)"""
+    found = {name for name in names
+             if re.search(rf"(?<![A-Za-z0-9_.-]){re.escape(name)}(?![A-Za-z0-9_.-])", text, re.IGNORECASE)}
+    return found.pop() if len(found) == 1 else None
+
+
+def _cluster_menu(clusters, current):
+    lines = [f"当前集群：{current or '未选择'}", "可访问的集群："]
+    for index, item in enumerate(clusters, 1):
+        tags = [PERMISSION_LABELS.get(item.get("permission"), item.get("permission"))]
+        if item.get("online") is False:
+            tags.append("agent 离线")
+        mark = "（当前）" if item["env"] == current else ""
+        lines.append(f"{index}. {item['env']} · {' · '.join(tags)}{mark}")
+    lines.append("发送「切换集群 序号或名称」切换，如「切换集群 2」；提问时写出集群全名也会自动切换过去。")
+    return "\n".join(lines)
+
+
+def _with_cluster(content, env):
+    return f"{content}\n\n—— 集群：{env}（发送「集群」查看或切换）" if env else content
 
 
 def _limit_stream(value):

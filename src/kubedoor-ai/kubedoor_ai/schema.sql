@@ -71,6 +71,9 @@ CREATE TABLE IF NOT EXISTS kubedoor_ai_wecom_config (
 -- 未绑定的企微成员按这个花折账号的权限使用机器人;为空时必须先绑定
 ALTER TABLE kubedoor_ai_wecom_config ADD COLUMN IF NOT EXISTS unbound_username text
     CHECK (unbound_username IS NULL OR char_length(unbound_username) BETWEEN 1 AND 200);
+-- 未绑定成员的默认集群;为空 = 「无」,成员要先切换集群才能提问
+ALTER TABLE kubedoor_ai_wecom_config ADD COLUMN IF NOT EXISTS unbound_default_env text
+    CHECK (unbound_default_env IS NULL OR char_length(unbound_default_env) BETWEEN 1 AND 255);
 CREATE TABLE IF NOT EXISTS kubedoor_ai_wecom_users (
     wecom_userid text PRIMARY KEY,
     username text,

@@ -162,6 +162,12 @@ export interface WeComUser {
   pending_approvals: number;
 }
 
+/** 未绑定成员的默认权限账号和默认集群 */
+export interface WeComUnbound {
+  unbound_username: string | null;
+  unbound_default_env: string | null;
+}
+
 export class AIRequestError extends Error {
   constructor(
     message: string,
@@ -376,18 +382,17 @@ export const aiApi = {
   testWecomProvider: (provider: AIProvider) =>
     request<Record<string, any>>("/wecom/test", "POST", { provider }),
   wecomUsers: () =>
-    request<{ users: WeComUser[]; unbound_username: string | null }>(
-      "/wecom/users"
-    ),
+    request<{ users: WeComUser[] } & WeComUnbound>("/wecom/users"),
   saveWecomUser: (data: {
     wecom_userid: string;
     username: string;
     default_env?: string | null;
   }) => request<{ success: boolean }>("/wecom/users", "POST", data),
-  /** 未绑定成员按这个花折账号的权限使用机器人;null 表示必须先绑定 */
-  saveWecomUnbound: (username: string | null) =>
-    request<{ unbound_username: string | null }>("/wecom/unbound", "PUT", {
-      username
+  /** 未绑定成员按 username 的权限使用机器人(null = 必须先绑定);defaultEnv 为 null 时要先切换集群才能提问 */
+  saveWecomUnbound: (username: string | null, defaultEnv: string | null) =>
+    request<WeComUnbound>("/wecom/unbound", "PUT", {
+      username,
+      default_env: defaultEnv
     }),
   deleteWecomUser: (userid: string) =>
     request<{ success: boolean }>(`/wecom/users/${itemPath(userid)}`, "DELETE"),

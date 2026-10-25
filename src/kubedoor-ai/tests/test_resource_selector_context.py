@@ -162,6 +162,25 @@ async def test_actual_model_receives_only_selected_scope_without_menu_option_lis
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("origin, hinted", [("wecom", True), ("chat", False)])
+async def test_wecom_runs_tell_the_model_how_to_switch_clusters(origin, hinted):
+    store = FakeStore()
+    gateway = Gateway(store, CredentialCipher("ab" * 32), "http://unused-master", "test-token")
+    model = RecordingModel(responses=[AIMessage(content="当前只能查看 cluster-a。")])
+    runtime = Runtime(store, gateway, InMemorySaver(), model_factory=lambda _: model)
+    scope = {"env": "cluster-a", "namespace": None, "deployment": None, "pod": None}
+    ctx = RunContext({"id": "run-1", "session_id": "session-1", "origin": origin, "scope": scope, "skill_ids": []},
+                     Identity("operator", "read"))
+    try:
+        await runtime.run_graph(ctx, Provider("http://unused-model/v1", "", "mock-model"), "查一下别的集群", None)
+        prompt = "\n".join(text_content(message) for message in model.histories[0] if isinstance(message, SystemMessage))
+        assert ("切换集群" in prompt) is hinted
+        assert json.loads(prompt.split("当前范围（本轮固定）：", 1)[1].split("\n", 1)[0]) == {"env": "cluster-a"}
+    finally:
+        await gateway.close()
+
+
+@pytest.mark.asyncio
 async def test_new_run_projects_ui_option_lists_out_of_stored_scope():
     async def insert(sql, *args):
         assert sql.startswith("INSERT INTO kubedoor_ai_runs")
