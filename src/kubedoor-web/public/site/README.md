@@ -31,7 +31,7 @@ done
 
 其它发布事项：
 
-- 页面标注当前版本为 2.2.0，GitHub Releases 目前只到 1.7.0，建议补发 2.0.0 / 2.1.0 / 2.2.0 的 Release 与变更说明。
+- 时间线里的当前版本（`tl-current`，目前为 2.3.0）、首屏的版本标签（`hero-pill`）要和 README 的升级说明、最新的 GitHub Release 一起更新。
 - 上线后把仓库 About 的简介改为新定位「AI 驱动的多 K8S 集群智能管控平台」，Website 填 <https://cassinfra.github.io/KubeDoor/>。
 - 截图中的集群名、IP 等敏感信息做了模糊处理；替换截图时请先自行处理后再放进 `assets/img/shots/`。
 - 「账号与权限」展示带里的 `assets/img/shots/login.webp` 是 Web 登录页（`src/kubedoor-web/src/views/login/`）的截图，登录页改版后记得同步替换。

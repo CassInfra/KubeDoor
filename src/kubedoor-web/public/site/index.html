@@ -4,8 +4,8 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>花折 · KubeDoor — AI 驱动的多 K8S 集群智能管控平台</title>
-<meta name="description" content="花折 · KubeDoor：开源的多 K8S 集群智能管控平台。一个平台统一纳管多套 Kubernetes —— 监控、资源管理、告警事件、高峰期资源治理与准入管控一站搞定；内置可审批、可审计的 AI 运维助手，并以标准 MCP 对外开放；支持 LDAP 登录与 K8S 集群级权限。">
-<meta name="keywords" content="KubeDoor,花折,Kubernetes,K8S,多集群管理,AI 运维,MCP,准入控制,告警,LDAP,集群权限,操作审计,VictoriaMetrics,PostgreSQL">
+<meta name="description" content="花折 · KubeDoor：开源的多 K8S 集群智能管控平台。一个平台统一纳管多套 Kubernetes —— 监控、资源管理、告警事件、Istio VirtualService、CoreDNS、高峰期资源治理与准入管控一站搞定；内置可审批、可审计的 AI 运维助手，网页和企业微信里都能对话，并以标准 MCP 对外开放；支持 LDAP 登录与 K8S 集群级权限。">
+<meta name="keywords" content="KubeDoor,花折,Kubernetes,K8S,多集群管理,AI 运维,企业微信机器人,MCP,Istio,VirtualService,CoreDNS,准入控制,告警,LDAP,集群权限,操作审计,VictoriaMetrics,PostgreSQL">
 <meta name="author" content="StarsL.cn">
 <meta name="theme-color" content="#05070f">
 <meta name="color-scheme" content="dark">
@@ -17,7 +17,7 @@
 <meta property="og:site_name" content="花折 · KubeDoor">
 <meta property="og:locale" content="zh_CN">
 <meta property="og:title" content="花折 · KubeDoor — AI 驱动的多 K8S 集群智能管控平台">
-<meta property="og:description" content="统一纳管多套 Kubernetes：监控、资源管理、告警事件、高峰期资源治理与准入管控；内置可审批、可审计的 AI 运维助手，并以标准 MCP 开放。">
+<meta property="og:description" content="统一纳管多套 Kubernetes：监控、资源管理、告警事件、Istio VirtualService、CoreDNS、高峰期资源治理与准入管控；内置可审批、可审计的 AI 运维助手，网页和企业微信里都能对话，并以标准 MCP 开放。">
 <meta property="og:url" content="https://cassinfra.github.io/KubeDoor/">
 <meta property="og:image" content="https://cassinfra.github.io/KubeDoor/assets/img/og-cover.jpg">
 <meta property="og:image:width" content="1200">
@@ -25,7 +25,7 @@
 <meta property="og:image:alt" content="花折 · KubeDoor：AI 驱动的多 K8S 集群智能管控平台">
 <meta name="twitter:card" content="summary_large_image">
 <meta name="twitter:title" content="花折 · KubeDoor — AI 驱动的多 K8S 集群智能管控平台">
-<meta name="twitter:description" content="统一纳管多套 Kubernetes，内置可审批、可审计的 AI 运维助手，并以标准 MCP 对外开放。">
+<meta name="twitter:description" content="统一纳管多套 Kubernetes，内置可审批、可审计的 AI 运维助手，网页和企业微信里都能对话，并以标准 MCP 对外开放。">
 <meta name="twitter:image" content="https://cassinfra.github.io/KubeDoor/assets/img/og-cover.jpg">
 
 <script type="application/ld+json">{"@context":"https://schema.org","@type":"SoftwareSourceCode","name":"花折 · KubeDoor","description":"AI 驱动的多 K8S 集群智能管控平台","url":"https://cassinfra.github.io/KubeDoor/","codeRepository":"https://github.com/CassInfra/KubeDoor","license":"https://opensource.org/licenses/MIT","programmingLanguage":["Python","TypeScript"]}</script>
@@ -60,6 +60,7 @@
   <symbol id="i-balance" viewBox="0 0 24 24"><path d="M12 3.5v17M6 20.5h12M4.5 7h15"/><path d="m4.5 7-2.5 6a2.5 2.5 0 0 0 5 0zM19.5 7 17 13a2.5 2.5 0 0 0 5 0z"/></symbol>
   <symbol id="i-lock" viewBox="0 0 24 24"><rect x="4.5" y="10" width="15" height="11" rx="2.5"/><path d="M8 10V7.5a4 4 0 0 1 8 0V10"/><path d="M12 14.5v2.5"/></symbol>
   <symbol id="i-route" viewBox="0 0 24 24"><circle cx="6" cy="18" r="2.5"/><circle cx="18" cy="6" r="2.5"/><path d="M8.5 18H15a3 3 0 0 0 0-6H9a3 3 0 0 1 0-6h6.5"/></symbol>
+  <symbol id="i-globe" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5"/><path d="M3.5 12h17M12 3.5c2.3 2.3 3.5 5.1 3.5 8.5s-1.2 6.2-3.5 8.5c-2.3-2.3-3.5-5.1-3.5-8.5s1.2-6.2 3.5-8.5z"/></symbol>
   <symbol id="i-db" viewBox="0 0 24 24"><ellipse cx="12" cy="5.5" rx="7.5" ry="2.8"/><path d="M4.5 5.5v13c0 1.5 3.4 2.8 7.5 2.8s7.5-1.3 7.5-2.8v-13"/><path d="M4.5 12c0 1.5 3.4 2.8 7.5 2.8s7.5-1.3 7.5-2.8"/></symbol>
   <symbol id="i-pulse" viewBox="0 0 24 24"><path d="M3 12h4l2.5-6 4 12 2.5-6H21"/></symbol>
   <symbol id="i-book" viewBox="0 0 24 24"><path d="M12 6.5C10 5 7.5 4.5 4 4.5v13c3.5 0 6 .5 8 2 2-1.5 4.5-2 8-2v-13c-3.5 0-6 .5-8 2z"/><path d="M12 6.5v13"/></symbol>
@@ -128,13 +129,13 @@
   <div class="hero-grid" aria-hidden="true"></div>
   <div class="container hero-inner">
     <div class="hero-copy">
-      <a class="hero-pill" href="#access"><span class="pill-tag">v2.2</span><span>新增 LDAP 登录 · K8S 集群级权限</span><svg class="icon" aria-hidden="true"><use href="#i-arrow"/></svg></a>
+      <a class="hero-pill" href="#wecom"><span class="pill-tag">v2.3</span><span><span class="nw">新增企微机器人 ·</span> <span class="nw">Istio VirtualService · CoreDNS</span></span><svg class="icon" aria-hidden="true"><use href="#i-arrow"/></svg></a>
       <h1 id="hero-title">
         <span class="hero-brand">花折 · KubeDoor</span>
         <span class="hero-tagline"><span class="grad-text">AI 驱动</span>的<br>多 K8S 集群<br>智能管控平台</span>
       </h1>
       <p class="hero-poem">花开堪折直须折，莫待无花空折枝</p>
-      <p class="hero-lead">一个平台统一纳管多套 Kubernetes —— 监控、<span class="nw">资源管理</span>、<span class="nw">告警事件</span>、<span class="nw">高峰期资源治理</span>与<span class="nw">准入管控</span><span class="nw">一站搞定</span>；内置<strong>可审批、可审计</strong>的 <span class="nw">AI 运维助手</span>，<span class="nw">并以<strong>标准 MCP</strong> 对外开放。</span></p>
+      <p class="hero-lead">一个平台统一纳管多套 Kubernetes —— 监控、<span class="nw">资源管理</span>、<span class="nw">告警事件</span>、<span class="nw">高峰期资源治理</span>与<span class="nw">准入管控</span><span class="nw">一站搞定</span>；内置<strong>可审批、可审计</strong>的 <span class="nw">AI 运维助手</span>，<span class="nw">网页和<strong>企业微信</strong>里都能对话，</span><span class="nw">并以<strong>标准 MCP</strong> 对外开放。</span></p>
       <div class="hero-ctas">
         <a class="btn btn-primary" href="https://github.com/CassInfra/KubeDoor" target="_blank" rel="noopener">
           <svg class="icon" aria-hidden="true"><use href="#i-github"/></svg>GitHub<svg class="icon icon-star" aria-hidden="true"><use href="#i-star"/></svg>Star
@@ -226,7 +227,7 @@ content_type: application/json-patch+json</pre>
 <section class="proof" aria-label="关键数据">
   <div class="container">
     <ul class="stats">
-      <li class="stat reveal"><span class="stat-num" data-count="63">63</span><span class="stat-label">项业务操作接入 AI<small>37 项查询 · 26 项变更</small></span></li>
+      <li class="stat reveal"><span class="stat-num" data-count="67">67</span><span class="stat-label">项业务操作接入 AI<small>38 项查询 · 29 项变更</small></span></li>
       <li class="stat reveal" style="--d:1"><span class="stat-num" data-count="5">5</span><span class="stat-label">类通用 K8S 执行器<small>API · CLI · Pod exec</small></span></li>
       <li class="stat reveal" style="--d:2"><span class="stat-num" data-count="17">17</span><span class="stat-label">个 MCP 工具<small>Streamable HTTP + SSE</small></span></li>
       <li class="stat reveal" style="--d:3"><span class="stat-num" data-count="44">44</span><span class="stat-label">条内置告警规则<small>Pod · JVM · Deploy · 节点</small></span></li>
@@ -254,7 +255,7 @@ content_type: application/json-patch+json</pre>
       <li class="reveal">
         <div class="card-icon card-icon-sm"><svg class="icon" aria-hidden="true"><use href="#i-robot"/></svg></div>
         <h3>内置 AI 运维助手</h3>
-        <p>选定集群用一句话排障与运维，自动联合日志、事件、监控与历史数据定位原因；变更先冻结参数、展示差异，经人工批准才执行，会话与每次操作全程入库审计，模型自由选。同一能力也以标准 MCP 开放。</p>
+        <p>选定集群用一句话排障与运维，自动联合日志、事件、监控与历史数据定位原因；变更先冻结参数、展示差异，经人工批准才执行，会话与每次操作全程入库审计，模型自由选。同一能力也开放给企业微信机器人和标准 MCP。</p>
       </li>
       <li class="reveal" style="--d:1">
         <div class="card-icon card-icon-sm"><svg class="icon" aria-hidden="true"><use href="#i-route"/></svg></div>
@@ -347,6 +348,61 @@ content_type: application/json-patch+json</pre>
         <h3>全局记忆 · DeepAgents</h3>
         <p>会话一键总结为可编辑的经验草稿，审核后存入全局记忆、下一轮按需引入；基于 DeepAgents，内置运维 Skill 与子 Agent 并行调查。</p>
       </article>
+      <article class="card glow-card reveal">
+        <div class="card-icon"><svg class="icon" aria-hidden="true"><use href="#i-gauge"/></svg></div>
+        <h3>认得资源管控<em class="new-tag">2.3</em></h3>
+        <p>扩缩容、调整 requests / limits 与 JVM 前先查 Deployment 是否受准入控制管控：受管控的走管控表，不受管控的直接改；审批卡写明「当前 → 目标」与副作用，执行后回读核验，会被改回的直接修改在批准前就拦下。</p>
+      </article>
+      <article class="card glow-card reveal" style="--d:1">
+        <div class="card-icon"><svg class="icon" aria-hidden="true"><use href="#i-pulse"/></svg></div>
+        <h3>长对话省钱 · 用量可见<em class="new-tag">2.3</em></h3>
+        <p>系统提示与历史保持稳定，长对话持续命中模型的前缀缓存；上下文按模型窗口自动压缩、对话框显示占用比例；「AI 用量看板」统计用量、缓存命中率与估算费用，DeepSeek 思考强度可调。</p>
+      </article>
+      <article class="card glow-card reveal" style="--d:2">
+        <div class="card-icon"><svg class="icon" aria-hidden="true"><use href="#i-help"/></svg></div>
+        <h3>一键问 AI · 重新生成<em class="new-tag">2.3</em></h3>
+        <p>告警、K8S 事件、Deployment 与 Pod 菜单一键「问 AI」，自动带上集群、资源和告警原文；最后一轮可重新生成或编辑后重发，会话按标题和内容搜索。</p>
+      </article>
+    </div>
+
+    <div class="access wecom" id="wecom">
+      <div class="access-copy reveal">
+        <p class="eyebrow eyebrow-sm">// 2.3 新增 · 企业微信机器人</p>
+        <h3 id="wecom-title">在企业微信里，<span class="grad-text">单聊就能运维 K8S</span></h3>
+        <p>管理员在「系统管理 → 企微 AI 机器人」接入企业微信智能机器人后，成员单聊机器人即可查询、排障和发起变更，与网页 AI 助手共用同一套工具、权限、审批与审计。</p>
+        <ul class="tick-list">
+          <li>长连接接入，不需要公网回调地址；机器人单独配置模型，凭证 <code class="nw">AES-256-GCM</code> 加密存储</li>
+          <li>成员绑定花折账号并指定默认集群，也可让未绑定的成员统一按一个账号的权限使用；每条消息都按账号实时校验</li>
+          <li>变更推送「批准 / 拒绝」卡片，只有发起人本人能批准，过期即失效；卡片上方写明管控状态、步骤与变化</li>
+          <li>发送「切换集群 2」切换集群，「新对话」「继续上次」管理对话，空闲 2 小时自动开新对话</li>
+        </ul>
+        <a class="link-arrow" href="https://github.com/CassInfra/KubeDoor/blob/main/src/kubedoor-ai/README.md#企业微信智能机器人" target="_blank" rel="noopener">阅读企业微信机器人说明<svg class="icon" aria-hidden="true"><use href="#i-arrow"/></svg></a>
+      </div>
+      <figure class="access-visual reveal" style="--d:1">
+        <div class="wecom-chat" role="img" aria-label="企业微信单聊示意：成员发送「把 demo 的 order-api 扩到 5 个」；KubeDoor 助手先回复待审批操作的说明：集群 prod-a，受花折资源管控，先写入管控副本数再扩缩容，副本数 2 到 5；下方是只有发起人能操作的「批准」「拒绝」卡片；批准后助手回复已执行且回读一致，并在末尾注明所用集群。">
+          <div class="wecom-bar"><span class="wecom-avatar">AI</span><span class="wecom-name"><b>KubeDoor 助手</b><small>企业微信 · 单聊</small></span><span class="console-status"><i class="live-dot"></i>已连接</span></div>
+          <div class="wecom-body">
+            <div class="msg msg-user"><div class="msg-meta">张三</div><div class="msg-bubble">把 demo 的 order-api 扩到 5 个</div></div>
+            <div class="msg msg-ai">
+              <div class="msg-meta"><span class="ai-mini">AI</span>KubeDoor 助手</div>
+              <div class="msg-content">
+                <p><strong>需要审批：Deployment 扩缩容</strong></p>
+                <p>目标：prod-a · demo/order-api<br>管控：受花折资源管控<br>步骤：① 写入管控副本数 ② 扩缩容<br>变化：副本数 2 → 5</p>
+              </div>
+            </div>
+            <div class="approve wecom-card">
+              <div class="approve-head"><code>Deployment 扩缩容</code><span class="state-tag">等待批准</span></div>
+              <div class="approve-meta">prod-a demo/order-api · 受管控 · 副本数 2 → 5</div>
+              <div class="approve-foot"><span class="approve-hint">仅发起人可操作</span><span class="a-btn">拒绝</span><span class="a-btn a-btn-ok">批准</span></div>
+            </div>
+            <div class="msg msg-ai">
+              <div class="msg-meta"><span class="ai-mini">AI</span>KubeDoor 助手</div>
+              <div class="msg-content"><p>已扩到 5 个副本，回读一致。</p><p class="wecom-env">—— 集群：prod-a</p></div>
+            </div>
+          </div>
+        </div>
+        <figcaption class="ca-note">示意 · 交互取自真实实现，数据仅为演示</figcaption>
+      </figure>
     </div>
 
     <div class="guard glass reveal">
@@ -442,7 +498,7 @@ content_type: application/json-patch+json</pre>
       <article class="card glow-card fcard reveal" style="--d:1">
         <div class="card-icon"><svg class="icon" aria-hidden="true"><use href="#i-cube"/></svg></div>
         <h3>K8S 资源管理</h3>
-        <p>Deployment、Pod、Service、Ingress、ConfigMap、StatefulSet、DaemonSet 与节点统一管理，Monaco 在线编辑 YAML，支持批量删除、扩缩容与重启；Istio VirtualService 管理为<span class="nw">试用功能</span>。</p>
+        <p>Deployment、Pod、Service、Ingress、ConfigMap、StatefulSet、DaemonSet 与节点统一管理，Monaco 在线编辑 YAML，支持批量删除、扩缩容与重启；网页终端可直接进容器或宿主机。</p>
       </article>
       <article class="card glow-card fcard reveal">
         <div class="card-icon"><svg class="icon" aria-hidden="true"><use href="#i-terminal"/></svg></div>
@@ -468,12 +524,12 @@ content_type: application/json-patch+json</pre>
         <div class="fcard-text">
           <div class="card-icon"><svg class="icon" aria-hidden="true"><use href="#i-gauge"/></svg></div>
           <h3>高峰资源画像 · 准入控制</h3>
-          <p>每天采集业务高峰时段的资源数据，取近 10 天集群 CPU 总消耗最大的一天写入管控表；在「Agent管理」开启「准入控制」后，Deployment 创建与发布时由 Mutating Webhook 按管控表改写副本数和第一个容器的 requests / limits，扩缩容时只改写副本数，让资源申请与真实使用保持一致。</p>
+          <p>每天采集业务高峰时段的资源数据，取近 10 天集群 CPU 总消耗最大的一天写入管控表；在「Agent管理」开启「准入控制」后，Deployment 创建与发布时由 Mutating Webhook 按管控表改写副本数、第一个容器的 requests / limits 与 JVM 参数，扩缩容（含 kubectl 直接改副本数）只改写副本数，让资源申请与真实使用保持一致。</p>
         </div>
         <ol class="mini-flow" aria-label="高峰资源管控流程">
           <li><b>每日高峰采集</b><span>CPU / 内存取 P80</span></li>
           <li><b>近 10 天最大日</b><span>写入管控表</span></li>
-          <li><b>准入 Webhook</b><span>改写副本数 · requests · limits</span></li>
+          <li><b>准入 Webhook</b><span>改写副本数 · requests · limits · JVM</span></li>
         </ol>
       </article>
       <article class="card glow-card fcard reveal">
@@ -490,6 +546,23 @@ content_type: application/json-patch+json</pre>
         <div class="card-icon"><svg class="icon" aria-hidden="true"><use href="#i-lock"/></svg></div>
         <h3>账号权限与审计<em class="new-tag">2.2</em></h3>
         <p>本地账号与 LDAP 统一登录，按用户 × 集群授权「读写 / 只读 / 无」，Web、Grafana、AI 助手与 MCP 共用一套权限；登录、权限变更与所有写操作（含越权被拒）进入操作审计，AI 操作的参数、审批与结果全部入库。</p>
+      </article>
+      <article class="card glow-card fcard fcard-wide fcard-flow reveal">
+        <div class="fcard-text">
+          <div class="card-icon"><svg class="icon" aria-hidden="true"><use href="#i-route"/></svg></div>
+          <h3>Istio VirtualService 管理<em class="new-tag">2.3</em></h3>
+          <p>按「Istio 组」统一维护一个项目在多个集群里的 VirtualService：规则、默认路由与 gateways 全组共用一份标准，hosts 和规则里的域名条件按集群维护；矩阵一屏看清各集群是否一致，跨组冲突标红，未建模的字段原样保留，所有修改仅限管理员。</p>
+        </div>
+        <ol class="mini-flow" aria-label="Istio VirtualService 管理流程">
+          <li><b>刷新现状</b><span>并行采集各集群的 VirtualService</span></li>
+          <li><b>对比 · 纳管</b><span>规则按匹配条件对齐，一致的一键纳管</span></li>
+          <li><b>预览后下发</b><span>按集群生成，逐项展示差异</span></li>
+        </ol>
+      </article>
+      <article class="card glow-card fcard reveal" style="--d:1">
+        <div class="card-icon"><svg class="icon" aria-hidden="true"><use href="#i-globe"/></svg></div>
+        <h3>CoreDNS 管理<em class="new-tag">2.3</em></h3>
+        <p>像改表格一样维护 CoreDNS 的 hosts 自定义解析，只重写改动的行；保存前看差异，并发修改自动提示冲突，保存后从集群内检查解析是否生效；另有解析测试、端口测试与 Monaco 高级编辑。</p>
       </article>
     </div>
 
@@ -674,7 +747,11 @@ content_type: application/json-patch+json</pre>
     </header>
     <ol class="timeline">
       <li class="tl-item tl-current reveal">
-        <div class="tl-date"><time datetime="2026-10-17">2026-10-17</time><span class="tl-ver">2.2.0 · 当前</span></div>
+        <div class="tl-date"><time datetime="2026-10-25">2026-10-25</time><span class="tl-ver">2.3.0 · 当前</span></div>
+        <div class="tl-body"><h3>企微机器人、Istio VirtualService 与 CoreDNS 管理</h3><p>企业微信里单聊机器人即可运维 K8S，变更经卡片审批；Istio VirtualService 按「Istio 组」统一维护，对比纳管后预览下发；CoreDNS 自定义解析表格化维护并检查生效；AI 助手长对话持续命中缓存、认得资源管控，支持一键「问 AI」、重新生成与会话搜索。</p></div>
+      </li>
+      <li class="tl-item reveal">
+        <div class="tl-date"><time datetime="2026-10-17">2026-10-17</time><span class="tl-ver">2.2.0</span></div>
         <div class="tl-body"><h3>LDAP 登录与 K8S 集群级权限</h3><p>登录与权限改由 master 统一管理：本地账号 + LDAP，全局权限兜底、按用户 × 集群授权「读写 / 只读 / 无」，Web、Grafana、AI 助手与 MCP 共用一套权限；新增操作审计、Agent 账号认证与全新水墨登录页。</p></div>
       </li>
       <li class="tl-item reveal">
@@ -729,6 +806,9 @@ content_type: application/json-patch+json</pre>
       <li class="reveal"><a class="doc-card glow-card" href="https://github.com/CassInfra/KubeDoor/blob/main/deploy/README.md" target="_blank" rel="noopener"><span class="doc-icon"><svg class="icon" aria-hidden="true"><use href="#i-rocket"/></svg></span><span class="doc-text"><b>部署指南</b><span>三步安装、常见场景与排查</span></span><svg class="icon doc-go" aria-hidden="true"><use href="#i-arrow"/></svg></a></li>
       <li class="reveal" style="--d:1"><a class="doc-card glow-card" href="https://github.com/CassInfra/KubeDoor/blob/main/deploy/README.md#账号与权限" target="_blank" rel="noopener"><span class="doc-icon"><svg class="icon" aria-hidden="true"><use href="#i-lock"/></svg></span><span class="doc-text"><b>账号与权限</b><span>本地账号、LDAP、集群授权与审计</span></span><svg class="icon doc-go" aria-hidden="true"><use href="#i-arrow"/></svg></a></li>
       <li class="reveal" style="--d:2"><a class="doc-card glow-card" href="https://github.com/CassInfra/KubeDoor/blob/main/docs/ai-assistant.md" target="_blank" rel="noopener"><span class="doc-icon"><svg class="icon" aria-hidden="true"><use href="#i-robot"/></svg></span><span class="doc-text"><b>AI 助手与 MCP</b><span>模型配置、审批、kubeconfig、全局记忆</span></span><svg class="icon doc-go" aria-hidden="true"><use href="#i-arrow"/></svg></a></li>
+      <li class="reveal"><a class="doc-card glow-card" href="https://github.com/CassInfra/KubeDoor/blob/main/src/kubedoor-ai/README.md#企业微信智能机器人" target="_blank" rel="noopener"><span class="doc-icon"><svg class="icon" aria-hidden="true"><use href="#i-chat"/></svg></span><span class="doc-text"><b>企业微信机器人</b><span>接入、成员绑定、集群切换与审批</span></span><svg class="icon doc-go" aria-hidden="true"><use href="#i-arrow"/></svg></a></li>
+      <li class="reveal" style="--d:1"><a class="doc-card glow-card" href="https://github.com/CassInfra/KubeDoor/blob/main/src/kubedoor-master/istio_route/README.md" target="_blank" rel="noopener"><span class="doc-icon"><svg class="icon" aria-hidden="true"><use href="#i-route"/></svg></span><span class="doc-text"><b>Istio VirtualService 管理</b><span>Istio 组、状态判断与典型流程</span></span><svg class="icon doc-go" aria-hidden="true"><use href="#i-arrow"/></svg></a></li>
+      <li class="reveal" style="--d:2"><a class="doc-card glow-card" href="https://github.com/CassInfra/KubeDoor/blob/main/README.md#3-coredns管理" target="_blank" rel="noopener"><span class="doc-icon"><svg class="icon" aria-hidden="true"><use href="#i-globe"/></svg></span><span class="doc-text"><b>CoreDNS 管理</b><span>hosts 解析维护、生效检查与网络测试</span></span><svg class="icon doc-go" aria-hidden="true"><use href="#i-arrow"/></svg></a></li>
       <li class="reveal"><a class="doc-card glow-card" href="https://github.com/CassInfra/KubeDoor/blob/main/docs/alert-silence.md" target="_blank" rel="noopener"><span class="doc-icon"><svg class="icon" aria-hidden="true"><use href="#i-mute"/></svg></span><span class="doc-text"><b>告警屏蔽</b><span>matcher 语法、状态与接口</span></span><svg class="icon doc-go" aria-hidden="true"><use href="#i-arrow"/></svg></a></li>
       <li class="reveal" style="--d:1"><a class="doc-card glow-card" href="https://github.com/CassInfra/KubeDoor/blob/main/docs/jvm-resource-control.md" target="_blank" rel="noopener"><span class="doc-icon"><svg class="icon" aria-hidden="true"><use href="#i-coffee"/></svg></span><span class="doc-text"><b>JVM 参数管控</b><span>启动参数采集、编辑与生效方式</span></span><svg class="icon doc-go" aria-hidden="true"><use href="#i-arrow"/></svg></a></li>
       <li class="reveal" style="--d:2"><a class="doc-card glow-card" href="https://github.com/CassInfra/KubeDoor/blob/main/help/K8S%E8%B5%84%E6%BA%90%E7%AE%A1%E6%8E%A7%E5%8A%9F%E8%83%BD%E8%AF%B4%E6%98%8E.md" target="_blank" rel="noopener"><span class="doc-icon"><svg class="icon" aria-hidden="true"><use href="#i-shield"/></svg></span><span class="doc-text"><b>K8S 资源管控</b><span>准入控制与高峰资源管控说明</span></span><svg class="icon doc-go" aria-hidden="true"><use href="#i-arrow"/></svg></a></li>

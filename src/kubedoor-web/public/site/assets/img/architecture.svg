@@ -170,7 +170,7 @@
 <rect x="478.93" y="297" width="75.07" height="22" rx="11" fill="url(#aigrad)"/>
 <text x="516.465" y="312.5" font-size="13" fill="#0b1020" font-weight="700" text-anchor="middle" data-box="ai">✦ AI 核心</text>
 <text x="292" y="315" font-size="19" fill="url(#aitext)" font-weight="800" data-box="ai">kubedoor-ai</text>
-<text x="292" y="337" font-size="13" fill="#e9d5ff" data-box="ai">AI 助手 + MCP Server · 同一服务</text>
+<text x="292" y="337" font-size="13" fill="#e9d5ff" data-box="ai">AI 助手 · 企微机器人 · MCP Server</text>
 <line x1="292" y1="350" x2="552" y2="350" stroke="#a78bfa" stroke-opacity="0.35"/>
 <text x="292" y="372" font-size="13" data-box="ai"><tspan fill="#e2e8f0">DeepAgents · Skills · 子 Agent 并行排查</tspan></text>
 <text x="292" y="394" font-size="13" data-box="ai"><tspan fill="#e2e8f0">统一工具 </tspan><tspan fill="#f0abfc" class="mono">kubedoor_tool</tspan><tspan fill="#e2e8f0">：</tspan></text>
