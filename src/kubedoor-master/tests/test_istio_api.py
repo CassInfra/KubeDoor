@@ -743,3 +743,78 @@ async def test_import_takes_domains_from_rule_with_same_target(env):
     assert beta['status'] == S.INCOMPLETE and beta['missing_domains'] == ['第 2 条规则(域名按集群 → job.adv)']
     # 「编辑 hosts 和域名」的默认值同样按转发目标取:job 规则在测试集群里没有对应的
     assert set(beta['live_domains']) == {str(gateway['id']), str(nacos['id'])}
+
+
+@pytest.mark.asyncio
+async def test_sync_rules_from_cluster_to_standard(env):
+    """对比里从集群现状整条同步规则到组标准:预览不保存;保存后其他集群保持原来的域名,新加的规则缺少域名;
+    打开对比之后组标准变了就拒绝;也能按现状删掉组标准里的规则。"""
+    client, agent, _ = env
+
+    def host_rule(service, domain, timeout=None):
+        entry = {'match': [{'authority': {'exact': domain}}],
+                 'route': [{'destination': {'host': f'{service}.b2c.svc.cluster.local'}}]}
+        return {**entry, 'timeout': timeout} if timeout else entry
+
+    def api(timeout):
+        return {**route('/api/', 6001), 'timeout': timeout}
+
+    agent.put('prod-k', 'svc', vs(['svc.x.com'], [host_rule('svc', 'svc.x.com'), api('7s')]))
+    agent.put('beta-k', 'svc', vs(['svc-beta.x.com', 'admin-beta.x.com'], [
+        host_rule('svc', 'svc-beta.x.com', '3s'), host_rule('admin', 'admin-beta.x.com'), api('9s'), route('/new/', 7001)]))
+    created = await call(client, 'POST', '/api/istio/groups', {'name': 'g', 'clusters': [
+        {'k8s_name': 'beta-k', 'env_type': 'test'}, {'k8s_name': 'prod-k', 'env_type': 'prod'}]})
+    group_id = created['data']['id']
+    await call(client, 'POST', '/api/istio/collect', {'group_id': group_id})
+    await call(client, 'POST', '/api/istio/import', {'group_id': group_id, 'items': [
+        {'namespace': NS, 'name': 'svc', 'base': 'prod-k', 'clusters': ['beta-k', 'prod-k']}]})
+    vs_id = (await matrix(client, group_id))['svc']['vs_id']
+
+    async def compare(k8s_name):
+        data = (await call(client, 'GET', '/api/istio/compare', group_id=group_id, namespace=NS, name='svc',
+                           left='standard', right=f'cluster@{k8s_name}'))['data']
+        body = {'group_id': group_id, 'namespace': NS, 'name': 'svc', 'standard': 'standard', 'k8s_name': k8s_name,
+                'standard_version': data['left']['version'], 'live_version': data['right']['version']}
+        return [(r['op'], r['left_index'], r['right_index']) for r in data['diff']['routes']], body
+
+    rows, body = await compare('beta-k')
+    assert rows == [('changed', 0, 0), ('right_only', None, 1), ('changed', 1, 2), ('right_only', None, 3)]
+    # 同步改了超时的按域名转发规则、新加的两条;/api/ 的超时不同步
+    body['rules'] = [{'standard_index': i, 'live_index': j} for _, i, j in (rows[0], rows[1], rows[3])]
+    preview = (await call(client, 'POST', '/api/istio/vs/sync/preview', body))['data']
+    assert (preview['summary']['added'], preview['summary']['replaced']) == (2, 1)
+    assert preview['missing_domains'] == [{'k8s_name': 'prod-k', 'rules': ['第 2 条规则(域名按集群 → admin.b2c)']}]
+    assert len(preview['spec']['http']) == 4
+    assert len((await call(client, 'GET', '/api/istio/vs', vs_id=vs_id))['data']['routes']) == 2  # 预览不保存
+
+    saved = await call(client, 'POST', '/api/istio/vs/sync', body)
+    assert saved['msg'] == '已从 beta-k 的现状同步到组标准:加入 2 条规则、替换 1 条规则,下发后生效'
+    detail = (await call(client, 'GET', '/api/istio/vs', vs_id=vs_id))['data']
+    svc, admin, api_rule, new = detail['routes']
+    assert (svc['timeout'], api_rule['timeout'], new['match_rules']) == ('3s', '7s', [{'uri': {'prefix': '/new/'}}])
+    assert domain_values(svc['domains']['prod-k']) == [['svc.x.com']]  # 其他集群保持原来的域名
+    assert domain_values(svc['domains']['beta-k']) == [['svc-beta.x.com']]
+    assert domain_values(admin['domains']['beta-k']) == [['admin-beta.x.com']] and 'prod-k' not in admin['domains']
+    status = {c['k8s_name']: c['status'] for c in detail['clusters']}
+    assert status == {'beta-k': S.PENDING, 'prod-k': S.INCOMPLETE}
+    # 组标准已经变了,还用打开对比时的版本:拒绝
+    assert '刷新对比' in (await call(client, 'POST', '/api/istio/vs/sync', body, status=409))['error']
+
+    # 按 prod-k 的现状删掉组标准里的 /new/
+    rows, body = await compare('prod-k')
+    assert rows == [('changed', 0, 0), ('left_only', 1, None), ('same', 2, 1), ('left_only', 3, None)]
+    bad = await call(client, 'POST', '/api/istio/vs/sync/preview',
+                     {**body, 'rules': [{'standard_index': 3, 'live_index': 1}]}, status=409)
+    assert '对不上' in bad['error']
+    assert '没有要同步的内容' in (await call(client, 'POST', '/api/istio/vs/sync', body, status=400))['error']
+    saved = await call(client, 'POST', '/api/istio/vs/sync', {**body, 'rules': [{'standard_index': 3}]})
+    assert '删除 1 条规则' in saved['msg']
+    detail = (await call(client, 'GET', '/api/istio/vs', vs_id=vs_id))['data']
+    assert [r['match_rules'][0].get('uri') for r in detail['routes']] == [None, None, {'prefix': '/api/'}]
+    # 组标准一侧只能是组标准;集群里没有这个 VS 的不能同步
+    wrong = await call(client, 'POST', '/api/istio/vs/sync', {**body, 'standard': 'cluster@beta-k'}, status=400)
+    assert 'standard 只能是' in wrong['error']
+    agent.clusters['prod-k'].clear()
+    await call(client, 'POST', '/api/istio/collect', {'group_id': group_id})
+    gone = await call(client, 'POST', '/api/istio/vs/sync', {**body, 'rules': [{'standard_index': 0}]}, status=404)
+    assert '现状里没有' in gone['error']

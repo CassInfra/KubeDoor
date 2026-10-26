@@ -278,6 +278,8 @@ export interface CompareSide {
   label: string;
   exists: boolean;
   spec: Record<string, any>;
+  /** 内容的哈希:从集群现状同步到组标准时,确认打开对比之后两边没变 */
+  version: string | null;
   vs_id?: number;
   /** 组标准 · 集群:还没设置该集群域名的规则 */
   missing_domains?: string[];
@@ -288,6 +290,8 @@ export interface RouteDiffRow {
   op: "same" | "domains" | "changed" | "left_only" | "right_only";
   moved: boolean;
   label: string;
+  /** 转发目标(两边不同时都列出) */
+  target: string;
   left_index: number | null;
   right_index: number | null;
   left: Record<string, any> | null;
@@ -317,6 +321,48 @@ export interface CompareResult {
   left: CompareSide;
   right: CompareSide;
   diff: SpecDiff;
+}
+
+/** 对比里的一行规则:组标准里的第几条、集群现状里的第几条(从 0 开始) */
+export interface SyncPick {
+  standard_index: number | null;
+  live_index: number | null;
+}
+
+/** 从集群现状整条同步到组标准 */
+export interface SyncPayload {
+  group_id: number;
+  namespace: string;
+  name: string;
+  /** 对比里组标准一侧:standard 或 standard@集群 */
+  standard: string;
+  k8s_name: string;
+  rules: SyncPick[];
+  gateways: boolean;
+  default: boolean;
+  extra: boolean;
+  standard_version: string;
+  live_version: string;
+}
+
+export interface SyncSummary {
+  added: number;
+  replaced: number;
+  deleted: number;
+  moved: number;
+  gateways: boolean;
+  default: boolean;
+  extra: boolean;
+  /** 同步来的规则里不符合命名规范的 */
+  lint: string[];
+}
+
+export interface SyncPreview {
+  /** 保存后的组标准(和对比里组标准一侧一样显示) */
+  spec: Record<string, any>;
+  summary: SyncSummary;
+  /** 保存后缺少规则域名的集群 */
+  missing_domains: { k8s_name: string; rules: string[] }[];
 }
 
 export interface ImportItem {
@@ -485,6 +531,19 @@ export const resetIstioVS = (vsId: number, k8sName: string) =>
   http.request<Done>("post", "/api/istio/vs/reset", {
     data: { vs_id: vsId, k8s_name: k8sName }
   });
+
+/** 从集群现状同步到组标准的预览(不保存);silent 时出错不弹提示 */
+export const previewIstioSync = (data: SyncPayload, silent = false) =>
+  http.request<Result<SyncPreview>>(
+    "post",
+    "/api/istio/vs/sync/preview",
+    { data },
+    silent ? { silent } : undefined
+  );
+
+/** 从集群现状整条同步规则(以及 gateways / 默认路由 / 其他字段)到组标准并保存 */
+export const syncIstioVS = (data: SyncPayload) =>
+  http.request<Done>("post", "/api/istio/vs/sync", { data });
 
 // ---------------------------------------------------------------- 组标准 VS
 export const getIstioVS = (vsId: number) =>

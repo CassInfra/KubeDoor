@@ -269,6 +269,7 @@ def test_top_queries_keep_cluster_filter_and_add_visibility():
 @pytest.mark.parametrize('method,path', [
     ('POST', '/api/istio/groups'), ('PUT', '/api/istio/groups'), ('DELETE', '/api/istio/groups'),
     ('POST', '/api/istio/collect'), ('POST', '/api/istio/import'), ('POST', '/api/istio/vs/reset'),
+    ('POST', '/api/istio/vs/sync/preview'), ('POST', '/api/istio/vs/sync'),
     ('POST', '/api/istio/ignore'), ('POST', '/api/istio/unignore'), ('POST', '/api/istio/live/delete'),
     ('POST', '/api/istio/vs'), ('PUT', '/api/istio/vs'), ('DELETE', '/api/istio/vs'),
     ('PUT', '/api/istio/vs/cluster'), ('DELETE', '/api/istio/vs/cluster'),

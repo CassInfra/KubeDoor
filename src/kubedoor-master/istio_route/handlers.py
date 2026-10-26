@@ -11,7 +11,7 @@ import functools
 import json
 import re
 from datetime import datetime
-from typing import Dict, Iterable, List, Optional, Union
+from typing import Dict, Iterable, List, Optional, Tuple, Union
 
 from aiohttp import web
 from loguru import logger
@@ -565,6 +565,43 @@ class ImportRequest(BaseModel):
     items: List[ImportItem] = Field(min_length=1, max_length=1000)
 
 
+class SyncPick(BaseModel):
+    """对比里的一行规则:组标准里的第几条、集群现状里的第几条(从 0 开始,没有就是空)。"""
+
+    standard_index: Optional[int] = Field(default=None, ge=0)
+    live_index: Optional[int] = Field(default=None, ge=0)
+
+    @model_validator(mode='after')
+    def _one_side(self):
+        if self.standard_index is None and self.live_index is None:
+            raise ValueError('要同步的规则两边都是空的')
+        return self
+
+
+class SyncRequest(VSKey):
+    """从集群现状整条同步规则(以及 gateways / 默认路由 / 其他字段)到组标准。"""
+
+    group_id: int
+    # 对比里组标准一侧:standard 或 standard@集群,规则按它和现状对齐
+    standard: str = 'standard'
+    k8s_name: str = Field(min_length=1, max_length=255)
+    rules: List[SyncPick] = Field(default_factory=list, max_length=2000)
+    gateways: bool = False
+    default: bool = False
+    extra: bool = False
+    # 打开对比时两边内容的哈希(对比接口的 version):之后变了就不能按当时的对齐结果同步
+    standard_version: str
+    live_version: str
+
+    @model_validator(mode='after')
+    def _check(self):
+        if self.standard != 'standard' and not self.standard.startswith('standard@'):
+            raise ValueError('standard 只能是 standard 或 standard@集群')
+        if not (self.rules or self.gateways or self.default or self.extra):
+            raise ValueError('没有要同步的内容')
+        return self
+
+
 class ApplyItem(BaseModel):
     vs_id: int
     k8s_name: str
@@ -770,28 +807,34 @@ async def collect(request):
     return _ok(list(results))
 
 
+def _standard_view(standard: dict, k8s_name: str) -> Tuple[dict, Optional[str]]:
+    """对比里组标准一侧显示的内容:给了已纳入的集群用该集群的 hosts 和域名,否则是共用部分(域名显示占位)。
+    返回 (spec, 用了哪个集群的域名);从集群现状同步到组标准时按同样的内容对齐规则。"""
+    binding = standard['bindings'].get(k8s_name) if k8s_name else None
+    if binding:
+        return S.standard_spec(standard, binding['hosts'], k8s_name), k8s_name
+    return S.standard_spec(standard), None
+
+
 async def _compare_side(request, group: dict, visible: List[str], namespace: str, name: str, side: str) -> dict:
-    """对比的一方:standard(组标准共用部分)、standard@集群(组标准 + 该集群 hosts 和域名)、cluster@集群(集群现状)。"""
+    """对比的一方:standard(组标准共用部分)、standard@集群(组标准 + 该集群 hosts 和域名)、cluster@集群(集群现状)。
+    version 是内容的哈希,从集群现状同步到组标准时用来确认两边没变。"""
     kind, _, k8s_name = (side or '').partition('@')
     if k8s_name and k8s_name not in visible:
         raise IstioError(f'没有集群 {k8s_name} 的访问权限', 403)
     if kind == 'standard':
         standard = await store.find_standard(group['id'], namespace, name)
         if standard is None:
-            return {'side': side, 'label': '组标准', 'exists': False, 'spec': {}}
-        binding = standard['bindings'].get(k8s_name) if k8s_name else None
-        label = f'组标准 · {k8s_name}' if k8s_name else '组标准'
-        result = {'side': side, 'label': label, 'exists': True, 'vs_id': standard['id'], 'missing_domains': []}
-        if binding:
-            result.update(spec=S.standard_spec(standard, binding['hosts'], k8s_name),
-                          missing_domains=S.missing_domains(standard, k8s_name))
-        else:
-            result['spec'] = S.standard_spec(standard)
-        return result
+            return {'side': side, 'label': '组标准', 'exists': False, 'spec': {}, 'version': None}
+        spec, rendered_for = _standard_view(standard, k8s_name)
+        return {'side': side, 'label': f'组标准 · {k8s_name}' if k8s_name else '组标准', 'exists': True,
+                'vs_id': standard['id'], 'spec': spec, 'version': S.spec_hash(spec),
+                'missing_domains': S.missing_domains(standard, rendered_for) if rendered_for else []}
     if kind == 'cluster' and k8s_name:
         snapshots = await store.load_snapshots([k8s_name], namespace, name)
         spec = snapshots.get((k8s_name, namespace, name))
-        return {'side': side, 'label': f'{k8s_name} 现状', 'exists': spec is not None, 'spec': spec or {}}
+        return {'side': side, 'label': f'{k8s_name} 现状', 'exists': spec is not None, 'spec': spec or {},
+                'version': S.spec_hash(spec) if spec is not None else None}
     raise IstioError('对比对象格式:standard、standard@集群 或 cluster@集群')
 
 
@@ -890,6 +933,59 @@ async def reset_standard(request):
                 route['domains'][cluster] = lists
     await store.replace_standard_content(standard['id'], parsed['vs'], routes, _username(request))
     return _ok(msg=f'已按 {k8s_name} 的现状更新组标准(各集群 hosts 不变),下发后生效')
+
+
+async def _sync_draft(request) -> Tuple[SyncRequest, dict, Optional[str], dict]:
+    """从集群现状同步到组标准:按对比时的对齐结果算出新的组标准。返回 (请求, 组标准, 对齐用了哪个集群的域名, 新组标准)。
+    打开对比之后组标准或现状变了(对齐结果可能不一样)就拒绝,让用户刷新后重选。"""
+    req = SyncRequest(**await _body(request))
+    group = await _group(req.group_id)
+    render_k8s = req.standard.partition('@')[2]
+    _members(group, [req.k8s_name, *([render_k8s] if render_k8s else [])])
+    standard = await store.find_standard(group['id'], req.namespace, req.name)
+    if standard is None:
+        raise IstioError(f'组里没有 {req.namespace}/{req.name} 的组标准', 404)
+    snapshots = await store.load_snapshots([req.k8s_name, *standard['bindings']], req.namespace, req.name)
+    live = snapshots.get((req.k8s_name, req.namespace, req.name))
+    if live is None:
+        raise IstioError(f'集群 {req.k8s_name} 的现状里没有这个 VirtualService,请先刷新现状', 404)
+    shown, rendered_for = _standard_view(standard, render_k8s)
+    if S.spec_hash(shown) != req.standard_version or S.spec_hash(live) != req.live_version:
+        raise IstioError(f'打开对比之后组标准或 {req.k8s_name} 的现状变了,请刷新对比后重新选择要同步的内容', 409)
+    try:
+        vs, routes, summary = S.sync_standard(
+            standard, rendered_for, req.k8s_name, live,
+            {c: snapshots.get((c, req.namespace, req.name)) for c in standard['bindings']},
+            [(pick.standard_index, pick.live_index) for pick in req.rules],
+            gateways=req.gateways, default=req.default, extra=req.extra)
+    except ValueError as exc:
+        raise IstioError(f'{exc},请刷新对比后重新选择', 409)
+    return req, standard, rendered_for, {**standard, **vs, 'routes': routes, 'summary': summary}
+
+
+@handler
+async def sync_preview(request):
+    """同步到组标准的预览(不保存):保存后的组标准(和对比里组标准一侧一样显示)、改了什么、哪些集群会缺少域名。"""
+    _, standard, rendered_for, draft = await _sync_draft(request)
+    binding = standard['bindings'].get(rendered_for) if rendered_for else None
+    missing = [{'k8s_name': c, 'rules': rules} for c in standard['bindings'] if (rules := S.missing_domains(draft, c))]
+    return _ok({'spec': S.standard_spec(draft, binding['hosts'] if binding else None, rendered_for),
+                'summary': draft['summary'], 'missing_domains': missing})
+
+
+@handler
+async def sync_to_standard(request):
+    """从集群现状整条同步规则(以及 gateways / 默认路由 / 其他字段)到组标准并保存;下发后才在各集群生效。"""
+    req, standard, _, draft = await _sync_draft(request)
+    summary = draft['summary']
+    parts = [f'{text} {summary[key]} 条规则' for key, text in
+             (('added', '加入'), ('replaced', '替换'), ('deleted', '删除'), ('moved', '调整顺序')) if summary[key]]
+    parts += [text for key, text in (('gateways', 'gateways'), ('default', '默认路由'), ('extra', '其他字段'))
+              if summary[key]]
+    if not parts:
+        return _ok(msg='选中的内容和组标准一样,没有要保存的修改')
+    await store.replace_standard_content(standard['id'], draft, draft['routes'], _username(request))
+    return _ok(msg=f"已从 {req.k8s_name} 的现状同步到组标准:{'、'.join(parts)},下发后生效")
 
 
 # ---------------------------------------------------------------------------
@@ -1340,6 +1436,8 @@ def register_routes(app, call_agent_api):
     router.add_get('/api/istio/live', live_detail)
     router.add_post('/api/istio/live/delete', delete_live)
     router.add_post('/api/istio/vs/reset', reset_standard)
+    router.add_post('/api/istio/vs/sync/preview', sync_preview)
+    router.add_post('/api/istio/vs/sync', sync_to_standard)
     router.add_get('/api/istio/vs/check', check_vs)
     router.add_get('/api/istio/vs', get_vs)
     router.add_post('/api/istio/vs', create_vs)

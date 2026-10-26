@@ -458,6 +458,79 @@ def test_aligned_domains_takes_values_from_matching_rules():
     assert S.aligned_domains(base, None) == {}
 
 
+# ---------------------------------------------------------------- 从集群现状同步到组标准
+NO_CHANGE = {'added': 0, 'replaced': 0, 'deleted': 0, 'moved': 0}
+
+
+def test_sync_plan_replaces_adds_and_deletes_whole_rules():
+    a, b, c, d, x = route('/a/', 1), route('/b/', 2), route('/c/', 3), route('/d/', 4), route('/x/', 9)
+    # 只有现状有的按现状里的位置加入,两边都有的原位替换
+    plan, counts = S.sync_plan([a, b, c], [a, route('/b/', 2, timeout='9s'), d, c], [(1, 1), (None, 2)])
+    assert plan == [('keep', 0), ('take', 1), ('take', 2), ('keep', 2)]
+    assert counts == {**NO_CHANGE, 'added': 1, 'replaced': 1}
+    # 只有组标准有的选了就删掉;没选的不动
+    assert S.sync_plan([a, x, c], [a, c], [(1, None)]) == ([('keep', 0), ('keep', 2)], {**NO_CHANGE, 'deleted': 1})
+    assert S.sync_plan([a, x, c], [a, c], [])[0] == [('keep', 0), ('keep', 1), ('keep', 2)]
+    # 两边一样的选了也不变
+    assert S.sync_plan([a, b], [a, b], [(0, 0)]) == ([('keep', 0), ('keep', 1)], NO_CHANGE)
+
+
+def test_sync_plan_moves_reordered_rules_to_live_position():
+    a, b, c = route('/a/', 1), route('/b/', 2), route('/c/', 3)
+    moved = [r for r in S.diff_http([a, b, c], [c, a, b]) if r['moved']]
+    assert [(r['left_index'], r['right_index']) for r in moved] == [(2, 0)]
+    assert S.sync_plan([a, b, c], [c, a, b], [(2, 0)]) == ([('take', 0), ('keep', 0), ('keep', 1)],
+                                                         {**NO_CHANGE, 'moved': 1})
+    assert S.sync_plan([a, b, c], [c, a, b], [])[0] == [('keep', 0), ('keep', 1), ('keep', 2)]
+    # 顺序不同、内容也不同:替换并调整顺序
+    plan, counts = S.sync_plan([a, b, c], [route('/c/', 3, timeout='1s'), a, b], [(2, 0)])
+    assert plan == [('take', 0), ('keep', 0), ('keep', 1)] and counts == {**NO_CHANGE, 'replaced': 1, 'moved': 1}
+    with pytest.raises(ValueError):  # 不是对齐出来的行(对比之后两边变了)
+        S.sync_plan([a, b, c], [c, a, b], [(0, 0)])
+
+
+def test_sync_standard_keeps_domains_of_other_clusters():
+    """以 p 纳管的组标准,从 k 的现状同步:改了的规则 p 保持原来的域名,新加的规则 p 缺少域名。"""
+    standard = make_domain_standard()
+    live = site_spec('k', routes=[host_rule('k', timeout='3s'), host_rule('k', shared='new.intra.example.com', service='new'),
+                                  route('/api/', 1, timeout='9s'), route('/r/', 5, rewrite='/')])
+    live['gateways'] = ['istio-system/external']
+    picks = [(0, 0), (None, 1), (1, 2), (None, 3)]
+    vs, routes, summary = S.sync_standard(standard, None, 'k', live, {'p': site_spec('p'), 'k': live}, picks,
+                                          gateways=True)
+    assert [r['priority'] for r in routes] == [10, 20, 30, 40]
+    assert [r['timeout'] for r in routes] == ['3s', None, '9s', '7s']
+
+    def values(lists):
+        return [[item['value'] for item in block] for block in lists]
+
+    assert values(routes[0]['domains']['k']) == [['svc-k.intra.example.com', 'svc.intra.example.com']]
+    assert values(routes[0]['domains']['p']) == [['svc-p.intra.example.com', 'svc.intra.example.com']]
+    assert values(routes[1]['domains']['k']) == [['svc-k.intra.example.com', 'new.intra.example.com']]
+    assert 'p' not in routes[1]['domains'] and routes[2]['domains'] == {}
+    assert vs['gateways'] == ['istio-system/external'] and vs['df_forward_type'] == standard['df_forward_type']
+    assert summary == {**NO_CHANGE, 'added': 2, 'replaced': 2, 'gateways': True, 'default': False, 'extra': False,
+                       'lint': ['第 4 条规则(uri prefix /r/)用了重写但没有名称']}
+    draft = {**standard, **vs, 'routes': routes}
+    assert S.missing_domains(draft, 'p') == ['第 2 条规则(域名按集群 → new.ns)'] and S.missing_domains(draft, 'k') == []
+    # 全部同步过来:组标准按 k 渲染就是 k 的现状
+    assert S.spec_hash(S.standard_spec(draft, live['hosts'], 'k')) == S.spec_hash(live)
+    # 组标准按 k 的域名显示时对齐结果不同:域名不同的那条规则两边对得上
+    rows = S.diff_http(S.split_http(S.standard_spec(standard, None, 'k')['http'])[0], live['http'])
+    assert [(r['op'], r['left_index'], r['right_index']) for r in rows][0] == ('changed', 0, 0)
+
+
+def test_sync_standard_default_route_and_other_fields():
+    parsed = S.parse_spec(vs_spec())
+    standard = {'id': 1, **parsed['vs'], 'routes': [{**r, 'id': n + 1, 'domains': {}} for n, r in enumerate(parsed['routes'])],
+                'bindings': {}}
+    live = vs_spec(default=None, exportTo=['.'])
+    vs, routes, summary = S.sync_standard(standard, None, 'k', live, {}, [], default=True, extra=True)
+    assert vs['df_forward_type'] is None and vs['extra_spec'] == {'exportTo': ['.']} and len(routes) == 2
+    assert S.spec_hash(S.standard_spec({**standard, **vs, 'routes': routes}, live['hosts'])) == S.spec_hash(live)
+    assert summary['default'] and summary['extra'] and not summary['gateways']
+
+
 def test_merge_adjacent_domain_blocks():
     template = [{S.DOMAIN_KEY: True}, {S.DOMAIN_KEY: True}, {'uri': {'prefix': '/x'}}, {S.DOMAIN_KEY: True}]
     item = {'field': 'authority', 'op': 'exact'}

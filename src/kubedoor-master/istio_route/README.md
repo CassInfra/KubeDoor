@@ -4,7 +4,7 @@
 
 | 文件 | 内容 |
 | --- | --- |
-| `spec.py` | 纯逻辑:解析 / 渲染 spec、域名条件按集群拆分与展开、归一化哈希、规则对齐对比、规范检查、组的 VS 范围与跨组冲突、组矩阵 |
+| `spec.py` | 纯逻辑:解析 / 渲染 spec、域名条件按集群拆分与展开、归一化哈希、规则对齐对比、从集群现状同步到组标准、规范检查、组的 VS 范围与跨组冲突、组矩阵 |
 | `store.py` | 数据访问(asyncpg,经 `db.py` 连接池) |
 | `handlers.py` | `/api/istio/*` 接口;调 agent 的列出 / 下发 / 删除接口 |
 | `../db.sql` | 第 6~8 节:`istio_*` 九张表(含早先「一个集群只属于一个组」结构的升级) |
@@ -56,6 +56,22 @@
 删除前从集群取最新内容记进审计 `istio.delete`(`detail.spec`,误删可以照着恢复);本组标准部署到了该集群的,
 同时不再部署(删掉该集群的 hosts 和域名),免得下次下发又建回来。这个接口要新版 agent(只换镜像),
 旧版 agent 会提示先升级。
+
+### 从集群现状同步到组标准
+
+对比时一边是组标准(`standard` 或 `standard@集群`)、一边是集群现状(`cluster@集群`),管理员可以把现状里的内容
+整条同步到组标准 —— 只能从现状到组标准(组标准只有一份,各集群的现状可能各不相同)。在要同步的规则后面点按钮,
+可以选多处、可以撤销,选好后「保存组标准」一次写入(保存前确认改了什么、哪些集群会缺少域名);下发后才在集群里生效。
+
+- 规则按对比的对齐结果整条处理:只有现状有的加入组标准(放在现状里的位置),两边都有但不同的用现状替换,
+  只有组标准有的从组标准删除(其他集群下发时也会删掉),只是顺序不同的按现状调整顺序;没选的规则内容和顺序都不变。
+- gateways、默认路由、其他字段(`extra_spec`)不同时也能同步,现状里没有的就是从组标准删掉;hosts 各集群独立,不同步。
+- 同步来的规则里的域名:来源集群用现状里的;其他已纳入的集群先找组标准里原来对应的规则(匹配条件不算域名、转发目标都一样),
+  找不到再取该集群的现状,都没有就留空,状态「缺少域名」。
+- 「组标准 · 集群」和该集群的现状对比时,存的域名和现状不一样的规则显示「只是域名不同」,也可以同步(换成现状里的域名)。
+- 选的是对比时的对齐结果:对比接口给两边返回 `version`(内容哈希),保存时有一边变了就拒绝(409),刷新对比后重新选。
+- 对比里展开规则是左右逐行对照:两边按行对齐,不同的行标红、行内不同的字加深,一边没有的行显示占位;
+  默认路由等较长的内容,离不同的行较远的相同行折叠起来。
 
 ### 域名条件按集群
 
@@ -116,7 +132,7 @@
    不一致的先对比,选基准集群纳管(或以某集群现状更新组标准) → 确认差异后下发拉齐。
 2. **日常修改**:改组标准 → 相关集群变成「待下发」 → 先下发测试集群,验证后再下发生产集群。
    下发前预览的是集群最新现状 → 将要下发的差异。新增按域名区分的规则时,在规则弹框里给每个集群选域名。
-3. **发现漂移**:刷新现状后出现「不一致」 → 对比 → 下发组标准覆盖回去,或以该集群现状更新组标准。
+3. **发现漂移**:刷新现状后出现「不一致」 → 对比 → 下发组标准覆盖回去,或把现状里的规则挑着同步到组标准(全部要就以该集群现状更新组标准)。
 4. **部署到新集群**:「部署到此集群」填 hosts 和各规则的域名(可以从别的集群复制并替换机房标识)→ 下发。
 
 5. **多个项目共用测试集群**:每个项目一个组,都加入共用的测试集群,用包含 / 忽略规则划分 VS(如 b2c 组包含 `b2c*`,
@@ -140,8 +156,9 @@
 | POST | `/api/istio/ignore` / `/api/istio/unignore` | `{group_id, items:[{namespace, name}]}`:在本组忽略 / 取消忽略(被组规则排除的取消忽略后单独纳入) |
 | GET | `/api/istio/live?group_id=&k8s_name=&namespace=&name=` | 查看集群里 VS 的现状(实时取完整对象,见上文):`{object, full}`,`full=false` 是旧版 agent,只有 spec |
 | POST | `/api/istio/live/delete` | `{group_id, k8s_name, namespace, name}`:删除集群里的 VS,见上文;审计 `istio.delete` |
-| GET | `/api/istio/compare?group_id=&namespace=&name=&left=&right=` | 对比。一方是 `standard`(组标准,不含 hosts,域名显示 `<按集群>`)、`standard@集群`、`cluster@集群`(现状);`diff.rules_same` = 只差 hosts 和域名,规则行 `op=domains` = 只是域名不同 |
+| GET | `/api/istio/compare?group_id=&namespace=&name=&left=&right=` | 对比。一方是 `standard`(组标准,不含 hosts,域名显示 `<按集群>`)、`standard@集群`、`cluster@集群`(现状);`diff.rules_same` = 只差 hosts 和域名,规则行 `op=domains` = 只是域名不同、`target` = 转发目标;两边的 `version` 是内容哈希,同步到组标准时用 |
 | POST | `/api/istio/import` | 纳管:`{group_id, items:[{namespace, name, base, clusters}]}`,以 base 集群现状生成组标准,各集群 hosts 和域名取自己的现状 |
+| POST | `/api/istio/vs/sync/preview`、`/api/istio/vs/sync` | 从集群现状同步到组标准(见上文):`{group_id, namespace, name, standard: standard\|standard@集群, k8s_name, rules:[{standard_index, live_index}], gateways, default, extra, standard_version, live_version}`。`rules` 是对比里要同步的规则行(两边的序号,从 0 开始),`*_version` 是对比接口两边的 `version`;preview 不保存,返回保存后的组标准(和对比里组标准一侧一样显示)、改动统计、会缺少域名的集群 |
 | POST | `/api/istio/vs/reset` | 以某集群现状更新组标准的共用部分:`{vs_id, k8s_name}`,hosts 不变;域名见上文 |
 | GET | `/api/istio/vs?vs_id=` | 组标准详情:共用部分、规则(`domains`:各集群的域名)、各集群的 hosts 和状态(`missing_domains` 缺哪些规则的域名,`live_domains` 现状里对应规则的域名)、规范检查 |
 | GET | `/api/istio/vs/check?group_id=&namespace=&name=` | 新建前检查:本组是否已有组标准、集群里是否已有同名的、其他组里是否已有、名称是否被本组排除 |

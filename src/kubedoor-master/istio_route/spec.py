@@ -529,11 +529,8 @@ def _merge_moved(rows: List[dict], left_keys: List[str], right_keys: List[str]) 
     return merged
 
 
-def align_rules(left: List[dict], right: List[dict]) -> List[dict]:
-    """两组规则对齐,返回 [{left_index, right_index, moved?}]。
-
-    先按匹配条件对齐;对不上的一段里再按 domain_rule_key 对齐(各集群只是域名不同的同一条规则);
-    最后两边都有、但位置对不上的合并成一行,标记 moved。"""
+def _align_raw(left: List[dict], right: List[dict]) -> Tuple[List[dict], tuple, tuple]:
+    """对齐的第一步:先按匹配条件对齐,对不上的一段里再按 domain_rule_key 对齐;还没有合并顺序不同的规则。"""
     keys = [route_key(e) for e in left], [route_key(e) for e in right]
     domain_keys = [domain_rule_key(e) for e in left], [domain_rule_key(e) for e in right]
     rows = []
@@ -549,8 +546,61 @@ def align_rules(left: List[dict], right: List[dict]) -> List[dict]:
             else:
                 rows += [{'left_index': i1 + a, 'right_index': None} for a in range(a1, a2)]
                 rows += [{'left_index': None, 'right_index': j1 + b} for b in range(b1, b2)]
+    return rows, keys, domain_keys
+
+
+def align_rules(left: List[dict], right: List[dict]) -> List[dict]:
+    """两组规则对齐,返回 [{left_index, right_index, moved?}]。
+
+    先按匹配条件对齐;对不上的一段里再按 domain_rule_key 对齐(各集群只是域名不同的同一条规则);
+    最后两边都有、但位置对不上的合并成一行,标记 moved。"""
+    rows, keys, domain_keys = _align_raw(left, right)
     rows = _merge_moved(rows, *keys)
     return _merge_moved(rows, *domain_keys)
+
+
+def sync_plan(standard: List[dict], live: List[dict], picks: Iterable[tuple]) -> Tuple[List[tuple], dict]:
+    """从集群现状整条同步规则到组标准:新的规则顺序 [('keep', 组标准里的序号) | ('take', 现状里的序号)] 和统计。
+
+    picks 是要同步的对齐行 [(组标准序号 | None, 现状序号 | None)],必须是 align_rules(standard, live) 给出的行:
+    两边都有的用现状替换(顺序不同的放到现状里的位置),只有现状有的按现状里的位置加入,只有组标准有的删除。
+    没选的规则保持组标准原来的顺序。对不上(对比之后两边变了)抛 ValueError。"""
+    raw, keys, domain_keys = _align_raw(standard, live)
+    merged = _merge_moved(_merge_moved([dict(row) for row in raw], *keys), *domain_keys)
+    rows = {(row['left_index'], row['right_index']): row for row in merged}
+    in_place, dropped, taken = {}, set(), set()
+    counts = {'added': 0, 'replaced': 0, 'deleted': 0, 'moved': 0}
+    for pick in picks:
+        row = rows.get(tuple(pick))
+        if row is None:
+            raise ValueError('要同步的规则和对齐结果对不上')
+        i, j = row['left_index'], row['right_index']
+        if i is None or j is None:
+            counts['added' if i is None else 'deleted'] += 1
+        elif canonical(standard[i]) != canonical(live[j]):
+            counts['replaced'] += 1
+        if i is not None and j is not None and not row.get('moved'):
+            if canonical(standard[i]) != canonical(live[j]):
+                in_place[i] = j
+            continue
+        # 顺序不同的规则在第一步里是分开的两行:从组标准原来的位置拿掉,放到现状里的位置
+        if i is not None and j is not None:
+            counts['moved'] += 1
+        if i is not None:
+            dropped.add(i)
+        if j is not None:
+            taken.add(j)
+    plan = []
+    for row in raw:
+        i, j = row['left_index'], row['right_index']
+        if i is not None and j is not None:
+            plan.append(('take', in_place[i]) if i in in_place else ('keep', i))
+        elif i is not None:
+            if i not in dropped:
+                plan.append(('keep', i))
+        elif j in taken:
+            plan.append(('take', j))
+    return plan, counts
 
 
 def diff_http(left: List[dict], right: List[dict]) -> List[dict]:
@@ -575,6 +625,9 @@ def diff_http(left: List[dict], right: List[dict]) -> List[dict]:
             'op': op,
             'moved': bool(row.get('moved')),
             'label': route_label(entry_left or entry_right),
+            # 转发目标:只有域名条件的规则描述都一样,靠它区分;两边不同时都列出
+            'target': ' / '.join(dict.fromkeys(filter(None, (forward_label(e) for e in (entry_left, entry_right)
+                                                             if e is not None)))),
             'left_index': i,
             'right_index': j,
             'left': entry_left,
@@ -781,6 +834,67 @@ def aligned_domains(entries: List[dict], live: Optional[dict]) -> Dict[int, List
         if lists and not any(item['value'] == DOMAIN_PLACEHOLDER for items in lists for item in items):
             result[i] = lists
     return result
+
+
+_ROUTE_FIELDS = ('name', 'match_rules', 'rewrite_rules', 'forward_type', 'forward_detail', 'timeout', 'extra')
+_DEFAULT_FIELDS = ('df_forward_type', 'df_forward_detail', 'df_forward_timeout', 'df_extra')
+
+
+def sync_standard(standard: dict, render_k8s: Optional[str], k8s_name: str, live: dict,
+                  snapshots: Dict[str, Optional[dict]], picks: Iterable[tuple], gateways: bool = False,
+                  default: bool = False, extra: bool = False) -> Tuple[dict, List[dict], dict]:
+    """从集群 k8s_name 的现状挑整条规则(以及 gateways / 默认路由 / 其他字段)同步到组标准,返回
+    (vs 字段, 新的规则, 统计)。规则按对比时组标准一侧的显示对齐:render_k8s 是那一侧用了哪个集群的域名。
+
+    没动的规则原样保留(各集群的域名不变);同步来的规则里的域名:k8s_name 用现状里的,其他已纳入的集群
+    先找组标准里原来对应的规则(匹配条件不算域名、转发目标都一样),找不到再取该集群的现状(snapshots),
+    都没有就留空(状态「缺少域名」)。"""
+    standard_entries, _ = split_http(standard_spec(standard, None, render_k8s).get('http'))
+    routes = sort_routes(standard.get('routes') or [])
+    if len(standard_entries) != len(routes):
+        raise ValueError('组标准最后一条规则没有匹配条件,和默认路由分不开,请先在详情页调整规则')
+    live_entries, _ = split_http(live.get('http'))
+    parsed = parse_spec(live)
+    plan, counts = sync_plan(standard_entries, live_entries, picks)
+
+    bound = list(standard.get('bindings') or {})
+    new_routes = []
+    for kind, index in plan:
+        source = routes[index] if kind == 'keep' else parsed['routes'][index]
+        route = {key: copy.deepcopy(source.get(key)) for key in _ROUTE_FIELDS}
+        route['domains'] = ({c: copy.deepcopy(lists) for c, lists in (source.get('domains') or {}).items() if c in bound}
+                            if kind == 'keep' else {})
+        route['priority'] = (len(new_routes) + 1) * 10
+        new_routes.append(route)
+    taken = [n for n, (kind, index) in enumerate(plan) if kind == 'take' and parsed['routes'][index]['domain_lists']]
+    for cluster in bound:
+        if not taken:
+            break
+        if cluster == k8s_name:
+            for n in taken:
+                new_routes[n]['domains'][cluster] = copy.deepcopy(parsed['routes'][plan[n][1]]['domain_lists'])
+            continue
+        entries = [render_route(routes[index], cluster) if kind == 'keep' else live_entries[index] for kind, index in plan]
+        kept = aligned_domains(entries, {'http': [render_route(route, cluster) for route in routes]})
+        current = aligned_domains(entries, snapshots.get(cluster))
+        for n in taken:
+            lists = kept.get(n) or current.get(n)
+            if lists:
+                new_routes[n]['domains'][cluster] = lists
+
+    vs = {key: copy.deepcopy(standard.get(key)) for key in ('gateways', *_DEFAULT_FIELDS, 'extra_spec')}
+    if gateways:
+        vs['gateways'] = parsed['vs']['gateways']
+    if default:
+        vs.update({key: parsed['vs'][key] for key in _DEFAULT_FIELDS})
+    if extra:
+        vs['extra_spec'] = parsed['vs']['extra_spec']
+    lint = []
+    for n, (kind, index) in enumerate(plan):
+        issue = route_issue(new_routes[n]['name'], new_routes[n]['rewrite_rules']) if kind == 'take' else None
+        if issue:
+            lint.append(f'第 {n + 1} 条规则({route_label(live_entries[index])}){issue}')
+    return vs, new_routes, {**counts, 'gateways': gateways, 'default': default, 'extra': extra, 'lint': lint}
 
 
 def build_matrix(clusters: List[dict], standards: List[dict], snapshots: Dict[tuple, dict]) -> List[dict]:
