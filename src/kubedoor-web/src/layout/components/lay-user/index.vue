@@ -1,10 +1,12 @@
 <script setup lang="ts">
-import { computed } from "vue";
+import { computed, onMounted, ref } from "vue";
 import { emitter } from "@/utils/mitt";
 import { useNav } from "@/layout/hooks/useNav";
 import { useUserStoreHook } from "@/store/modules/user";
+import { aiApi } from "@/api/ai";
 import LogoutCircleRLine from "@iconify-icons/ri/logout-circle-r-line";
 import LockPasswordLine from "@iconify-icons/ri/lock-password-line";
+import Wechat2Line from "@iconify-icons/ri/wechat-2-line";
 
 defineOptions({
   name: "LayUserMenu"
@@ -22,6 +24,17 @@ const ROLE_TAG = {
 
 const tagType = computed(() => ROLE_TAG[user.role] ?? "info");
 const displayName = computed(() => user.nickname || user.username);
+
+/** 启用了企微机器人(或已经绑过,方便解除)才显示「绑定企业微信」;AI 服务没部署时请求失败,不显示 */
+const wecomBindable = ref(false);
+onMounted(() => {
+  aiApi
+    .wecomBinding()
+    .then(
+      value => (wecomBindable.value = value.enabled || !!value.members.length)
+    )
+    .catch(() => undefined);
+});
 </script>
 
 <template>
@@ -54,7 +67,18 @@ const displayName = computed(() => user.nickname || user.username);
           <IconifyIconOffline :icon="LockPasswordLine" style="margin: 5px" />
           修改口令
         </el-dropdown-item>
-        <el-dropdown-item :divided="!user.canChangePassword" @click="logout">
+        <el-dropdown-item
+          v-if="wecomBindable"
+          :divided="!user.canChangePassword"
+          @click="emitter.emit('openWecomBind')"
+        >
+          <IconifyIconOffline :icon="Wechat2Line" style="margin: 5px" />
+          绑定企业微信
+        </el-dropdown-item>
+        <el-dropdown-item
+          :divided="!user.canChangePassword && !wecomBindable"
+          @click="logout"
+        >
           <IconifyIconOffline :icon="LogoutCircleRLine" style="margin: 5px" />
           退出登录
         </el-dropdown-item>

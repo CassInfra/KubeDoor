@@ -413,13 +413,23 @@ async def get_k8s_names():
         return []
 
 
+async def get_k8s_aliases():
+    """从库中读取所有K8S环境及其别名 {env: [别名, ...]}(AI 助手按别名识别集群)"""
+    try:
+        rows = await pg_fetch("SELECT env, aliases FROM k8s_agent_status ORDER BY env")
+        return {row[0]: list(row[1] or []) for row in rows}
+    except Exception as e:
+        logger.exception(e)
+        return {}
+
+
 async def agent_info():
     """从库中读取所有 agent 的信息"""
     agent_info = {}
     try:
         rows = await pg_fetch(
             "SELECT env, collect, peak_hours, admission, admission_namespace, "
-            "nms_not_confirm, scheduler FROM k8s_agent_status"
+            "nms_not_confirm, scheduler, aliases FROM k8s_agent_status"
         )
         for row in rows:
             agent_info[row[0]] = {
@@ -429,6 +439,7 @@ async def agent_info():
                 "admission_namespace": row[4],
                 "nms_not_confirm": row[5],
                 "scheduler": row[6],
+                "aliases": list(row[7] or []),
             }
     except Exception as e:
         logger.exception(e)

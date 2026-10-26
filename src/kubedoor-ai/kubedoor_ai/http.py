@@ -241,6 +241,19 @@ def create_app(service=None, token=None):
                 identity.require_admin()
                 await request.app.state.wecom.delete_user(request.path_params["userid"])
                 result = {"success": True}
+            elif endpoint == "wecom-user-purge":
+                identity.require_admin()
+                result = await request.app.state.wecom.purge_member(request.path_params["userid"])
+            elif endpoint == "wecom-user-remark":
+                identity.require_admin()
+                result = await request.app.state.wecom.save_remark(request.path_params["userid"], await body(request))
+            # 自助绑定:任何登录用户管理自己账号绑定的企微成员
+            elif endpoint == "wecom-binding":
+                result = await request.app.state.wecom.binding(identity)
+            elif endpoint == "wecom-binding-code":
+                result = await request.app.state.wecom.create_bind_code(identity)
+            elif endpoint == "wecom-binding-member":
+                result = await request.app.state.wecom.unbind_self(identity, request.path_params["userid"])
             elif endpoint == "skills":
                 result = {"skills": SKILLS}
             elif endpoint == "skill":
@@ -295,6 +308,11 @@ def create_app(service=None, token=None):
     route("/wecom/users", "wecom-users", ["GET", "POST"])
     route("/wecom/unbound", "wecom-unbound", ["PUT"])
     route("/wecom/users/{userid}", "wecom-user", ["DELETE"])
+    route("/wecom/users/{userid}/purge", "wecom-user-purge", ["POST"])
+    route("/wecom/users/{userid}/remark", "wecom-user-remark", ["PUT"])
+    route("/wecom/binding", "wecom-binding", ["GET"])
+    route("/wecom/binding/code", "wecom-binding-code", ["POST"])
+    route("/wecom/binding/{userid}", "wecom-binding-member", ["DELETE"])
     route("/skills", "skills", ["GET"])
     route("/skills/{skill_id}", "skill", ["GET"])
     route("/tools", "tools", ["GET"])

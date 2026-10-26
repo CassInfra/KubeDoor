@@ -293,7 +293,7 @@ RULES = (
     _rule('POST', '/api/db/res/(add|edit)', 'custom', check=res_upsert_check),
     _rule('POST', '/api/db/res/pod_count', 'env_write', env='body.env'),
     # ---- Agent 管理(管理员)----
-    _rule('POST', '/api/db/agent/(admission|collect|nms_not_confirm|scheduler)', 'admin'),
+    _rule('POST', '/api/db/agent/(admission|collect|nms_not_confirm|scheduler|aliases)', 'admin'),
     _rule('GET', '/api/admis_switch', 'admin', write=True),
     _rule('GET', '/api/db/agent/show_add_label', 'env_read', env='query.env'),
     # ---- 告警 ----

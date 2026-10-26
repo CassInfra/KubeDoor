@@ -34,6 +34,9 @@ CREATE TABLE IF NOT EXISTS k8s_agent_status (
     scheduler           boolean NOT NULL DEFAULT false
 );
 
+-- 集群别名:AI 助手(企业微信机器人等)按别名识别用户说的是哪个集群,在 Web 的 Agent 管理页编辑
+ALTER TABLE k8s_agent_status ADD COLUMN IF NOT EXISTS aliases text[] NOT NULL DEFAULT '{}';
+
 -- =============================================================================
 -- 2. k8s_res_control —— 资源管控表(env×namespace×deployment,热路径 UPDATE)
 --    准入 webhook 每次部署都会按主键实时查询

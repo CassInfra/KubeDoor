@@ -103,6 +103,7 @@ def test_env_condition_sql():
     ('GET', '/api/agent/istio/vs', 'admin'),
     ('POST', '/api/scale', 'env_write'),
     ('POST', '/api/db/agent/collect', 'admin'),
+    ('POST', '/api/db/agent/aliases', 'admin'),
     ('GET', '/api/agent/res/content', 'custom'),
     ('GET', '/api/agent/coredns', 'env_read'),
     ('GET', '/api/agent/net/resolve', 'env_read'),  # 从 agent 所在 Pod 解析域名

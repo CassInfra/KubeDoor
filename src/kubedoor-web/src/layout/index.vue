@@ -37,6 +37,7 @@ import NavHorizontal from "./components/lay-sidebar/NavHorizontal.vue";
 import BackTopIcon from "@/assets/svg/back_top.svg?component";
 import AIHeaderButton from "@/components/AI/AIHeaderButton.vue";
 import ChangePasswordDialog from "@/components/ChangePasswordDialog.vue";
+import WecomBindDialog from "@/components/WecomBindDialog.vue";
 import { getConfig } from "@/config";
 
 const { t } = useI18n();
@@ -232,6 +233,8 @@ const LayHeader = defineComponent({
     <LaySetting />
     <!-- 修改口令(出厂口令 / 管理员重置的口令会强制弹出) -->
     <ChangePasswordDialog />
+    <!-- 绑定企业微信(右上角用户菜单打开) -->
+    <WecomBindDialog />
     <AIChatDialog v-if="ai.mounted" />
   </div>
 </template>

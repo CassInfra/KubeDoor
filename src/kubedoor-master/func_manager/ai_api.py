@@ -113,7 +113,9 @@ async def agent_rpc(clients, env, payload, timeout=130):
 def register_routes(app, clients, utils):
     async def bootstrap(request):
         principal = authorize(request)
-        envs = sorted(set(await utils.get_k8s_names()) | set(clients))
+        # 集群别名在 Web 的 Agent 管理页维护,AI 助手按别名识别用户说的是哪个集群;库里还没有的集群给空列表
+        aliases = await utils.get_k8s_aliases()
+        envs = sorted(set(aliases) | set(clients))
         return web.json_response({
             "enabled": True,
             "username": principal.username, "permission": principal.role, "role": principal.role,
@@ -123,7 +125,8 @@ def register_routes(app, clients, utils):
             "clusters": [{"env": env, "online": bool(clients.get(env, {}).get("online")),
                           "ai_tools": bool(clients.get(env, {}).get("ai_tools")),
                           "ver": clients.get(env, {}).get("ver", ""),
-                          "permission": principal.permission(env)}
+                          "permission": principal.permission(env),
+                          "aliases": aliases.get(env, [])}
                          for env in envs if principal.can_read(env)],
             "prom_type": utils.PROM_TYPE, "prom_label_key": utils.PROM_K8S_TAG_KEY,
         })

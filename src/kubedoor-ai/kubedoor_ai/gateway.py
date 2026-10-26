@@ -220,7 +220,31 @@ class RunContext:
     active_calls: dict = field(default_factory=dict)
     secrets: tuple[str, ...] = ()
     usage: dict = field(default_factory=dict)   # 本轮模型用量，见 runtime.UsageMiddleware
+    switch_env: str | None = None   # 企微提问里 AI 请求切换到的集群；本轮随后只让模型说一句正在切换
 
+
+# 企业微信没有集群选择框：AI 判断用户问的是另一个集群时调用它，由企微在那个集群上重新处理
+# 这个问题。每一轮仍只在一个集群上执行，这个操作只校验和记录目标，不访问任何集群。
+# 请求之后本轮不再调用工具，模型用一句话收尾，本轮正常结束（检查点完整，下一轮只追加）。
+SWITCH_CLUSTER = "switch_cluster"
+
+
+def request_cluster_switch(ctx: RunContext, arguments: dict) -> dict:
+    run = ctx.run
+    clusters = run.get("_clusters") or []
+    if run.get("origin") != "wecom" or not clusters:
+        raise AIError("只有企业微信对话里的提问可以切换集群，请让用户自己切换", 400, "switch_unsupported")
+    if run.get("_switched") or ctx.switch_env:
+        raise AIError("本轮已经切换过一次集群，不能再切换，请在当前集群上回答", 409, "switch_repeated")
+    env = arguments.get("env")
+    if not isinstance(env, str) or env not in {item["env"] for item in clusters}:
+        raise AIError(f"集群「{env}」不在用户可访问的集群里，请用「可切换的集群」里的全名", 404, "cluster_not_found")
+    if env == run["scope"]["env"]:
+        raise AIError("已经在这个集群上，直接回答即可", 400, "switch_same")
+    ctx.switch_env = env
+    return {"success": True, "env": env,
+            "message": f"已请求切换到集群 {env}。不要再调用工具，也不要回答用户的问题，只用一句话告诉用户正在切换到 {env} 查询；"
+                       "平台会在该集群上重新处理这个问题。"}
 
 @dataclass(frozen=True)
 class ExecutorBinding:
@@ -338,6 +362,11 @@ class Gateway:
         if not isinstance(arguments, dict):
             raise AIError("工具 arguments 必须为对象")
         await self.check_cancel(ctx)
+        if operation == SWITCH_CLUSTER:
+            return request_cluster_switch(ctx, arguments)
+        if ctx.switch_env:
+            # 已经请求切换集群：本轮剩下的只是告诉用户正在切换，不再访问当前集群（子 Agent 同样）
+            raise AIError(f"已请求切换到集群 {ctx.switch_env}，本轮不能再调用工具，请用一句话告诉用户正在切换过去", 409, "switch_pending")
         args = copy.deepcopy(arguments)
         source = await self.choose_source(ctx, operation, source)
         read_only = self.read_only(operation, args)

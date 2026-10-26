@@ -63,7 +63,8 @@ def test_metrics_invalid_or_unbounded_range_is_rejected(updates):
 @pytest.mark.asyncio
 async def test_internal_routes_require_service_token_and_user_identity(monkeypatch):
     monkeypatch.setenv("AI_INTERNAL_TOKEN", "secret-test-token")
-    utils = SimpleNamespace(get_k8s_names=AsyncMock(return_value=["offline"]), PROM_TYPE="Victoria-Metrics-Cluster", PROM_K8S_TAG_KEY="origin_prometheus")
+    utils = SimpleNamespace(get_k8s_aliases=AsyncMock(return_value={"offline": ["离线集群"]}),
+                            PROM_TYPE="Victoria-Metrics-Cluster", PROM_K8S_TAG_KEY="origin_prometheus")
     app = internal_app(monkeypatch, {"online": {"online": True, "ver": "2"}}, utils)
     async with TestClient(TestServer(app)) as client:
         assert (await client.get("/api/ai/internal/bootstrap")).status == 401
@@ -80,8 +81,9 @@ async def test_internal_routes_require_service_token_and_user_identity(monkeypat
         assert response.status == 200
         body = await response.json()
         assert body["username"] == "viewer" and body["permission"] == "read"
-        assert [(c["env"], c["online"], c["permission"]) for c in body["clusters"]] == [
-            ("offline", False, "read"), ("online", True, "read")]
+        # 库里还没有的集群(只在 clients 里)别名是空列表
+        assert [(c["env"], c["online"], c["permission"], c["aliases"]) for c in body["clusters"]] == [
+            ("offline", False, "read", ["离线集群"]), ("online", True, "read", [])]
         identity = await client.get("/api/ai/internal/identity", headers={
             "X-Kubedoor-Token": "secret-test-token", "X-User-Name": "limited", "X-User-Permission": "admin",
         })
@@ -95,7 +97,7 @@ async def test_internal_routes_require_service_token_and_user_identity(monkeypat
 @pytest.mark.asyncio
 async def test_bootstrap_hides_clusters_without_permission_and_execute_checks_cluster(monkeypatch):
     monkeypatch.setenv("AI_INTERNAL_TOKEN", "secret-test-token")
-    utils = SimpleNamespace(get_k8s_names=AsyncMock(return_value=["prod", "staging", "secret"]),
+    utils = SimpleNamespace(get_k8s_aliases=AsyncMock(return_value={"prod": ["生产"], "staging": [], "secret": ["机密"]}),
                             PROM_TYPE="Victoria-Metrics-Cluster", PROM_K8S_TAG_KEY="origin_prometheus")
     sent = []
 
@@ -115,7 +117,9 @@ async def test_bootstrap_hides_clusters_without_permission_and_execute_checks_cl
     headers = {"X-Kubedoor-Token": "secret-test-token", "X-User-Name": "limited"}
     async with TestClient(TestServer(app)) as client:
         body = await (await client.get("/api/ai/internal/bootstrap", headers=headers)).json()
-        assert [(c["env"], c["permission"]) for c in body["clusters"]] == [("prod", "rw"), ("staging", "read")]
+        # 看不到的集群连同别名一起隐藏
+        assert [(c["env"], c["permission"], c["aliases"]) for c in body["clusters"]] == [
+            ("prod", "rw", ["生产"]), ("staging", "read", [])]
         # 看不到的集群不能执行任何工具
         response = await client.post("/api/ai/internal/agent-execute?env=secret", headers=headers,
                                       json={"operation": "api", "phase": "prepare"})

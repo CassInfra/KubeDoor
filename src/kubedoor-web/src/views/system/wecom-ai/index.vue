@@ -8,6 +8,7 @@ import {
   watch
 } from "vue";
 import { ElMessage, ElMessageBox } from "element-plus";
+import dayjs from "dayjs";
 import {
   aiApi,
   type AIProvider,
@@ -70,9 +71,9 @@ watch(
 const mappings = ref<WeComUser[]>([]);
 const systemUsers = ref<SystemUser[]>([]);
 const clusters = ref<string[]>([]);
-/** 默认集群的「无」:成员要先切换集群(或在提问里写出集群全名)才能提问 */
+/** 默认集群的「无」:每个新对话都要先选集群(卡片里选,或提问里说出集群名 / 别名) */
 const NO_CLUSTER = "__none__";
-const NO_CLUSTER_LABEL = "无（先切换集群才能提问）";
+const NO_CLUSTER_LABEL = "无（每个新对话先选集群）";
 const envOrNull = (value: string) =>
   value && value !== NO_CLUSTER ? value : null;
 const mapping = reactive({
@@ -80,6 +81,10 @@ const mapping = reactive({
   username: "",
   default_env: NO_CLUSTER
 });
+/** 绑定表单里正在绑定的成员(从列表点「绑定」带入时能显示他是谁) */
+const mappingMember = computed(() =>
+  mappings.value.find(item => item.wecom_userid === mapping.wecom_userid.trim())
+);
 const availableClusters = computed(() => {
   const user = systemUsers.value.find(
     item => item.username === mapping.username
@@ -159,6 +164,24 @@ function defaultEnvOf(row: WeComUser) {
     ? unboundSaved.value.unbound_default_env
     : null;
 }
+
+/** 列表里怎么称呼这个成员:企微只给加密的 UserID,管理员备注优先,其次是成员自报的名字 */
+function memberName(row: WeComUser) {
+  return row.remark || (row.self_name ? `${row.self_name}（自称）` : "");
+}
+
+/** 绑定方式:成员用绑定码自助绑定时,绑定人就是他自己的账号 */
+function boundLabel(row: WeComUser) {
+  if (!row.username || !row.bound_by) return "";
+  return row.bound_by === row.username ? "自助绑定" : `${row.bound_by} 绑定`;
+}
+
+function formatTime(value: string | null) {
+  return value ? dayjs(value).format("MM-DD HH:mm") : "";
+}
+
+/** ElMessageBox 被取消或关掉时 reject 的值,不算出错 */
+const dismissed = (error: unknown) => error === "cancel" || error === "close";
 let refreshTimer: ReturnType<typeof setInterval> | undefined;
 
 async function loadConfig() {
@@ -332,6 +355,12 @@ function editMapping(row: WeComUser) {
   mapping.default_env = row.default_env || NO_CLUSTER;
 }
 
+function resetMapping() {
+  mapping.wecom_userid = "";
+  mapping.username = "";
+  mapping.default_env = NO_CLUSTER;
+}
+
 async function saveMapping() {
   if (!mapping.wecom_userid.trim() || !mapping.username) {
     ElMessage.warning("请填写企微 UserID 并选择花折账号。");
@@ -343,9 +372,7 @@ async function saveMapping() {
       username: mapping.username,
       default_env: envOrNull(mapping.default_env)
     });
-    mapping.wecom_userid = "";
-    mapping.username = "";
-    mapping.default_env = NO_CLUSTER;
+    resetMapping();
     await loadMappings();
     ElMessage.success("成员映射已保存。");
   } catch (error) {
@@ -358,7 +385,7 @@ async function saveMapping() {
 async function removeMapping(row: WeComUser) {
   try {
     await ElMessageBox.confirm(
-      `解除企微成员 ${row.wecom_userid} 的花折账号绑定？`,
+      `解除企微成员 ${memberName(row) || row.wecom_userid} 的花折账号绑定？`,
       "解除绑定",
       { type: "warning" }
     );
@@ -366,8 +393,54 @@ async function removeMapping(row: WeComUser) {
     await loadMappings();
     ElMessage.success("成员绑定已解除。");
   } catch (error) {
-    if (error !== "cancel")
+    if (!dismissed(error))
       ElMessage.error(error instanceof Error ? error.message : "解除绑定失败");
+  }
+}
+
+async function editRemark(row: WeComUser) {
+  try {
+    // 加密 UserID 有 32 位,放标题里太长:没有名字时用尾号指代
+    const who =
+      memberName(row) || `UserID 尾号 ${row.wecom_userid.slice(-6)} 的成员`;
+    const { value } = await ElMessageBox.prompt(
+      `给 ${who} 写备注（比如姓名、部门），只用来辨认，不影响权限；留空表示清除。`,
+      "成员备注",
+      {
+        inputValue: row.remark || "",
+        inputPlaceholder: "例如：张三（运维部）",
+        inputValidator: (text: string) =>
+          !text || text.trim().length <= 100 || "备注最多 100 个字",
+        confirmButtonText: "保存"
+      }
+    );
+    await aiApi.saveWecomRemark(row.wecom_userid, value?.trim() || null);
+    await loadMappings();
+    ElMessage.success("备注已保存。");
+  } catch (error) {
+    if (!dismissed(error))
+      ElMessage.error(error instanceof Error ? error.message : "保存备注失败");
+  }
+}
+
+async function purgeMapping(row: WeComUser) {
+  try {
+    await ElMessageBox.confirm(
+      `清理企微成员 ${memberName(row) || row.wecom_userid}？绑定、默认集群和对话都会清掉，进行中的任务会停止，旧对话不能再继续（消息记录仍保留在审计里）；他下次发消息时按新成员接入。`,
+      "清理成员",
+      { type: "warning", confirmButtonText: "清理" }
+    );
+    const result = await aiApi.purgeWecomUser(row.wecom_userid);
+    if (mapping.wecom_userid.trim() === row.wecom_userid) resetMapping();
+    await loadMappings();
+    ElMessage.success(
+      result.stopped
+        ? `已清理，停止了 ${result.stopped} 个进行中的任务。`
+        : "已清理，该成员下次发消息时按新成员接入。"
+    );
+  } catch (error) {
+    if (!dismissed(error))
+      ElMessage.error(error instanceof Error ? error.message : "清理成员失败");
   }
 }
 
@@ -394,7 +467,7 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <div class="wecom-admin" v-loading="loading">
+  <div v-loading="loading" class="wecom-admin">
     <section class="settings-section">
       <div class="section-heading">
         <div>
@@ -491,6 +564,11 @@ onBeforeUnmount(() => {
           <p>
             企微成员权限始终按花折账号实时校验：已绑定的成员用绑定的账号，未绑定的成员用下面的默认权限；未绑定成员首次发消息后会出现在列表中。
           </p>
+          <p>
+            企微只提供加密的
+            UserID，认不出是谁时：请成员在花折右上角用户菜单「绑定企业微信」获取绑定码、在企微里发给机器人完成自助绑定；或者请他在企微里发「我是
+            张三」，名字会显示在列表里，也可以给成员写备注。
+          </p>
         </div>
       </div>
       <el-form label-width="170px" class="unbound-form">
@@ -540,8 +618,8 @@ onBeforeUnmount(() => {
             />
           </el-select>
           <div class="form-tip">
-            未绑定成员没切换过集群时在这个集群上提问；选「无」时，成员要先发「切换集群
-            序号或名称」，或在提问里写出集群全名。
+            未绑定成员每个新对话从这个集群开始；选「无」时，每个新对话都要先在卡片里选集群（也可以发「切换集群
+            名称」，或在提问里说出集群名或别名）。
           </div>
         </el-form-item>
         <div class="form-actions">
@@ -576,15 +654,32 @@ onBeforeUnmount(() => {
         row-key="wecom_userid"
         size="small"
       >
-        <el-table-column
-          prop="wecom_userid"
-          label="企业微信 UserID"
-          min-width="220"
-          show-overflow-tooltip
-        />
+        <el-table-column label="企微成员" min-width="230">
+          <template #default="{ row }">
+            <div class="member-name">
+              <span v-if="memberName(row)">{{ memberName(row) }}</span>
+              <span v-else class="muted-text">未知成员</span>
+              <el-button
+                link
+                type="primary"
+                size="small"
+                @click="editRemark(row)"
+                >备注</el-button
+              >
+            </div>
+            <div class="member-id" :title="row.wecom_userid">
+              {{ row.wecom_userid }}
+            </div>
+          </template>
+        </el-table-column>
         <el-table-column label="花折账号" min-width="150">
           <template #default="{ row }">
-            <span v-if="row.username">{{ row.username }}</span>
+            <template v-if="row.username">
+              <span>{{ row.username }}</span>
+              <div v-if="boundLabel(row)" class="member-id">
+                {{ boundLabel(row) }}
+              </div>
+            </template>
             <template v-else>
               <el-tag type="warning" size="small">待绑定</el-tag>
               <span v-if="unboundSaved.unbound_username" class="muted"
@@ -605,8 +700,13 @@ onBeforeUnmount(() => {
             row.current_env || defaultEnvOf(row) || "未选择"
           }}</template>
         </el-table-column>
-        <el-table-column prop="pending_approvals" label="待审批" width="90" />
-        <el-table-column label="操作" width="150" fixed="right">
+        <el-table-column label="最后活跃" width="110">
+          <template #default="{ row }">{{
+            formatTime(row.last_seen_at)
+          }}</template>
+        </el-table-column>
+        <el-table-column prop="pending_approvals" label="待审批" width="80" />
+        <el-table-column label="操作" width="160" fixed="right">
           <template #default="{ row }">
             <el-button link type="primary" @click="editMapping(row)">{{
               row.username ? "修改" : "绑定"
@@ -618,6 +718,14 @@ onBeforeUnmount(() => {
               @click="removeMapping(row)"
               >解除</el-button
             >
+            <el-tooltip
+              content="当作新成员：清掉绑定、集群和对话，停止进行中的任务"
+              placement="top"
+            >
+              <el-button link type="danger" @click="purgeMapping(row)"
+                >清理</el-button
+              >
+            </el-tooltip>
           </template>
         </el-table-column>
       </el-table>
@@ -626,8 +734,14 @@ onBeforeUnmount(() => {
         <el-form-item label="企业微信 UserID" required>
           <el-input
             v-model="mapping.wecom_userid"
-            placeholder="从上方待绑定成员选择，或输入成员 UserID"
+            placeholder="在上方列表点「绑定」带入，或输入成员 UserID"
           />
+          <div
+            v-if="mappingMember && memberName(mappingMember)"
+            class="form-tip"
+          >
+            成员：{{ memberName(mappingMember) }}
+          </div>
         </el-form-item>
         <el-form-item label="花折账号" required>
           <el-select
@@ -657,6 +771,9 @@ onBeforeUnmount(() => {
               :value="env"
             />
           </el-select>
+          <div class="form-tip">
+            该成员每个新对话从这个集群开始；选「无」时每个新对话都要先选集群。
+          </div>
         </el-form-item>
         <div class="form-actions">
           <el-button type="primary" @click="saveMapping">保存绑定</el-button>
@@ -736,6 +853,25 @@ onBeforeUnmount(() => {
   margin-left: 6px;
   font-size: 12px;
   color: var(--el-text-color-secondary);
+}
+
+.muted-text {
+  color: var(--el-text-color-secondary);
+}
+
+.member-name {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+
+/* 企微的加密 UserID 很长:放在名字下面用小字,单行省略,悬停看全文 */
+.member-id {
+  overflow: hidden;
+  font-size: 12px;
+  color: var(--el-text-color-secondary);
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .form-actions {

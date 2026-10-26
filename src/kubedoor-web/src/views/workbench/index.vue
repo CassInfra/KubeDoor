@@ -64,6 +64,42 @@
               show-overflow-tooltip
               sortable
             />
+            <el-table-column label="别名" min-width="160">
+              <template #header>
+                <span class="ai-connection-header">
+                  别名
+                  <el-tooltip placement="top">
+                    <template #content>
+                      <div class="ai-connection-tip">{{ ALIAS_TIP }}</div>
+                    </template>
+                    <el-icon class="ai-connection-header__hint">
+                      <QuestionFilled />
+                    </el-icon>
+                  </el-tooltip>
+                </span>
+              </template>
+              <template #default="scope">
+                <div class="alias-cell">
+                  <el-tag
+                    v-for="alias in scope.row.aliases"
+                    :key="alias"
+                    size="small"
+                    effect="plain"
+                  >
+                    {{ alias }}
+                  </el-tag>
+                  <el-button
+                    v-if="isAdmin"
+                    size="small"
+                    link
+                    type="primary"
+                    @click="handleEditAliases(scope.row)"
+                  >
+                    编辑
+                  </el-button>
+                </div>
+              </template>
+            </el-table-column>
             <el-table-column
               prop="online"
               label="状态"
@@ -415,6 +451,40 @@
         </template>
       </el-dialog>
 
+      <!-- 编辑别名对话框 -->
+      <el-dialog v-model="aliasDialogVisible" title="编辑别名" width="500px">
+        <el-form :model="aliasForm" label-width="80px" @submit.prevent>
+          <el-form-item label="K8S环境">
+            <el-input v-model="aliasForm.env" disabled />
+          </el-form-item>
+          <el-form-item label="别名">
+            <el-input-tag
+              v-model="aliasForm.aliases"
+              :max="ALIAS_MAX_COUNT"
+              :maxlength="ALIAS_MAX_LENGTH"
+              clearable
+              placeholder="输入别名后按回车添加"
+            />
+          </el-form-item>
+          <div class="alias-tip">
+            <p>{{ ALIAS_TIP }}</p>
+            <p>{{ ALIAS_RULE_TIP }}</p>
+          </div>
+        </el-form>
+        <template #footer>
+          <span class="dialog-footer">
+            <el-button @click="aliasDialogVisible = false">取消</el-button>
+            <el-button
+              type="primary"
+              :loading="aliasLoading"
+              @click="submitAliases"
+            >
+              确认
+            </el-button>
+          </span>
+        </template>
+      </el-dialog>
+
       <!-- 更新对话框 -->
       <el-dialog v-model="updateDialogVisible" title="更新镜像" width="500px">
         <el-form :model="updateForm" label-width="80px">
@@ -490,7 +560,12 @@ import {
   defineAsyncComponent,
   h
 } from "vue";
-import { ElMessage, ElMessageBox, type TableInstance } from "element-plus";
+import {
+  ElInputTag,
+  ElMessage,
+  ElMessageBox,
+  type TableInstance
+} from "element-plus";
 import { QuestionFilled } from "@element-plus/icons-vue";
 import {
   getAgentStatus,
@@ -500,6 +575,7 @@ import {
   updateAdmission,
   updateNmsNotConfirm,
   updateScheduler,
+  updateAgentAliases,
   updateAgentImage,
   restartAgent,
   type AgentOpResult
@@ -508,6 +584,7 @@ import {
 import { getPromNamespace } from "@/api/monit";
 
 import { message } from "@/utils/message";
+import { useClusterPermission } from "@/utils/permission";
 import { transformI18n } from "@/plugins/i18n";
 import { aiApi, type AIConnection } from "@/api/ai";
 
@@ -556,6 +633,7 @@ function connectionSummary(env: string) {
 // 定义Agent数据类型
 interface AgentData {
   key: string;
+  aliases: string[];
   online: boolean;
   last_heartbeat: string;
   ver: string;
@@ -615,6 +693,7 @@ const getAgentData = async () => {
     if (data) {
       tableData.value = Object.keys(data).map(key => ({
         key,
+        aliases: Array.isArray(data[key].aliases) ? data[key].aliases : [],
         online: data[key].online || false,
         last_heartbeat: data[key].last_heartbeat || "",
         ver: data[key].ver || "",
@@ -886,6 +965,50 @@ const handleSchedulerChange = async (val: boolean, row: AgentData) => {
   });
 };
 
+// ---- 集群别名(AI 助手按别名识别集群)----
+// 只有管理员能编辑(后端同样校验);按登录账号判断,不依赖 AI 服务是否启用
+const { isAdmin } = useClusterPermission();
+// 和 master func_manager/db_api.py 的校验保持一致
+const ALIAS_MAX_COUNT = 20;
+const ALIAS_MAX_LENGTH = 64;
+const ALIAS_TIP =
+  "企业微信 AI 助手按别名识别用户说的是哪个集群（例如「beta 昆仑」），一个集群可以有多个别名，不能和其它集群的名称或别名重复。";
+const ALIAS_RULE_TIP = `比较时忽略大小写、空格和 - _ . 符号，例如「beta 昆仑」和「Beta-昆仑」算同一个别名；最多 ${ALIAS_MAX_COUNT} 个，每个不超过 ${ALIAS_MAX_LENGTH} 个字符。中文别名在提问里原样出现就算提到了这个集群，不要用「测试」「生产」这类日常用词。`;
+const aliasDialogVisible = ref(false);
+const aliasLoading = ref(false);
+// el-input-tag 点清空后给的是 undefined
+const aliasForm = reactive<{ env: string; aliases?: string[] }>({
+  env: "",
+  aliases: []
+});
+
+const handleEditAliases = (row: AgentData) => {
+  aliasForm.env = row.key;
+  aliasForm.aliases = [...row.aliases];
+  aliasDialogVisible.value = true;
+};
+
+const submitAliases = async () => {
+  const aliases = aliasForm.aliases ?? [];
+  aliasLoading.value = true;
+  try {
+    const res = await updateAgentAliases(aliasForm.env, aliases);
+    const dropped = aliases.length - res.aliases.length;
+    ElMessage.success(
+      dropped > 0
+        ? `更新成功，已忽略 ${dropped} 个重复或与集群名相同的别名`
+        : "更新成功"
+    );
+    aliasDialogVisible.value = false;
+    await getAgentData();
+  } catch (error) {
+    // 失败原因(比如和其它集群重复)已由请求拦截器提示,弹窗保留方便修改
+    console.error("更新别名失败:", error);
+  } finally {
+    aliasLoading.value = false;
+  }
+};
+
 // 更新对话框
 const updateDialogVisible = ref(false);
 const updateForm = reactive({
@@ -1150,6 +1273,23 @@ onMounted(() => {
 .ai-connection-tip {
   max-width: 280px;
   line-height: 1.6;
+}
+
+.alias-cell {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  align-items: center;
+}
+
+.alias-tip {
+  font-size: 13px;
+  line-height: 1.6;
+  color: var(--el-text-color-secondary);
+}
+
+.alias-tip p {
+  margin: 4px 0;
 }
 
 .batch-targets {

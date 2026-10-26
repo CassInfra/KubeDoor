@@ -9,7 +9,10 @@
 写入类接口返回 {"success": true, "msg": "..."}。
 """
 
+import asyncio
 import json
+import re
+import unicodedata
 from datetime import datetime, date
 from decimal import Decimal
 from aiohttp import web
@@ -92,12 +95,16 @@ def _rolling_strategy_updates(data):
     return values
 
 
-def _pod_count_error(message):
+def _bad_request(message):
     """带 message 的 400，前端 http 拦截器会把 message 提示给用户。"""
     return web.HTTPBadRequest(
         text=json.dumps({"success": False, "message": message}, ensure_ascii=False),
         content_type='application/json',
     )
+
+
+def _pod_count_error(message):
+    return _bad_request(message)
 
 
 def _pod_count_manual(data):
@@ -469,6 +476,91 @@ async def agent_update_scheduler(request):
     return web.json_response({"success": True, "msg": "更新成功"})
 
 
+# ---- 集群别名:AI 助手(企业微信机器人等)按别名识别用户说的是哪个集群 ----
+ALIAS_MAX_LENGTH = 64
+ALIAS_MAX_COUNT = 20
+# 控制字符(Cc)、零宽字符这类不可见的格式字符(Cf)、孤立的代理码点(Cs,写库会出错)
+_ALIAS_BAD_CATEGORIES = ('Cc', 'Cf', 'Cs')
+
+
+def alias_key(text):
+    """集群名 / 别名的归一化键:去掉空白和 - _ . 后转小写。
+
+    AI 助手按同一个规则匹配用户说的集群,两边必须保持一致。
+    """
+    return re.sub(r"[\s\-_.]+", "", text).lower()
+
+
+def clean_aliases(env, aliases, others):
+    """校验并整理集群 env 的别名,返回要保存的列表;不合法时抛 ValueError(中文说明)。
+
+    - 去掉首尾空白,空的跳过;每个 1~64 个字符,不能含控制字符或不可见字符
+    - 按归一化键去重(保留第一次出现的原文),和本集群名相同的去掉,最多 20 个
+    - others 是其它集群的 {集群名: [别名, ...]}(含 env 自己也会跳过),不能和它们的名称或别名重复
+    """
+    if not isinstance(aliases, list) or not all(isinstance(item, str) for item in aliases):
+        raise ValueError('aliases 必须是字符串数组')
+    # 其它集群占用的归一化键 → (集群名, 别名);别名为 None 表示和集群名本身相同
+    taken = {}
+    for other_env, other_aliases in others.items():
+        if other_env == env:
+            continue
+        taken.setdefault(alias_key(other_env), (other_env, None))
+        for other_alias in other_aliases or []:
+            taken.setdefault(alias_key(other_alias), (other_env, other_alias))
+    own_key = alias_key(env)
+    seen = set()
+    result = []
+    for index, item in enumerate(aliases, 1):
+        text = item.strip()
+        if not text:
+            continue
+        if any(unicodedata.category(ch) in _ALIAS_BAD_CATEGORIES for ch in text):
+            raise ValueError(f'第 {index} 个别名包含控制字符或不可见字符')
+        if len(text) > ALIAS_MAX_LENGTH:
+            raise ValueError(f'别名「{text[:20]}…」超过 {ALIAS_MAX_LENGTH} 个字符')
+        key = alias_key(text)
+        if not key:
+            raise ValueError(f'别名「{text}」只有空格和 - _ . 符号，不能用来识别集群')
+        if key == own_key or key in seen:
+            continue
+        if key in taken:
+            other_env, other_alias = taken[key]
+            target = '名称' if other_alias is None else f'别名「{other_alias}」'
+            raise ValueError(f'别名「{text}」和集群 {other_env} 的{target}重复')
+        seen.add(key)
+        result.append(text)
+    if len(result) > ALIAS_MAX_COUNT:
+        raise ValueError(f'每个集群最多 {ALIAS_MAX_COUNT} 个别名')
+    return result
+
+
+# 别名不能跨集群重复:「读出其它集群 → 校验 → 写入」串行执行,避免两个请求同时把同一个别名加给不同集群
+# (master 单副本、单 event loop,进程内的锁就够了)
+_aliases_lock = asyncio.Lock()
+
+
+async def agent_update_aliases(request):
+    """整体替换集群的别名列表,返回实际保存的列表(去掉了重复的和与集群名相同的)。"""
+    d = await request.json()
+    env = d.get('env') if isinstance(d, dict) else None
+    if not isinstance(env, str) or not env:
+        raise _bad_request('env 不能为空')
+    async with _aliases_lock:
+        rows = await pg_fetch("SELECT env, aliases FROM k8s_agent_status")
+        others = {row['env']: row['aliases'] for row in rows}
+        if env not in others:
+            raise _bad_request(f'K8S 集群 {env} 不存在')
+        del others[env]
+        try:
+            aliases = clean_aliases(env, d.get('aliases'), others)
+        except ValueError as exc:
+            raise _bad_request(str(exc)) from exc
+        await pg_execute("UPDATE k8s_agent_status SET aliases=$1 WHERE env=$2", aliases, env)
+    logger.info(f'更新集群 {env} 的别名: {aliases}')
+    return web.json_response({"success": True, "msg": "更新成功", "aliases": aliases})
+
+
 async def agent_show_add_label(request):
     """是否已开启固定节点均衡模式(showAddLabel:SELECT 1 exists)"""
     env = request.query.get('env')
@@ -633,6 +725,7 @@ def register_routes(app):
     app.router.add_post("/api/db/agent/collect", agent_update_collect)
     app.router.add_post("/api/db/agent/nms_not_confirm", agent_update_nms_not_confirm)
     app.router.add_post("/api/db/agent/scheduler", agent_update_scheduler)
+    app.router.add_post("/api/db/agent/aliases", agent_update_aliases)
     app.router.add_get("/api/db/agent/show_add_label", agent_show_add_label)
     # 告警
     app.router.add_get("/api/db/alert/envs", alert_envs)

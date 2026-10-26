@@ -12,6 +12,8 @@ type Events = {
   passwordChangeRequired: undefined;
   /** 打开「修改口令」弹窗 */
   openChangePassword: undefined;
+  /** 打开「绑定企业微信」弹窗 */
+  openWecomBind: undefined;
 };
 
 export const emitter: Emitter<Events> = mitt<Events>();

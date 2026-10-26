@@ -189,9 +189,32 @@ export interface WeComUser {
   username: string | null;
   default_env: string | null;
   current_env: string | null;
+  /** 管理员写的备注(比如姓名) */
+  remark: string | null;
+  /** 成员在企微里发「我是 张三」自报的名字,只用于辨认 */
+  self_name: string | null;
+  /** 绑定人:管理员绑定是管理员账号,成员用绑定码自助绑定是他本人的账号 */
+  bound_by: string | null;
+  bound_at: string | null;
   first_seen_at: string;
   last_seen_at: string;
   pending_approvals: number;
+}
+
+/** 当前花折账号绑定的企微成员(右上角用户菜单「绑定企业微信」) */
+export interface WeComBinding {
+  /** 管理员是否启用了企微机器人 */
+  enabled: boolean;
+  connected: boolean;
+  members: {
+    wecom_userid: string;
+    self_name: string | null;
+    bound_by: string | null;
+    bound_at: string | null;
+    last_seen_at: string;
+  }[];
+  /** 绑定码有效分钟数 */
+  code_minutes: number;
 }
 
 /** 未绑定成员的默认权限账号和默认集群 */
@@ -439,6 +462,32 @@ export const aiApi = {
     }),
   deleteWecomUser: (userid: string) =>
     request<{ success: boolean }>(`/wecom/users/${itemPath(userid)}`, "DELETE"),
+  /** 清理企微成员:下次发消息时按新成员接入(停掉进行中的任务,对话不能再继续) */
+  purgeWecomUser: (userid: string) =>
+    request<{ success: boolean; sessions: number; stopped: number }>(
+      `/wecom/users/${itemPath(userid)}/purge`,
+      "POST",
+      {}
+    ),
+  saveWecomRemark: (userid: string, remark: string | null) =>
+    request<{ remark: string | null }>(
+      `/wecom/users/${itemPath(userid)}/remark`,
+      "PUT",
+      { remark }
+    ),
+  /** 以下三个任何登录用户都能用:管理自己账号绑定的企微成员 */
+  wecomBinding: () => request<WeComBinding>("/wecom/binding"),
+  createWecomBindCode: () =>
+    request<{ code: string; expires_at: string; minutes?: number }>(
+      "/wecom/binding/code",
+      "POST",
+      {}
+    ),
+  unbindWecom: (userid: string) =>
+    request<{ success: boolean }>(
+      `/wecom/binding/${itemPath(userid)}`,
+      "DELETE"
+    ),
   connections: () => request<{ connections: AIConnection[] }>("/connections"),
   parseConnection: (content: string) =>
     request<{

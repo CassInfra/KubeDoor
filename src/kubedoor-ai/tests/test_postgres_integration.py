@@ -12,6 +12,7 @@ import sys
 import threading
 import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from unittest.mock import AsyncMock
 from urllib.parse import urlsplit
 
 import httpx
@@ -19,11 +20,12 @@ import pytest
 import uvicorn
 from fastmcp import Client
 from fastmcp.client.transports import SSETransport, StreamableHttpTransport
-from langchain_core.messages import AIMessage
+from langchain_core.messages import AIMessage, ToolMessage
 
 from kubedoor_ai.domain import Identity, Provider
 from kubedoor_ai.gateway import RunContext
 from kubedoor_ai.http import create_app
+from kubedoor_ai.runtime import text_content
 from kubedoor_ai.service import Service
 from fakes import ScriptedModel, control_state
 
@@ -371,8 +373,8 @@ def test_wecom_conversation_boundaries_use_one_locked_transaction(harness):
         userid, identity = "wx-" + uuid.uuid4().hex, Identity(h.username, "rw")
         await store.execute("INSERT INTO kubedoor_ai_wecom_users(wecom_userid) VALUES($1)", userid)
         try:
-            first, notices, active = await wecom._current_session(userid, identity)
-            assert (notices, active) == ([], None)
+            first, notices, active, reset = await wecom._current_session(userid, identity)
+            assert (notices, active, reset) == ([], None, False)
             row = await store.one("SELECT channel,channel_key FROM kubedoor_ai_sessions WHERE id=$1::uuid", first)
             assert row == {"channel": "wecom", "channel_key": f"{userid}:{h.username}:{first}"}
             assert (await wecom._current_session(userid, identity))[0] == first
@@ -390,7 +392,7 @@ def test_wecom_conversation_boundaries_use_one_locked_transaction(harness):
 
             # 继续上次：切回并刷新最后活跃时间，紧接着的消息不会被空闲切走
             assert (await wecom._resume_previous_session(userid, identity)).startswith("已回到上一个对话（最后活跃：")
-            assert await wecom._current_session(userid, identity) == (first, [], None)
+            assert await wecom._current_session(userid, identity) == (first, [], None, False)
 
             # 只剩过期审批的任务先被停止
             run_id = str(uuid.uuid4())
@@ -399,7 +401,7 @@ def test_wecom_conversation_boundaries_use_one_locked_transaction(harness):
             await store.execute("INSERT INTO kubedoor_ai_actions(id,run_id,call_id,operation,source,arguments,preview,read_only,state,expires_at) "
                                 "VALUES($1::uuid,$2::uuid,$3,'delete_pod','kubedoor','{}','{}',false,'pending',now()-interval '1 minute')",
                                 str(uuid.uuid4()), run_id, run_id + ":expired")
-            session_id, notices, active = await wecom._current_session(userid, identity)
+            session_id, notices, active, _ = await wecom._current_session(userid, identity)
             assert (session_id, notices, active) == (first, ["上一个待审批的操作已过期，已停止该任务。"], None)
             assert (await store.one("SELECT status FROM kubedoor_ai_runs WHERE id=$1::uuid", run_id))["status"] == "cancelled"
 
@@ -422,7 +424,7 @@ def test_unreachable_old_wecom_conversation_loses_its_checkpoint_but_keeps_messa
         userid, identity = "wx-" + uuid.uuid4().hex, Identity(h.username, "rw")
         await store.execute("INSERT INTO kubedoor_ai_wecom_users(wecom_userid) VALUES($1)", userid)
         try:
-            old, _, _ = await wecom._current_session(userid, identity)
+            old, *_ = await wecom._current_session(userid, identity)
             h.model(AIMessage(content="查过了，一切正常"))
             run, _ = await h.service.new_run(identity, old, {"env": "cluster-a"}, origin="wecom", channel="wecom")
             await store.message(run, "user", "查一下")
@@ -442,9 +444,142 @@ def test_unreachable_old_wecom_conversation_loses_its_checkpoint_but_keeps_messa
             assert row["checkpoint_purged_at"] and row["messages"] == 2   # 消息记录保留用于审计
             # 上一个对话（middle）还能「继续上次」，不清理；旧卡片切不回已清理的 old
             assert (await store.one("SELECT checkpoint_purged_at FROM kubedoor_ai_sessions WHERE id=$1::uuid", middle))["checkpoint_purged_at"] is None
-            assert await wecom._continue_session(userid, identity, old) == "该对话已不可用，直接发送问题即可开始新对话。"
+            assert (await wecom._continue_session(userid, identity, old))[0] == "该对话已不可用，直接发送问题即可开始新对话。"
         finally:
             await store.execute("DELETE FROM kubedoor_ai_wecom_users WHERE wecom_userid=$1", userid)
+
+    runner.run(verify())
+
+
+def test_wecom_clusters_held_questions_binding_and_cleanup_on_postgres(harness):
+    """企微新加的 SQL 在真实 PostgreSQL 上执行：新对话回到默认集群、继续上次恢复集群、被拦下的提问、
+    管理员绑定和绑定码自助绑定、备注、清理成员。"""
+    h, runner = harness
+
+    async def verify():
+        from kubedoor_ai.wecom import WeComIntegration
+        store, wecom = h.service.store, WeComIntegration(h.service)
+        userid, identity = "wx-" + uuid.uuid4().hex, Identity(h.username, "rw")
+        wecom._identity = AsyncMock(return_value=identity)   # 测试 master 不认识这个账号，绑定时只要它有效
+
+        async def member(*columns):
+            return await store.one(f"SELECT {','.join(columns)} FROM kubedoor_ai_wecom_users WHERE wecom_userid=$1", userid)
+
+        await wecom._mapped_user(userid)
+        try:
+            # 第一个对话在 cluster-b 上提问过
+            first, *_ = await wecom._current_session(userid, identity)
+            await wecom._set_current_env(userid, "cluster-b")
+            await store.execute("INSERT INTO kubedoor_ai_runs(id,session_id,username,permission,status,scope,origin) "
+                                "VALUES($1::uuid,$2::uuid,$3,'rw','completed',$4,'wecom')", str(uuid.uuid4()), first, h.username, {"env": "cluster-b"})
+            await store.execute("INSERT INTO kubedoor_ai_messages(id,session_id,role,content) VALUES($1::uuid,$2::uuid,'user','查询 Pod')",
+                                str(uuid.uuid4()), first)
+            # 空闲超时开的新对话回到默认集群；「继续上次」恢复那个对话的集群；新对话按钮带上选的集群
+            await store.execute("UPDATE kubedoor_ai_sessions SET updated_at=now()-interval '3 hours' WHERE id=$1::uuid", first)
+            second, _, _, reset = await wecom._current_session(userid, identity)
+            assert second != first and reset and (await member("current_env"))["current_env"] is None
+            assert (await wecom._resume_previous_session(userid, identity)).endswith("集群：cluster-b）。")
+            assert await member("session_id", "current_env") == {"session_id": first, "current_env": "cluster-b"}
+            await wecom._start_new_session(userid, identity, "cluster-a")
+            assert (await member("current_env"))["current_env"] == "cluster-a"
+
+            # 被拦下的提问并发时只能取走一次，过期的不要，取完或过期都清掉原文
+            await wecom._hold_question(userid, "查一下 Pod")
+            taken = await asyncio.gather(wecom._take_pending(userid), wecom._take_pending(userid))
+            assert sorted(taken, key=bool) == [None, "查一下 Pod"]
+            assert await member("pending_text", "pending_at") == {"pending_text": None, "pending_at": None}
+            await wecom._hold_question(userid, "旧问题")
+            await store.execute("UPDATE kubedoor_ai_wecom_users SET pending_at=now()-interval '11 minutes' WHERE wecom_userid=$1", userid)
+            assert await wecom._take_pending(userid) is None
+            assert (await member("pending_text"))["pending_text"] is None
+            # 新对话时被拦下的提问作废
+            await wecom._hold_question(userid, "上一个对话里的问题")
+            await wecom._start_new_session(userid, identity)
+            assert await member("pending_text", "current_env") == {"pending_text": None, "current_env": None}
+
+            # 管理员绑定记绑定人；只改默认集群不动；解除后清空
+            await wecom.save_user(Identity("admin", "admin"), {"wecom_userid": userid, "username": h.username, "default_env": "cluster-a"})
+            bound = await member("username", "default_env", "current_env", "bound_by", "bound_at")
+            assert (bound["username"], bound["default_env"], bound["current_env"], bound["bound_by"]) == (h.username, "cluster-a", None, "admin")
+            await wecom.save_user(Identity("other-admin", "admin"), {"wecom_userid": userid, "username": h.username, "default_env": "cluster-b"})
+            assert await member("default_env", "bound_by", "bound_at") == {"default_env": "cluster-b", "bound_by": "admin", "bound_at": bound["bound_at"]}
+            # 改绑到别的账号:被拦下的提问作废
+            await wecom._hold_question(userid, "按原来账号问的问题")
+            await wecom.save_user(Identity("admin", "admin"), {"wecom_userid": userid, "username": h.username + "-new", "default_env": None})
+            assert await member("username", "pending_text", "bound_by") == {"username": h.username + "-new", "pending_text": None, "bound_by": "admin"}
+            await wecom.save_user(Identity("admin", "admin"), {"wecom_userid": userid, "username": h.username, "default_env": "cluster-b"})
+            assert await wecom.save_remark(userid, {"remark": "张三（运维）"}) == {"remark": "张三（运维）"}
+            row = next(row for row in await wecom.users() if row["wecom_userid"] == userid)
+            assert (row["remark"], row["bound_by"], row["pending_approvals"]) == ("张三（运维）", "admin", 0)
+            await wecom.delete_user(userid)
+            assert await member("username", "bound_by", "session_id") == {"username": None, "bound_by": None, "session_id": None}
+
+            # 绑定码：再生成会替换旧码；用过即删；输错计数
+            wecom.config = {"enabled": True}
+            stale = (await wecom.create_bind_code(identity))["code"]
+            code = (await wecom.create_bind_code(identity))["code"]
+            assert (await store.one("SELECT count(*) AS n FROM kubedoor_ai_wecom_bind_codes WHERE username=$1", h.username))["n"] == 1
+            if stale != code:
+                assert (await wecom._bind_by_code(userid, stale)).startswith("绑定码不对")
+            assert await wecom._bind_by_code(userid, code) == f"已绑定花折账号 {h.username}，之后按这个账号的权限使用机器人。"
+            assert await member("username", "bound_by", "bind_failures") == {"username": h.username, "bound_by": h.username, "bind_failures": 0}
+            assert (await wecom._bind_by_code(userid, code)).startswith("绑定码不对")
+            assert (await member("bind_failures"))["bind_failures"] == 1
+            assert [item["wecom_userid"] for item in (await wecom.binding(identity))["members"]] == [userid]
+
+            # 清理：成员行和待审批删掉，进行中的任务停掉，对话打标记删检查点（消息保留），旧卡片回不去
+            session_id, *_ = await wecom._current_session(userid, identity)
+            run_id = str(uuid.uuid4())
+            await store.execute("INSERT INTO kubedoor_ai_runs(id,session_id,username,permission,status,scope,origin) "
+                                "VALUES($1::uuid,$2::uuid,$3,'rw','waiting_approval',$4,'wecom')", run_id, session_id, h.username, {"env": "cluster-a"})
+            result = await wecom.purge_member(userid)
+            assert result["success"] and result["stopped"] == 1 and result["sessions"] >= 3
+            assert await store.one("SELECT 1 FROM kubedoor_ai_wecom_users WHERE wecom_userid=$1", userid) is None
+            assert (await store.one("SELECT status FROM kubedoor_ai_runs WHERE id=$1::uuid", run_id))["status"] == "cancelled"
+            sessions = await store.fetch("SELECT checkpoint_purged_at IS NOT NULL AS purged FROM kubedoor_ai_sessions "
+                                         "WHERE channel='wecom' AND starts_with(channel_key,$1)", f"{userid}:")
+            assert sessions and all(row["purged"] for row in sessions)
+            assert (await store.one("SELECT count(*) AS n FROM kubedoor_ai_messages WHERE session_id=$1::uuid", first))["n"] == 1
+            mapped = await wecom._mapped_user(userid)   # 下次发消息按新成员接入
+            assert (mapped["username"], mapped["session_id"], mapped["current_env"]) == (None, None, None)
+            assert (await wecom._continue_session(userid, identity, first))[0] == "该对话已不可用，直接发送问题即可开始新对话。"
+            assert await wecom._session_purged(session_id) and not await wecom._session_purged(str(uuid.uuid4()))
+        finally:
+            await store.execute("DELETE FROM kubedoor_ai_wecom_users WHERE wecom_userid=$1", userid)
+            await store.execute("DELETE FROM kubedoor_ai_wecom_bind_codes WHERE username=$1", h.username)
+
+    runner.run(verify())
+
+
+def test_wecom_cluster_switch_keeps_a_clean_checkpoint_on_postgres(harness):
+    """企微里 AI 请求切换集群:本轮正常结束、切换目标记进任务行;在新集群上重跑的那一轮,
+    Postgres 检查点里是真实的切换结果(没有被当成中断的工具调用补一条)"""
+    h, runner = harness
+
+    async def verify():
+        store, identity, provider = h.service.store, Identity(h.username, "rw"), Provider.parse(PROVIDER)
+        clusters = [{"env": "cluster-a", "permission": "rw"}, {"env": "cluster-b", "permission": "rw"}]
+        sid = await h.session()
+        h.model(AIMessage(content="", tool_calls=[{"name": "kubedoor_tool", "id": "switch-1", "type": "tool_call",
+                                                   "args": {"operation": "switch_cluster", "arguments": {"env": "cluster-b"}, "source": "auto"}}]),
+                AIMessage(content="正在切换到 cluster-b 查询。"), AIMessage(content="cluster-b 一切正常。"))
+        run, _ = await h.service.new_run(identity, sid, {"env": "cluster-a"}, origin="wecom")
+        run["_clusters"] = clusters
+        await store.message(run, "user", "cluster-b 怎么样")
+        await h.service.runtime.run_graph(RunContext(run, identity), provider, "cluster-b 怎么样", None)
+        assert await store.one("SELECT status,switch_env FROM kubedoor_ai_runs WHERE id=$1::uuid", run["id"]) == {
+            "status": "completed", "switch_env": "cluster-b"}
+
+        rerun, _ = await h.service.new_run(identity, sid, {"env": "cluster-b"}, origin="wecom")
+        rerun["_clusters"], rerun["_switched"] = clusters, True
+        await h.service.runtime.run_graph(RunContext(rerun, identity), provider, "已切换到集群 cluster-b，请在这个集群上回答我上一条消息里的问题。", None)
+        assert (await store.one("SELECT status,switch_env FROM kubedoor_ai_runs WHERE id=$1::uuid", rerun["id"])) == {
+            "status": "completed", "switch_env": None}
+        graph = h.service.runtime.graph(RunContext(rerun, identity), provider)
+        messages = (await graph.aget_state({"configurable": {"thread_id": sid}})).values["messages"]
+        results = [text_content(message) for message in messages if isinstance(message, ToolMessage)]
+        assert len(results) == 1 and "已请求切换到集群 cluster-b" in results[0]
+        assert text_content(messages[-1]) == "cluster-b 一切正常。"
 
     runner.run(verify())
 

@@ -8,7 +8,7 @@ from unittest.mock import AsyncMock
 import httpx
 import pytest
 import pytest_asyncio
-from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 from langgraph.checkpoint.memory import InMemorySaver
 from pydantic import Field
 
@@ -189,6 +189,61 @@ async def test_wecom_runs_tell_the_model_how_to_switch_clusters(origin, hinted):
         assert ("切换集群" in turn_line(block, "对话渠道：")) is hinted
         assert "切换集群" not in system
         assert json.loads(turn_line(block, "本轮范围：")) == {"env": "cluster-a"}
+    finally:
+        await gateway.close()
+
+
+@pytest.mark.asyncio
+async def test_wecom_switch_finishes_the_turn_normally_and_the_rerun_sees_the_real_result():
+    store = FakeStore()
+    gateway = Gateway(store, CredentialCipher("ab" * 32), "http://unused-master", "test-token")
+    switch = AIMessage(content="", tool_calls=[{"name": "kubedoor_tool", "id": "switch-1", "type": "tool_call",
+                                                "args": {"operation": "switch_cluster", "arguments": {"env": "cluster-b"}, "source": "auto"}}])
+    model = RecordingModel(responses=[switch, AIMessage(content="正在切换到 cluster-b 查询。"), AIMessage(content="cluster-b 的版本是 v1.30。")])
+    runtime = Runtime(store, gateway, InMemorySaver(), model_factory=lambda _: model)
+    provider = Provider("http://unused-model/v1", "", "mock-model")
+    clusters = [{"env": "cluster-a", "permission": "read", "aliases": []},
+                {"env": "cluster-b", "permission": "read", "aliases": ["beta 昆仑"]}]
+    scope = {"env": "cluster-a", "namespace": None, "deployment": None, "pod": None}
+    run = {"id": "run-1", "session_id": "session-1", "origin": "wecom", "skill_ids": [], "_clusters": clusters, "scope": scope}
+    try:
+        await runtime.run_graph(RunContext(run, Identity("operator", "read")), provider, "cassmall beta 昆仑集群的版本", None)
+        system, block = prompts(model.histories[0])
+        # 可访问的集群和别名在本轮上下文块里，系统提示不变
+        assert json.loads(turn_line(block, "可切换的集群：")) == [{"env": "cluster-a"}, {"env": "cluster-b", "aliases": ["beta 昆仑"]}]
+        assert "可切换的集群" not in system and "switch_cluster" in turn_line(block, "对话渠道：")
+        # 切换只记下目标，不访问集群；模型看到结果后一句话收尾，本轮正常结束，done 带上目标
+        assert len(model.histories) == 2 and store.actions == {}
+        assert store.statuses[-1] == "completed" and store.messages[-1]["content"] == "正在切换到 cluster-b 查询。"
+        assert store.events[-1]["type"] == "done" and store.events[-1]["data"]["switch_env"] == "cluster-b"
+
+        # 企微在 cluster-b 上重新提问：检查点里是真实的切换结果（没有被当成中断的工具调用补一条），不再提供切换
+        rerun = {**run, "id": "run-2", "_switched": True, "scope": {**scope, "env": "cluster-b"}}
+        await runtime.run_graph(RunContext(rerun, Identity("operator", "read")), provider,
+                                "已切换到集群 cluster-b，请在这个集群上回答我上一条消息里的问题。", None)
+        history = model.histories[2]
+        results = [text_content(message) for message in history if isinstance(message, ToolMessage)]
+        assert len(results) == 1 and "已请求切换到集群 cluster-b" in results[0]
+        assert not any(line.startswith("可切换的集群：") for line in prompts(history)[1].split("\n"))
+        assert store.events[-1]["data"].get("switch_env") is None
+    finally:
+        await gateway.close()
+
+
+@pytest.mark.asyncio
+async def test_after_a_switch_request_the_turn_cannot_touch_the_old_cluster():
+    from kubedoor_ai.domain import AIError
+    from kubedoor_ai.gateway import request_cluster_switch
+    store = FakeStore()
+    gateway = Gateway(store, CredentialCipher("ab" * 32), "http://unused-master", "test-token")
+    run = {"id": "run-1", "origin": "wecom", "_clusters": [{"env": "cluster-a"}, {"env": "cluster-b"}],
+           "scope": {"env": "cluster-a", "namespace": None, "deployment": None, "pod": None}}
+    ctx = RunContext(run, Identity("operator", "read"))
+    try:
+        request_cluster_switch(ctx, {"env": "cluster-b"})
+        with pytest.raises(AIError) as error:
+            await gateway.invoke(ctx, "pod_list", {})
+        assert error.value.code == "switch_pending" and store.actions == {}
     finally:
         await gateway.close()
 

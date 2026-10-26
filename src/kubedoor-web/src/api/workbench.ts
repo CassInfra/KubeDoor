@@ -102,6 +102,24 @@ export const updateScheduler = (env: string, scheduler: number) => {
   });
 };
 
+export type AgentAliasesResult = {
+  success: boolean;
+  msg?: string;
+  /** 实际保存的别名(去掉了重复的和与集群名相同的) */
+  aliases: string[];
+};
+
+/**
+ * 更新集群别名(整体替换),AI 助手按别名识别用户说的是哪个集群
+ * @param env K8S环境
+ * @param aliases 别名列表
+ */
+export const updateAgentAliases = (env: string, aliases: string[]) => {
+  return http.request<AgentAliasesResult>("post", "/api/db/agent/aliases", {
+    data: { env, aliases }
+  });
+};
+
 /** Agent 自己的 Deployment:install.sh 固定装在 kubedoor 命名空间 */
 const AGENT_NAMESPACE = "kubedoor";
 const AGENT_DEPLOYMENT = "kubedoor-agent";

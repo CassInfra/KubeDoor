@@ -31,6 +31,8 @@ CREATE UNIQUE INDEX IF NOT EXISTS kubedoor_ai_one_active_run ON kubedoor_ai_runs
 ALTER TABLE kubedoor_ai_runs ADD COLUMN IF NOT EXISTS usage jsonb;
 -- 这一轮的用户消息在检查点里的 id 是 user-<run id>，重新生成 / 编辑后重发靠它找到要删掉的那一轮；之前的旧 run 没有
 ALTER TABLE kubedoor_ai_runs ADD COLUMN IF NOT EXISTS rewindable boolean NOT NULL DEFAULT false;
+-- 企微提问里 AI 判断用户问的是另一个集群：这一轮结束时记下目标，wecom.py 在那个集群上重新处理这个问题
+ALTER TABLE kubedoor_ai_runs ADD COLUMN IF NOT EXISTS switch_env text;
 CREATE TABLE IF NOT EXISTS kubedoor_ai_messages (
     id uuid PRIMARY KEY, session_id uuid NOT NULL REFERENCES kubedoor_ai_sessions(id) ON DELETE CASCADE,
     run_id uuid REFERENCES kubedoor_ai_runs(id) ON DELETE SET NULL,
@@ -101,6 +103,27 @@ CREATE INDEX IF NOT EXISTS kubedoor_ai_wecom_users_username ON kubedoor_ai_wecom
 -- session_id 是成员的当前对话;previous_session_id 是上一个对话,「继续上次」切回去
 ALTER TABLE kubedoor_ai_wecom_users ADD COLUMN IF NOT EXISTS previous_session_id uuid
     REFERENCES kubedoor_ai_sessions(id) ON DELETE SET NULL;
+-- 管理员写的备注、成员在企微里发「我是 张三」自报的名字:企微只给加密的 UserID,这两项帮管理员认出是谁,不作为身份依据
+ALTER TABLE kubedoor_ai_wecom_users ADD COLUMN IF NOT EXISTS remark text
+    CHECK (remark IS NULL OR char_length(remark) BETWEEN 1 AND 100);
+ALTER TABLE kubedoor_ai_wecom_users ADD COLUMN IF NOT EXISTS self_name text
+    CHECK (self_name IS NULL OR char_length(self_name) BETWEEN 1 AND 16);
+-- 谁、什么时候绑定的花折账号:管理员绑定记管理员账号,成员用绑定码自助绑定记他本人的账号
+ALTER TABLE kubedoor_ai_wecom_users ADD COLUMN IF NOT EXISTS bound_by text;
+ALTER TABLE kubedoor_ai_wecom_users ADD COLUMN IF NOT EXISTS bound_at timestamptz;
+-- 还没选集群而被拦下的提问:成员选好集群后接着处理(wecom.PENDING_MINUTES 分钟内有效)
+ALTER TABLE kubedoor_ai_wecom_users ADD COLUMN IF NOT EXISTS pending_text text;
+ALTER TABLE kubedoor_ai_wecom_users ADD COLUMN IF NOT EXISTS pending_at timestamptz;
+-- 绑定码输错的次数和最近一次输错的时间:短时间内输错太多次就暂停一会儿
+ALTER TABLE kubedoor_ai_wecom_users ADD COLUMN IF NOT EXISTS bind_failures integer NOT NULL DEFAULT 0;
+ALTER TABLE kubedoor_ai_wecom_users ADD COLUMN IF NOT EXISTS bind_failed_at timestamptz;
+-- 自助绑定码:花折用户在 Web 右上角菜单生成,几分钟内在企微里发「绑定 码」;每个账号同时只有一个,用过即删
+CREATE TABLE IF NOT EXISTS kubedoor_ai_wecom_bind_codes (
+    code text PRIMARY KEY,
+    username text NOT NULL UNIQUE,
+    expires_at timestamptz NOT NULL,
+    created_at timestamptz NOT NULL DEFAULT now()
+);
 CREATE TABLE IF NOT EXISTS kubedoor_ai_wecom_inbox (
     msgid text PRIMARY KEY,
     wecom_userid text NOT NULL,
