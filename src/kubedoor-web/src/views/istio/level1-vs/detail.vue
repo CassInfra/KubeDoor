@@ -24,6 +24,7 @@ import HostsDialog from "./components/HostsDialog.vue";
 import CompareDialog from "./components/CompareDialog.vue";
 import ApplyDialog from "./components/ApplyDialog.vue";
 import LiveDialog from "./components/LiveDialog.vue";
+import RollbackDialog from "./components/RollbackDialog.vue";
 import {
   ENV_TYPE_LABEL,
   ENV_TYPE_TAG,
@@ -137,6 +138,10 @@ const compare = ref({ visible: false, left: "", right: "" });
 const applyState = ref({ visible: false, items: [] as ApplyItem[] });
 const hostsState = ref({ visible: false, k8sName: "" });
 const liveState = ref({ visible: false, cluster: null as VSClusterRow | null });
+const rollbackState = ref({
+  visible: false,
+  cluster: null as VSClusterRow | null
+});
 
 function openCompare(c: VSClusterRow) {
   compare.value = {
@@ -163,6 +168,10 @@ function openHosts(c: VSClusterRow) {
 
 function openLive(c: VSClusterRow) {
   liveState.value = { visible: true, cluster: c };
+}
+
+function openRollback(c: VSClusterRow) {
+  rollbackState.value = { visible: true, cluster: c };
 }
 
 async function resetFrom(c: VSClusterRow) {
@@ -211,7 +220,11 @@ async function deleteLive(c: VSClusterRow) {
           "组标准部署到了该集群:同时不再部署(删除花折里该集群的 hosts 和域名),组标准和其他集群不受影响。"
         )
       : null,
-    vnode("p", null, "删除前的内容会记在审计日志(istio.delete)里。")
+    vnode(
+      "p",
+      null,
+      "删除前会先备份,可以用「回退」恢复;删除前的内容也会记在审计日志(istio.delete)里。"
+    )
   ];
   await ElMessageBox.confirm(
     vnode("div", null, lines),
@@ -358,9 +371,13 @@ onMounted(load);
                 <div class="sub">{{ formatTime(row.applied_at) }}</div>
               </template>
               <span v-else class="sub">-</span>
+              <div v-if="row.rolled_back" class="rolled-back">
+                <div>{{ row.rolled_back.by }} 回退了</div>
+                <div class="sub">{{ formatTime(row.rolled_back.at) }}</div>
+              </div>
             </template>
           </el-table-column>
-          <el-table-column label="操作" width="390">
+          <el-table-column label="操作" width="430">
             <template #default="{ row }">
               <el-button
                 v-if="row.in_cluster"
@@ -383,10 +400,26 @@ onMounted(load);
                   @click="openApply([row])"
                   >下发</el-button
                 >
+                <el-tooltip
+                  v-if="row.bound || row.in_cluster || row.backup_count"
+                  :disabled="row.backup_count > 0"
+                  content="还没有备份:花折下发、回退、删除这个 VirtualService 之前才会备份"
+                  placement="top"
+                >
+                  <span class="op">
+                    <el-button
+                      link
+                      type="warning"
+                      :disabled="!row.backup_count"
+                      @click="openRollback(row)"
+                      >回退</el-button
+                    >
+                  </span>
+                </el-tooltip>
                 <el-dropdown
                   v-if="row.in_cluster || row.bound"
                   trigger="click"
-                  class="ml-2"
+                  class="op"
                 >
                   <el-button link type="info">更多</el-button>
                   <template #dropdown>
@@ -627,6 +660,17 @@ onMounted(load);
         :namespace="vs.namespace"
         :name="vs.name"
       />
+      <RollbackDialog
+        v-if="rollbackState.cluster"
+        v-model="rollbackState.visible"
+        :group-id="vs.group_id"
+        :k8s-name="rollbackState.cluster.k8s_name"
+        :env-type="rollbackState.cluster.env_type"
+        :namespace="vs.namespace"
+        :name="vs.name"
+        :bound="rollbackState.cluster.bound"
+        @done="load"
+      />
       <CompareDialog
         v-model="compare.visible"
         :group-id="vs.group_id"
@@ -738,6 +782,19 @@ onMounted(load);
 
 .danger-text {
   color: var(--el-color-danger);
+}
+
+/* 操作列里和按钮并排的下拉菜单、外面包了一层提示的按钮:间距和按钮之间一样;
+   el-dropdown 自带 vertical-align: top,不改会比旁边的按钮偏上 */
+.op {
+  display: inline-flex;
+  margin-left: 12px;
+  vertical-align: middle;
+}
+
+.rolled-back {
+  margin-top: 4px;
+  color: var(--el-color-warning);
 }
 
 .warn {

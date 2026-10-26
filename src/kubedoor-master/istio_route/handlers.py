@@ -4,13 +4,14 @@
 集群里的 VS 只经这里读写:master 调 agent 的 /api/agent/istio/vs(列出)、/api/agent/istio/vs/detail(查看单个)、
 /api/agent/istio/vs/apply(下发)和 /api/agent/istio/vs/delete(删除),下发内容由 master 按组标准生成,
 不接受前端传来的 spec;浏览器不能经通用转发直接调这些 agent 接口。
+改集群里的 VS 之前(下发、回退、删除)都先备份它当时的内容,用于回退(istio_vs_backup)。
 """
 
 import asyncio
 import functools
 import json
 import re
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from typing import Dict, Iterable, List, Optional, Tuple, Union
 
 from aiohttp import web
@@ -27,6 +28,7 @@ AGENT_DETAIL_PATH = '/api/agent/istio/vs/detail'
 AGENT_APPLY_PATH = '/api/agent/istio/vs/apply'
 AGENT_DELETE_PATH = '/api/agent/istio/vs/delete'
 AGENT_TIMEOUT = 60
+BEIJING = timezone(timedelta(hours=8))
 
 _call_agent = None  # register_routes 时注入 kubedoor-master 的 call_agent_api
 
@@ -95,6 +97,10 @@ async def _body(request) -> dict:
 
 def _username(request) -> str:
     return principal_of(request).username
+
+
+def _beijing(value: datetime) -> str:
+    return value.astimezone(BEIJING).strftime('%Y-%m-%d %H:%M:%S')
 
 
 async def _group(group_id: int) -> dict:
@@ -341,6 +347,12 @@ class LiveDeleteRequest(VSKey):
 
     group_id: int
     k8s_name: str = Field(min_length=1, max_length=255)
+
+
+class RollbackRequest(LiveDeleteRequest):
+    """把集群里的 VirtualService 回退到某一份备份。"""
+
+    backup_id: int
 
 
 class VSFields(BaseModel):
@@ -642,6 +654,47 @@ async def fetch_live(k8s_name: str) -> List[dict]:
     return items
 
 
+async def _agent_write(k8s_name: str, path: str, method: str, query=None, body=None) -> Tuple[Optional[bool], dict]:
+    """调 agent 改集群里的 VS:(结果, 回包)。结果 True 成功;False 是 agent 明确回了失败,集群没变;
+    None 是不清楚(等待超时、连接断开),可能已经生效。"""
+    try:
+        resp = await _call_agent(k8s_name, path, query=query, method=method, body=body, timeout=AGENT_TIMEOUT)
+    except Exception as exc:
+        return None, {'success': False, 'error': str(exc)}
+    return isinstance(resp, dict) and resp.get('success') is True, resp
+
+
+# ---------------------------------------------------------------------------
+# 回退用的备份:改集群里的 VS 之前(下发、回退、删除)先存下它当时的 spec,设计见 README「下发前备份与回退」
+# ---------------------------------------------------------------------------
+BACKUP_ACTION_TEXT = {'apply': '下发', 'rollback': '回退', 'delete': '删除'}
+
+
+def _same_spec(a: Optional[dict], b: Optional[dict]) -> bool:
+    """两个 spec 是否一样;None 表示集群里没有。"""
+    if a is None or b is None:
+        return a is None and b is None
+    return S.spec_hash(a) == S.spec_hash(b)
+
+
+async def _backup(k8s_name: str, namespace: str, name: str, live: Optional[dict], action: str, username: str) -> int:
+    """备份集群里这个 VS 当时的内容;live 是 fetch_live 取到的那一项,None 表示集群里没有。"""
+    return await store.add_backup(k8s_name, namespace, name, live['spec'] if live else None,
+                                  live['resource_version'] if live else '', action, username)
+
+
+async def _settle_backup(backup_id: int, key: tuple, ok: Optional[bool], keep_id: Optional[int] = None) -> None:
+    """改完集群后处理刚做的备份:agent 明确回了失败(集群没变)就删掉它,否则只留最近几份(见 store.prune_backups)。
+    这一步出错不影响操作结果,下次写入时会再清理。key 是 (集群, 命名空间, 名称)。"""
+    try:
+        if ok is False:
+            await store.drop_backup(backup_id)
+        else:
+            await store.prune_backups(*key, keep_id=keep_id)
+    except Exception as exc:
+        logger.warning(f'整理 {key} 的备份失败: {exc}')
+
+
 async def _collect_cluster(k8s_name: str, username: str) -> dict:
     try:
         items = await fetch_live(k8s_name)
@@ -756,8 +809,9 @@ async def group_matrix(request):
     keys = set(standards) | set(where)
     classes = {key: view.classify(key) for key in keys}
     shown = {key for key in keys if classes[key]['visible']}
-    rows = S.build_matrix(visible, [s for key, s in standards.items() if key in shown],
-                          {k: v for k, v in snapshots.items() if (k[1], k[2]) in shown})
+    # 每个 VS 按集群渲染、算哈希、展平搜索内容,VS 多时要算上一秒,放到线程里免得卡住 event loop
+    rows = await asyncio.to_thread(S.build_matrix, visible, [s for key, s in standards.items() if key in shown],
+                                   {k: v for k, v in snapshots.items() if (k[1], k[2]) in shown})
     conflicts = view.conflicts(shown)
     for row in rows:
         key = (row['namespace'], row['name'])
@@ -991,7 +1045,8 @@ async def sync_to_standard(request):
 # ---------------------------------------------------------------------------
 # 组标准 VS
 # ---------------------------------------------------------------------------
-def _cluster_rows(clusters: List[dict], standard: dict, snapshots: Dict[tuple, dict]) -> List[dict]:
+def _cluster_rows(clusters: List[dict], standard: dict, snapshots: Dict[tuple, dict],
+                  backups: Dict[str, dict]) -> List[dict]:
     routes = S.sort_routes(standard['routes'])
     rows = []
     for cluster in clusters:
@@ -1016,6 +1071,14 @@ def _cluster_rows(clusters: List[dict], standard: dict, snapshots: Dict[tuple, d
         found = S.aligned_domains([S.render_route(route, k8s_name) for route in routes], live)
         row['live_domains'] = {routes[index]['id']: lists for index, lists in found.items()
                                if S.domain_block_count(routes[index]['match_rules'])}
+        # 回退用的备份有几份;最近一次下发之后又回退过、集群里也不是下发的内容了,就说明是谁、什么时候回退的
+        last = backups.get(k8s_name)
+        row['backup_count'] = last['count'] if last else 0
+        rolled_back = bool(last) and last['action'] == 'rollback' and (
+            row['applied_at'] is None or last['created_at'] > row['applied_at'])
+        if rolled_back and binding is not None and live is not None:
+            rolled_back = S.spec_hash(live) != binding['applied_hash']
+        row['rolled_back'] = {'by': last['created_by'], 'at': last['created_at']} if rolled_back else None
         rows.append(row)
     return rows
 
@@ -1027,11 +1090,12 @@ async def get_vs(request):
     visible = _visible(request, group)
     names = {c['k8s_name'] for c in visible}
     snapshots = await store.load_snapshots(names, standard['namespace'], standard['name'])
+    backups = await store.backup_stats(names, standard['namespace'], standard['name'])
     shared = S.standard_spec(standard)
     routes = [{**route, 'issue': S.route_issue(route['name'], route['rewrite_rules']),
                'domains': {k: v for k, v in route['domains'].items() if k in names}}
               for route in S.sort_routes(standard['routes'])]
-    clusters = _cluster_rows(visible, standard, snapshots)
+    clusters = _cluster_rows(visible, standard, snapshots, backups)
     view = await _view_of(group)
     vs_key = (standard['namespace'], standard['name'])
     data = {key: standard[key] for key in (
@@ -1187,10 +1251,44 @@ def _old_agent(resp) -> bool:
     return isinstance(resp, dict) and 'status' not in resp and 'unexpected mimetype' in str(resp.get('error', ''))
 
 
-@handler
-async def live_detail(request):
-    """查看集群里这个 VS 的现状:实时从 agent 取完整对象,去掉 managedFields 和 last-applied 注解。
-    旧版 agent 还没有取单个 VS 的接口,用列表接口拼出来(只有 spec,full 为 False)。"""
+def _delete_error(k8s_name: str, resp) -> str:
+    if _old_agent(resp):
+        return f'集群 {k8s_name} 的 agent 版本过旧,还不支持删除 VirtualService,请先升级 agent'
+    return _agent_error(resp)
+
+
+async def _delete_in_cluster(k8s_name: str, namespace: str, name: str) -> Tuple[Optional[bool], dict]:
+    """删除集群里的 VS(结果同 _agent_write);agent 回 404(已经没有了)也算删掉了。"""
+    ok, resp = await _agent_write(k8s_name, AGENT_DELETE_PATH, 'DELETE', query={'namespace': namespace, 'name': name})
+    if ok is False and isinstance(resp, dict) and resp.get('status') == 404:
+        ok = True
+    return ok, resp
+
+
+async def _fetch_one(k8s_name: str, namespace: str, name: str) -> Tuple[Optional[dict], bool]:
+    """实时从 agent 取集群里的一个 VS:(对象, 是否完整),集群里没有时对象为 None;对象去掉了 managedFields 和
+    last-applied 注解。旧版 agent 还没有取单个 VS 的接口,用列表接口拼出来(只有 spec,不完整)。"""
+    try:
+        resp = await _call_agent(k8s_name, AGENT_DETAIL_PATH, query={'namespace': namespace, 'name': name},
+                                 timeout=AGENT_TIMEOUT)
+    except Exception as exc:
+        raise IstioError(f'集群 {k8s_name}:{exc}', 502)
+    if isinstance(resp, dict) and resp.get('success') is True and isinstance(resp.get('data'), dict):
+        return S.clean_live(resp['data']), True
+    if isinstance(resp, dict) and resp.get('status') == 404:
+        return None, True
+    if not _old_agent(resp):
+        raise IstioError(f'从集群 {k8s_name} 取现状失败:{_agent_error(resp)}', 502)
+    live = next((i for i in await fetch_live(k8s_name) if i['namespace'] == namespace and i['name'] == name), None)
+    if live is None:
+        return None, False
+    obj = S.manifest(namespace, name, live['spec'])
+    obj['metadata']['resourceVersion'] = live['resource_version']
+    return obj, False
+
+
+async def _live_target(request) -> Tuple[dict, str, str, str]:
+    """查看集群里某个 VS 的参数:(组, 集群, 命名空间, 名称);集群要在组里,并且当前用户能看。"""
     query = request.query
     group = await _group(_int(query.get('group_id'), 'group_id'))
     k8s_name, namespace, name = (query.get(key) or '' for key in ('k8s_name', 'namespace', 'name'))
@@ -1200,29 +1298,91 @@ async def live_detail(request):
     _members(group, [k8s_name])
     if k8s_name not in visible:
         raise IstioError(f'没有集群 {k8s_name} 的访问权限', 403)
-    gone = f'集群 {k8s_name} 里已经没有 {namespace}/{name}'
+    return group, k8s_name, namespace, name
+
+
+@handler
+async def live_detail(request):
+    """查看集群里这个 VS 的现状:实时取完整对象,去掉 managedFields 和 last-applied 注解(旧版 agent 只有 spec)。"""
+    _, k8s_name, namespace, name = await _live_target(request)
+    obj, full = await _fetch_one(k8s_name, namespace, name)
+    if obj is None:
+        raise IstioError(f'集群 {k8s_name} 里已经没有 {namespace}/{name}', 404)
+    return _ok({'object': obj, 'full': full})
+
+
+@handler
+async def live_backups(request):
+    """集群里这个 VS 的备份(新的在前)和实时取的集群现状(对比用,判断回退后有没有变化);
+    现状取不到时 live 为空、live_error 说明原因,备份照样列出。"""
+    _, k8s_name, namespace, name = await _live_target(request)
+    backups = await store.list_backups(k8s_name, namespace, name)
+    live, live_error = None, None
     try:
-        resp = await _call_agent(k8s_name, AGENT_DETAIL_PATH, query={'namespace': namespace, 'name': name},
-                                 timeout=AGENT_TIMEOUT)
+        obj, _ = await _fetch_one(k8s_name, namespace, name)
+        live = {'exists': obj is not None, 'spec': (obj.get('spec') or {}) if obj else None,
+                'resource_version': str(((obj or {}).get('metadata') or {}).get('resourceVersion') or '')}
+    except IstioError as exc:
+        live_error = exc.message
+    for backup in backups:
+        backup['exists'] = backup['spec'] is not None
+        backup['same'] = live is not None and _same_spec(live['spec'], backup['spec'])
+    return _ok({'keep': store.BACKUP_KEEP, 'live': live, 'live_error': live_error, 'backups': backups})
+
+
+@handler
+async def rollback_live(request):
+    """把集群里的 VS 回退到某一份备份(备份时集群里还没有的,回退就是从集群删除)。只改集群,不改组标准,
+    下次下发会再用组标准覆盖;回退前同样先备份集群当前的内容,回退也能撤销。"""
+    req = RollbackRequest(**await _body(request))
+    group = await _group(req.group_id)
+    _members(group, [req.k8s_name])
+    key, target = (req.k8s_name, req.namespace, req.name), f'{req.namespace}/{req.name}'
+    backup = await store.get_backup(req.backup_id)
+    if backup is None or (backup['k8s_name'], backup['namespace'], backup['name']) != key:
+        raise IstioError(f'这份备份已经没有了(每个集群只留最近 {store.BACKUP_KEEP} 份),请刷新后重新选择', 404)
+    username, ip = _username(request), client_ip(request)
+    point = f"{_beijing(backup['created_at'])} {BACKUP_ACTION_TEXT[backup['action']]}前"
+    live = next((i for i in await fetch_live(req.k8s_name)
+                 if i['namespace'] == req.namespace and i['name'] == req.name), None)
+    if _same_spec(live['spec'] if live else None, backup['spec']):
+        return _ok(msg=f'集群 {req.k8s_name} 里的 {target} 已经和 {point}的内容一样,不需要回退')
+    backup_id = await _backup(*key, live, 'rollback', username)
+    if backup['spec'] is None:
+        ok, resp = await _delete_in_cluster(*key)
+    else:
+        ok, resp = await _agent_write(req.k8s_name, AGENT_APPLY_PATH, 'POST',
+                                      body=S.manifest(req.namespace, req.name, backup['spec']))
+    # 结果不明时,要回退到的那份这次先不清理:万一没生效还能再回退
+    await _settle_backup(backup_id, key, ok, keep_id=backup['id'] if ok is None else None)
+    detail = {'group_id': group['id'], 'backup_id': backup['id'], 'backup_action': backup['action'],
+              'backup_at': backup['created_at'].isoformat(), 'backup_by': backup['created_by'],
+              'spec': live['spec'] if live else None}
+    if not ok:
+        error = _delete_error(req.k8s_name, resp) if backup['spec'] is None else _agent_error(resp)
+        audit.record_bg(username, 'istio.rollback', env=req.k8s_name, target=target, ip=ip, success=False,
+                        detail={**detail, 'error': error})
+        raise IstioError(f'回退失败:{error}', 502)
+    try:
+        await store.replace_snapshots(req.k8s_name, await fetch_live(req.k8s_name), username)
     except Exception as exc:
-        raise IstioError(f'集群 {k8s_name}:{exc}', 502)
-    if isinstance(resp, dict) and resp.get('success') is True and isinstance(resp.get('data'), dict):
-        return _ok({'object': S.clean_live(resp['data']), 'full': True})
-    if isinstance(resp, dict) and resp.get('status') == 404:
-        raise IstioError(gone, 404)
-    if not _old_agent(resp):
-        raise IstioError(f'从集群 {k8s_name} 取现状失败:{_agent_error(resp)}', 502)
-    live = next((i for i in await fetch_live(k8s_name) if i['namespace'] == namespace and i['name'] == name), None)
-    if live is None:
-        raise IstioError(gone, 404)
-    obj = S.manifest(namespace, name, live['spec'])
-    obj['metadata']['resourceVersion'] = live['resource_version']
-    return _ok({'object': obj, 'full': False})
+        logger.warning(f'回退后刷新集群 {req.k8s_name} 的现状失败: {exc}')
+        if backup['spec'] is None:
+            await store.drop_snapshot(*key)
+    audit.record_bg(username, 'istio.rollback', env=req.k8s_name, target=target, ip=ip, success=True, detail=detail)
+    if backup['spec'] is None:
+        done = f'{point}集群 {req.k8s_name} 里还没有 {target},已从集群删除'
+    else:
+        done = f'已把集群 {req.k8s_name} 里的 {target} 回退到 {point}的内容'
+    standard = await store.find_standard(group['id'], req.namespace, req.name)
+    if standard and req.k8s_name in standard['bindings']:
+        done += ';组标准没有变,下次下发会再用组标准覆盖'
+    return _ok(msg=done)
 
 
 @handler
 async def delete_live(request):
-    """删除集群里的 VirtualService(立即生效)。删除前的内容记进审计 istio.delete,误删可以照着恢复;
+    """删除集群里的 VirtualService(立即生效)。删除前先备份(可以回退恢复),删除前的内容也记进审计 istio.delete;
     本组标准部署到了该集群的,同时不再部署(删掉该集群的 hosts 和域名),免得下次下发又建回来。"""
     req = LiveDeleteRequest(**await _body(request))
     group = await _group(req.group_id)
@@ -1234,15 +1394,12 @@ async def delete_live(request):
     detail = {'group_id': group['id'], 'spec': live['spec'] if live else None,
               'resource_version': live['resource_version'] if live else None}
     if live is not None:
-        try:
-            resp = await _call_agent(req.k8s_name, AGENT_DELETE_PATH, query={'namespace': req.namespace, 'name': req.name},
-                                     method='DELETE', timeout=AGENT_TIMEOUT)
-        except Exception as exc:
-            resp = {'success': False, 'error': str(exc)}
-        gone = isinstance(resp, dict) and (resp.get('success') is True or resp.get('status') == 404)
-        if not gone:
-            error = (f'集群 {req.k8s_name} 的 agent 版本过旧,还不支持删除 VirtualService,请先升级 agent'
-                     if _old_agent(resp) else _agent_error(resp))
+        key = (req.k8s_name, req.namespace, req.name)
+        backup_id = await _backup(*key, live, 'delete', username)
+        ok, resp = await _delete_in_cluster(*key)
+        await _settle_backup(backup_id, key, ok)
+        if not ok:
+            error = _delete_error(req.k8s_name, resp)
             audit.record_bg(username, 'istio.delete', env=req.k8s_name, target=target, ip=ip, success=False,
                             detail={**detail, 'error': error})
             raise IstioError(f'删除失败:{error}', 502)
@@ -1379,26 +1536,38 @@ async def apply_preview(request):
     return _ok(result)
 
 
-async def _apply_one(item: dict, username: str, ip: str) -> dict:
-    body = S.manifest(item['namespace'], item['name'], item['spec'])
-    try:
-        resp = await _call_agent(item['k8s_name'], AGENT_APPLY_PATH, method='POST', body=body, timeout=AGENT_TIMEOUT)
-    except Exception as exc:
-        resp = {'success': False, 'error': str(exc)}
-    success = isinstance(resp, dict) and resp.get('success') is True
-    error = None if success else _agent_error(resp)
-    if success:
-        await store.mark_applied(item['vs_id'], item['k8s_name'], item['hash'], username)
+def _apply_result(item: dict, username: str, ip: str, error: Optional[str] = None) -> dict:
+    """记审计 istio.apply,返回这一项的下发结果。"""
     audit.record_bg(username, 'istio.apply', env=item['k8s_name'], target=f"{item['namespace']}/{item['name']}",
-                    ip=ip, success=success, detail={'vs_id': item['vs_id'], **({'error': error} if error else {})})
+                    ip=ip, success=error is None, detail={'vs_id': item['vs_id'], **({'error': error} if error else {})})
     return {'vs_id': item['vs_id'], 'k8s_name': item['k8s_name'], 'namespace': item['namespace'],
-            'name': item['name'], 'success': success, 'error': error}
+            'name': item['name'], 'success': error is None, 'error': error}
+
+
+async def _apply_one(item: dict, live: Optional[dict], username: str, ip: str) -> dict:
+    """下发一项。集群里的内容会变时先备份当时的内容(live,None 表示集群里没有),备份不了就不下发;
+    agent 明确回了失败(集群没变)就删掉这份备份。"""
+    key = (item['k8s_name'], item['namespace'], item['name'])
+    backup_id = None
+    if live is None or S.spec_hash(live['spec']) != item['hash']:
+        try:
+            backup_id = await _backup(*key, live, 'apply', username)
+        except Exception as exc:
+            logger.exception(f'下发前备份 {key} 失败: {exc}')
+            return _apply_result(item, username, ip, f'下发前备份集群里的内容失败,没有下发:{exc}')
+    ok, resp = await _agent_write(item['k8s_name'], AGENT_APPLY_PATH, 'POST',
+                                  body=S.manifest(item['namespace'], item['name'], item['spec']))
+    if ok:
+        await store.mark_applied(item['vs_id'], item['k8s_name'], item['hash'], username)
+    if backup_id is not None:
+        await _settle_backup(backup_id, key, ok)
+    return _apply_result(item, username, ip, None if ok else _agent_error(resp))
 
 
 @handler
 async def apply(request):
     """按组标准 + 各集群 hosts 下发(agent 用 Server-Side Apply)。同一集群依次下发,不同集群并行;
-    下发完重新采集该集群现状,状态以集群里的实际内容为准。"""
+    下发前从集群取最新现状备份(取不到就不下发这个集群),下发完重新采集该集群现状,状态以集群里的实际内容为准。"""
     req = ApplyRequest(**await _body(request))
     prepared = await _prepare(req.items)
     blocked = [f"{i['namespace']}/{i['name']} → {i['error']}" for i in prepared if i['error']]
@@ -1407,7 +1576,13 @@ async def apply(request):
     username, ip = _username(request), client_ip(request)
 
     async def run(k8s_name, items):
-        results = [await _apply_one(item, username, ip) for item in items]
+        try:
+            current = {(i['namespace'], i['name']): i for i in await fetch_live(k8s_name)}
+        except IstioError as exc:
+            error = f'下发前取集群现状(用于备份)失败,没有下发:{exc.message}'
+            return [_apply_result(item, username, ip, error) for item in items]
+        results = [await _apply_one(item, current.get((item['namespace'], item['name'])), username, ip)
+                   for item in items]
         try:
             await store.replace_snapshots(k8s_name, await fetch_live(k8s_name), username)
         except Exception as exc:
@@ -1435,6 +1610,8 @@ def register_routes(app, call_agent_api):
     router.add_post('/api/istio/unignore', unignore_vs)
     router.add_get('/api/istio/live', live_detail)
     router.add_post('/api/istio/live/delete', delete_live)
+    router.add_get('/api/istio/live/backups', live_backups)
+    router.add_post('/api/istio/live/rollback', rollback_live)
     router.add_post('/api/istio/vs/reset', reset_standard)
     router.add_post('/api/istio/vs/sync/preview', sync_preview)
     router.add_post('/api/istio/vs/sync', sync_to_standard)

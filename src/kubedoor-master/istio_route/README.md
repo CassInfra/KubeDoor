@@ -6,8 +6,8 @@
 | --- | --- |
 | `spec.py` | 纯逻辑:解析 / 渲染 spec、域名条件按集群拆分与展开、归一化哈希、规则对齐对比、从集群现状同步到组标准、规范检查、组的 VS 范围与跨组冲突、组矩阵 |
 | `store.py` | 数据访问(asyncpg,经 `db.py` 连接池) |
-| `handlers.py` | `/api/istio/*` 接口;调 agent 的列出 / 下发 / 删除接口 |
-| `../db.sql` | 第 6~8 节:`istio_*` 九张表(含早先「一个集群只属于一个组」结构的升级) |
+| `handlers.py` | `/api/istio/*` 接口;调 agent 的列出 / 查看 / 下发 / 删除接口,改集群前备份、回退 |
+| `../db.sql` | 第 6~8 节:`istio_*` 十张表(含早先「一个集群只属于一个组」结构的升级) |
 | `../tests/test_istio_spec.py` | 纯逻辑单测 |
 | `../tests/test_istio_api.py` | 接口端到端测试(真实 PG + 假 agent,设置 `KUBEDOOR_TEST_PG_DSN` 才运行) |
 
@@ -41,6 +41,16 @@
 - 采集照常拉取集群里的全部 VS(现状各组共用),按规则在展示和处理时过滤,所以改规则不用重新采集;
   刷新现状的结果里给出每个集群的总数、归本组的个数和被忽略的个数。
 
+### 矩阵搜索
+
+列表的搜索框不区分大小写,空格分开的多个关键字要全部命中;每个关键字命中 VirtualService 的「命名空间/名称」、
+各集群的 hosts、规则内容中的任一处都算。规则内容是矩阵每行的 `search_lines`(`spec.search_lines`):组标准
+(按当前用户能看的集群展开域名)和这些集群的现状里除 hosts 外的内容,一个字段一行「字段路径: 值」并去重。
+http 规则从规则里的字段写起(`match.uri.prefix: /api/`、`route.destination.port.number: 8080`、`timeout: 30s`),
+其余字段带上字段名(`gateways: ...`、`tcp.route.destination.host: ...`),数组不带下标,所以字段名
+(retries、mirror、fault…)和值都能搜;单个值最多保留 300 个字符。规则里命中的行显示在名称下面
+(命中关键字多的在前),前端的匹配和高亮在 `views/istio/level1-vs/search.ts`。
+
 ### 查看集群里的 VS
 
 矩阵格子菜单的「查看现状」、详情页集群列表的「查看现状」:实时调 agent 的 `GET /api/agent/istio/vs/detail`
@@ -53,9 +63,28 @@
 ### 删除集群里的 VS
 
 矩阵格子菜单的「删除」、详情页「更多 → 从集群删除」:调 agent 的 `DELETE /api/agent/istio/vs/delete` 立即删除。
-删除前从集群取最新内容记进审计 `istio.delete`(`detail.spec`,误删可以照着恢复);本组标准部署到了该集群的,
-同时不再部署(删掉该集群的 hosts 和域名),免得下次下发又建回来。这个接口要新版 agent(只换镜像),
-旧版 agent 会提示先升级。
+删除前从集群取最新内容先备份(误删可以用下面的「回退」恢复),也记进审计 `istio.delete`(`detail.spec`);
+本组标准部署到了该集群的,同时不再部署(删掉该集群的 hosts 和域名),免得下次下发又建回来。这个接口要新版 agent
+(只换镜像),旧版 agent 会提示先升级。
+
+### 下发前备份与回退
+
+花折改集群里的 VirtualService 之前(下发、回退、删除),都先从集群取最新内容备份进 `istio_vs_backup`。详情页
+「集群与 Hosts」每个集群后面的「回退」列出这个集群的备份(备份时间、执行人、是哪个操作之前的内容,新的在前),
+选一份看过它和集群现状的差异后写回集群。
+
+- 按集群里的对象(集群 + 命名空间 + 名称)保存,不挂在组标准上:组标准删了重建、换了组,备份还在;
+  集群不在任何组里时一并删除。每个对象只留最近 5 份(`store.BACKUP_KEEP`),写入时清理。
+- 存的是 spec(下发只改 spec,labels / annotations 不归花折管);当时集群里还没有的记为空,回退就是从集群删除。
+- 下发:每个集群下发前取一次最新现状,取不到就不下发这个集群;内容不会变的项不备份,免得反复下发把有用的备份挤掉。
+  agent 明确回了失败(集群没变)就删掉这份备份;等待超时、连接断开这类结果不明的保留。
+- 回退:集群现状和那份备份一样时只提示不需要回退。回退前同样先备份当前内容,所以回退也能撤销;写回和下发一样用
+  Server-Side Apply,备份是空的就调删除接口(要新版 agent)。结果不明时,要回退到的那份这次先不清理,万一没生效还能再回退。
+- 回退只改集群,不改组标准:之后这个集群的状态是「不一致」,下次下发会再用组标准覆盖。最近一次下发之后又回退过、
+  集群里也不是下发的内容时,详情页「最近下发」列显示谁、什么时候回退的。
+- 删除后回退恢复的,本组标准已经不再部署到该集群,恢复后状态是「未纳入」。
+- 审计 `istio.rollback`:`detail` 里有回退到的那份备份(`backup_id`、`backup_at`、`backup_by`、`backup_action`)
+  和回退前集群里的内容 `spec`。
 
 ### 从集群现状同步到组标准
 
@@ -114,7 +143,7 @@
 | --- | --- |
 | 一致 `synced` | 集群现状 = 组标准 + 该集群的 hosts 和域名 |
 | 待下发 `pending` | 不一致,但集群现状仍是上次下发(或纳管时)的内容:花折这边改了还没下发 |
-| 不一致 `diff` | 集群现状不是上次下发的内容:有人直接改过集群,或纳管后从未下发且不同 |
+| 不一致 `diff` | 集群现状不是上次下发的内容:有人直接改过集群、回退过,或纳管后从未下发且不同 |
 | 集群中没有 `missing` | 有部署关系,但集群里没有这个 VS |
 | 缺少域名 `incomplete` | 有规则的域名条件还没设置该集群的域名(或一个都没选),补上前不能下发 |
 | 未采集 `unknown` | 该集群还没采集过现状 |
@@ -132,6 +161,7 @@
    不一致的先对比,选基准集群纳管(或以某集群现状更新组标准) → 确认差异后下发拉齐。
 2. **日常修改**:改组标准 → 相关集群变成「待下发」 → 先下发测试集群,验证后再下发生产集群。
    下发前预览的是集群最新现状 → 将要下发的差异。新增按域名区分的规则时,在规则弹框里给每个集群选域名。
+   下发后发现有问题:详情页该集群的「回退」→ 选「下发前」那份回退,改好组标准再下发。
 3. **发现漂移**:刷新现状后出现「不一致」 → 对比 → 下发组标准覆盖回去,或把现状里的规则挑着同步到组标准(全部要就以该集群现状更新组标准)。
 4. **部署到新集群**:「部署到此集群」填 hosts 和各规则的域名(可以从别的集群复制并替换机房标识)→ 下发。
 
@@ -149,18 +179,20 @@
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
 | GET | `/api/istio/groups` | 组列表(含包含 / 忽略规则);管理员额外返回所有集群,以及各自已在哪些组里 |
-| POST / PUT / DELETE | `/api/istio/groups`(`?id=`) | 新建 / 修改 / 删除组。body:`{name, description, clusters:[{k8s_name, env_type, remark}], include_patterns, ignore_patterns}`,规则每条 `{type: glob\|regex, pattern}`,集群顺序即显示顺序;移出组的集群,它在本组的部署关系删除,不再属于任何组的集群,现状也删除 |
+| POST / PUT / DELETE | `/api/istio/groups`(`?id=`) | 新建 / 修改 / 删除组。body:`{name, description, clusters:[{k8s_name, env_type, remark}], include_patterns, ignore_patterns}`,规则每条 `{type: glob\|regex, pattern}`,集群顺序即显示顺序;移出组的集群,它在本组的部署关系删除,不再属于任何组的集群,现状和备份也删除 |
 | GET | `/api/istio/groups/preview?group_id=&clusters=&include=&ignore=` | 组管理里预览规则(`include` / `ignore` 是 JSON 数组):按所选集群已采集的现状,每个 VS 归本组还是被忽略、和哪些组冲突;不保存 |
-| GET | `/api/istio/matrix?group_id=` | 组矩阵:只列本组范围内的 VS,`cells` 按集群给出 hosts、状态、版本、最近一次下发的时间和下发人,`conflicts` 冲突的组;另给 `ignored`(被忽略的 VS 和原因)和 `stats`(总数、忽略数) |
+| GET | `/api/istio/matrix?group_id=` | 组矩阵:只列本组范围内的 VS,`cells` 按集群给出 hosts、状态、版本、最近一次下发的时间和下发人,`conflicts` 冲突的组,`search_lines` 搜索用的规则内容(见「矩阵搜索」);另给 `ignored`(被忽略的 VS 和原因)和 `stats`(总数、忽略数) |
 | POST | `/api/istio/collect` | 刷新现状:`{group_id, k8s_names?}`,逐个集群返回成功 / 失败,以及 VS 总数、归本组的个数、被忽略的个数 |
 | POST | `/api/istio/ignore` / `/api/istio/unignore` | `{group_id, items:[{namespace, name}]}`:在本组忽略 / 取消忽略(被组规则排除的取消忽略后单独纳入) |
 | GET | `/api/istio/live?group_id=&k8s_name=&namespace=&name=` | 查看集群里 VS 的现状(实时取完整对象,见上文):`{object, full}`,`full=false` 是旧版 agent,只有 spec |
-| POST | `/api/istio/live/delete` | `{group_id, k8s_name, namespace, name}`:删除集群里的 VS,见上文;审计 `istio.delete` |
+| POST | `/api/istio/live/delete` | `{group_id, k8s_name, namespace, name}`:删除集群里的 VS(删除前先备份),见上文;审计 `istio.delete` |
+| GET | `/api/istio/live/backups?group_id=&k8s_name=&namespace=&name=` | 集群里这个 VirtualService 的备份,新的在前:`{keep, live, live_error, backups:[{id, spec, exists, resource_version, action, created_by, created_at, same}]}`。`action` 是备份之后做的操作(`apply` / `rollback` / `delete`),`spec` 为空表示当时集群里还没有;`live` 是实时取的集群现状,取不到时为空、`live_error` 说明原因,`same` = 和现状一样。要有该集群的读权限 |
+| POST | `/api/istio/live/rollback` | `{group_id, k8s_name, namespace, name, backup_id}`:把集群里的 VirtualService 回退到这份备份(见上文),只改集群;审计 `istio.rollback` |
 | GET | `/api/istio/compare?group_id=&namespace=&name=&left=&right=` | 对比。一方是 `standard`(组标准,不含 hosts,域名显示 `<按集群>`)、`standard@集群`、`cluster@集群`(现状);`diff.rules_same` = 只差 hosts 和域名,规则行 `op=domains` = 只是域名不同、`target` = 转发目标;两边的 `version` 是内容哈希,同步到组标准时用 |
 | POST | `/api/istio/import` | 纳管:`{group_id, items:[{namespace, name, base, clusters}]}`,以 base 集群现状生成组标准,各集群 hosts 和域名取自己的现状 |
 | POST | `/api/istio/vs/sync/preview`、`/api/istio/vs/sync` | 从集群现状同步到组标准(见上文):`{group_id, namespace, name, standard: standard\|standard@集群, k8s_name, rules:[{standard_index, live_index}], gateways, default, extra, standard_version, live_version}`。`rules` 是对比里要同步的规则行(两边的序号,从 0 开始),`*_version` 是对比接口两边的 `version`;preview 不保存,返回保存后的组标准(和对比里组标准一侧一样显示)、改动统计、会缺少域名的集群 |
 | POST | `/api/istio/vs/reset` | 以某集群现状更新组标准的共用部分:`{vs_id, k8s_name}`,hosts 不变;域名见上文 |
-| GET | `/api/istio/vs?vs_id=` | 组标准详情:共用部分、规则(`domains`:各集群的域名)、各集群的 hosts 和状态(`missing_domains` 缺哪些规则的域名,`live_domains` 现状里对应规则的域名)、规范检查 |
+| GET | `/api/istio/vs?vs_id=` | 组标准详情:共用部分、规则(`domains`:各集群的域名)、各集群的 hosts 和状态(`missing_domains` 缺哪些规则的域名,`live_domains` 现状里对应规则的域名,`backup_count` 回退用的备份份数,`rolled_back` 下发之后又回退过时是谁、什么时候)、规范检查 |
 | GET | `/api/istio/vs/check?group_id=&namespace=&name=` | 新建前检查:本组是否已有组标准、集群里是否已有同名的、其他组里是否已有、名称是否被本组排除 |
 | POST | `/api/istio/vs` | 新建:`{group_id, namespace, name, gateways, df_*, clusters:[{k8s_name, hosts}], force_include?}`;集群里已有同名 VS 时要求用纳管,其他组里已有的拒绝;名称被本组排除的要 `force_include`(单独纳入) |
 | PUT / DELETE | `/api/istio/vs?vs_id=` | 修改 gateways 和默认路由 / 删除组标准(名称、命名空间不可改) |
@@ -169,7 +201,7 @@
 | PUT / DELETE | `/api/istio/httproute?route_id=` | 修改(`priority` 不传保持原位置,未建模字段保留,各集群域名整体替换)/ 删除(删除后重排优先级) |
 | POST | `/api/istio/httproute/reorder?vs_id=` | 优先级重排为 10、20、30…… |
 | POST | `/api/istio/apply/preview` | `{items:[{vs_id, k8s_name}]}`:从集群取最新现状(顺便刷新快照),逐项给出现状、将要下发的 spec 和结构化差异;不能下发的项(在本组被忽略、和其他组冲突、缺少域名)给出 error |
-| POST | `/api/istio/apply` | 下发:同一集群依次、不同集群并行;有不能下发的项整个请求拒绝;成功的记下发人和内容哈希,完成后重新采集该集群现状;每项记审计 `istio.apply` |
+| POST | `/api/istio/apply` | 下发:同一集群依次、不同集群并行;有不能下发的项整个请求拒绝;每个集群先取最新现状备份(取不到就不下发这个集群,内容不会变的项不备份);成功的记下发人和内容哈希,完成后重新采集该集群现状;每项记审计 `istio.apply` |
 
 ## 测试
 

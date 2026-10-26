@@ -42,6 +42,14 @@ import {
   conflictText,
   formatTime
 } from "./utils";
+import {
+  type SearchEntry,
+  highlightParts,
+  matchesAll,
+  ruleHits,
+  searchEntry,
+  searchTerms
+} from "./search";
 
 defineOptions({ name: "Level1VirtualService" });
 
@@ -99,8 +107,21 @@ function needsAction(row: MatrixRow) {
   return Object.values(row.cells).some(c => ACTION_STATUSES.includes(c.status));
 }
 
+const terms = computed(() => searchTerms(keyword.value));
+/** 每行的搜索内容(名称、各集群 hosts、规则内容),矩阵刷新时算一次 */
+const searchIndex = computed(() => {
+  const index = new Map<string, SearchEntry>();
+  for (const row of rows.value) {
+    const hosts = Object.values(row.cells).flatMap(c => c.hosts);
+    index.set(
+      rowKey(row),
+      searchEntry([rowKey(row), ...hosts], row.search_lines ?? [])
+    );
+  }
+  return index;
+});
+
 const filteredRows = computed(() => {
-  const kw = keyword.value.trim().toLowerCase();
   return rows.value.filter(row => {
     if (filter.value === "problem" && !needsAction(row)) return false;
     if (filter.value === "conflict" && !row.conflicts.length) return false;
@@ -114,13 +135,26 @@ const filteredRows = computed(() => {
     ) {
       return false;
     }
-    if (!kw) return true;
-    if (`${row.namespace}/${row.name}`.toLowerCase().includes(kw)) return true;
-    return Object.values(row.cells).some(c =>
-      c.hosts.some(h => h.toLowerCase().includes(kw))
-    );
+    if (!terms.value.length) return true;
+    const entry = searchIndex.value.get(rowKey(row));
+    return !!entry && matchesAll(entry, terms.value);
   });
 });
+
+/** 搜索时各行规则内容里命中的行,显示在名称下面,看得出是哪里搜到的 */
+const ruleHitLines = computed(() => {
+  const hits = new Map<string, string[]>();
+  if (!terms.value.length) return hits;
+  for (const row of filteredRows.value) {
+    const entry = searchIndex.value.get(rowKey(row));
+    const lines = entry ? ruleHits(entry, terms.value) : [];
+    if (lines.length) hits.set(rowKey(row), lines);
+  }
+  return hits;
+});
+function hitsOf(row: MatrixRow) {
+  return ruleHitLines.value.get(rowKey(row)) ?? [];
+}
 
 const selectedRows = computed(() => {
   const keys = new Set(selectedKeys.value);
@@ -405,7 +439,13 @@ async function deleteLive(row: MatrixRow, k8s: string) {
     row.conflicts.length
       ? vnode("p", null, `注意:这个 VS 也在${conflictText(row.conflicts)}里。`)
       : null,
-    vnode("p", null, "删除前的内容会记在审计日志(istio.delete)里。")
+    vnode(
+      "p",
+      null,
+      row.vs_id !== null
+        ? "删除前会先备份,可以在 VirtualService 详情的「回退」里恢复;删除前的内容也会记在审计日志(istio.delete)里。"
+        : "删除前的内容会记在审计日志(istio.delete)里。"
+    )
   ];
   await ElMessageBox.confirm(
     vnode("div", null, lines),
@@ -485,9 +525,10 @@ onMounted(async () => {
       >
       <el-input
         v-model="keyword"
-        placeholder="VS 名称 / host"
+        placeholder="VS 名称 / host / 规则内容,如路径、端口、超时"
+        title="不区分大小写,空格分开的多个关键字要全部命中。规则内容(组标准和各集群现状)按「字段路径: 值」匹配,如 match.uri.prefix: /api、route.destination.port.number: 8080、timeout: 30s"
         clearable
-        style="width: 170px"
+        style="width: 360px"
       />
       <el-select v-model="filter" style="width: 150px">
         <el-option
@@ -683,6 +724,33 @@ onMounted(async () => {
               effect="plain"
               >{{ COVERAGE_LABEL[row.coverage] }}</el-tag
             >
+            <!-- 搜索时规则内容里命中的地方 -->
+            <div v-if="hitsOf(row).length" class="rule-hits">
+              <div
+                v-for="line in hitsOf(row).slice(0, 2)"
+                :key="line"
+                class="rule-hit"
+                :title="line"
+              >
+                <span
+                  v-for="(part, i) in highlightParts(line, terms)"
+                  :key="i"
+                  :class="{ 'hit-mark': part.hit }"
+                  >{{ part.text }}</span
+                >
+              </div>
+              <el-tooltip v-if="hitsOf(row).length > 2" placement="top">
+                <template #content>
+                  <div v-for="line in hitsOf(row).slice(2, 22)" :key="line">
+                    {{ line }}
+                  </div>
+                  <div v-if="hitsOf(row).length > 22">…</div>
+                </template>
+                <div class="sub">
+                  规则里还有 {{ hitsOf(row).length - 2 }} 处命中…
+                </div>
+              </el-tooltip>
+            </div>
           </template>
         </el-table-column>
         <el-table-column label="规则版本" width="120">
@@ -1054,6 +1122,28 @@ onMounted(async () => {
 .lint {
   color: var(--el-color-warning);
   cursor: help;
+}
+
+/* 搜索时规则内容里命中的地方:每条最多两行,完整内容看 title */
+.rule-hits {
+  margin-top: 2px;
+}
+
+.rule-hit {
+  display: -webkit-box;
+  overflow: hidden;
+  font-family: Consolas, Monaco, monospace;
+  font-size: 12px;
+  line-height: 18px;
+  color: var(--el-text-color-regular);
+  -webkit-line-clamp: 2;
+  overflow-wrap: anywhere;
+  -webkit-box-orient: vertical;
+}
+
+.hit-mark {
+  background: var(--el-color-warning-light-7);
+  border-radius: 2px;
 }
 
 .col-head {

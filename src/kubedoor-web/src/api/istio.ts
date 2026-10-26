@@ -174,6 +174,9 @@ export interface MatrixRow {
   conflicts: VSConflict[];
   /** 被组规则排除、单独纳入本组的 */
   included: boolean;
+  /** 全文搜索用:组标准(按各集群展开域名)和各集群现状里除 hosts 外的内容,
+   *  一个字段一行「字段路径: 值」并去重,如 match.uri.prefix: /api、route.destination.port.number: 8080 */
+  search_lines: string[];
 }
 
 export interface IstioMatrix {
@@ -214,6 +217,10 @@ export interface VSClusterRow extends IstioGroupCluster {
   missing_domains: string[];
   /** 集群现状里对应规则的域名(规则 id → 域名),部署到该集群、补设置域名时做默认值 */
   live_domains: Record<string, DomainLists>;
+  /** 回退用的备份有几份(花折改集群里的这个 VirtualService 之前做的) */
+  backup_count: number;
+  /** 最近一次改集群是回退(在最近一次下发之后):谁、什么时候回退的 */
+  rolled_back: { by: string; at: string } | null;
 }
 
 export interface VSFields {
@@ -422,6 +429,37 @@ export interface LiveVS {
   full: boolean;
 }
 
+/** 备份之后做的操作(备份的是这个操作之前的内容):下发 / 回退 / 删除 */
+export type BackupAction = "apply" | "rollback" | "delete";
+
+/** 花折改集群里的 VirtualService 之前做的备份,回退用 */
+export interface VSBackup {
+  id: number;
+  /** 当时集群里的 spec;那时集群里还没有这个 VirtualService 时为空(回退就是删除) */
+  spec: Record<string, any> | null;
+  exists: boolean;
+  resource_version: string;
+  action: BackupAction;
+  created_by: string;
+  created_at: string;
+  /** 和集群现状一样,回退也不会有变化 */
+  same: boolean;
+}
+
+export interface VSBackups {
+  /** 每个集群里的每个 VirtualService 保留几份 */
+  keep: number;
+  /** 实时取的集群现状;取不到时为空,原因见 live_error */
+  live: {
+    exists: boolean;
+    spec: Record<string, any> | null;
+    resource_version: string;
+  } | null;
+  live_error: string | null;
+  /** 新的在前 */
+  backups: VSBackup[];
+}
+
 type Result<T> = { success: boolean; data: T; msg?: string };
 type Done = { success: boolean; msg?: string };
 
@@ -486,7 +524,7 @@ export const getIstioLive = (
     { silent: true }
   );
 
-/** 删除集群里的 VirtualService(立即生效);本组部署到了该集群的,同时不再部署 */
+/** 删除集群里的 VirtualService(立即生效,删除前会先备份);本组部署到了该集群的,同时不再部署 */
 export const deleteIstioLiveVS = (
   groupId: number,
   k8sName: string,
@@ -495,6 +533,38 @@ export const deleteIstioLiveVS = (
 ) =>
   http.request<Done>("post", "/api/istio/live/delete", {
     data: { group_id: groupId, k8s_name: k8sName, namespace, name }
+  });
+
+/** 集群里这个 VirtualService 的备份(新的在前)和实时取的现状;出错不弹提示,由对话框显示 */
+export const getIstioBackups = (
+  groupId: number,
+  k8sName: string,
+  namespace: string,
+  name: string
+) =>
+  http.request<Result<VSBackups>>(
+    "get",
+    "/api/istio/live/backups",
+    { params: { group_id: groupId, k8s_name: k8sName, namespace, name } },
+    { silent: true }
+  );
+
+/** 把集群里的 VirtualService 回退到某一份备份(只改集群,不改组标准;回退前也会备份) */
+export const rollbackIstioLiveVS = (
+  groupId: number,
+  k8sName: string,
+  namespace: string,
+  name: string,
+  backupId: number
+) =>
+  http.request<Done>("post", "/api/istio/live/rollback", {
+    data: {
+      group_id: groupId,
+      k8s_name: k8sName,
+      namespace,
+      name,
+      backup_id: backupId
+    }
   });
 
 // ---------------------------------------------------------------- 矩阵 / 现状 / 对比 / 纳管

@@ -58,6 +58,7 @@ class FakeAgent:
         self.clusters = {}
         self.offline = set()
         self.old_agent = set()  # 还没有查看单个 / 删除接口的旧版 agent
+        self.lost = set()  # 改集群的请求等不到回应(超时,没生效)
         self.applied = []
         self.deleted = []
 
@@ -67,6 +68,8 @@ class FakeAgent:
     async def call(self, env, path, query=None, method='GET', body=None, timeout=30):
         if env in self.offline:
             raise Exception(f'目标客户端 {env} 不在线')
+        if env in self.lost and method != 'GET':
+            raise Exception(f'等待 {env} 对 {path} 的响应超时')
         items = self.clusters.setdefault(env, {})
         if path == handlers.AGENT_LIST_PATH and method == 'GET':
             data = [{'name': name, 'namespace': ns, 'resourceVersion': '1', 'spec': copy.deepcopy(spec)}
@@ -122,7 +125,7 @@ async def env(monkeypatch):
     monkeypatch.setattr(db, '_pool', pool)
     monkeypatch.setattr(db, '_loop', asyncio.get_running_loop())
     await db.run_ddl_file(str(DB_SQL))
-    await db.pg_execute('TRUNCATE istio_group RESTART IDENTITY CASCADE')
+    await db.pg_execute('TRUNCATE istio_group, istio_vs_backup RESTART IDENTITY CASCADE')
     audits = []
     monkeypatch.setattr(audit, 'record_bg', lambda username, action, **kw: audits.append((username, action, kw)))
     agent = FakeAgent()
@@ -182,6 +185,7 @@ async def test_collect_compare_import_edit_and_apply(env):
     assert rows['a']['vs_id'] is None and len(rows['a']['versions']) == 1 and rows['a']['coverage'] == ''
     assert [v['clusters'] for v in rows['b']['versions']] == [['beta-k'], ['beta-p']]
     assert rows['b']['coverage'] == 'test_only' and cells(rows['b'])['prod-a'] == S.NONE
+    assert 'match.uri.prefix: /b2/' in rows['b']['search_lines']  # 页面全文搜索用的规则内容
 
     # 纳管:A 三个集群一致;B 以 beta-k 为准,beta-p 规则不同 → 待下发
     imported = await call(client, 'POST', '/api/istio/import', {'group_id': group_id, 'items': [
@@ -317,6 +321,9 @@ async def test_vs_detail_routes_bindings_and_permissions(env):
     reader = {'X-Test-Role': 'none', 'X-Test-Clusters': json.dumps({'beta-k': 'read'})}
     rows = await matrix(client, group_id, headers=reader)
     assert set(rows['a']['cells']) == {'beta-k'}
+    # 搜索内容也只来自能看的集群:/b2/ 只在 beta-k 里
+    only_p = {'X-Test-Role': 'none', 'X-Test-Clusters': json.dumps({'beta-p': 'read'})}
+    assert 'match.uri.prefix: /b2/' not in (await matrix(client, group_id, headers=only_p))['b']['search_lines']
     detail = (await call(client, 'GET', '/api/istio/vs', vs_id=vs_id, headers=reader))['data']
     assert [c['k8s_name'] for c in detail['clusters']] == ['beta-k']
     denied = await call(client, 'GET', '/api/istio/compare', group_id=group_id, namespace=NS, name='a',
@@ -602,6 +609,186 @@ async def test_view_live_vs(env):
     assert data['full'] is False and data['object']['metadata'] == {'name': 'a', 'namespace': NS, 'resourceVersion': '1'}
     assert data['object']['spec'] == agent.clusters['beta-k'][(NS, 'a')]
     await call(client, 'GET', '/api/istio/live', **{**params, 'name': 'gone'}, status=404)
+
+
+async def backups(client, group_id, k8s_name, name='a', **kw):
+    params = {'group_id': group_id, 'k8s_name': k8s_name, 'namespace': NS, 'name': name}
+    return (await call(client, 'GET', '/api/istio/live/backups', **params, **kw))['data']
+
+
+async def rollback(client, group_id, k8s_name, backup_id, name='a', status=200):
+    return await call(client, 'POST', '/api/istio/live/rollback', {
+        'group_id': group_id, 'k8s_name': k8s_name, 'namespace': NS, 'name': name, 'backup_id': backup_id},
+        status=status)
+
+
+async def cluster_row(client, vs_id, k8s_name):
+    detail = (await call(client, 'GET', '/api/istio/vs', vs_id=vs_id))['data']
+    return next(c for c in detail['clusters'] if c['k8s_name'] == k8s_name)
+
+
+async def apply_to(client, vs_id, k8s_name):
+    data = await call(client, 'POST', '/api/istio/apply', {'items': [{'vs_id': vs_id, 'k8s_name': k8s_name}]})
+    return data['data'][0]
+
+
+@pytest.mark.asyncio
+async def test_backup_before_apply_and_rollback(env):
+    """下发前备份集群里当时的内容(会变时才备份),每个集群每个 VS 留最近 5 份;回退写回备份,只改集群不改组标准,
+    回退前也备份(可以撤销);agent 明确失败(集群没变)不留备份,结果不明时要回退到的那份先留着。"""
+    client, agent, audits = env
+    group_id = await setup_group(client, agent)
+    await call(client, 'POST', '/api/istio/collect', {'group_id': group_id})
+    imported = await call(client, 'POST', '/api/istio/import', {'group_id': group_id, 'items': [
+        {'namespace': NS, 'name': 'a', 'base': 'beta-k', 'clusters': ['beta-k', 'beta-p', 'prod-a']}]})
+    a_id = imported['data'][0]['vs_id']
+    before = copy.deepcopy(agent.clusters['beta-k'][(NS, 'a')])
+
+    # 集群里的内容不会变的下发不备份
+    assert (await apply_to(client, a_id, 'beta-k'))['success']
+    assert (await backups(client, group_id, 'beta-k'))['backups'] == []
+
+    # 加一条规则再下发:先备份下发前的内容
+    await call(client, 'POST', '/api/istio/httproute', {
+        'match_rules': [{'uri': {'prefix': '/new/'}}], 'forward_type': 'route',
+        'forward_detail': [{'destination': {'host': 'new', 'port': {'number': 80}}}]}, vs_id=a_id)
+    assert (await apply_to(client, a_id, 'beta-k'))['success']
+    data = await backups(client, group_id, 'beta-k')
+    assert data['keep'] == 5 and data['live_error'] is None and len(data['live']['spec']['http']) == 3
+    [first] = data['backups']
+    assert first['action'] == 'apply' and first['created_by'] == 'admin' and first['resource_version'] == '1'
+    assert first['spec'] == before and first['exists'] and not first['same']
+    row = await cluster_row(client, a_id, 'beta-k')
+    assert row['backup_count'] == 1 and row['rolled_back'] is None and row['status'] == S.SYNCED
+    assert (await cluster_row(client, a_id, 'beta-p'))['backup_count'] == 0
+
+    # 回退:写回下发前的内容,组标准不变(状态不一致);回退前的内容也备份了,审计里记着
+    rolled = await rollback(client, group_id, 'beta-k', first['id'])
+    assert rolled['msg'].startswith('已把集群 beta-k 里的 istio-system/a 回退到 20')
+    assert rolled['msg'].endswith(' 下发前的内容;组标准没有变,下次下发会再用组标准覆盖')
+    assert agent.clusters['beta-k'][(NS, 'a')] == before
+    assert agent.applied[-1][1] == {'apiVersion': S.API_VERSION, 'kind': 'VirtualService',
+                                    'metadata': {'name': 'a', 'namespace': NS}, 'spec': before}
+    _, action, record = audits[-1]
+    assert action == 'istio.rollback' and record['success'] and record['env'] == 'beta-k'
+    assert record['detail']['backup_id'] == first['id'] and len(record['detail']['spec']['http']) == 3
+    data = await backups(client, group_id, 'beta-k')
+    assert [(b['action'], b['same']) for b in data['backups']] == [('rollback', False), ('apply', True)]
+    row = await cluster_row(client, a_id, 'beta-k')
+    assert row['status'] == S.DIFF and row['backup_count'] == 2 and row['rolled_back']['by'] == 'admin'
+    assert len((await call(client, 'GET', '/api/istio/vs', vs_id=a_id))['data']['routes']) == 3
+
+    # 已经一样了:不用回退,也不再备份
+    same = await rollback(client, group_id, 'beta-k', first['id'])
+    assert '不需要回退' in same['msg'] and len((await backups(client, group_id, 'beta-k'))['backups']) == 2
+
+    # 撤销回退:回到回退前的内容,也就是最近一次下发的,不再显示回退过
+    await rollback(client, group_id, 'beta-k', data['backups'][0]['id'])
+    assert len(agent.clusters['beta-k'][(NS, 'a')]['http']) == 3
+    row = await cluster_row(client, a_id, 'beta-k')
+    assert row['status'] == S.SYNCED and row['rolled_back'] is None and row['backup_count'] == 3
+    assert (await apply_to(client, a_id, 'beta-k'))['success']
+    row = await cluster_row(client, a_id, 'beta-k')
+    assert row['rolled_back'] is None and row['backup_count'] == 3
+
+    # agent 明确回了失败(集群没变):不留备份
+    await call(client, 'PUT', '/api/istio/vs/cluster', {'vs_id': a_id, 'k8s_name': 'beta-p',
+                                                       'hosts': ['reject.example.com']})
+    assert not (await apply_to(client, a_id, 'beta-p'))['success']
+    assert (await backups(client, group_id, 'beta-p'))['backups'] == []
+
+    # 每个集群每个 VS 只留最近 5 份,新的在前
+    for n in range(6):
+        await call(client, 'PUT', '/api/istio/vs', {'gateways': [f'istio-system/gw{n}']}, vs_id=a_id)
+        assert (await apply_to(client, a_id, 'prod-a'))['success']
+    data = await backups(client, group_id, 'prod-a')
+    assert [b['spec']['gateways'] for b in data['backups']] == [[f'istio-system/gw{n}'] for n in (4, 3, 2, 1, 0)]
+    assert (await cluster_row(client, a_id, 'prod-a'))['backup_count'] == 5
+
+    # 回退到最早那份时等不到回应(没生效):这份先留着,还能再回退;成功后恢复成 5 份
+    oldest = data['backups'][-1]
+    agent.lost.add('prod-a')
+    lost = await rollback(client, group_id, 'prod-a', oldest['id'], status=502)
+    assert lost['error'].startswith('回退失败:等待 prod-a') and audits[-1][2]['success'] is False
+    agent.lost.clear()
+    data = await backups(client, group_id, 'prod-a')
+    assert len(data['backups']) == 6 and data['backups'][-1]['id'] == oldest['id']
+    assert data['backups'][0]['action'] == 'rollback'
+    await rollback(client, group_id, 'prod-a', oldest['id'])
+    assert agent.clusters['prod-a'][(NS, 'a')]['gateways'] == ['istio-system/gw0']
+    data = await backups(client, group_id, 'prod-a')
+    assert len(data['backups']) == 5 and oldest['id'] not in {b['id'] for b in data['backups']}
+
+
+@pytest.mark.asyncio
+async def test_rollback_create_delete_and_limits(env):
+    """第一次下发前集群里没有:回退就是删除;删除前也备份,回退可以恢复。只能看有读权限的集群的备份;
+    取不到集群现状时备份照样列出、不下发;旧版 agent 删不了;集群移出所有组时备份一并删除。"""
+    client, agent, audits = env
+    group_id = await setup_group(client, agent)
+    await call(client, 'POST', '/api/istio/collect', {'group_id': group_id})
+    created = await call(client, 'POST', '/api/istio/vs', {
+        'group_id': group_id, 'namespace': NS, 'name': 'fresh',
+        'clusters': [{'k8s_name': 'beta-k', 'hosts': ['fresh.x.com']}]})
+    fresh_id = created['data']['id']
+
+    # 第一次下发:备份里记着集群里没有,回退就是从集群删除(组标准还部署到该集群,状态是集群中没有)
+    assert (await apply_to(client, fresh_id, 'beta-k'))['success']
+    [made] = (await backups(client, group_id, 'beta-k', name='fresh'))['backups']
+    assert made['spec'] is None and not made['exists'] and not made['same'] and made['resource_version'] == ''
+    gone = await rollback(client, group_id, 'beta-k', made['id'], name='fresh')
+    assert ' 下发前集群 beta-k 里还没有 istio-system/fresh,已从集群删除;组标准没有变' in gone['msg']
+    assert (NS, 'fresh') not in agent.clusters['beta-k'] and agent.deleted[-1] == ('beta-k', (NS, 'fresh'))
+    row = await cluster_row(client, fresh_id, 'beta-k')
+    assert row['bound'] and row['status'] == S.MISSING and row['rolled_back']['by'] == 'admin'
+    data = await backups(client, group_id, 'beta-k', name='fresh')
+    assert data['live'] == {'exists': False, 'spec': None, 'resource_version': ''}
+    assert [(b['action'], b['exists'], b['same']) for b in data['backups']] == [
+        ('rollback', True, False), ('apply', False, True)]
+
+    # 旧版 agent 没有删除接口:回退到「没有」失败、提示升级,回退前的备份不留
+    assert (await apply_to(client, fresh_id, 'beta-k'))['success']
+    agent.old_agent.add('beta-k')
+    old = await rollback(client, group_id, 'beta-k', made['id'], name='fresh', status=502)
+    assert 'agent 版本过旧' in old['error'] and (NS, 'fresh') in agent.clusters['beta-k']
+    assert len((await backups(client, group_id, 'beta-k', name='fresh'))['backups']) == 3
+    agent.old_agent.clear()
+
+    # 删除前也备份,误删可以回退恢复(没有组标准的也行)
+    await call(client, 'POST', '/api/istio/live/delete', {'group_id': group_id, 'k8s_name': 'beta-p',
+                                                         'namespace': NS, 'name': 'b'})
+    [removed] = (await backups(client, group_id, 'beta-p', name='b'))['backups']
+    assert removed['action'] == 'delete' and removed['spec']['hosts'] == ['b-beta.x.com']
+    restored = await rollback(client, group_id, 'beta-p', removed['id'], name='b')
+    assert restored['msg'].endswith(' 删除前的内容') and agent.clusters['beta-p'][(NS, 'b')] == removed['spec']
+
+    # 备份不是这个 VS 的
+    wrong = await rollback(client, group_id, 'beta-k', removed['id'], status=404)
+    assert '这份备份已经没有了' in wrong['error']
+
+    # 只能看有读权限的集群的备份
+    reader = {'X-Test-Role': 'none', 'X-Test-Clusters': json.dumps({'beta-k': 'read'})}
+    assert (await backups(client, group_id, 'beta-k', name='fresh', headers=reader))['backups']
+    denied = await call(client, 'GET', '/api/istio/live/backups', group_id=group_id, k8s_name='beta-p',
+                        namespace=NS, name='b', headers=reader, status=403)
+    assert '没有集群 beta-p 的访问权限' in denied['error']
+
+    # 取不到集群现状:备份照样列出,只是没法比较;也备份不了,不下发
+    agent.offline.add('beta-k')
+    data = await backups(client, group_id, 'beta-k', name='fresh')
+    assert data['live'] is None and '不在线' in data['live_error'] and not any(b['same'] for b in data['backups'])
+    result = await apply_to(client, fresh_id, 'beta-k')
+    assert not result['success'] and result['error'].startswith('下发前取集群现状(用于备份)失败,没有下发:')
+    assert audits[-1][1] == 'istio.apply' and audits[-1][2]['success'] is False
+    agent.offline.clear()
+
+    # 集群移出所有组:它的备份一并删除
+    await call(client, 'PUT', '/api/istio/groups', {
+        'name': 'cassmall', 'description': '双活',
+        'clusters': [{'k8s_name': 'beta-k', 'env_type': 'test'}, {'k8s_name': 'prod-a', 'env_type': 'prod'}]},
+        id=group_id)
+    count = 'SELECT count(*) FROM istio_vs_backup WHERE k8s_name = $1'
+    assert await db.pg_fetchval(count, 'beta-p') == 0 and await db.pg_fetchval(count, 'beta-k') == 3
 
 
 def domain_values(lists):

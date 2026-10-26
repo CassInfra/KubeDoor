@@ -14,7 +14,7 @@
 --      - k8s_events         : 按 lasttimestamp  保留 90 天
 --   3. 配置/管控表:k8s_agent_status / k8s_res_control / alert_silences
 --      Istio 管理:istio_group / istio_group_cluster / istio_group_vs_override / istio_cluster_state /
---      istio_vs / istio_vs_route / istio_vs_cluster / istio_vs_route_domain / istio_vs_snapshot
+--      istio_vs / istio_vs_route / istio_vs_cluster / istio_vs_route_domain / istio_vs_snapshot / istio_vs_backup
 --   4. 账号与权限:auth_users / auth_user_clusters / auth_sessions / auth_settings,
 --      操作审计 audit_logs(按 ts 保留 180 天,RETENTION_AUDIT_DAYS 可调)
 --
@@ -216,7 +216,8 @@ $$ LANGUAGE plpgsql;
 --   同一个 VS 只能属于一个组:用组的包含 / 忽略规则和单个 VS 的手动忽略 / 单独纳入(istio_group_vs_override)划分;
 --   组标准 VS 是花折保存的那一份:规则、默认路由、gateways 全组共用,hosts 和规则里的域名条件按集群各自维护;
 --   每个 VS 自己选择部署到组内哪些集群(istio_vs_cluster);
---   istio_vs_snapshot 是采集到的集群现状(按集群,各组共用,只读),只用于对比、纳管和状态判断,不直接修改。
+--   istio_vs_snapshot 是采集到的集群现状(按集群,各组共用,只读),只用于对比、纳管和状态判断,不直接修改;
+--   istio_vs_backup 是花折改集群里的 VS 之前做的备份(每个对象留最近 5 份),用于回退。
 -- =============================================================================
 -- 旧版(VS 按名称全局唯一、按单集群采集)的三张表,功能未正式使用,数据直接删除
 DROP TABLE IF EXISTS k8s_cluster, vs_http_routes, vs_global;
@@ -364,6 +365,23 @@ CREATE TABLE IF NOT EXISTS istio_vs_snapshot (
     collected_at     timestamptz NOT NULL DEFAULT now(),
     PRIMARY KEY (k8s_name, namespace, name)
 );
+
+-- 回退用的备份:花折改集群里的 VirtualService 之前(下发、回退、删除)先存下它当时的 spec,回退时原样写回。
+-- 按集群里的对象(集群 + 命名空间 + 名称)保存,不挂在组标准上 —— 组标准删了重建、换了组,集群里还是那个对象;
+-- 每个对象只留最近 5 份(写入时由程序清理),集群不在任何组里时一并删除
+CREATE TABLE IF NOT EXISTS istio_vs_backup (
+    id               SERIAL PRIMARY KEY,
+    k8s_name         varchar(255) NOT NULL,
+    namespace        varchar(255) NOT NULL,
+    name             varchar(255) NOT NULL,
+    spec             jsonb,                                -- NULL:当时集群里还没有这个 VirtualService,回退就是删除
+    resource_version varchar(64) NOT NULL DEFAULT '',
+    action           varchar(10) NOT NULL,                 -- 备份之后做的操作:apply 下发 / rollback 回退 / delete 删除
+    created_by       varchar(255) NOT NULL DEFAULT '',
+    created_at       timestamptz NOT NULL DEFAULT now(),
+    CONSTRAINT ck_istio_vs_backup_action CHECK (action IN ('apply', 'rollback', 'delete'))
+);
+CREATE INDEX IF NOT EXISTS idx_istio_vs_backup_key ON istio_vs_backup (k8s_name, namespace, name, created_at DESC);
 
 -- 升级:早先一个集群只属于一个组(istio_group_cluster 主键是 k8s_name,采集状态也记在里面,
 -- istio_vs_cluster / istio_vs_snapshot 外键引用它)。改成可以属于多个组,采集状态挪到 istio_cluster_state,数据保留

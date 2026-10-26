@@ -2,6 +2,7 @@ import * as yaml from "js-yaml";
 import dayjs from "dayjs";
 import utc from "dayjs/plugin/utc";
 import {
+  type BackupAction,
   type CellStatus,
   type DomainItem,
   type DomainLists,
@@ -61,7 +62,7 @@ export const STATUS_META: Record<
   diff: {
     label: "不一致",
     type: "danger",
-    desc: "集群里不是花折上次下发的内容:有人直接改过集群,或纳管后从未下发且不同"
+    desc: "集群里不是花折上次下发的内容:有人直接改过集群、回退过,或纳管后从未下发且不同"
   },
   missing: {
     label: "集群中没有",
@@ -104,6 +105,16 @@ export const ENV_TYPE_TAG: Record<EnvType, TagType> = {
 export const COVERAGE_LABEL: Record<string, string> = {
   test_only: "只在测试环境",
   prod_only: "只在生产环境"
+};
+
+/** 备份是在什么操作之前做的 */
+export const BACKUP_ACTION_LABEL: Record<
+  BackupAction,
+  { label: string; type: TagType }
+> = {
+  apply: { label: "下发前", type: "primary" },
+  rollback: { label: "回退前", type: "warning" },
+  delete: { label: "删除前", type: "danger" }
 };
 
 /** 时间一律按北京时间(UTC+8)显示,不受浏览器所在时区影响 */

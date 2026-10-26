@@ -98,18 +98,20 @@ async def get_group(group_id: int) -> Optional[dict]:
 
 
 async def _drop_orphan_clusters(conn) -> None:
-    """不在任何组里的集群:采集到的现状和采集状态一并删除。"""
+    """不在任何组里的集群:采集到的现状、采集状态和回退用的备份一并删除。"""
     await conn.execute(
         'DELETE FROM istio_vs_snapshot WHERE k8s_name NOT IN (SELECT k8s_name FROM istio_group_cluster)')
     await conn.execute(
         'DELETE FROM istio_cluster_state WHERE k8s_name NOT IN (SELECT k8s_name FROM istio_group_cluster)')
+    await conn.execute(
+        'DELETE FROM istio_vs_backup WHERE k8s_name NOT IN (SELECT k8s_name FROM istio_group_cluster)')
 
 
 async def save_group(group_id: Optional[int], name: str, description: str, clusters: List[dict],
                      include_patterns: List[dict], ignore_patterns: List[dict]) -> int:
     """新建(group_id 为空)或修改组。clusters 按显示顺序:[{k8s_name, env_type, remark}];一个集群可以属于多个组。
 
-    移出组的集群,它在本组 VS 里的 hosts 和域名一并删除;不再属于任何组的集群,采集到的现状也删除。"""
+    移出组的集群,它在本组 VS 里的 hosts 和域名一并删除;不再属于任何组的集群,采集到的现状和备份也删除。"""
     names = [c['k8s_name'] for c in clusters]
     patterns = (_dump(include_patterns or []), _dump(ignore_patterns or []))
     try:
@@ -144,7 +146,7 @@ async def save_group(group_id: Optional[int], name: str, description: str, clust
 
 
 async def delete_group(group_id: int) -> bool:
-    """删除组:组标准、各集群 hosts 和域名、手动忽略记录都会删除,只在这个组里的集群的现状也删除;
+    """删除组:组标准、各集群 hosts 和域名、手动忽略记录都会删除,只在这个组里的集群的现状和备份也删除;
     集群里的 VirtualService 不受影响。"""
     async with db.get_pool().acquire() as conn:
         async with conn.transaction():
@@ -265,6 +267,70 @@ async def load_snapshots(k8s_names: Iterable[str], namespace: str = None, name: 
         rows = await db.pg_fetch(
             'SELECT k8s_name, namespace, name, spec FROM istio_vs_snapshot WHERE k8s_name = ANY($1::text[])', names)
     return {(r['k8s_name'], r['namespace'], r['name']): _load(r['spec']) for r in rows}
+
+
+# ---------------------------------------------------------------------------
+# 回退用的备份:改集群里的 VS 之前先存下它当时的 spec
+# ---------------------------------------------------------------------------
+BACKUP_KEEP = 5  # 每个集群里的每个 VS 只留最近几份
+_BACKUP_COLS = 'id, spec, resource_version, action, created_by, created_at'
+
+
+def _backup(row) -> dict:
+    data = dict(row)
+    data['spec'] = _load(data['spec'])
+    return data
+
+
+async def add_backup(k8s_name: str, namespace: str, name: str, spec: Optional[dict], resource_version: str,
+                     action: str, username: str) -> int:
+    """备份集群里这个 VS 当时的 spec(None 表示集群里没有);超出份数的旧备份等操作有了结果再清理(prune_backups)。"""
+    return await db.pg_fetchval(
+        'INSERT INTO istio_vs_backup (k8s_name, namespace, name, spec, resource_version, action, created_by) '
+        'VALUES ($1, $2, $3, $4::jsonb, $5, $6, $7) RETURNING id',
+        k8s_name, namespace, name, _dump(spec), resource_version or '', action, username)
+
+
+async def drop_backup(backup_id: int) -> None:
+    await db.pg_execute('DELETE FROM istio_vs_backup WHERE id = $1', backup_id)
+
+
+async def prune_backups(k8s_name: str, namespace: str, name: str, keep_id: Optional[int] = None) -> None:
+    """只留这个 VS 最近 BACKUP_KEEP 份备份;keep_id 那份这次先不删(回退结果不明时,要回退到的那份还得留着)。"""
+    await db.pg_execute(
+        'DELETE FROM istio_vs_backup WHERE k8s_name = $1 AND namespace = $2 AND name = $3 '
+        'AND ($5::int IS NULL OR id <> $5) AND id NOT IN ('
+        'SELECT id FROM istio_vs_backup WHERE k8s_name = $1 AND namespace = $2 AND name = $3 '
+        'ORDER BY created_at DESC, id DESC LIMIT $4)',
+        k8s_name, namespace, name, BACKUP_KEEP, keep_id)
+
+
+async def get_backup(backup_id: int) -> Optional[dict]:
+    row = await db.pg_fetchrow(
+        f'SELECT k8s_name, namespace, name, {_BACKUP_COLS} FROM istio_vs_backup WHERE id = $1', backup_id)
+    return _backup(row) if row else None
+
+
+async def list_backups(k8s_name: str, namespace: str, name: str) -> List[dict]:
+    """集群里这个 VS 的备份,新的在前。"""
+    rows = await db.pg_fetch(
+        f'SELECT {_BACKUP_COLS} FROM istio_vs_backup WHERE k8s_name = $1 AND namespace = $2 AND name = $3 '
+        'ORDER BY created_at DESC, id DESC', k8s_name, namespace, name)
+    return [_backup(row) for row in rows]
+
+
+async def backup_stats(k8s_names: Iterable[str], namespace: str, name: str) -> Dict[str, dict]:
+    """各集群里这个 VS 的备份份数和最近一份:{k8s_name: {count, action, created_by, created_at}}"""
+    names = list(k8s_names)
+    if not names:
+        return {}
+    rows = await db.pg_fetch(
+        'SELECT DISTINCT ON (k8s_name) k8s_name, action, created_by, created_at, '
+        'count(*) OVER (PARTITION BY k8s_name) AS count FROM istio_vs_backup '
+        'WHERE k8s_name = ANY($1::text[]) AND namespace = $2 AND name = $3 '
+        'ORDER BY k8s_name, created_at DESC, id DESC', names, namespace, name)
+    return {row['k8s_name']: {key: row[key] for key in ('count', 'action', 'created_by', 'created_at')}
+            for row in rows}
 
 
 # ---------------------------------------------------------------------------

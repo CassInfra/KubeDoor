@@ -154,6 +154,7 @@ async function submit() {
       show-icon
       class="mb-2"
       title="下发内容 = 组标准(规则、默认路由、gateways)+ 该集群的 hosts 和规则里的域名。下面的差异是集群最新现状(左)→ 将要下发(右),展开行查看。"
+      description="下发前会先备份集群里当时的内容,有问题可以在 VirtualService 详情「集群与 Hosts」的「回退」里恢复(每个集群保留最近 5 份)。"
     />
     <el-alert
       v-if="prodSelected.length"

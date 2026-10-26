@@ -13,7 +13,7 @@
   域名条件里的域名要在本集群的 hosts 里。
 - VSScope / find_conflicts:组的 VS 范围(包含 / 忽略规则 + 单个 VS 的手动忽略 / 单独纳入),
   以及同一个 VS 是否也在共用集群的其他组里(同一个 VS 只能属于一个组)。
-- build_matrix:组矩阵,每行一个 VS,每列一个集群。
+- build_matrix:组矩阵,每行一个 VS,每列一个集群;search_lines 把规则内容展平成「字段路径: 值」供页面全文搜索。
 """
 
 import copy
@@ -56,7 +56,7 @@ SCOPE_NOT_INCLUDED = 'not_included'      # 一条包含规则都没匹配上
 # 集群格子的状态
 SYNCED = 'synced'        # 集群现状 = 组标准 + 该集群 hosts
 PENDING = 'pending'      # 不一致,但集群里仍是上次下发(或纳管时)的内容:花折这边改了还没下发
-DIFF = 'diff'            # 集群里不是上次下发的内容:有人直接改过集群,或纳管后从未下发且不同
+DIFF = 'diff'            # 集群里不是上次下发的内容:有人直接改过集群、回退过,或纳管后从未下发且不同
 MISSING = 'missing'      # 纳入了该集群,但集群里没有这个 VS
 INCOMPLETE = 'incomplete'  # 有规则的域名条件还没设置该集群的域名,设置后才能下发
 UNKNOWN = 'unknown'      # 该集群还没采集过现状
@@ -897,12 +897,47 @@ def sync_standard(standard: dict, render_k8s: Optional[str], k8s_name: str, live
     return vs, new_routes, {**counts, 'gateways': gateways, 'default': default, 'extra': extra, 'lint': lint}
 
 
+# ---------------------------------------------------------------------------
+# 矩阵搜索:规则内容展平成「字段路径: 值」
+# ---------------------------------------------------------------------------
+SEARCH_VALUE_MAX = 300  # 单个值最多保留的字符数(directResponse 的 body 这类长文本)
+
+
+def _flatten_for_search(value, path: str, out: Dict[str, None]):
+    if isinstance(value, dict):
+        for key, item in value.items():
+            _flatten_for_search(item, f'{path}.{key}' if path else str(key), out)
+    elif isinstance(value, list):
+        for item in value:
+            _flatten_for_search(item, path, out)
+    elif value is not None and value != DOMAIN_PLACEHOLDER:
+        text = json.dumps(value) if isinstance(value, bool) else ' '.join(str(value).split())
+        if len(text) > SEARCH_VALUE_MAX:
+            text = text[:SEARCH_VALUE_MAX] + '…'
+        out[f'{path}: {text}'] = None
+
+
+def search_lines(specs: Iterable[Optional[dict]]) -> List[str]:
+    """矩阵全文搜索用:几份 spec 除 hosts 外的内容展平成「字段路径: 值」,去重、保持先后顺序。
+
+    http 规则从规则里的字段写起(match.uri.prefix: /api、route.destination.port.number: 8080、timeout: 30s),
+    其余字段带上字段名(gateways: ...、tcp.route.destination.host: ...);数组不带下标。
+    hosts 按集群显示在矩阵的格子里,页面直接搜;组标准里没按集群展开的域名占位不算。"""
+    out: Dict[str, None] = {}
+    for spec in specs:
+        for key, value in (spec or {}).items():
+            if key != 'hosts':
+                _flatten_for_search(value, '' if key == 'http' else str(key), out)
+    return list(out)
+
+
 def build_matrix(clusters: List[dict], standards: List[dict], snapshots: Dict[tuple, dict]) -> List[dict]:
     """组矩阵。
 
     clusters:当前用户能看到的组内集群(按显示顺序),含 k8s_name / env_type / collected_at;
     standards:组标准,含 routes(带各集群的 domains)和 bindings({k8s_name: {hosts, applied_hash, ...}});
     snapshots:{(k8s_name, namespace, name): spec}。
+    每行的 search_lines 是组标准(按这些集群展开域名)和这些集群现状的规则内容,页面全文搜索用。
     """
     names = [c['k8s_name'] for c in clusters]
     collected = {c['k8s_name']: bool(c.get('collected_at')) for c in clusters}
@@ -916,8 +951,10 @@ def build_matrix(clusters: List[dict], standards: List[dict], snapshots: Dict[tu
         live = {k: snapshots[(k, namespace, name)] for k in names if (k, namespace, name) in snapshots}
         labels, versions = version_labels(live, names)
         row = {'namespace': namespace, 'name': name, 'vs_id': None, 'versions': versions, 'cells': {}}
+        searched = []  # 搜索的内容:组标准(共用部分和各集群展开后的),再加各集群现状
         if standard:
             shared = standard_spec(standard)
+            searched.append(shared)
             digest = rule_digest(shared)
             row.update(
                 vs_id=standard['id'],
@@ -949,6 +986,7 @@ def build_matrix(clusters: List[dict], standards: List[dict], snapshots: Dict[tu
             cell = {'in_cluster': spec is not None, 'version': labels.get(k8s_name), 'bound': binding is not None}
             if binding is not None:
                 status, rendered = cluster_status(standard, binding, k8s_name, spec, collected[k8s_name])
+                searched.append(rendered)
                 if status != INCOMPLETE:
                     row['lint'] += lint_domains(rendered, f'{k8s_name}:')
                 cell.update(
@@ -971,5 +1009,6 @@ def build_matrix(clusters: List[dict], standards: List[dict], snapshots: Dict[tu
         has_prod = any(env_types.get(k) == 'prod' for k in present)
         row['coverage'] = 'test_only' if has_test and not has_prod else 'prod_only' if has_prod and not has_test else ''
         row['status_count'] = dict(Counter(cell['status'] for cell in row['cells'].values()))
+        row['search_lines'] = search_lines([*searched, *live.values()])
         rows.append(row)
     return rows

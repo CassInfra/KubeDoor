@@ -271,6 +271,7 @@ def test_top_queries_keep_cluster_filter_and_add_visibility():
     ('POST', '/api/istio/collect'), ('POST', '/api/istio/import'), ('POST', '/api/istio/vs/reset'),
     ('POST', '/api/istio/vs/sync/preview'), ('POST', '/api/istio/vs/sync'),
     ('POST', '/api/istio/ignore'), ('POST', '/api/istio/unignore'), ('POST', '/api/istio/live/delete'),
+    ('POST', '/api/istio/live/rollback'),
     ('POST', '/api/istio/vs'), ('PUT', '/api/istio/vs'), ('DELETE', '/api/istio/vs'),
     ('PUT', '/api/istio/vs/cluster'), ('DELETE', '/api/istio/vs/cluster'),
     ('POST', '/api/istio/httproute'), ('PUT', '/api/istio/httproute'), ('DELETE', '/api/istio/httproute'),
@@ -289,7 +290,8 @@ async def test_istio_changes_are_admin_only(method, path):
 
 
 @pytest.mark.parametrize('path', ['/api/istio/groups', '/api/istio/groups/preview', '/api/istio/matrix',
-                                  '/api/istio/compare', '/api/istio/live', '/api/istio/vs', '/api/istio/vs/check'])
+                                  '/api/istio/compare', '/api/istio/live', '/api/istio/live/backups',
+                                  '/api/istio/vs', '/api/istio/vs/check'])
 def test_istio_reads_are_filtered_by_handlers(path):
     """查看只要登录,能看到哪些集群由 handler 按集群读权限过滤。"""
     assert policy.match('GET', path).kind == 'login'

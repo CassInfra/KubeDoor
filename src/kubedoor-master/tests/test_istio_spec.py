@@ -570,6 +570,75 @@ def test_matrix_domain_only_difference_is_one_version():
     assert row['cells']['k']['status'] == S.INCOMPLETE
 
 
+# ---------------------------------------------------------------- 矩阵搜索
+def test_search_lines_flatten_fields_with_paths():
+    spec = vs_spec(
+        routes=[route('/a/', 8080, name='/a', rewrite='/', retries={'attempts': 3, 'perTryTimeout': '2s'})],
+        exportTo=['.'],
+        tcp=[{'match': [{'port': 3306}], 'route': [{'destination': {'host': 'db'}}]}],
+    )
+    assert S.search_lines([spec]) == [
+        'gateways: istio-system/internal',
+        'name: /a',
+        'match.uri.prefix: /a/',
+        'rewrite.uri: /',
+        'route.destination.host: svc8080.ns.svc.cluster.local',
+        'route.destination.port.number: 8080',
+        'timeout: 7s',
+        'retries.attempts: 3',
+        'retries.perTryTimeout: 2s',
+        'route.destination.host: web.ns.svc.cluster.local',
+        'route.destination.port.number: 80',
+        'route.headers.request.set.X-Forwarded-Proto: https',
+        'timeout: 30s',
+        'exportTo: .',
+        'tcp.match.port: 3306',
+        'tcp.route.destination.host: db',
+    ]
+
+
+def test_search_lines_dedup_and_value_forms():
+    long_body = 'x' * (S.SEARCH_VALUE_MAX + 50)
+    spec = {'hosts': ['only-in-hosts.example.com'], 'http': [
+        {'match': [{'uri': {'exact': '/x'}, 'ignoreUriCase': True}], 'timeout': '7s',
+         'directResponse': {'status': 200, 'body': {'string': long_body}}},
+        {'match': [{'uri': {'regex': '/a\n  /b'}}], 'timeout': '7s', 'fault': None},
+    ]}
+    lines = S.search_lines([spec, copy.deepcopy(spec), None])
+    assert lines == [
+        'match.uri.exact: /x',
+        'match.ignoreUriCase: true',
+        'timeout: 7s',
+        'directResponse.status: 200',
+        f"directResponse.body.string: {'x' * S.SEARCH_VALUE_MAX}…",
+        'match.uri.regex: /a /b',
+    ]
+    assert not any('only-in-hosts' in line for line in lines)
+
+
+def test_matrix_search_lines_cover_standard_and_live_of_visible_clusters():
+    clusters = [{'k8s_name': 'p', 'env_type': 'prod', 'collected_at': 'x'},
+                {'k8s_name': 'k', 'env_type': 'prod', 'collected_at': 'x'}]
+    drifted = site_spec('k', routes=[host_rule('k', timeout='9s'), route('/api/', 1)])
+    snapshots = {('p', 'istio-system', 'demo'): site_spec('p'), ('k', 'istio-system', 'demo'): drifted}
+    row = S.build_matrix(clusters, [make_domain_standard()], snapshots)[0]
+    lines = row['search_lines']
+    # 组标准按各集群展开的域名、集群现状里组标准没有的内容都在;域名占位、hosts 不在
+    assert {'match.authority.exact: svc-p.intra.example.com', 'match.authority.exact: svc-k.intra.example.com',
+            'match.uri.prefix: /api/', 'route.destination.port.number: 1', 'timeout: 9s'} <= set(lines)
+    assert not any(S.DOMAIN_PLACEHOLDER in line or 'other-p' in line for line in lines)
+    assert len(lines) == len(set(lines))
+
+    # 只能看到 p:k 的域名和 k 的现状都不出现
+    row = S.build_matrix(clusters[:1], [make_domain_standard()], {('p', 'istio-system', 'demo'): site_spec('p')})[0]
+    assert not any('svc-k' in line or '9s' in line for line in row['search_lines'])
+    assert 'match.authority.exact: svc-p.intra.example.com' in row['search_lines']
+
+    # 未纳管:各集群现状的内容都在
+    row = S.build_matrix(clusters, [], snapshots)[0]
+    assert {'match.authority.exact: svc-k.intra.example.com', 'timeout: 9s'} <= set(row['search_lines'])
+
+
 # ---------------------------------------------------------------- 组的 VS 范围与冲突
 def glob(pattern):
     return {'type': 'glob', 'pattern': pattern}
