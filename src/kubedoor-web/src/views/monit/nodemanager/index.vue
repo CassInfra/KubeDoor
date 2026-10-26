@@ -307,7 +307,7 @@
           <el-table-column
             prop="container_runtime"
             label="容器运行时"
-            min-width="120"
+            min-width="180"
             show-overflow-tooltip
             sortable
           />
@@ -315,43 +315,39 @@
           <!-- 操作列 -->
           <el-table-column
             label="操作"
-            min-width="180"
+            width="100"
             align="center"
             fixed="right"
           >
             <template #default="scope">
-              <el-button
-                type="info"
-                size="default"
-                :disabled="!canWrite(searchForm.env)"
-                @click="handleNodeShell(scope.row)"
-              >
-                终端
-              </el-button>
-              <el-button
-                v-if="scope.row.schedulable"
-                type="warning"
-                size="default"
-                @click="handleCordonNode(scope.row)"
-              >
-                禁止调度
-              </el-button>
-              <el-button
-                v-else
-                type="success"
-                size="default"
-                @click="handleUncordonNode(scope.row)"
-              >
-                允许调度
-              </el-button>
-              <el-button
-                class="action-edit-btn"
-                type="primary"
-                size="default"
-                @click="handleEdit(scope.row)"
-              >
-                编辑
-              </el-button>
+              <el-dropdown>
+                <el-button type="primary" size="small">
+                  操作
+                  <el-icon class="el-icon--right"><arrow-down /></el-icon>
+                </el-button>
+                <template #dropdown>
+                  <el-dropdown-menu>
+                    <el-dropdown-item
+                      :disabled="!canWrite(searchForm.env)"
+                      @click="handleNodeShell(scope.row)"
+                      >终端</el-dropdown-item
+                    >
+                    <el-dropdown-item
+                      v-if="scope.row.schedulable"
+                      @click="handleCordonNode(scope.row)"
+                      >禁止调度</el-dropdown-item
+                    >
+                    <el-dropdown-item
+                      v-else
+                      @click="handleUncordonNode(scope.row)"
+                      >允许调度</el-dropdown-item
+                    >
+                    <el-dropdown-item @click="handleEdit(scope.row)"
+                      >编辑</el-dropdown-item
+                    >
+                  </el-dropdown-menu>
+                </template>
+              </el-dropdown>
             </template>
           </el-table-column>
         </el-table>
@@ -423,7 +419,7 @@
 <script setup lang="ts">
 import { ref, reactive, onMounted, nextTick, watch } from "vue";
 import { ElMessage, ElMessageBox } from "element-plus";
-import { RefreshRight } from "@element-plus/icons-vue";
+import { RefreshRight, ArrowDown } from "@element-plus/icons-vue";
 import { getNodesList, cordonNodes, uncordonNodes } from "@/api/node";
 import { getAgentNames } from "@/api/istio";
 import { useSearchStoreHook } from "@/store/modules/search";
@@ -960,10 +956,6 @@ onMounted(() => {
 
 .refresh-btn-item {
   margin-left: -12px !important;
-}
-
-.action-edit-btn {
-  margin-left: 8px;
 }
 
 .edit-container {
