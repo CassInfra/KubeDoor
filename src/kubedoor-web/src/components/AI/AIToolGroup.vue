@@ -8,11 +8,13 @@ const props = withDefaults(
   defineProps<{
     tools: AITool[];
     writable: boolean;
+    /** 会话状态已核验：用户自己接入的 MCP 只看这个，不看集群写权限 */
+    ready?: boolean;
     deciding?: string;
     secret?: string;
     active?: boolean;
   }>(),
-  { active: true }
+  { active: true, ready: true }
 );
 const expanded = defineModel<boolean>("expanded", { default: false });
 const emit = defineEmits<{
@@ -94,6 +96,7 @@ const failed = (tool: AITool) =>
         :key="tool.id"
         :tool="tool"
         :writable="writable"
+        :ready="ready"
         :deciding="deciding"
         :secret="secret"
         @decide="(id, decision) => emit('decide', id, decision)"

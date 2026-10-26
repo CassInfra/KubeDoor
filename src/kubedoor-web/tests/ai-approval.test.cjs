@@ -675,3 +675,26 @@ test("a completed stream cannot be resurrected by a late successful decision res
   assert.equal(h.ai.busy, false);
   assert.equal(h.requests.length, 1);
 });
+
+test("a read-only account can approve its own MCP calls but not cluster changes", async t => {
+  const h = await harness(t);
+  h.state.permission = "read";
+  await h.ai.refreshBootstrap();
+  await h.start();
+  assert.equal(h.ai.writable, false);
+  // 用户自己接入的 MCP 和集群权限无关
+  h.emit("approval", {
+    ...action("ticket"),
+    name: "jira/create_issue",
+    source: "mcp"
+  });
+  h.emit("approval", action("cluster"));
+  h.emit("status", { status: "waiting_approval" });
+  await flush();
+  await assert.rejects(h.ai.decide("cluster", "approve"), /只读/);
+  await h.ai.decide("ticket", "approve");
+  assert.deepEqual(
+    h.requests.map(item => [item.actionId, item.decision]),
+    [["ticket", "approve"]]
+  );
+});

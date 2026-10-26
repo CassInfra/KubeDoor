@@ -215,6 +215,24 @@ def create_app(service=None, token=None):
                 return StreamingResponse(events(), media_type="text/event-stream", headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"})
             elif endpoint == "provider-test":
                 result = await svc.test_provider((await body(request)).get("provider"))
+            # 用户自己接入的外部 MCP（AI 助手的「MCP 管理」）：任何登录用户，只能管自己账号的
+            elif endpoint == "mcp-servers":
+                if request.method == "GET":
+                    result = await svc.gateway.mcp.list(identity)
+                else:
+                    result = await svc.gateway.mcp.create(identity, await body(request))
+            elif endpoint == "mcp-server-test":
+                result = await svc.gateway.mcp.test(identity, await body(request))
+            elif endpoint == "mcp-server":
+                server_id = request.path_params["mcp_id"]
+                if request.method == "PUT":
+                    result = await svc.gateway.mcp.update(identity, server_id, await body(request))
+                elif request.method == "PATCH":
+                    result = await svc.gateway.mcp.patch(identity, server_id, await body(request))
+                else:
+                    result = await svc.gateway.mcp.delete(identity, server_id)
+            elif endpoint == "mcp-server-refresh":
+                result = await svc.gateway.mcp.refresh(identity, request.path_params["mcp_id"])
             elif endpoint == "wecom-config":
                 identity.require_admin()
                 if request.method == "GET":
@@ -303,6 +321,10 @@ def create_app(service=None, token=None):
     route("/runs/{rid}/decisions", "decisions", ["POST"])
     route("/runs/{rid}/cancel", "cancel", ["POST"])
     route("/provider/test", "provider-test", ["POST"])
+    route("/mcp-servers", "mcp-servers", ["GET", "POST"])
+    route("/mcp-servers/test", "mcp-server-test", ["POST"])
+    route("/mcp-servers/{mcp_id}", "mcp-server", ["PUT", "PATCH", "DELETE"])
+    route("/mcp-servers/{mcp_id}/refresh", "mcp-server-refresh", ["POST"])
     route("/wecom", "wecom-config", ["GET", "PUT"])
     route("/wecom/test", "wecom-test", ["POST"])
     route("/wecom/users", "wecom-users", ["GET", "POST"])

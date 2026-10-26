@@ -12,7 +12,7 @@
     "preview": "vite preview",
     "preview:build": "pnpm build && vite preview",
     "typecheck": "tsc --noEmit && vue-tsc --noEmit --skipLibCheck",
-    "test:ai": "node --test tests/ai.test.cjs tests/ai-approval.test.cjs tests/ai-sessions.test.cjs tests/ai-scope.test.cjs tests/ai-memory.test.cjs",
+    "test:ai": "node --test tests/ai.test.cjs tests/ai-approval.test.cjs tests/ai-sessions.test.cjs tests/ai-scope.test.cjs tests/ai-memory.test.cjs tests/ai-mcp.test.cjs",
     "test:ai-markdown": "node --test tests/ai-markdown.test.cjs",
     "test:ai-sessions": "node --test tests/ai-sessions.test.cjs",
     "svgo": "svgo -f . -r",

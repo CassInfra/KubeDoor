@@ -223,6 +223,61 @@ export interface WeComUnbound {
   unbound_default_env: string | null;
 }
 
+export type AIMcpTransport = "streamable_http" | "sse";
+/** 调用审批：readonly 声明只读的工具自动执行、其余需批准；never 全部自动执行；always 每次都需批准 */
+export type AIMcpApproval = "readonly" | "never" | "always";
+
+export interface AIMcpTool {
+  name: string;
+  title?: string | null;
+  description?: string;
+  /** MCP 服务声明了只读（readOnlyHint） */
+  read_only: boolean;
+}
+
+export interface AIMcpServerInfo {
+  name?: string;
+  title?: string;
+  version?: string;
+  instructions?: string;
+  protocol_version?: string;
+}
+
+/** 当前账号自己接入的外部 MCP（AI 助手的「MCP 管理」）；请求头只回显名称 */
+export interface AIMcpServer {
+  id: string;
+  name: string;
+  transport: AIMcpTransport;
+  url: string;
+  headers: { name: string }[];
+  enabled: boolean;
+  approval: AIMcpApproval;
+  tools: AIMcpTool[];
+  server_info?: AIMcpServerInfo | null;
+  tools_at?: string | null;
+  checked_at?: string | null;
+  last_error?: string | null;
+  created_at?: string;
+  updated_at?: string;
+}
+
+export interface AIMcpServerInput {
+  name: string;
+  transport: AIMcpTransport;
+  url: string;
+  /** 编辑时值留空表示沿用已保存的同名请求头 */
+  headers: { name: string; value: string }[];
+  approval: AIMcpApproval;
+  enabled: boolean;
+}
+
+export interface AIMcpTestResult {
+  success: boolean;
+  error?: string | null;
+  tools: AIMcpTool[];
+  server_info?: AIMcpServerInfo | null;
+}
+
 export class AIRequestError extends Error {
   constructor(
     message: string,
@@ -431,6 +486,24 @@ export const aiApi = {
     request<{ status?: string }>(`/runs/${itemPath(id)}/cancel`, "POST", {}),
   testProvider: (provider: AIProvider) =>
     request<Record<string, any>>("/provider/test", "POST", { provider }),
+  /** 以下是当前账号自己接入的外部 MCP；保存、测试、刷新时服务端会连一次 MCP 拿工具列表 */
+  mcpServers: () => request<{ servers: AIMcpServer[] }>("/mcp-servers"),
+  createMcpServer: (data: AIMcpServerInput) =>
+    request<AIMcpServer>("/mcp-servers", "POST", data),
+  updateMcpServer: (id: string, data: AIMcpServerInput) =>
+    request<AIMcpServer>(`/mcp-servers/${itemPath(id)}`, "PUT", data),
+  /** 列表上的启用开关和调用审批：不改连接配置，不重新连接 */
+  patchMcpServer: (
+    id: string,
+    data: { enabled?: boolean; approval?: AIMcpApproval }
+  ) => request<AIMcpServer>(`/mcp-servers/${itemPath(id)}`, "PATCH", data),
+  deleteMcpServer: (id: string) =>
+    request<{ success: boolean }>(`/mcp-servers/${itemPath(id)}`, "DELETE"),
+  refreshMcpServer: (id: string) =>
+    request<AIMcpServer>(`/mcp-servers/${itemPath(id)}/refresh`, "POST", {}),
+  /** 只测试不保存；id 用于沿用已保存的请求头 */
+  testMcpServer: (data: AIMcpServerInput & { id?: string }) =>
+    request<AIMcpTestResult>("/mcp-servers/test", "POST", data),
   wecomConfig: () => request<WeComConfig>("/wecom"),
   saveWecomConfig: (data: {
     enabled: boolean;

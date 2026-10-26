@@ -9,12 +9,17 @@ import {
   verificationOf
 } from "@/utils/ai";
 
-const props = defineProps<{
-  tool: AITool;
-  writable: boolean;
-  deciding?: string;
-  secret?: string;
-}>();
+const props = withDefaults(
+  defineProps<{
+    tool: AITool;
+    writable: boolean;
+    /** 会话状态已核验：用户自己接入的 MCP 只看这个，不看集群写权限 */
+    ready?: boolean;
+    deciding?: string;
+    secret?: string;
+  }>(),
+  { ready: true }
+);
 const emit = defineEmits<{
   decide: [actionId: string, decision: "approve" | "reject"];
 }>();
@@ -23,6 +28,40 @@ const text = (value: unknown) => {
   const result = safeAIText(value);
   return props.secret ? result.split(props.secret).join("[已隐藏]") : result;
 };
+// 用户自己接入的外部 MCP：和集群无关，会话本人就能批准
+const mcp = computed(() => props.tool.source === "mcp");
+const approvable = computed(() => (mcp.value ? props.ready : props.writable));
+const approvalHint = computed(() => {
+  if (mcp.value)
+    return props.ready
+      ? "批准后调用这个 MCP 工具"
+      : "正在核验会话状态，稍后可以批准";
+  return props.writable ? "批准后执行以上动作" : "当前账号只读，不能批准修改";
+});
+const mcpInfo = computed(() => {
+  const preview = props.tool.preview;
+  if (!mcp.value || !preview || typeof preview !== "object") return null;
+  const value = preview as Record<string, unknown>;
+  return {
+    server: String(value.server ?? ""),
+    tool: String(value.tool ?? ""),
+    title:
+      typeof value.title === "string" && value.title !== value.tool
+        ? value.title
+        : "",
+    readOnly: value.read_only === true
+  };
+});
+// MCP 的结果主要是 content 里的文本，原样显示比 JSON 好读
+const resultText = computed(() => {
+  const result = props.tool.result as Record<string, unknown> | undefined;
+  return mcp.value &&
+    result &&
+    typeof result === "object" &&
+    typeof result.content === "string"
+    ? text(result.content)
+    : text(props.tool.result);
+});
 // 副本数、资源、JVM 等修改：网关按花折资源管控状态生成的执行计划和执行后回读
 const plan = computed(() => controlPlan(props.tool.preview));
 const badge = computed(() => (plan.value ? controlBadge(plan.value) : null));
@@ -68,9 +107,9 @@ const time = computed(() => {
       <el-tag v-if="badge" :type="badge.type" size="small" effect="light">{{
         badge.label
       }}</el-tag>
-      <span v-if="tool.env">集群 {{ tool.env }}</span>
+      <span v-if="tool.env && !mcp">集群 {{ tool.env }}</span>
       <span v-if="tool.namespace">命名空间 {{ tool.namespace }}</span>
-      <span>来源 {{ tool.source || "等待工具返回" }}</span>
+      <span>来源 {{ mcp ? "MCP" : tool.source || "等待工具返回" }}</span>
       <span v-if="time">观测 {{ time }}</span>
       <span v-if="tool.freshness">{{ tool.freshness }}</span>
       <span v-if="tool.truncated" class="truncated">结果已截断</span>
@@ -89,6 +128,15 @@ const time = computed(() => {
       {{ verification.message }}
     </p>
     <div v-if="expanded || tool.pending" class="tool-details">
+      <p v-if="mcpInfo" class="mcp-summary">
+        你接入的 MCP「{{ text(mcpInfo.server) }}」的工具
+        <code>{{ text(mcpInfo.tool) }}</code
+        >{{ mcpInfo.title ? `（${text(mcpInfo.title)}）` : "" }}：{{
+          mcpInfo.readOnly
+            ? "服务声明为只读"
+            : "服务没有声明只读，可能会修改数据"
+        }}
+      </p>
       <div v-if="plan" class="control-plan">
         <p class="control-message">{{ plan.message }}</p>
         <div class="detail-label">执行步骤</div>
@@ -147,7 +195,7 @@ const time = computed(() => {
         <div class="detail-label">执行命令</div>
         <pre>{{ text(tool.command) }}</pre>
       </template>
-      <template v-if="tool.preview && !plan">
+      <template v-if="tool.preview && !plan && !mcp">
         <div class="detail-label">变更预览</div>
         <pre>{{ text(tool.preview) }}</pre>
       </template>
@@ -157,14 +205,12 @@ const time = computed(() => {
       </template>
       <template v-if="tool.result !== undefined">
         <div class="detail-label">工具结果</div>
-        <pre>{{ text(tool.result) }}</pre>
+        <pre>{{ resultText }}</pre>
       </template>
       <p v-if="tool.error" class="tool-error">{{ text(tool.error) }}</p>
     </div>
     <div v-if="tool.pending" class="approval-actions">
-      <span>{{
-        writable ? "批准后执行以上动作" : "当前账号只读，不能批准修改"
-      }}</span>
+      <span>{{ approvalHint }}</span>
       <el-button
         size="small"
         :disabled="!!deciding || !tool.action_id"
@@ -175,7 +221,7 @@ const time = computed(() => {
         size="small"
         type="primary"
         :loading="deciding === tool.action_id"
-        :disabled="!writable || !!deciding || !tool.action_id"
+        :disabled="!approvable || !!deciding || !tool.action_id"
         @click="emit('decide', tool.action_id!, 'approve')"
         >批准这次操作</el-button
       >
@@ -258,6 +304,17 @@ pre {
 
 .tool-error {
   color: var(--el-color-danger);
+}
+
+.mcp-summary {
+  margin: 4px 0 0;
+  font-size: 13px;
+  line-height: 1.7;
+  color: var(--el-text-color-regular);
+
+  code {
+    font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  }
 }
 
 .verification {

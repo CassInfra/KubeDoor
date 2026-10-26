@@ -325,6 +325,14 @@ async def test_cli_secret_resources_are_redacted_before_text_export():
     await executor.close()
 
 
+async def test_nested_exports_do_not_stack_redaction_placeholders():
+    executor = KubernetesExecutor()
+    # _export redacts every level of a nested result again; the placeholder must not grow
+    exported = executor._export({"items": [{"metadata": {"annotations": {"note": "token: abc"}}}]})
+    assert exported["items"][0]["metadata"]["annotations"]["note"] == "token: [REDACTED]"
+    await executor.close()
+
+
 async def test_real_incluster_sdk_token_is_exported_refreshed_and_redacted(tmp_path, monkeypatch):
     from kubernetes import config
     from kubernetes.config.incluster_config import InClusterConfigLoader

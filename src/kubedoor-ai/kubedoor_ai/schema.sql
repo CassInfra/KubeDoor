@@ -142,3 +142,28 @@ CREATE TABLE IF NOT EXISTS kubedoor_ai_wecom_approvals (
     created_at timestamptz NOT NULL DEFAULT now(),
     UNIQUE(action_id)
 );
+
+-- 用户在网页 AI 助手「MCP 管理」里接入的外部 MCP 服务（user_mcp.py）：按 KubeDoor 账号隔离；地址和请求头用
+-- AI_ENCRYPTION_KEY 加密（关联数据是 mcp:<id>），接口只回显请求头名称。revision 在连接配置变化时加一，
+-- 审批中的调用冻结它；tools 是缓存的工具列表，checked_at 是最近一次连接的时间，过期后在后台刷新
+CREATE TABLE IF NOT EXISTS kubedoor_ai_mcp_servers (
+    id uuid PRIMARY KEY,
+    username text NOT NULL,
+    name text NOT NULL,
+    transport text NOT NULL,
+    encrypted_config bytea NOT NULL,
+    enabled boolean NOT NULL DEFAULT true,
+    approval text NOT NULL DEFAULT 'readonly',
+    revision integer NOT NULL DEFAULT 1,
+    tools jsonb NOT NULL DEFAULT '[]',
+    server_info jsonb,
+    tools_at timestamptz,
+    checked_at timestamptz,
+    last_error text,
+    created_at timestamptz NOT NULL DEFAULT now(),
+    updated_at timestamptz NOT NULL DEFAULT now(),
+    CHECK (transport IN ('streamable_http', 'sse')),
+    CHECK (approval IN ('readonly', 'never', 'always')),
+    CHECK (char_length(name) BETWEEN 1 AND 40)
+);
+CREATE UNIQUE INDEX IF NOT EXISTS kubedoor_ai_mcp_servers_name ON kubedoor_ai_mcp_servers(username, lower(name));

@@ -18,6 +18,7 @@ from .domain import AIError, CredentialCipher, Identity, beijing_now, redact, ut
 from .catalogue import EXTRA_CATALOG, EXTRA_SCHEMAS, build_request, validate_arguments
 from .control import (OUTSIDE_ADMISSION, PLANNED, STEP_NAMES, build_plan, changed_fields, check_target, control_drift,
                       deployment_edits, deployment_path, main_step, rejection, snapshot, verify)
+from .user_mcp import McpServers, frozen_fingerprint, needs_approval
 
 
 # Logical operations are a closed catalogue: the model cannot choose URLs or
@@ -259,10 +260,12 @@ class PendingAction(Exception):
 
 
 class Gateway:
-    def __init__(self, store, cipher: CredentialCipher, master_url: str, token: str, http=None):
+    def __init__(self, store, cipher: CredentialCipher, master_url: str, token: str, http=None, mcp=None):
         self.store, self.cipher = store, cipher
         self.master_url, self.token = master_url.rstrip("/"), token
         self.http = http or httpx.AsyncClient(timeout=httpx.Timeout(330, connect=10), follow_redirects=False)
+        # 用户自己接入的外部 MCP（网页 AI 助手的「MCP 管理」）
+        self.mcp = mcp or McpServers(store, cipher)
 
     async def master(self, identity, method, path, params=None, body=None, allow_failure=False):
         # master 按 X-User-Name 从库里重新计算该用户的集群权限,不采信这里带的权限
@@ -394,7 +397,8 @@ class Gateway:
         guard_scope(scope, operation, args, read_only)
         if not read_only:
             ctx.identity.require_write(scope["env"])
-            unknown = await self.store.one("SELECT id FROM kubedoor_ai_actions WHERE run_id=$1::uuid AND state='unknown' AND read_only=false LIMIT 1", ctx.run["id"])
+            # 用户自己的 MCP 结果未知和集群无关，不拦集群上的修改
+            unknown = await self.store.one("SELECT id FROM kubedoor_ai_actions WHERE run_id=$1::uuid AND state='unknown' AND read_only=false AND source<>'mcp' LIMIT 1", ctx.run["id"])
             if unknown:
                 raise AIError("本轮已有写入结果未知，请查询实际状态并在新一轮重新提出操作，不能切换来源盲目重试", 409, "outcome_unknown")
         call_id = call_id or f"{ctx.run['id']}:{uuid.uuid4().hex}"
@@ -414,10 +418,14 @@ class Gateway:
             if binding:
                 preview["credential_fingerprint"] = binding.fingerprint
             action = await self.store.one("INSERT INTO kubedoor_ai_actions(id,run_id,call_id,operation,source,arguments,preview,read_only,connection_revision,state) VALUES($1::uuid,$2::uuid,$3,$4,$5,$6,$7,$8,$9,$10) ON CONFLICT(call_id) DO UPDATE SET call_id=EXCLUDED.call_id RETURNING *", str(uuid.uuid4()), ctx.run["id"], call_id, operation, source, args, preview, read_only, binding.revision if binding else None, "ready" if read_only else "pending")
+        return await self.settle(ctx, action, mcp)
+
+    async def settle(self, ctx, action, mcp=False):
+        """已记账的动作：已有结果的直接返回，待批准的先中断等用户决定，然后派发"""
         if action["state"] in ("succeeded", "failed", "unknown", "rejected", "cancelled"):
             return action["result"] or {"success": False, "error": {"code": action["state"], "message": "该操作不会重复执行"}}
         if action["state"] == "pending":
-            preview = self.action_preview(action, scope)
+            preview = self.action_preview(action, ctx.run["scope"])
             if mcp:
                 raise PendingAction(preview)
             decision = interrupt({"kind": "approval", **preview})
@@ -427,6 +435,50 @@ class Gateway:
                 return result
         return await self.dispatch(ctx, action)
 
+    async def invoke_mcp(self, ctx: RunContext, server: str, tool: str = "", arguments=None, describe=False, call_id=""):
+        """调用用户在「MCP 管理」里接入的外部 MCP（user_mcp.py）。
+
+        和集群工具共用动作记录、审批与审计，但与集群权限无关：是否要批准按该 MCP 的审批方式和工具是否声明只读。
+        可用的服务来自提问时加载的目录（run["_mcp"]）；审批恢复的那一轮没有，用到时再读。
+        """
+        await self.check_cancel(ctx)
+        if ctx.switch_env:
+            raise AIError(f"已请求切换到集群 {ctx.switch_env}，本轮不能再调用工具，请用一句话告诉用户正在切换过去", 409, "switch_pending")
+        call_id = call_id or f"{ctx.run['id']}:{uuid.uuid4().hex}"
+        if not describe:
+            # 已经记账的调用（审批恢复）不再查目录：拒绝照常记下；停用、删除、改了配置在执行前拦下
+            action = await self.store.one("SELECT * FROM kubedoor_ai_actions WHERE call_id=$1", call_id)
+            if action:
+                return await self.settle(ctx, action)
+        servers = ctx.run.get("_mcp")
+        if servers is None:
+            servers = await self.mcp.catalogue(ctx.identity) if ctx.run.get("origin", "chat") == "chat" else []
+            ctx.run["_mcp"] = servers
+        entry = next((item for item in servers if item["name"] == server), None)
+        if entry is None:
+            names = "、".join(item["name"] for item in servers)
+            raise AIError(f"没有启用名为 {server} 的 MCP；" + (f"本轮可用：{names}" if names else "本轮没有可用的 MCP"), 404, "mcp_not_found")
+        if describe:
+            return self.mcp.describe(entry, tool or "")
+        if not isinstance(tool, str) or not tool:
+            raise AIError("请用 tool 指定要调用的 MCP 工具名")
+        if not entry["tools"]:
+            raise AIError(f"MCP {entry['name']} 暂时连不上，没有工具列表：{entry.get('error') or '请稍后再试'}", 409, "mcp_unavailable")
+        spec = next((item for item in entry["tools"] if item["name"] == tool), None)
+        if spec is None:
+            raise AIError(f"MCP {entry['name']} 没有工具 {tool}，可用工具：{', '.join(item['name'] for item in entry['tools'][:50])}", 404, "mcp_tool_not_found")
+        arguments = {} if arguments is None else arguments
+        if not isinstance(arguments, dict):
+            raise AIError("MCP 工具的 arguments 必须为对象")
+        read_only = spec.get("read_only") is True
+        # 冻结连接配置的版本：审批期间改了配置、停用或删除，批准就失效
+        preview = {"server": entry["name"], "tool": tool, "title": spec.get("title"), "read_only": read_only,
+                   "approval": entry["approval"], "server_id": entry["id"],
+                   "credential_fingerprint": frozen_fingerprint(entry["id"], entry["revision"])}
+        state = "pending" if needs_approval(entry["approval"], read_only) else "ready"
+        action = await self.store.one("INSERT INTO kubedoor_ai_actions(id,run_id,call_id,operation,source,arguments,preview,read_only,connection_revision,state) VALUES($1::uuid,$2::uuid,$3,$4,$5,$6,$7,$8,$9,$10) ON CONFLICT(call_id) DO UPDATE SET call_id=EXCLUDED.call_id RETURNING *", str(uuid.uuid4()), ctx.run["id"], call_id, f"{entry['name']}/{tool}", "mcp", copy.deepcopy(arguments), preview, read_only, None, state)
+        return await self.settle(ctx, action)
+
     @staticmethod
     def action_preview(action, scope):
         preview = redact({k: v for k, v in action["preview"].items() if k != "credential_fingerprint"})
@@ -435,7 +487,9 @@ class Gateway:
     async def dispatch(self, ctx, action):
         await self.check_cancel(ctx)
         if not action["read_only"]:
-            ctx.identity.require_write(ctx.run["scope"]["env"])
+            # 用户自己接入的 MCP 和集群权限无关；集群上的修改要当前集群的读写权限
+            if action["source"] != "mcp":
+                ctx.identity.require_write(ctx.run["scope"]["env"])
             valid = await self.store.one("SELECT id FROM kubedoor_ai_actions WHERE id=$1::uuid AND expires_at>now()", action["id"])
             if not valid:
                 raise AIError("批准已过期，请重新生成操作", 409, "approval_expired")
@@ -512,6 +566,8 @@ class Gateway:
     async def execute_action(self, ctx, action):
         source, operation, args = action["source"], action["operation"], action["arguments"]
         env = ctx.run["scope"]["env"]
+        if source == "mcp":
+            return await self.mcp.execute(ctx.identity, action)
         if source == "kubedoor" and (action.get("preview") or {}).get("plan"):
             return await self.execute_plan(ctx, action)
         if source == "kubedoor" and not CATALOG[operation][1]:
@@ -724,4 +780,5 @@ class Gateway:
         ctx.executor_bindings.clear()
 
     async def close(self):
+        await self.mcp.close()
         await self.http.aclose()

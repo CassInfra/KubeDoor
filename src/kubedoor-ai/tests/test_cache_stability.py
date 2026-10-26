@@ -93,12 +93,14 @@ class Harness:
         self.monkeypatch.setattr(runtime_module, "utc_now", lambda: moment.astimezone(timezone.utc).isoformat(), raising=False)
 
     async def turn(self, session, run_id, message, moment, *, scope=None, capabilities=ONLINE, origin="chat",
-                   skill_ids=(), resume=None, usage=None, rewind=None):
+                   skill_ids=(), resume=None, usage=None, rewind=None, mcp=None):
         self.at(moment)
         run = {"id": run_id, "session_id": session, "scope": scope or SCOPE, "skill_ids": list(skill_ids),
                "origin": origin, "capabilities": capabilities, "usage": usage}
         if rewind:
             run["_rewind"] = rewind
+        if mcp is not None:
+            run["_mcp"] = mcp
         ctx = RunContext(run, Identity("operator", "rw"), secrets=(self.provider.api_key,))
         start = len(self.model.payloads)
         await self.runtime.run_graph(ctx, self.provider, message, resume)
@@ -232,5 +234,30 @@ async def test_large_write_file_arguments_are_never_rewritten_in_later_requests(
         assert {dumps(item) for item in later} == {dumps(later[0])}
         for previous, current in zip(payloads, payloads[1:]):
             assert_appends(previous, current)
+    finally:
+        await harness.close()
+
+
+@pytest.mark.asyncio
+async def test_connected_mcp_servers_only_change_the_turn_context(monkeypatch):
+    """I1 / I2：各用户接入的 MCP 不同，只能出现在当轮上下文块里；工具定义是固定的 mcp_tool"""
+    amap = [{"id": "server-1", "name": "amap", "approval": "readonly", "revision": 1,
+             "tools": [{"name": "maps_weather", "description": "查询天气"}], "instructions": None, "error": None}]
+    harness = Harness([answer("你好"), answer("北京晴"), answer("好的")], monkeypatch)
+    try:
+        first = await harness.turn("session-a", "run-1", "你好", FIRST_TIME)
+        second = await harness.turn("session-a", "run-2", "北京天气怎么样", SECOND_TIME, mcp=amap)
+        other = await harness.turn("session-b", "run-3", "你好", THIRD_TIME, mcp=[])
+        payloads = first + second + other
+        assert {dumps(p["messages"][0]) for p in payloads} == {dumps(first[0]["messages"][0])}
+        assert {dumps(p["tools"]) for p in payloads} == {dumps(first[0]["tools"])}
+        assert {"kubedoor_tool", "mcp_tool"} <= {tool["function"]["name"] for tool in first[0]["tools"]}
+        assert_appends(first[-1], second[0])
+        users = [m["content"] for m in second[0]["messages"] if m["role"] == "user"]
+        block = users[-1].split("</kubedoor_turn_context>")[0]
+        assert '用户接入的 MCP：[{"server":"amap","tools":["maps_weather"]}]' in block
+        assert "maps_weather" not in users[0] and "查询天气" not in users[-1]
+        assert "amap" not in text(first[0]["messages"][0]["content"])
+        assert "用户接入的 MCP：" not in [m["content"] for m in other[0]["messages"] if m["role"] == "user"][-1]
     finally:
         await harness.close()

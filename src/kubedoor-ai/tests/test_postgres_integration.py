@@ -20,14 +20,14 @@ import pytest
 import uvicorn
 from fastmcp import Client
 from fastmcp.client.transports import SSETransport, StreamableHttpTransport
-from langchain_core.messages import AIMessage, ToolMessage
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
 from kubedoor_ai.domain import Identity, Provider
 from kubedoor_ai.gateway import RunContext
 from kubedoor_ai.http import create_app
 from kubedoor_ai.runtime import text_content
 from kubedoor_ai.service import Service
-from fakes import ScriptedModel, control_state
+from fakes import ScriptedModel, control_state, remote_mcp
 
 
 pytestmark = pytest.mark.skipif(not os.getenv("AI_TEST_PG_DATABASE"), reason="isolated PostgreSQL integration is opt-in")
@@ -109,6 +109,7 @@ class Harness:
             await self.service.runtime.checkpointer.adelete_thread(row["id"])
         await self.service.store.execute("DELETE FROM kubedoor_ai_sessions WHERE username=$1", self.username)
         await self.service.store.execute("DELETE FROM kubedoor_ai_connections WHERE updated_by=$1", self.username)
+        await self.service.store.execute("DELETE FROM kubedoor_ai_mcp_servers WHERE username=$1", self.username)
         await self.service.close()
 
 
@@ -622,5 +623,100 @@ def test_regenerate_and_edit_replace_only_a_safe_last_turn_and_search_finds_sess
             str(uuid.uuid4()), replacement, "call-" + uuid.uuid4().hex, {"success": False, "error": {"code": "partial_failure"}})
         denied = await h.http.post(f"/api/ai/sessions/{sid}/runs", json=edit)
         assert denied.status_code == 409 and denied.json()["error"]["code"] == "turn_has_writes"
+
+    runner.run(verify())
+
+
+def mcp_message(tool, arguments, call_id):
+    return AIMessage(content="", tool_calls=[{"name": "mcp_tool", "args": {"server": "remote", "tool": tool, "arguments": arguments},
+                                              "id": call_id, "type": "tool_call"}])
+
+
+def test_user_mcp_servers_are_private_encrypted_and_callable_on_postgres(harness, monkeypatch):
+    h, runner = harness
+    monkeypatch.setenv("NO_PROXY", "*")   # AI 服务连本机的 MCP 时不走开发机的系统代理
+
+    async def verify():
+        async with remote_mcp() as base:
+            url = base + "/mcp?key=url-secret-abcdef"
+            created = await h.http.post("/api/ai/mcp-servers", json={"name": "Remote", "transport": "streamable_http", "url": url,
+                                                                     "headers": [{"name": "X-Token", "value": "good-token"}]})
+            assert created.status_code == 200, created.text
+            server = created.json()
+            sid = server["id"]
+            assert server["last_error"] is None and server["approval"] == "readonly" and server["enabled"] is True
+            assert server["headers"] == [{"name": "X-Token"}] and server["url"] == url
+            assert {tool["name"]: tool["read_only"] for tool in server["tools"]} == {"whoami": True, "create_ticket": False}
+            stored = await h.service.store.one("SELECT encrypted_config,revision FROM kubedoor_ai_mcp_servers WHERE id=$1::uuid", sid)
+            assert b"good-token" not in bytes(stored["encrypted_config"]) and b"url-secret" not in bytes(stored["encrypted_config"])
+            listed = await h.http.get("/api/ai/mcp-servers")
+            assert [item["id"] for item in listed.json()["servers"]] == [sid] and "good-token" not in listed.text
+            # 名称不区分大小写不能重复；别的账号看不到也改不了
+            clash = await h.http.post("/api/ai/mcp-servers", json={"name": "remote", "transport": "sse", "url": base + "/sse",
+                                                                   "headers": [{"name": "X-Token", "value": "x"}]})
+            assert clash.status_code == 409
+            other = {**h.headers, "X-User-Name": "other-" + h.username}
+            assert (await h.http.get("/api/ai/mcp-servers", headers=other)).json() == {"servers": []}
+            assert (await h.http.delete(f"/api/ai/mcp-servers/{sid}", headers=other)).status_code == 404
+            assert (await h.http.patch(f"/api/ai/mcp-servers/{sid}", headers=other, json={"enabled": False})).status_code == 404
+            # 测试和编辑时请求头的值留空，沿用已保存的值；只改名称不改连接配置时版本号不变
+            form = {"id": sid, "name": "remote", "transport": "streamable_http", "url": url, "headers": [{"name": "X-Token", "value": ""}]}
+            tested = (await h.http.post("/api/ai/mcp-servers/test", json=form)).json()
+            assert tested["success"] is True and len(tested["tools"]) == 2, tested
+            wrong = (await h.http.post("/api/ai/mcp-servers/test", json={**form, "headers": [{"name": "X-Token", "value": "bad-token"}]})).json()
+            assert wrong["success"] is False and "HTTP 401" in wrong["error"]
+            assert (await h.http.put(f"/api/ai/mcp-servers/{sid}", json=form)).json()["name"] == "remote"
+            revision = await h.service.store.one("SELECT revision FROM kubedoor_ai_mcp_servers WHERE id=$1::uuid", sid)
+            assert revision["revision"] == stored["revision"]
+
+            # 对话：集群只读的账号也能用、能批准自己接入的 MCP；只读工具自动执行，写工具等批准
+            reader = {**h.headers, "X-User-Permission": "read"}
+            session = (await h.http.post("/api/ai/sessions", json={"title": "MCP"}, headers=reader)).json()["id"]
+            h.model(mcp_message("whoami", {}, "mcp-read"), mcp_message("create_ticket", {"title": "磁盘告警"}, "mcp-write"),
+                    AIMessage(content="工单已创建"))
+            started = await h.http.post(f"/api/ai/sessions/{session}/runs", headers=reader,
+                                        json={"message": "建个工单", "scope": {"env": "cluster-a"}, "provider": PROVIDER})
+            assert started.status_code == 200, started.text
+            rid = started.json()["run_id"]
+            await h.wait(rid, "waiting_approval")
+            pending = (await h.http.get(f"/api/ai/sessions/{session}", headers=reader)).json()["active_run"]["pending_actions"]
+            assert [(item["name"], item["source"]) for item in pending] == [("remote/create_ticket", "mcp")]
+            assert "credential_fingerprint" not in json.dumps(pending)
+            decided = await h.http.post(f"/api/ai/runs/{rid}/decisions", headers=reader,
+                                        json={"action_id": pending[0]["action_id"], "decision": "approve", "provider": PROVIDER})
+            assert decided.status_code == 200, decided.text
+            await h.wait(rid)
+            actions = await h.service.store.fetch("SELECT operation,state,read_only,result FROM kubedoor_ai_actions WHERE run_id=$1::uuid ORDER BY created_at", rid)
+            assert [(item["operation"], item["state"], item["read_only"]) for item in actions] ==                 [("remote/whoami", "succeeded", True), ("remote/create_ticket", "succeeded", False)]
+            # 请求头确实带上了（不是 null），回显的值被去掉；之后几层统一脱敏也不再改写这个占位
+            assert json.loads(actions[0]["result"]["content"]) == {"token": "[redacted]"}
+            assert json.loads(actions[1]["result"]["content"]) == {"id": 7, "title": "磁盘告警"}
+            # 检查点里的用户消息开头是本轮上下文块，列出了 MCP；密钥不进检查点
+            ctx = RunContext({"id": rid, "session_id": session, "scope": {"env": "cluster-a"}, "skill_ids": []}, Identity(h.username, "read"))
+            state = await h.service.runtime.graph(ctx, Provider.parse(PROVIDER)).aget_state({"configurable": {"thread_id": session}})
+            messages = state.values["messages"]
+            user = next(message for message in messages if isinstance(message, HumanMessage))
+            assert '用户接入的 MCP：[{"server":"remote","tools":["whoami","create_ticket"]}]' in text_content(user)
+            assert "good-token" not in str(messages) and "url-secret" not in str(messages)
+
+            # 「重新连接」立即刷新；缓存过期后，提问时只用旧缓存，在后台刷新
+            refreshed = (await h.http.post(f"/api/ai/mcp-servers/{sid}/refresh")).json()
+            assert refreshed["last_error"] is None and len(refreshed["tools"]) == 2, refreshed
+            await h.service.store.execute("UPDATE kubedoor_ai_mcp_servers SET checked_at=now()-interval '1 hour',tools='[]' WHERE id=$1::uuid", sid)
+            stale = await h.service.gateway.mcp.catalogue(Identity(h.username, "read"))
+            assert [item["tools"] for item in stale] == [[]]
+            await asyncio.gather(*list(h.service.gateway.mcp.refreshing.values()))
+            fresh = await h.service.store.one("SELECT tools,checked_at > now()-interval '1 minute' AS recent FROM kubedoor_ai_mcp_servers WHERE id=$1::uuid", sid)
+            assert len(fresh["tools"]) == 2 and fresh["recent"] is True
+
+            # 改了连接配置：版本号加一、重新拿工具列表；停用后不再进本轮目录；删除
+            moved = (await h.http.put(f"/api/ai/mcp-servers/{sid}", json={**form, "transport": "sse", "url": base + "/sse"})).json()
+            assert moved["transport"] == "sse" and moved["last_error"] is None and len(moved["tools"]) == 2, moved
+            revision = await h.service.store.one("SELECT revision FROM kubedoor_ai_mcp_servers WHERE id=$1::uuid", sid)
+            assert revision["revision"] == stored["revision"] + 1
+            assert (await h.http.patch(f"/api/ai/mcp-servers/{sid}", json={"enabled": False})).json()["enabled"] is False
+            assert await h.service.gateway.mcp.catalogue(Identity(h.username, "read")) == []
+            assert (await h.http.delete(f"/api/ai/mcp-servers/{sid}")).json() == {"success": True}
+            assert (await h.http.get("/api/ai/mcp-servers")).json() == {"servers": []}
 
     runner.run(verify())

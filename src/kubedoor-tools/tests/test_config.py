@@ -75,3 +75,18 @@ def test_exports_hide_secrets_but_retain_resource_lists():
     assert "encoded" not in json.dumps(exported)
     assert "hidden" not in json.dumps(exported)
     assert exported["client-key-data"] == "[REDACTED]"
+
+
+@pytest.mark.parametrize("text,expected", [
+    ("token: abc123", "token: [REDACTED]"),
+    ('{"token":"abc"}', '{"token":"[REDACTED]"}'),
+    ("authorization: Bearer xyz", "authorization: Bearer [REDACTED]"),
+    ("api_key: 'k-1'", "api_key: '[REDACTED]'"),
+    ("password=hunter2 user=a", "password=[REDACTED] user=a"),
+    # kubedoor-ai writes its own lower-case placeholder before exporting again
+    ('{"token":"[redacted]"}', '{"token":"[redacted]"}'),
+])
+def test_text_redaction_is_idempotent_across_layers(text, expected):
+    assert redact_export(text) == expected
+    assert redact_export(redact_export(text)) == expected
+    assert redact_export(redact_export({"a": [{"b": text}]})) == {"a": [{"b": expected}]}

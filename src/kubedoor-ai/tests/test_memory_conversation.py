@@ -152,6 +152,8 @@ class ConversationStore(FakeStore):
             if "state='pending'" in sql:
                 rows = [row for row in rows if row["state"] == "pending"]
             return copy.deepcopy(rows)
+        if "FROM kubedoor_ai_mcp_servers" in sql:
+            return await super().fetch(sql, *args)
         raise AssertionError(f"Unexpected SQL in conversation test: {sql}")
 
     async def execute(self, sql, *args):

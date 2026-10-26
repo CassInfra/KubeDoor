@@ -7,6 +7,7 @@ import {
   AIRequestError,
   type AIBootstrap,
   type AIEvent,
+  type AIMcpServer,
   type AIMemorySummary,
   type AIMessage,
   type AIProvider,
@@ -71,6 +72,11 @@ export const useAIStore = defineStore("kubedoor-ai", () => {
   const contextUsage = ref<AIUsage | null>(null);
   /** 页面上「问 AI」预填的问题，对话框取走后清空 */
   const pendingInput = ref("");
+  /** 当前账号自己接入的外部 MCP（MCP 管理）；按钮上显示启用的个数 */
+  const mcpServers = ref<AIMcpServer[]>([]);
+  const enabledMcpCount = computed(
+    () => mcpServers.value.filter(item => item.enabled).length
+  );
   const submitting = ref(false);
   const deciding = ref("");
   const cancelling = ref(false);
@@ -281,6 +287,7 @@ export const useAIStore = defineStore("kubedoor-ai", () => {
     scope.value = emptyScope();
     skillIds.value = [];
     selectedMemories.value = [];
+    mcpServers.value = [];
     provider.value = defaultProvider();
     lastSeq.value = 0;
     assistantId = "";
@@ -379,6 +386,22 @@ export const useAIStore = defineStore("kubedoor-ai", () => {
     }
   }
 
+  async function refreshMcpServers() {
+    const username = owner;
+    const result = await aiApi.mcpServers();
+    if (username === owner) mcpServers.value = result.servers || [];
+  }
+
+  function upsertMcpServer(server: AIMcpServer) {
+    const index = mcpServers.value.findIndex(item => item.id === server.id);
+    if (index >= 0) mcpServers.value.splice(index, 1, server);
+    else mcpServers.value.push(server);
+  }
+
+  function dropMcpServer(id: string) {
+    mcpServers.value = mcpServers.value.filter(item => item.id !== id);
+  }
+
   async function open(requestedSession?: string) {
     mounted.value = true;
     visible.value = true;
@@ -392,6 +415,8 @@ export const useAIStore = defineStore("kubedoor-ai", () => {
       const selection =
         previousOwner !== owner ? sessionGeneration : previousSelection;
       if (!bootstrap.value.enabled) return;
+      // 只用来在按钮上显示启用的 MCP 个数；旧版 AI 服务没有这个接口
+      void refreshMcpServers().catch(() => undefined);
       await refreshSessions();
       if (selection !== sessionGeneration) {
         initialized.value = true;
@@ -1132,7 +1157,11 @@ export const useAIStore = defineStore("kubedoor-ai", () => {
     if (!sessionReady.value)
       throw new Error("正在核验会话状态，暂不能批准或拒绝缓存中的操作。");
     if (!activeRun.value || deciding.value) return;
-    if (decision === "approve" && !writable.value)
+    // 用户自己接入的 MCP 和集群权限无关，集群只读的账号也能批准
+    const mcp = pendingTools.value.some(
+      tool => tool.action_id === actionId && tool.source === "mcp"
+    );
+    if (decision === "approve" && !writable.value && !mcp)
       throw new Error("当前账号仅有只读权限。");
     const runId = activeRun.value.id;
     const generation = approvalGeneration;
@@ -1247,9 +1276,14 @@ export const useAIStore = defineStore("kubedoor-ai", () => {
     clusterAvailable,
     liveAvailable,
     pendingTools,
+    mcpServers,
+    enabledMcpCount,
     open,
     refreshBootstrap,
     refreshSessions,
+    refreshMcpServers,
+    upsertMcpServer,
+    dropMcpServer,
     saveProvider,
     forgetProvider,
     selectSession,

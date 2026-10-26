@@ -255,7 +255,9 @@ async def test_new_run_projects_ui_option_lists_out_of_stored_scope():
         return {"id": args[0], "session_id": args[1], "scope": copy.deepcopy(args[4]), "status": "running"}
 
     store = SimpleNamespace(session=AsyncMock(return_value={"id": "session-1"}), one=AsyncMock(side_effect=insert))
-    service = Service(store, None, None)
+    # 网页提问会读用户接入的 MCP 目录；这里没有接入任何 MCP
+    gateway = SimpleNamespace(mcp=SimpleNamespace(catalogue=AsyncMock(return_value=[])))
+    service = Service(store, gateway, None)
     service.ensure_env = AsyncMock(return_value={"env": "cluster-a", "online": True, "ai_tools": True})
     run, created = await service.new_run(Identity("operator", "read"), "session-1", {"env": "cluster-a", "namespace_options": UI_ONLY_NAMES})
     assert created is True

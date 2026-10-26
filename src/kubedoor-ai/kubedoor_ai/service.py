@@ -302,6 +302,8 @@ class Service:
         # Their contents belong to the user message/checkpoint, not a global
         # system prompt or a separate run-level memory snapshot.
         memories = await self.memory_library.resolve([] if memory_ids is None else memory_ids)
+        # 用户在「MCP 管理」里启用的外部 MCP，只在网页提问里用；读的是缓存，过期的在后台刷新，不拖慢提问
+        servers = await self.gateway.mcp.catalogue(identity) if origin == "chat" and channel == "web" else None
         try:
             run = await self.store.one("INSERT INTO kubedoor_ai_runs(id,session_id,username,permission,status,scope,origin,skill_ids,idempotency_key,rewindable) VALUES($1::uuid,$2::uuid,$3,$4,'running',$5,$6,$7,$8,true) RETURNING *", str(uuid.uuid4()), session_id, identity.username, identity.permission_for(scope["env"]), scope, origin, skills, key)
         except asyncpg.UniqueViolationError:
@@ -313,6 +315,8 @@ class Service:
         run["capabilities"] = self.capabilities(cluster)
         if memories:
             run["_memories"] = memories
+        if servers is not None:
+            run["_mcp"] = servers
         return run, True
 
     async def search_sessions(self, identity, text):
@@ -385,13 +389,15 @@ class Service:
 
     async def decision(self, identity, rid, body):
         run = await self.store.run(rid, identity)
-        identity.require_write(run["scope"]["env"])
         decision, action_id = body.get("decision"), body.get("action_id")
         if decision not in ("approve", "reject") or not action_id:
             raise AIError("请提供 action_id 和 approve/reject")
         action = await self.store.one("SELECT * FROM kubedoor_ai_actions WHERE id=$1::uuid AND run_id=$2::uuid", action_id, rid)
         if not action:
             raise AIError("批准操作不存在", 404, "not_found")
+        # 用户自己接入的 MCP 和集群权限无关，会话本人就能批准；集群上的操作要该集群的读写权限
+        if action["source"] != "mcp":
+            identity.require_write(run["scope"]["env"])
         if action["state"] != "pending":
             return {"run_id": rid, "status": run["status"], "action_status": action["state"]}
         if run["status"] != "waiting_approval" or run["cancel_requested"]:
@@ -403,6 +409,10 @@ class Service:
             connection = await self.store.connection(run["scope"]["env"])
             if not connection or connection["revision"] != action["connection_revision"] or self.gateway.connection_fingerprint(connection) != action["preview"].get("credential_fingerprint"):
                 raise AIError("kubeconfig 已变更，请重新生成操作", 409, "connection_changed")
+        if action["source"] == "mcp" and decision == "approve":
+            problem = await self.gateway.mcp.frozen_problem(identity, action["preview"])
+            if problem:
+                raise AIError(problem + "；可以拒绝或停止本轮", 409, "mcp_changed")
         if run["origin"] == "mcp":
             changed = await self.store.one("UPDATE kubedoor_ai_actions SET state=$2 WHERE id=$1::uuid AND state='pending' RETURNING id", action_id, "approved" if decision == "approve" else "rejected")
             if not changed:

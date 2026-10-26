@@ -530,6 +530,15 @@ kubectl -n kubedoor logs deploy/kubedoor-ai --tail=50
 
 kubedoor-ai 启动时要连接 PostgreSQL，并读取 Secret `kubedoor-ai-security` 里的密钥，数据库不通或密钥无效都会导致启动失败。
 
+### Q：怎么让 AI 助手调用我自己的 MCP 服务（地图、工单、知识库等）？
+
+打开 AI 助手，点右上角「MCP 管理」→「添加 MCP」：填名称、选连接方式（Streamable HTTP 或 SSE）、填 URL，需要鉴权的在「请求头」里加（如 `Authorization: Bearer xxx`），也可以把 key 放在 URL 参数里。先「测试连接」，能列出工具再保存。启用后直接在对话里提问，AI 会按需调用。
+
+- 配置按账号隔离，只有自己能看到；URL 和请求头加密保存在服务端，请求头的值不回显，编辑时留空表示不修改。
+- 默认「只读工具自动执行」：MCP 服务声明为只读的工具直接调用，其余工具调用前要在对话里批准（对集群只读的账号也能批准自己的 MCP）；可以改成「全部自动执行」或「每次都需批准」。
+- 连接失败时列表里会写原因：HTTP 401/403 查请求头里的鉴权信息；HTTP 404、400、405 多半是 URL 路径或连接方式选错了（Streamable HTTP 地址通常以 `/mcp` 结尾，SSE 通常以 `/sse` 结尾）；「无法连接」「无法解析域名」说明 kubedoor-ai 所在的 Pod 访问不到这个地址。
+- 不支持本地 stdio 的 MCP 和 OAuth 登录；目前只在网页 AI 助手里可用，企微机器人不会调用。详见 [AI 助手文档](../docs/ai-assistant.md#接入自己的-mcp)。
+
 ### Q：外部 MCP 客户端怎么接入？
 
 外部 MCP 由 kubedoor-ai 提供，经 Web 的 nginx 对外开放，`ENABLE_MCP` 默认为 `true`。

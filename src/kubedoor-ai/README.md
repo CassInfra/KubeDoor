@@ -248,6 +248,36 @@ kubeconfig 使用 AES-256-GCM 加密后存入 PostgreSQL，原始配置不提供
 原批准失效。K8S Secret 和 CLI files/stdin 在批准卡、事件与会话历史中隐藏，
 内部动作保留实际参数以执行已经批准的操作。
 
+## 用户接入的 MCP
+
+网页 AI 助手的「MCP 管理」让每个账号接入自己的 MCP 服务（`kubedoor_ai/user_mcp.py`，前端
+`src/components/AI/AIMcpDialog.vue`，使用说明见 [AI 助手说明](../../docs/ai-assistant.md#接入自己的-mcp)）。
+连接方式只有 SSE 和 Streamable HTTP（fastmcp 客户端，`mode="auto"`：先探测 `server/discover`，旧版服务回退到
+`initialize` 握手），不支持 stdio 和 OAuth。
+
+- **存储**：`kubedoor_ai_mcp_servers`，按用户名隔离。URL 和请求头一起用 `AI_ENCRYPTION_KEY` 加密（关联数据
+  `mcp:<id>`，密文不能挪到别的记录上用），接口只回显请求头名称；编辑时请求头的值留空表示沿用。`revision` 只在连接
+  配置（连接方式、URL、请求头）变化时加一。
+- **工具列表**：保存、测试、「重新连接」时连上去 `tools/list`，缓存在 `tools`（最多 300 个；名字带空白、尖括号或
+  控制字符的丢弃，免得冒充上下文块的边界）。提问时（`Service.new_run`，只有网页渠道）只读缓存，`checked_at` 超过
+  10 分钟的在后台刷新、下一轮生效，不拖慢提问。
+- **缓存不变量**：用户的 MCP 不注册成工具（工具定义会因人而异，违反 I2）。工具定义里只有固定的
+  `mcp_tool(server, tool, arguments, describe)`，主 Agent 和子 Agent 都有；本轮可用的服务和工具名写在
+  `<kubedoor_turn_context>` 块的「用户接入的 MCP」一行（每个服务最多列 100 个工具名），参数说明由模型
+  `describe=true` 按需查看。没有启用 MCP 的提问没有这一行。
+- **调用与审批**：走网关 `invoke_mcp`，和集群工具共用动作记录、审批、审计与事件：`source=mcp`，
+  `operation=<服务>/<工具>`，预览里冻结 `credential_fingerprint=mcp:<id>:<revision>`（和 kubeconfig 指纹一样不显示）。
+  是否要批准看该 MCP 的 `approval`：`readonly`（默认，工具声明了 `readOnlyHint` 才自动执行）、`never`、`always`。
+  MCP 与集群权限无关：派发和 `decisions` 都不检查集群写权限，会话本人就能批准；批准时和执行前核对 MCP 仍存在、
+  已启用、版本没变。审批恢复时按 `call_id` 找到原动作，不再查目录（拒绝照常记下）。
+- **结果**：文本（含文本资源）最多 60000 字符，图片、音频、二进制资源只写占位说明；`structuredContent` 只在没有文本
+  时使用。请求头的值（含 `Bearer` 后面的 token）和 URL 参数的值在结果和错误提示里替换掉，之后照常过一遍统一脱敏。
+- **失败**：还没连上就失败是已知失败（`mcp_unavailable`）；服务端明确拒绝的 JSON-RPC 错误（参数不对、没有这个工具）
+  是 `mcp_error`；工具返回 `isError` 是 `mcp_tool_error`；调用发出后超时或断开，修改类调用按结果未知处理、不重放
+  （不拦同一轮集群上的修改）。Streamable HTTP 会把 401/404 等报成笼统的错误，HTTP 状态码用响应钩子记下来再给出
+  具体原因；日志只记不带查询参数的 URL 和原因。
+- 企微和外部 MCP 入口不加载用户的 MCP。
+
 ## HTTP、Skills 与外部 MCP
 
 浏览器及共享工具接口统一位于 `/api/ai`：
@@ -263,6 +293,7 @@ kubeconfig 使用 AES-256-GCM 加密后存入 PostgreSQL，原始配置不提供
 | `GET /api/ai/tools`、`POST /api/ai/tools/execute` | 查询目录与调用统一工具网关 |
 | `GET /api/ai/skills`、`GET /api/ai/skills/{id}` | 获取仓库内 Skills |
 | `/api/ai/connections`、`/api/ai/provider/test` | 连接管理与模型连通性测试 |
+| `/api/ai/mcp-servers`、`/api/ai/mcp-servers/{id}`、`/api/ai/mcp-servers/test`、`/api/ai/mcp-servers/{id}/refresh` | 本人接入的外部 MCP：列表、新增、修改（PUT 全量；PATCH 只改启用和审批方式，不重新连接）、删除、只测试不保存、重新获取工具列表 |
 | `GET /health` | 无需身份的健康检查 |
 
 DeepAgents 加载仓库内 `skills/kubedoor-k8s`，Skills 文件只读；会话和运行创建支持
@@ -402,6 +433,7 @@ DeepSeek 等模型的上下文缓存要求请求从第一个 token 起完整匹�
 - 不要每次调用模型都扫描整个历史：消息在产生时处理一次，之后不再改动。key 脱敏就是这样做的：用户消息构造时脱敏，模型输出在 `wrap_model_call`、工具结果在 `wrap_tool_call` 里脱敏（工具结果可能是 `ToolMessage`，也可能装在 `Command` 的状态更新里）。全量扫描的耗时随对话增长，2 MB 历史时每次约 0.2 秒，而且阻塞 event loop。
 - 摘要、会话标题、记忆总结这类不带工具的辅助请求用 `models.without_thinking` 关闭思考；摘要请求不经过 agent 中间件，它的用量靠回调（`SummaryUsageCallback`）记录。
 - 声明式子 Agent 不继承主 Agent 的中间件覆盖，新增的中间件要同时加进子 Agent 的 `middleware`。
+- 用户接入的 MCP 不能按人注册成工具：工具定义里只有固定的 `mcp_tool`，可用的服务和工具名只放本轮上下文块（见上文「用户接入的 MCP」）。
 - 每轮用户消息在检查点里的 id 固定为 `user-<run id>`，重新生成 / 编辑后重发靠它找到要删掉的那一轮，不要改这个格式；只有 `kubedoor_ai_runs.rewindable=true` 的 run 才有。
 - 守护测试：`tests/test_cache_stability.py`（按 DeepSeek 实际请求格式录制 payload，检查 system、tools、历史在轮次、会话、渠道、审批恢复之间逐字节稳定）、`tests/test_summarization.py`（摘要只让前缀变化一次）、`tests/test_runtime.py` 的检查点写入用例。这几组测试失败时先修代码，不要改断言。
 

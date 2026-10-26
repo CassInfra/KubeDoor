@@ -104,7 +104,18 @@ def parse_kubeconfig(raw: str | dict, context: str | None = None) -> dict:
 
 _SECRET_KEY = re.compile(r"^(?:.*[_-])?(?:password|passwd|token|secret|api[_-]?key|authorization|credential|credentials)$", re.I)
 _KUBECONFIG_KEYS = {"client-key-data", "client-certificate-data", "client-key", "tokenfile"}
-_TEXT_SECRET = re.compile(r'''(?i)(\b(?:authorization["']?\s*[:=]\s*["']?(?:bearer\s+)?|(?:api[_-]?key|password|token)["']?\s*[:=]\s*["']?))[^\s"'`,;{}\]]+''')
+_TEXT_SECRET = re.compile(r'''(?i)(\b(?:authorization["']?\s*[:=]\s*["']?(?:bearer\s+)?|(?:api[_-]?key|password|token)["']?\s*[:=]\s*["']?))([^\s"'`,;{}\]]+)''')
+
+
+def _redact_text_secret(match: re.Match) -> str:
+    # Results pass through several redaction layers (executor, AI gateway,
+    # event store). A value that is already a placeholder ([REDACTED] here,
+    # [redacted] from kubedoor-ai) is kept; otherwise every pass takes
+    # "[REDACTED" as the value and appends another "]".
+    end = match.end()
+    if match.group(2).lower() == "[redacted" and match.string[end:end + 1] == "]":
+        return match.group(0)
+    return match.group(1) + "[REDACTED]"
 
 
 def redact_export(value: Any, _secret_resource: bool = False) -> Any:
@@ -120,5 +131,5 @@ def redact_export(value: Any, _secret_resource: bool = False) -> Any:
     if isinstance(value, (list, tuple)):
         return [redact_export(item, _secret_resource) for item in value]
     if isinstance(value, str):
-        return _TEXT_SECRET.sub(r"\1[REDACTED]", value)
+        return _TEXT_SECRET.sub(_redact_text_secret, value)
     return value

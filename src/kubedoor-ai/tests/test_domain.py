@@ -65,6 +65,16 @@ def test_provider_validation_and_recursive_redaction():
     assert Provider.parse({"base_url": "http://localhost:11434/v1", "api_key": "", "model": "local"}).api_key == ""
 
 
+def test_redaction_is_stable_across_nesting_and_repeated_passes():
+    # 结果要经过网关、事件、消息、HTTP 好几层脱敏，每层还逐级递归：已经打过的码不能再变
+    value = {"a": {"b": {"c": "token: abc"}}, "list": [["password=x"]], "header": "authorization: Bearer q",
+             "mcp": '{"token":"[redacted]"}'}
+    once = redact(value)
+    assert once == {"a": {"b": {"c": "token: [REDACTED]"}}, "list": [["password=[REDACTED]"]],
+                    "header": "authorization: Bearer [REDACTED]", "mcp": '{"token":"[redacted]"}'}
+    assert redact(redact(once)) == once
+
+
 def test_provider_context_window_settings_are_optional_and_bounded():
     base = {"base_url": "https://api.deepseek.com", "api_key": "", "model": "deepseek-flash"}
     parsed = Provider.parse(base)

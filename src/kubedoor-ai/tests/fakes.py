@@ -1,14 +1,23 @@
+import asyncio
 import copy
 import json
+import socket
 import uuid
+from contextlib import AsyncExitStack, asynccontextmanager
 from datetime import datetime, timezone
 from typing import Any
 from unittest.mock import AsyncMock
 
+import uvicorn
+from fastmcp import FastMCP
+from fastmcp.server.dependencies import get_http_headers
 from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.outputs import ChatGeneration, ChatGenerationChunk, ChatResult
 from langchain_core.messages import AIMessage, AIMessageChunk
+from mcp_types import ToolAnnotations
 from pydantic import Field
+from starlette.applications import Starlette
+from starlette.responses import JSONResponse
 from kubedoor_ai.domain import redact
 from kubedoor_ai.models import KubeDoorChatDeepSeek
 
@@ -69,15 +78,20 @@ class FakeStore:
         self.statuses = []
         self.usage = {}
         self.cancelled = False
+        self.mcp_servers = {}   # 用户接入的外部 MCP：id → kubedoor_ai_mcp_servers 的一行
 
     async def connection(self, env):
         return None
 
     async def one(self, sql, *args):
+        if "FROM kubedoor_ai_mcp_servers" in sql:
+            row = self.mcp_servers.get(args[0])
+            return copy.deepcopy(row) if row and row["username"] == args[1] else None
         if "cancel_requested" in sql:
             return {"cancel_requested": self.cancelled}
         if "state='unknown'" in sql:
-            return next((a for a in self.actions.values() if a["state"] == "unknown" and not a["read_only"]), None)
+            return next((a for a in self.actions.values() if a["state"] == "unknown" and not a["read_only"]
+                         and ("source<>'mcp'" not in sql or a["source"] != "mcp")), None)
         if sql.startswith("INSERT INTO kubedoor_ai_actions"):
             action = dict(zip(("id", "run_id", "call_id", "operation", "source", "arguments", "preview", "read_only", "connection_revision", "state"), args))
             action.update(expires_at="2099-01-01T00:00:00+00:00", interrupt_id=None, result=None)
@@ -122,6 +136,10 @@ class FakeStore:
         return result
 
     async def fetch(self, sql, *args):
+        if "FROM kubedoor_ai_mcp_servers" in sql:
+            # 本轮目录（AND enabled）按创建顺序；缓存都当作还没过期
+            rows = [row for row in self.mcp_servers.values() if row["username"] == args[0] and (row["enabled"] or "AND enabled" not in sql)]
+            return copy.deepcopy([{**row, "stale": False} for row in sorted(rows, key=lambda row: row["created_at"])])
         return copy.deepcopy(list(self.actions.values()))
 
 
@@ -178,3 +196,54 @@ class RecordingDeepSeek(KubeDoorChatDeepSeek):
             tool_call_chunks=[{"name": call["name"], "args": json.dumps(call["args"], ensure_ascii=False), "id": call["id"],
                                "index": index, "type": "tool_call_chunk"} for index, call in enumerate(message.tool_calls)],
         ))
+
+
+class TokenGuard:
+    """只放行带 X-Token: good-token 的请求，其余回 401（模拟要鉴权的 MCP 服务）"""
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] == "http" and dict(scope["headers"]).get(b"x-token") != b"good-token":
+            await JSONResponse({"error": "unauthorized"}, status_code=401)(scope, receive, send)
+            return
+        await self.app(scope, receive, send)
+
+
+@asynccontextmanager
+async def remote_mcp():
+    """本机端口上的真实 MCP 服务（/mcp 是 Streamable HTTP，/sse 是 SSE），用户接入的外部 MCP 的测试对端"""
+    server = FastMCP("remote")
+
+    @server.tool(description="返回收到的令牌", annotations=ToolAnnotations(readOnlyHint=True))
+    def whoami() -> dict:
+        return {"token": get_http_headers(include_all=True).get("x-token")}
+
+    @server.tool(description="创建工单")
+    def create_ticket(title: str) -> dict:
+        return {"id": 7, "title": title}
+
+    streamable, legacy = server.http_app(path="/mcp", transport="http"), server.http_app(path="/sse", transport="sse")
+
+    @asynccontextmanager
+    async def lifespan(_):
+        async with AsyncExitStack() as stack:
+            await stack.enter_async_context(streamable.router.lifespan_context(streamable))
+            await stack.enter_async_context(legacy.router.lifespan_context(legacy))
+            yield
+
+    sock = socket.socket()
+    sock.bind(("127.0.0.1", 0))
+    web = uvicorn.Server(uvicorn.Config(TokenGuard(Starlette(routes=[*streamable.routes, *legacy.routes], lifespan=lifespan)),
+                                        log_level="error", access_log=False, lifespan="on"))
+    task = asyncio.create_task(web.serve(sockets=[sock]))
+    try:
+        for _ in range(200):
+            if web.started:
+                break
+            await asyncio.sleep(0.025)
+        assert web.started
+        yield f"http://127.0.0.1:{sock.getsockname()[1]}"
+    finally:
+        web.should_exit = True
+        await asyncio.wait_for(task, 10)

@@ -12,6 +12,7 @@ import {
 } from "@/api/ai";
 import AIScopeSelector from "./AIScopeSelector.vue";
 import AIProviderDialog from "./AIProviderDialog.vue";
+import AIMcpDialog from "./AIMcpDialog.vue";
 import AIToolGroup from "./AIToolGroup.vue";
 import AIMarkdown from "./AIMarkdown.vue";
 import AIMemoryDialog from "./AIMemoryDialog.vue";
@@ -21,6 +22,7 @@ import AIMemoryAttachments from "./AIMemoryAttachments.vue";
 const ai = useAIStoreHook();
 const mobile = useMediaQuery("(max-width: 760px)");
 const providerVisible = ref(false);
+const mcpVisible = ref(false);
 const memoryVisible = ref(false);
 const memoryEditorVisible = ref(false);
 const memoryDraft = ref<AIMemoryDraft>({ title: "", content: "" });
@@ -415,6 +417,15 @@ const timestamp = (value?: string) => {
             @click="providerVisible = true"
             >模型设置</el-button
           >
+          <el-button
+            size="small"
+            :disabled="!ai.bootstrap?.username"
+            title="接入自己的 MCP 服务，对话时 AI 可以按需调用"
+            @click="mcpVisible = true"
+            >MCP 管理{{
+              ai.enabledMcpCount ? `（${ai.enabledMcpCount}）` : ""
+            }}</el-button
+          >
         </div>
       </div>
     </template>
@@ -641,6 +652,7 @@ const timestamp = (value?: string) => {
                 :expanded="isToolGroupExpanded(message)"
                 :active="ai.busy && message === ai.messages.at(-1)"
                 :writable="ai.writable && ai.sessionReady"
+                :ready="ai.sessionReady"
                 :deciding="ai.deciding"
                 :secret="ai.provider.api_key"
                 @update:expanded="value => setToolGroupExpanded(message, value)"
@@ -754,6 +766,7 @@ const timestamp = (value?: string) => {
       </div>
     </div>
     <AIProviderDialog v-model="providerVisible" />
+    <AIMcpDialog v-model="mcpVisible" />
     <AIMemoryDialog
       v-model="memoryVisible"
       :selected="ai.selectedMemories"
