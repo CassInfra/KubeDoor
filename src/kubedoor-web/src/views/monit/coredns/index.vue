@@ -189,7 +189,13 @@
           >
             <el-table-column label="行号" width="72" align="center">
               <template #default="{ row }">
-                <div class="line-cell">
+                <div
+                  class="line-cell"
+                  :class="{
+                    'is-new': !row.origin,
+                    'is-changed': row.origin && isChanged(row)
+                  }"
+                >
                   <span v-if="row.origin" class="line-no">{{
                     row.origin.line + 1
                   }}</span>
@@ -200,10 +206,7 @@
                     effect="dark"
                     >新增</el-tag
                   >
-                  <el-tag
-                    v-else-if="rowChanged(row)"
-                    size="small"
-                    type="warning"
+                  <el-tag v-else-if="isChanged(row)" size="small" type="warning"
                     >已修改</el-tag
                   >
                 </div>
@@ -247,8 +250,11 @@
                     @blur="touch(row, 'text')"
                   >
                     <template #prefix><span class="hash">#</span></template>
-                    <template v-if="errorOf(row, 'text')" #suffix>
+                    <!-- #suffix 插槽一直要有、v-if 写在里面:el-input 只在挂载时看有没有这个插槽,
+                         之后才出现的错误不会显示图标(只有红框,也看不到原因) -->
+                    <template #suffix>
                       <el-tooltip
+                        v-if="errorOf(row, 'text')"
                         :content="errorOf(row, 'text')"
                         placement="top"
                       >
@@ -265,11 +271,18 @@
                     :disabled="!canEdit"
                     placeholder="10.0.0.1"
                     class="mono"
-                    :class="{ 'is-invalid': errorOf(row, 'ip') }"
+                    :class="{
+                      'is-invalid': errorOf(row, 'ip'),
+                      'is-off': !row.enabled
+                    }"
                     @blur="touch(row, 'ip')"
                   >
-                    <template v-if="errorOf(row, 'ip')" #suffix>
-                      <el-tooltip :content="errorOf(row, 'ip')" placement="top">
+                    <template #suffix>
+                      <el-tooltip
+                        v-if="errorOf(row, 'ip')"
+                        :content="errorOf(row, 'ip')"
+                        placement="top"
+                      >
                         <el-icon class="issue-icon is-error"
                           ><WarningFilled
                         /></el-icon>
@@ -291,15 +304,18 @@
                   :class="{
                     'is-invalid': errorOf(row, 'names'),
                     'is-warning':
-                      !errorOf(row, 'names') && issueOf(row).warnings.length
+                      !errorOf(row, 'names') && issueOf(row).warnings.length,
+                    'is-off': !row.enabled
                   }"
                   @blur="touch(row, 'names')"
                 >
-                  <template
-                    v-if="errorOf(row, 'names') || issueOf(row).warnings.length"
-                    #suffix
-                  >
-                    <el-tooltip placement="top">
+                  <template #suffix>
+                    <el-tooltip
+                      v-if="
+                        errorOf(row, 'names') || issueOf(row).warnings.length
+                      "
+                      placement="top"
+                    >
                       <template #content>
                         <div v-if="errorOf(row, 'names')">
                           {{ errorOf(row, "names") }}
@@ -329,7 +345,10 @@
                   size="small"
                   :disabled="!canEdit"
                   placeholder="可选,写在行尾的 # 后面"
-                  :class="{ 'is-invalid': errorOf(row, 'remark') }"
+                  :class="{
+                    'is-invalid': errorOf(row, 'remark'),
+                    'is-off': !row.enabled
+                  }"
                   @blur="touch(row, 'remark')"
                 />
               </template>
@@ -342,7 +361,7 @@
                     link
                     type="primary"
                     size="small"
-                    :disabled="!canEdit || busy || !rowChanged(row)"
+                    :disabled="!canEdit || busy || !isChanged(row)"
                     :loading="savingId === row.id"
                     @click="saveRow(row)"
                   >
@@ -351,7 +370,7 @@
                   <el-button
                     link
                     size="small"
-                    :disabled="!row.origin || !rowChanged(row) || busy"
+                    :disabled="!row.origin || !isChanged(row) || busy"
                     @click="revertRow(row)"
                   >
                     撤销
@@ -363,8 +382,10 @@
                     @click="copyRow(row)"
                     >复制</el-button
                   >
+                  <!-- 菜单打开时才渲染:默认每一行都常驻一份,行多了首屏和整表刷新都慢 -->
                   <el-dropdown
                     trigger="click"
+                    :persistent="false"
                     :disabled="!canEdit"
                     @command="onInsert(row, $event)"
                   >
@@ -399,28 +420,33 @@
                   >
                     删除
                   </el-button>
-                  <el-tooltip
-                    v-if="row.kind === 'entry'"
-                    :disabled="checkable(row)"
-                    :content="
-                      row.origin
-                        ? '这条记录的 IP 或域名不合法,无法检查'
-                        : '保存后才能检查'
-                    "
-                    placement="top"
-                  >
-                    <span>
-                      <el-button
-                        link
-                        type="success"
-                        size="small"
-                        :disabled="!checkable(row)"
-                        @click="openCheck(row)"
-                      >
-                        检查
-                      </el-button>
-                    </span>
-                  </el-tooltip>
+                  <template v-if="row.kind === 'entry'">
+                    <el-button
+                      v-if="checkable(row)"
+                      link
+                      type="success"
+                      size="small"
+                      @click="openCheck(row)"
+                    >
+                      检查
+                    </el-button>
+                    <!-- 只有不能检查时才需要提示原因;每行都放一个 el-tooltip 的话,行多了首屏明显变慢 -->
+                    <el-tooltip
+                      v-else
+                      :content="
+                        row.origin
+                          ? '这条记录的 IP 或域名不合法,无法检查'
+                          : '保存后才能检查'
+                      "
+                      placement="top"
+                    >
+                      <span>
+                        <el-button link type="success" size="small" disabled>
+                          检查
+                        </el-button>
+                      </span>
+                    </el-tooltip>
+                  </template>
                 </div>
               </template>
             </el-table-column>
@@ -471,11 +497,15 @@
 <script setup lang="ts">
 import {
   computed,
+  markRaw,
   nextTick,
   onBeforeUnmount,
   onMounted,
+  reactive,
   ref,
-  shallowRef
+  shallowRef,
+  toRaw,
+  type ComputedRef
 } from "vue";
 import { onBeforeRouteLeave } from "vue-router";
 import { ElMessage, ElMessageBox } from "element-plus";
@@ -568,29 +598,57 @@ const canEdit = computed(() => canSave.value && !!block.value?.editable);
 const hasReload = computed(
   () => !!block.value?.server.directives.includes("reload")
 );
-const dirtyRows = computed(() => rows.value.filter(rowChanged));
 
-const EMPTY_ISSUES: RowIssues = {
-  ip: "",
-  names: "",
-  remark: "",
-  text: "",
-  warnings: []
-};
-const issues = computed(() => {
-  const map = new Map<number, RowIssues>();
+// 表格按单元格各自更新:每行的「是否改过」「校验结果」各是一个 computed,改一个字只重渲染这一行的单元格。
+// 单元格里不能读整张表共用的结果(比如所有行校验结果的 Map),否则改任何一个字所有行都要重渲染
+interface RowState {
+  changed: ComputedRef<boolean>;
+  issues: ComputedRef<RowIssues>;
+}
+const rowStates = new WeakMap<HostsRow, RowState>();
+
+const sameIssues = (a: RowIssues, b: RowIssues) =>
+  a.ip === b.ip &&
+  a.names === b.names &&
+  a.remark === b.remark &&
+  a.text === b.text &&
+  a.warnings.length === b.warnings.length &&
+  a.warnings.every((text, i) => text === b.warnings[i]);
+
+/** 同一个 hosts 块里域名重复的提示:只和启用记录的 IP / 域名有关,改注释、备注不会重新计算 */
+const duplicates = computed(() => {
+  const map = new Map<number, string[]>();
   for (const item of blocks.value) {
     const own = rows.value.filter(row => row.block === item.index);
-    const duplicates = duplicateWarnings(own);
-    for (const row of own) {
-      const result = validateRow(row, item.zones);
-      result.warnings.push(...(duplicates.get(row.id) ?? []));
-      map.set(row.id, result);
-    }
+    duplicateWarnings(own).forEach((list, id) => map.set(id, list));
   }
   return map;
 });
-const issueOf = (row: HostsRow) => issues.value.get(row.id) ?? EMPTY_ISSUES;
+
+function stateOf(row: HostsRow): RowState {
+  const raw = toRaw(row);
+  let state = rowStates.get(raw);
+  if (!state) {
+    const live = reactive(raw) as HostsRow;
+    state = {
+      changed: computed(() => rowChanged(live)),
+      // 结果没变时沿用原来的对象:别的行改了域名、重新算重复提示时,这一行不用重渲染
+      issues: computed<RowIssues>(previous => {
+        const zones =
+          blocks.value.find(item => item.index === live.block)?.zones ?? [];
+        const next = validateRow(live, zones);
+        next.warnings.push(...(duplicates.value.get(live.id) ?? []));
+        return previous && sameIssues(previous, next) ? previous : next;
+      })
+    };
+    rowStates.set(raw, state);
+  }
+  return state;
+}
+const isChanged = (row: HostsRow) => stateOf(row).changed.value;
+const issueOf = (row: HostsRow) => stateOf(row).issues.value;
+const dirtyRows = computed(() => rows.value.filter(isChanged));
+
 const hasError = (row: HostsRow) => {
   const item = issueOf(row);
   return !!(item.ip || item.names || item.remark || item.text);
@@ -607,7 +665,7 @@ function errorOf(row: HostsRow, field: Field): string {
   const message = issueOf(row)[field];
   if (!message) return "";
   const shown =
-    !rowChanged(row) ||
+    !isChanged(row) ||
     attempted.value.has(row.id) ||
     touched.value.has(`${row.id}:${field}`);
   return shown ? message : "";
@@ -625,11 +683,13 @@ const stats = computed(() => {
   };
 });
 
-const visibleRows = computed(() => {
+// el-table 对 data 是深度监听:数组里的行是响应式的话,改任何一个字都会 setData、重新布局并重渲染整张表。
+// 所以给它 markRaw 的数组(只认数组本身换没换),显示的行没变时沿用原来的数组
+const visibleRows = computed<HostsRow[]>(previous => {
   const word = keyword.value.trim().toLowerCase();
-  return rows.value.filter(row => {
+  const next = rows.value.filter(row => {
     if (row.block !== blockIndex.value) return false;
-    const changed = rowChanged(row);
+    const changed = isChanged(row);
     if (statusFilter.value === "changed") return changed;
     if (changed) return true; // 正在改的行始终显示,免得改着改着被筛选掉
     if (
@@ -652,6 +712,12 @@ const visibleRows = computed(() => {
         .includes(word)
     );
   });
+  if (
+    previous?.length === next.length &&
+    next.every((row, i) => row === previous[i])
+  )
+    return previous;
+  return markRaw(next);
 });
 
 const emptyText = computed(() => {
@@ -713,13 +779,10 @@ const alerts = computed(() => {
   return list;
 });
 
+// 表格整体渲染时逐行调用,只能读不会变的字段(读了行内容的话,改一个字就要重渲染整张表);
+// 已修改 / 新增 / 停用的样式加在单元格里
 function rowClass({ row }: { row: HostsRow }) {
-  return [
-    row.kind === "comment" ? "row-comment" : row.enabled ? "" : "row-disabled",
-    !row.origin ? "row-new" : rowChanged(row) ? "row-changed" : ""
-  ]
-    .filter(Boolean)
-    .join(" ");
+  return row.kind === "comment" ? "row-comment" : "";
 }
 
 // 注释行:IP、域名、备注三列合成一格
@@ -1177,7 +1240,7 @@ function openCheck(row: HostsRow) {
     ip: origin.ip,
     enabled: origin.enabled,
     line: origin.line + 1,
-    dirty: rowChanged(row)
+    dirty: isChanged(row)
   };
   checkVisible.value = true;
 }
@@ -1355,16 +1418,31 @@ onBeforeUnmount(() =>
   --el-table-tr-bg-color: var(--el-fill-color-lighter);
 }
 
-.coredns-table :deep(.row-disabled .el-input__inner) {
+/* el-input 自带 transform: translateZ(0),每个输入框都是一个合成层:表格里有几百个输入框时,
+   每输入一个字浏览器都要花上百毫秒重新分层(Layerize) */
+.coredns-table :deep(.el-input__wrapper) {
+  transform: none;
+}
+
+/* 停用的记录 */
+.is-off :deep(.el-input__inner) {
   color: var(--el-text-color-placeholder);
 }
 
-.coredns-table :deep(.row-new > td:first-child) {
-  box-shadow: inset 3px 0 0 var(--el-color-success);
+/* 改过的行左侧标黄、新增的标绿:画在行号单元格里(单元格是 position: relative) */
+.line-cell.is-new::before,
+.line-cell.is-changed::before {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  width: 3px;
+  content: "";
+  background: var(--el-color-warning);
 }
 
-.coredns-table :deep(.row-changed > td:first-child) {
-  box-shadow: inset 3px 0 0 var(--el-color-warning);
+.line-cell.is-new::before {
+  background: var(--el-color-success);
 }
 
 .ops {
