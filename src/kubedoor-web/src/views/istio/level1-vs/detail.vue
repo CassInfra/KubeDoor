@@ -300,6 +300,21 @@ onMounted(load);
         <div v-for="item in vs.lint" :key="item">{{ item }}</div>
       </el-alert>
       <el-alert
+        v-if="vs.domain_issues.length"
+        type="warning"
+        :closable="false"
+        show-icon
+        class="mb-3"
+      >
+        <template #title
+          >域名重复(同一个集群里,多个 VirtualService 的 hosts 不能重复,同一个
+          VirtualService
+          里不同规则的域名也不能重复;按要下发的内容检查,集群里其他组的、被忽略的
+          VirtualService 也算)</template
+        >
+        <div v-for="item in vs.domain_issues" :key="item">{{ item }}</div>
+      </el-alert>
+      <el-alert
         v-if="!vs.scope.visible"
         type="warning"
         :closable="false"

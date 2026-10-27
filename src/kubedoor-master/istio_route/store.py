@@ -388,6 +388,15 @@ async def find_standard(group_id: int, namespace: str, name: str) -> Optional[di
     return await get_standard(vs_id) if vs_id is not None else None
 
 
+async def list_bindings(group_id: int) -> List[dict]:
+    """组里各组标准部署到了哪些集群:[{namespace, name, gateways, k8s_name, hosts}](查重复的 host 用)。"""
+    rows = await db.pg_fetch(
+        'SELECT v.namespace, v.name, v.gateways, b.k8s_name, b.hosts FROM istio_vs_cluster b '
+        'JOIN istio_vs v ON v.id = b.vs_id WHERE v.group_id = $1', group_id)
+    return [{**dict(row), 'gateways': _load(row['gateways']) or [], 'hosts': _load(row['hosts']) or []}
+            for row in rows]
+
+
 async def route_vs_id(route_id: int) -> Optional[int]:
     return await db.pg_fetchval('SELECT vs_id FROM istio_vs_route WHERE id = $1', route_id)
 

@@ -633,6 +633,61 @@ async def apply_to(client, vs_id, k8s_name):
 
 
 @pytest.mark.asyncio
+async def test_duplicate_domains_in_pages_and_apply_preview(env):
+    """同一个集群里的域名不能重复:矩阵和详情页按组标准要下发的内容查(集群里被忽略的、不在本组的 VS 也算),
+    未纳管的按现状查;下发预览标出哪些是这次下发带来的。"""
+    client, agent, _ = env
+    group_id = await setup_group(client, agent)
+    agent.put('beta-k', 'c', vs(['a-beta-k.x.com'], [route('/c/', 3)]))  # 和 a 在 beta-k 的 host 重复
+    agent.put('prod-a', 'd', vs(['d.x.com'], [  # 两条规则匹配同一个域名(authority / host 头各写一次)
+        {'match': [{'authority': {'exact': 'd.x.com'}}], 'route': [{'destination': {'host': 'd1'}}]},
+        {'match': [{'headers': {'host': {'exact': 'D.x.com'}}}], 'route': [{'destination': {'host': 'd2'}}]}]))
+    await call(client, 'POST', '/api/istio/collect', {'group_id': group_id})
+    imported = await call(client, 'POST', '/api/istio/import', {'group_id': group_id, 'items': [
+        {'namespace': NS, 'name': 'a', 'base': 'beta-k', 'clusters': ['beta-k', 'beta-p', 'prod-a']}]})
+    a_id = imported['data'][0]['vs_id']
+    a_issue = f'beta-k:host a-beta-k.x.com 也在 {NS}/c 里'
+    d_issue = '域名 d.x.com 在第 1 条(→ d1)、第 2 条(→ d2)规则里重复;第 2 条对这个域名不会生效'
+    rows = await matrix(client, group_id)
+    assert rows['a']['domain_issues'] == [a_issue] and rows['b']['domain_issues'] == []
+    assert rows['c']['domain_issues'] == [f'beta-k:host a-beta-k.x.com 也在 {NS}/a 里']
+    assert rows['d']['domain_issues'] == [f'prod-a:{d_issue}']
+    assert (await call(client, 'GET', '/api/istio/vs', vs_id=a_id))['data']['domain_issues'] == [a_issue]
+
+    # 忽略 c:列表里不显示了,但它还在集群里,a 照样报
+    await call(client, 'POST', '/api/istio/ignore', {'group_id': group_id, 'items': [{'namespace': NS, 'name': 'c'}]})
+    rows = await matrix(client, group_id)
+    assert 'c' not in rows and rows['a']['domain_issues'] == [a_issue]
+
+    # 改了 a 在 beta-p 的 hosts(还没下发):按要下发的查,和 b 重复
+    await call(client, 'PUT', '/api/istio/vs/cluster', {'vs_id': a_id, 'k8s_name': 'beta-p',
+                                                       'hosts': ['a-beta.x.com', 'b-beta.x.com']})
+    rows = await matrix(client, group_id)
+    assert rows['a']['domain_issues'] == [a_issue, f'beta-p:host b-beta.x.com 也在 {NS}/b 里']
+    assert rows['b']['domain_issues'] == [f'beta-p:host b-beta.x.com 也在 {NS}/a 里']
+    detail = (await call(client, 'GET', '/api/istio/vs', vs_id=a_id))['data']
+    assert detail['domain_issues'] == rows['a']['domain_issues']
+    # 只能看 beta-k 的:只查 beta-k
+    reader = {'X-Test-Role': 'none', 'X-Test-Clusters': json.dumps({'beta-k': 'read'})}
+    assert (await matrix(client, group_id, headers=reader))['a']['domain_issues'] == [a_issue]
+
+    # 下发预览:beta-k 的是集群里原来就有的,beta-p 的是这次下发带来的
+    preview = (await call(client, 'POST', '/api/istio/apply/preview', {'items': [
+        {'vs_id': a_id, 'k8s_name': 'beta-k'}, {'vs_id': a_id, 'k8s_name': 'beta-p'}]}))['data']
+    assert {p['k8s_name']: p['domain_issues'] for p in preview} == {
+        'beta-k': [{'text': f'host a-beta-k.x.com 也在 {NS}/c 里', 'new': False}],
+        'beta-p': [{'text': f'host b-beta.x.com 也在 {NS}/b 里', 'new': True}]}
+
+    # 纳管 d:组标准里还是两条规则匹配同一个域名,下发预览里是原来就有的
+    imported = await call(client, 'POST', '/api/istio/import', {'group_id': group_id, 'items': [
+        {'namespace': NS, 'name': 'd', 'base': 'prod-a', 'clusters': ['prod-a']}]})
+    preview = (await call(client, 'POST', '/api/istio/apply/preview', {'items': [
+        {'vs_id': imported['data'][0]['vs_id'], 'k8s_name': 'prod-a'}]}))['data'][0]
+    assert preview['same'] and preview['domain_issues'] == [{'text': d_issue, 'new': False}]
+    assert (await matrix(client, group_id))['d']['domain_issues'] == [f'prod-a:{d_issue}']
+
+
+@pytest.mark.asyncio
 async def test_backup_before_apply_and_rollback(env):
     """下发前备份集群里当时的内容(会变时才备份),每个集群每个 VS 留最近 5 份;回退写回备份,只改集群不改组标准,
     回退前也备份(可以撤销);agent 明确失败(集群没变)不留备份,结果不明时要回退到的那份先留着。"""

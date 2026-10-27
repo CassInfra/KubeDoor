@@ -76,6 +76,7 @@ const FILTERS = [
   { value: "unmanaged", label: "未纳管" },
   { value: "inconsistent", label: "各集群规则不一致" },
   { value: "lint", label: "规范问题" },
+  { value: "domain", label: "域名重复" },
   { value: "test_only", label: "只在测试环境" },
   { value: "prod_only", label: "只在生产环境" }
 ];
@@ -129,6 +130,7 @@ const filteredRows = computed(() => {
     if (filter.value === "inconsistent" && row.versions.length <= 1)
       return false;
     if (filter.value === "lint" && !row.lint.length) return false;
+    if (filter.value === "domain" && !row.domain_issues.length) return false;
     if (
       ["test_only", "prod_only"].includes(filter.value) &&
       row.coverage !== filter.value
@@ -170,6 +172,7 @@ const summary = computed(() => ({
   managed: rows.value.filter(r => r.vs_id !== null).length,
   problem: rows.value.filter(needsAction).length,
   lint: rows.value.filter(r => r.lint.length).length,
+  domain: rows.value.filter(r => r.domain_issues.length).length,
   conflict: rows.value.filter(r => r.conflicts.length).length,
   ignored: matrix.value?.stats.ignored ?? 0
 }));
@@ -623,9 +626,9 @@ onMounted(async () => {
         <span>
           共 {{ summary.total }} 个 VirtualService,已纳管
           {{ summary.managed }} 个,需要处理 {{ summary.problem }} 个,规范问题
-          {{ summary.lint }} 个<span
-            v-if="summary.conflict"
-            class="conflict-sum"
+          {{ summary.lint }} 个<span v-if="summary.domain" class="domain-sum"
+            >,域名重复 {{ summary.domain }} 个</span
+          ><span v-if="summary.conflict" class="conflict-sum"
             >,与其他组冲突 {{ summary.conflict }} 个(红色行)</span
           >
         </span>
@@ -703,11 +706,34 @@ onMounted(async () => {
                   >单独纳入</el-tag
                 >
               </el-tooltip>
-              <el-tooltip v-if="row.lint.length" placement="top">
+              <el-tooltip
+                v-if="row.lint.length"
+                placement="top"
+                popper-class="istio-issue-tip"
+              >
                 <template #content>
                   <div v-for="item in row.lint" :key="item">{{ item }}</div>
                 </template>
                 <el-icon class="lint"><Warning /></el-icon>
+              </el-tooltip>
+              <el-tooltip
+                v-if="row.domain_issues.length"
+                placement="top"
+                popper-class="istio-issue-tip"
+              >
+                <template #content>
+                  <div>
+                    同一个集群里的域名不能重复(多个 VirtualService 的
+                    hosts、同一个 VirtualService
+                    里不同规则的域名);部署了的按组标准要下发的内容检查:
+                  </div>
+                  <div v-for="item in row.domain_issues" :key="item">
+                    · {{ item }}
+                  </div>
+                </template>
+                <el-tag size="small" type="warning" class="domain-tag"
+                  >域名重复</el-tag
+                >
               </el-tooltip>
             </div>
             <div class="sub">
@@ -1214,7 +1240,23 @@ onMounted(async () => {
   color: var(--el-color-danger);
 }
 
+.domain-sum {
+  color: var(--el-color-warning);
+}
+
+.domain-tag {
+  cursor: help;
+}
+
 .ignored-link {
   font-size: 13px;
+}
+</style>
+
+<style>
+/* 规范问题、域名重复的悬浮提示:一条可能很长,限制宽度、折行(提示框挂在 body 下,不能用 scoped) */
+.istio-issue-tip {
+  max-width: 760px;
+  line-height: 1.6;
 }
 </style>

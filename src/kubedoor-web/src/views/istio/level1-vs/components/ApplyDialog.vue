@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, ref, watch } from "vue";
+import { computed, h as vnode, nextTick, ref, watch } from "vue";
 import { ElMessageBox } from "element-plus";
 import { message } from "@/utils/message";
 import {
@@ -63,6 +63,18 @@ watch(
 const changedCount = computed(
   () => preview.value.filter(r => !r.error && !r.same).length
 );
+/** 下发后会新出现重复域名的项(这次下发带来的,集群里原来没有) */
+const dupCount = computed(
+  () => preview.value.filter(r => r.domain_issues.some(i => i.new)).length
+);
+/** 勾选的项里这次下发会带来的重复域名,确认下发时列出 */
+const newIssues = computed(() =>
+  selection.value.flatMap(r =>
+    r.domain_issues
+      .filter(i => i.new)
+      .map(i => `${r.k8s_name} · ${r.namespace}/${r.name}:${i.text}`)
+  )
+);
 const prodSelected = computed(() =>
   Array.from(
     new Set(
@@ -115,13 +127,39 @@ async function submit() {
     return;
   }
   const prod = prodSelected.value;
-  await ElMessageBox.confirm(
-    prod.length
-      ? `包含生产集群 ${prod.join("、")},确认已核对差异,下发 ${selection.value.length} 项?`
-      : `下发 ${selection.value.length} 项?`,
-    "确认下发",
-    { type: prod.length ? "warning" : "info", confirmButtonText: "下发" }
-  );
+  const fresh = newIssues.value;
+  const question = prod.length
+    ? `包含生产集群 ${prod.join("、")},确认已核对差异,下发 ${selection.value.length} 项?`
+    : `下发 ${selection.value.length} 项?`;
+  // 有这次下发带来的重复域名:列出来,确认后照样可以下发(同一个域名按路径分到几条规则是常见写法;
+  // 把域名从一个 VirtualService 挪到另一个、只先下发了新的那个时,也会短暂重复)
+  const content = fresh.length
+    ? vnode("div", null, [
+        vnode("p", null, question),
+        vnode(
+          "p",
+          { class: "dup-confirm-title" },
+          `下发后会新出现 ${fresh.length} 处重复的域名(同一个集群里的域名不能重复):`
+        ),
+        ...fresh
+          .slice(0, 10)
+          .map(text =>
+            vnode("div", { class: "dup-confirm-item" }, `· ${text}`)
+          ),
+        fresh.length > 10
+          ? vnode(
+              "div",
+              { class: "dup-confirm-item" },
+              `…另有 ${fresh.length - 10} 处,见列表`
+            )
+          : null
+      ])
+    : question;
+  await ElMessageBox.confirm(content, "确认下发", {
+    type: prod.length || fresh.length ? "warning" : "info",
+    confirmButtonText: fresh.length ? "仍要下发" : "下发",
+    customClass: fresh.length ? "istio-apply-confirm" : undefined
+  });
   applying.value = true;
   try {
     const res = await applyIstio(
@@ -154,8 +192,15 @@ async function submit() {
       show-icon
       class="mb-2"
       title="下发内容 = 组标准(规则、默认路由、gateways)+ 该集群的 hosts 和规则里的域名。下面的差异是集群最新现状(左)→ 将要下发(右),展开行查看。"
-      description="下发前会先备份集群里当时的内容,有问题可以在 VirtualService 详情「集群与 Hosts」的「回退」里恢复(每个集群保留最近 5 份)。"
-    />
+    >
+      <div>
+        下发前会先备份集群里当时的内容,有问题可以在 VirtualService 详情「集群与
+        Hosts」的「回退」里恢复(每个集群保留最近 5 份)。
+      </div>
+      <div>
+        「变化」里列出这些都下发后同一个集群里重复的域名,这次下发带来的标红,确认下发时还会再列出来。
+      </div>
+    </el-alert>
     <el-alert
       v-if="prodSelected.length"
       type="warning"
@@ -166,7 +211,9 @@ async function submit() {
     />
     <div class="summary">
       共 {{ preview.length }} 项,有变化 {{ changedCount }} 项,已勾选
-      {{ selection.length }} 项
+      {{ selection.length }} 项<span v-if="dupCount" class="dup-sum"
+        >,{{ dupCount }} 项下发后会新出现重复的域名</span
+      >
     </div>
     <el-table
       ref="tableRef"
@@ -206,7 +253,7 @@ async function submit() {
           >
         </template>
       </el-table-column>
-      <el-table-column label="变化" min-width="260">
+      <el-table-column label="变化" min-width="360">
         <template #default="{ row }">
           <span v-if="row.error" class="err">{{ row.error }}</span>
           <el-tag
@@ -218,6 +265,16 @@ async function submit() {
             class="mr-1"
             >{{ item }}</el-tag
           >
+          <!-- 下发后重复的域名:这次下发带来的标红,集群里原来就有的标灰 -->
+          <div v-for="issue in row.domain_issues" :key="issue.text" class="dup">
+            <el-tag
+              size="small"
+              :type="issue.new ? 'danger' : 'info'"
+              effect="plain"
+              >{{ issue.new ? "这次下发带来" : "集群里原有" }}</el-tag
+            >
+            <span :class="{ 'dup-new': issue.new }">{{ issue.text }}</span>
+          </div>
         </template>
       </el-table-column>
       <el-table-column label="状态" width="140">
@@ -259,5 +316,43 @@ async function submit() {
 .err {
   font-size: 12px;
   color: var(--el-color-danger);
+}
+
+.dup-sum,
+.dup-new {
+  color: var(--el-color-danger);
+}
+
+.dup {
+  display: flex;
+  gap: 6px;
+  align-items: flex-start;
+  margin-top: 4px;
+  font-size: 12px;
+  line-height: 20px;
+  word-break: normal;
+  overflow-wrap: anywhere;
+}
+
+.dup .el-tag {
+  flex: none;
+}
+</style>
+
+<style>
+/* 确认下发时列出这次下发带来的重复域名:一条较长,加宽确认框(确认框挂在 body 下,不能用 scoped) */
+.istio-apply-confirm {
+  --el-messagebox-width: 640px;
+}
+
+.istio-apply-confirm .dup-confirm-title {
+  margin-top: 8px;
+  font-weight: 600;
+  color: var(--el-color-danger);
+}
+
+.istio-apply-confirm .dup-confirm-item {
+  font-size: 12px;
+  line-height: 20px;
 }
 </style>

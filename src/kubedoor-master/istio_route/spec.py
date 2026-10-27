@@ -11,6 +11,8 @@
   只是域名不同的规则单独标出。
 - lint_http / lint_domains:规范检查 —— 用了重写就要有名称,没用重写就不要名称(名称用于访问日志展示);
   域名条件里的域名要在本集群的 hosts 里。
+- hosts_index / domain_issues / apply_domain_issues:同一个集群里的域名不能重复 —— 多个 VS 的 hosts 不能重复,
+  同一个 VS 里不同 http 规则匹配的域名(authority / headers.host)也不能重复。
 - VSScope / find_conflicts:组的 VS 范围(包含 / 忽略规则 + 单个 VS 的手动忽略 / 单独纳入),
   以及同一个 VS 是否也在共用集群的其他组里(同一个 VS 只能属于一个组)。
 - build_matrix:组矩阵,每行一个 VS,每列一个集群;search_lines 把规则内容展平成「字段路径: 值」供页面全文搜索。
@@ -482,6 +484,142 @@ def lint_domains(spec: Optional[dict], where: str = '') -> List[str]:
 
 
 # ---------------------------------------------------------------------------
+# 重复的域名:同一个集群里,多个 VS 的 hosts 不能重复,同一个 VS 里不同 http 规则匹配的域名也不能重复
+# ---------------------------------------------------------------------------
+# {集群: {host(小写): {(命名空间, 名称): 绑定的 gateway}}}
+HostsIndex = Dict[str, Dict[str, Dict[Tuple[str, str], frozenset]]]
+_NO_CONDITION = canonical({})
+
+
+def _gateway_set(gateways, namespace: str) -> frozenset:
+    """VS 绑定的 gateway,补全命名空间;没写 gateways 的是网格内部(mesh)。"""
+    values = [g for g in gateways or [] if isinstance(g, str) and g]
+    return frozenset(g if g == 'mesh' or '/' in g else f'{namespace}/{g}' for g in values) or frozenset(['mesh'])
+
+
+def planned_hosts(standards: Iterable[dict]) -> Dict[tuple, dict]:
+    """组标准部署到各集群后的 hosts 和 gateways(下发后就是它):{(集群, 命名空间, 名称): {hosts, gateways}}"""
+    return {(k8s_name, s['namespace'], s['name']): {'hosts': binding.get('hosts') or [],
+                                                     'gateways': s.get('gateways') or []}
+            for s in standards for k8s_name, binding in (s.get('bindings') or {}).items()}
+
+
+def hosts_index(live: Dict[tuple, dict], planned: Optional[Dict[tuple, dict]] = None) -> HostsIndex:
+    """各集群里每个 host 被哪些 VS 用。live 是集群现状,planned 是要下发的(只看 hosts 和 gateways),
+    同一个 VS 以 planned 为准;键都是 (集群, 命名空间, 名称)。"""
+    planned = planned or {}
+    index: HostsIndex = {}
+    for key, spec in [*((k, v) for k, v in live.items() if k not in planned), *planned.items()]:
+        k8s_name, namespace, name = key
+        gateways = _gateway_set((spec or {}).get('gateways'), namespace)
+        for host in (spec or {}).get('hosts') or []:
+            if isinstance(host, str) and host:
+                index.setdefault(k8s_name, {}).setdefault(host.lower(), {})[(namespace, name)] = gateways
+    return index
+
+
+def duplicate_hosts(index: HostsIndex, k8s_name: str, key: Tuple[str, str], hosts) -> Dict[str, Dict[tuple, bool]]:
+    """这个 VS 的 hosts 里,同一个集群里别的 VS 也有的:{host: {别的 VS: 两个 VS 是否绑定了同一个 gateway}}"""
+    owners_by_host = index.get(k8s_name) or {}
+    result = {}
+    for host in dict.fromkeys(h.lower() for h in hosts or [] if isinstance(h, str) and h):
+        owners = owners_by_host.get(host) or {}
+        mine = owners.get(key, frozenset())
+        others = {other: bool(gateways & mine) for other, gateways in owners.items() if other != key}
+        if others:
+            result[host] = others
+    return result
+
+
+def rule_domains(entry: dict) -> List[Tuple[str, str]]:
+    """一条规则匹配的域名,和同一个 match 条目里的其余条件:[(域名, 其余条件)]。
+    authority 和 headers.host 是同一个东西,不分写法和匹配方式,域名转小写比较;按集群的占位不算。"""
+    result = []
+    match = entry.get('match')
+    for cond in match if isinstance(match, list) else []:
+        parsed = domain_condition(cond)
+        if parsed and parsed[0]['value'] != DOMAIN_PLACEHOLDER:
+            result.append((parsed[0]['value'].lower(), canonical(parsed[1])))
+    return result
+
+
+def rule_domain_dups(spec: Optional[dict]) -> Tuple[List[dict], Dict[str, dict]]:
+    """同一个 VS 里不同的 http 规则匹配了同一个域名(默认路由不算):(普通规则, {域名: {rules, dead}})。
+    rules 是用到这个域名的规则下标;dead 是其中对这个域名永远不会生效的 —— 它匹配这个域名的每个条目,
+    前面都有规则匹配这个域名时没有别的条件,或者别的条件和它一样。"""
+    entries, _ = split_http((spec or {}).get('http'))
+    uses: Dict[str, List[Tuple[int, str]]] = {}
+    for index, entry in enumerate(entries):
+        for value, rest in rule_domains(entry):
+            uses.setdefault(value, []).append((index, rest))
+    dups = {}
+    for value, items in uses.items():
+        rules = list(dict.fromkeys(index for index, _ in items))
+        if len(rules) < 2:
+            continue
+        dead = [j for j in rules[1:]
+                if all(any(i < j and rest_i in (_NO_CONDITION, rest_j) for i, rest_i in items)
+                       for k, rest_j in items if k == j)]
+        dups[value] = {'rules': rules, 'dead': dead}
+    return entries, dups
+
+
+def _rule_tag(entry: dict) -> str:
+    """规则的简短标识:有名称用名称,否则用转发目标。"""
+    if entry.get('name'):
+        return entry['name']
+    target = forward_label(entry)
+    return f'→ {target}' if target else describe_match(entry.get('match'))
+
+
+def _hosts_text(host: str, others: Dict[tuple, bool]) -> str:
+    names = '、'.join(f"{ns}/{name}{'' if shared else '(gateway 不同)'}" for (ns, name), shared in sorted(others.items()))
+    return f'host {host} 也在 {names} 里'
+
+
+def _rule_domain_text(entries: List[dict], value: str, dup: dict) -> str:
+    rules = '、'.join(f'第 {i + 1} 条({_rule_tag(entries[i])})' for i in dup['rules'])
+    dead = f";第 {'、'.join(str(i + 1) for i in dup['dead'])} 条对这个域名不会生效" if dup['dead'] else ''
+    return f'域名 {value} 在{rules}规则里重复{dead}'
+
+
+def domain_issues(spec: Optional[dict], index: HostsIndex, k8s_name: str, key: Tuple[str, str]) -> List[str]:
+    """同一个集群里的域名不能重复:这个 VS(spec 是它在该集群的内容)的 hosts 不能和集群里别的 VS 重复,
+    不同 http 规则匹配的域名(authority / headers.host)也不能重复。"""
+    spec = spec or {}
+    issues = [_hosts_text(host, others) for host, others in duplicate_hosts(index, k8s_name, key, spec.get('hosts')).items()]
+    entries, dups = rule_domain_dups(spec)
+    return issues + [_rule_domain_text(entries, value, dup) for value, dup in dups.items()]
+
+
+def by_cluster(pairs: Iterable[Tuple[str, str]]) -> List[str]:
+    """[(集群, 提示)] → 「集群1、集群2:提示」:各集群一样的提示合成一条(规则是共用的,域名常常也一样),保持先后顺序。"""
+    grouped: Dict[str, List[str]] = {}
+    for k8s_name, text in pairs:
+        names = grouped.setdefault(text, [])
+        if k8s_name not in names:
+            names.append(k8s_name)
+    return [f"{'、'.join(names)}:{text}" for text, names in grouped.items()]
+
+
+def apply_domain_issues(spec: dict, current: Optional[dict], after: HostsIndex, before: HostsIndex,
+                        k8s_name: str, key: Tuple[str, str]) -> List[dict]:
+    """下发预览:下发后这个 VS 的重复域名 [{text, new}]。after / before 是这批下发之后 / 之前集群里的 hosts,
+    current 是集群里这个 VS 现在的内容(没有为 None);new 表示集群里原来没有、是这次下发带来的。"""
+    issues = []
+    previous = (before.get(k8s_name) or {})
+    for host, others in duplicate_hosts(after, k8s_name, key, spec.get('hosts')).items():
+        owners = previous.get(host) or {}
+        new = key not in owners or any(other not in owners for other in others)
+        issues.append({'text': _hosts_text(host, others), 'new': new})
+    existing = rule_domain_dups(current)[1] if current is not None else {}
+    entries, dups = rule_domain_dups(spec)
+    for value, dup in dups.items():
+        issues.append({'text': _rule_domain_text(entries, value, dup), 'new': value not in existing})
+    return issues
+
+
+# ---------------------------------------------------------------------------
 # 对比
 # ---------------------------------------------------------------------------
 def route_key(entry: dict) -> str:
@@ -931,14 +1069,18 @@ def search_lines(specs: Iterable[Optional[dict]]) -> List[str]:
     return list(out)
 
 
-def build_matrix(clusters: List[dict], standards: List[dict], snapshots: Dict[tuple, dict]) -> List[dict]:
+def build_matrix(clusters: List[dict], standards: List[dict], snapshots: Dict[tuple, dict],
+                 hosts: Optional[HostsIndex] = None) -> List[dict]:
     """组矩阵。
 
     clusters:当前用户能看到的组内集群(按显示顺序),含 k8s_name / env_type / collected_at;
     standards:组标准,含 routes(带各集群的 domains)和 bindings({k8s_name: {hosts, applied_hash, ...}});
-    snapshots:{(k8s_name, namespace, name): spec}。
-    每行的 search_lines 是组标准(按这些集群展开域名)和这些集群现状的规则内容,页面全文搜索用。
+    snapshots:{(k8s_name, namespace, name): spec};
+    hosts:这些集群里每个 host 被哪些 VS 用(hosts_index,含不在本组的),查重复的 host。
+    每行的 search_lines 是组标准(按这些集群展开域名)和这些集群现状的规则内容,页面全文搜索用;
+    domain_issues 是重复的域名:部署了的按组标准要下发的内容查,未纳管的按集群现状查。
     """
+    hosts = hosts or {}
     names = [c['k8s_name'] for c in clusters]
     collected = {c['k8s_name']: bool(c.get('collected_at')) for c in clusters}
     env_types = {c['k8s_name']: c.get('env_type') for c in clusters}
@@ -951,6 +1093,7 @@ def build_matrix(clusters: List[dict], standards: List[dict], snapshots: Dict[tu
         live = {k: snapshots[(k, namespace, name)] for k in names if (k, namespace, name) in snapshots}
         labels, versions = version_labels(live, names)
         row = {'namespace': namespace, 'name': name, 'vs_id': None, 'versions': versions, 'cells': {}}
+        issues = []  # 重复的域名:[(集群, 提示)]
         searched = []  # 搜索的内容:组标准(共用部分和各集群展开后的),再加各集群现状
         if standard:
             shared = standard_spec(standard)
@@ -989,6 +1132,7 @@ def build_matrix(clusters: List[dict], standards: List[dict], snapshots: Dict[tu
                 searched.append(rendered)
                 if status != INCOMPLETE:
                     row['lint'] += lint_domains(rendered, f'{k8s_name}:')
+                issues += [(k8s_name, text) for text in domain_issues(rendered, hosts, k8s_name, (namespace, name))]
                 cell.update(
                     hosts=list(binding.get('hosts') or []),
                     status=status,
@@ -998,6 +1142,7 @@ def build_matrix(clusters: List[dict], standards: List[dict], snapshots: Dict[tu
             elif spec is not None:
                 if not standard:
                     row['lint'] += lint_domains(spec, f'{k8s_name}:')
+                    issues += [(k8s_name, text) for text in domain_issues(spec, hosts, k8s_name, (namespace, name))]
                 cell.update(hosts=list(spec.get('hosts') or []), status=UNBOUND if standard else UNMANAGED)
             else:
                 cell.update(hosts=[], status=NONE)
@@ -1009,6 +1154,7 @@ def build_matrix(clusters: List[dict], standards: List[dict], snapshots: Dict[tu
         has_prod = any(env_types.get(k) == 'prod' for k in present)
         row['coverage'] = 'test_only' if has_test and not has_prod else 'prod_only' if has_prod and not has_test else ''
         row['status_count'] = dict(Counter(cell['status'] for cell in row['cells'].values()))
+        row['domain_issues'] = by_cluster(issues)
         row['search_lines'] = search_lines([*searched, *live.values()])
         rows.append(row)
     return rows

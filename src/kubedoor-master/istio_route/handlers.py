@@ -809,9 +809,16 @@ async def group_matrix(request):
     keys = set(standards) | set(where)
     classes = {key: view.classify(key) for key in keys}
     shown = {key for key in keys if classes[key]['visible']}
+    shown_standards = [s for key, s in standards.items() if key in shown]
+
+    def matrix_rows():
+        # 查重复的 host:这些集群里的全部 VS(含其他组的、被忽略的),本组的按组标准要下发的 hosts
+        hosts = S.hosts_index(snapshots, S.planned_hosts(shown_standards))
+        return S.build_matrix(visible, shown_standards,
+                              {k: v for k, v in snapshots.items() if (k[1], k[2]) in shown}, hosts)
+
     # 每个 VS 按集群渲染、算哈希、展平搜索内容,VS 多时要算上一秒,放到线程里免得卡住 event loop
-    rows = await asyncio.to_thread(S.build_matrix, visible, [s for key, s in standards.items() if key in shown],
-                                   {k: v for k, v in snapshots.items() if (k[1], k[2]) in shown})
+    rows = await asyncio.to_thread(matrix_rows)
     conflicts = view.conflicts(shown)
     for row in rows:
         key = (row['namespace'], row['name'])
@@ -1046,13 +1053,14 @@ async def sync_to_standard(request):
 # 组标准 VS
 # ---------------------------------------------------------------------------
 def _cluster_rows(clusters: List[dict], standard: dict, snapshots: Dict[tuple, dict],
-                  backups: Dict[str, dict]) -> List[dict]:
+                  backups: Dict[str, dict], hosts: S.HostsIndex) -> List[dict]:
     routes = S.sort_routes(standard['routes'])
+    key = (standard['namespace'], standard['name'])
     rows = []
     for cluster in clusters:
         k8s_name = cluster['k8s_name']
         binding = standard['bindings'].get(k8s_name)
-        live = snapshots.get((k8s_name, standard['namespace'], standard['name']))
+        live = snapshots.get((k8s_name, *key))
         row = {**cluster, 'bound': binding is not None, 'in_cluster': live is not None}
         if binding is not None:
             status, rendered = S.cluster_status(standard, binding, k8s_name, live, bool(cluster['collected_at']))
@@ -1063,10 +1071,11 @@ def _cluster_rows(clusters: List[dict], standard: dict, snapshots: Dict[tuple, d
                 applied_by=binding['applied_by'],
                 missing_domains=S.missing_domains(standard, k8s_name),
                 lint=S.lint_domains(rendered, f'{k8s_name}:') if status != S.INCOMPLETE else [],
+                domain_issues=S.domain_issues(rendered, hosts, k8s_name, key),
             )
         else:
             row.update(hosts=list((live or {}).get('hosts') or []), status=S.UNBOUND if live else S.NONE,
-                       applied_at=None, applied_by='', missing_domains=[], lint=[])
+                       applied_at=None, applied_by='', missing_domains=[], lint=[], domain_issues=[])
         # 集群现状里对应规则的域名:部署到该集群、补设置域名时用作默认值
         found = S.aligned_domains([S.render_route(route, k8s_name) for route in routes], live)
         row['live_domains'] = {routes[index]['id']: lists for index, lists in found.items()
@@ -1083,21 +1092,31 @@ def _cluster_rows(clusters: List[dict], standard: dict, snapshots: Dict[tuple, d
     return rows
 
 
+async def _group_hosts(group_id: int, view: GroupView, snapshots: Dict[tuple, dict],
+                       current: Tuple[str, str]) -> S.HostsIndex:
+    """查重复的 host:snapshots 是这些集群里全部 VS 的现状,本组范围内的组标准(和正在看的 current)
+    按部署到各集群要下发的 hosts 算。"""
+    planned = {(b['k8s_name'], b['namespace'], b['name']): b for b in await store.list_bindings(group_id)
+               if (b['namespace'], b['name']) == current or view.classify((b['namespace'], b['name']))['visible']}
+    return S.hosts_index(snapshots, planned)
+
+
 @handler
 async def get_vs(request):
     standard = await _standard(_int(request.query.get('vs_id'), 'vs_id'))
     group = await _group(standard['group_id'])
     visible = _visible(request, group)
     names = {c['k8s_name'] for c in visible}
-    snapshots = await store.load_snapshots(names, standard['namespace'], standard['name'])
-    backups = await store.backup_stats(names, standard['namespace'], standard['name'])
+    vs_key = (standard['namespace'], standard['name'])
+    snapshots = await store.load_snapshots(names)  # 这些集群里全部的 VS:这个 VS 的现状,以及查重复的 host
+    backups = await store.backup_stats(names, *vs_key)
+    view = await _view_of(group)
+    hosts = await _group_hosts(group['id'], view, snapshots, vs_key)
     shared = S.standard_spec(standard)
     routes = [{**route, 'issue': S.route_issue(route['name'], route['rewrite_rules']),
                'domains': {k: v for k, v in route['domains'].items() if k in names}}
               for route in S.sort_routes(standard['routes'])]
-    clusters = _cluster_rows(visible, standard, snapshots, backups)
-    view = await _view_of(group)
-    vs_key = (standard['namespace'], standard['name'])
+    clusters = _cluster_rows(visible, standard, snapshots, backups, hosts)
     data = {key: standard[key] for key in (
         'id', 'group_id', 'namespace', 'name', 'gateways', 'df_forward_type', 'df_forward_detail',
         'df_forward_timeout', 'df_extra', 'extra_spec', 'updated_by', 'created_at', 'updated_at')}
@@ -1106,6 +1125,7 @@ async def get_vs(request):
         clusters=clusters,
         routes=routes,
         lint=S.lint_http(shared.get('http')) + [issue for row in clusters for issue in row.pop('lint')],
+        domain_issues=S.by_cluster((row['k8s_name'], text) for row in clusters for text in row.pop('domain_issues')),
         scope=view.classify(vs_key),
         conflicts=view.conflicts([vs_key]).get(vs_key, []),
     )
@@ -1504,7 +1524,8 @@ def _by_cluster(prepared: List[dict]) -> Dict[str, List[dict]]:
 
 @handler
 async def apply_preview(request):
-    """下发前预览:从集群取最新现状(顺便刷新快照),和要下发的内容逐项对比。"""
+    """下发前预览:从集群取最新现状(顺便刷新快照),和要下发的内容逐项对比;并检查下发后的重复域名
+    (这批都下发之后,和集群里别的 VS 的 hosts 重复、规则之间的域名重复),标出是不是这次下发带来的。"""
     req = ApplyRequest(**await _body(request))
     prepared = await _prepare(req.items)
     username = _username(request)
@@ -1519,11 +1540,16 @@ async def apply_preview(request):
 
     loaded = await asyncio.gather(*(load(name) for name in _by_cluster(prepared)))
     live_by_cluster = {name: (live, error) for name, live, error in loaded}
+    everything = {(name, *key): spec for name, (live, _) in live_by_cluster.items() for key, spec in (live or {}).items()}
+    batch = {(i['k8s_name'], i['namespace'], i['name']): i['spec'] for i in prepared
+             if i['error'] is None and live_by_cluster[i['k8s_name']][1] is None}
+    before, after = S.hosts_index(everything), S.hosts_index(everything, batch)
     result = []
     for item in prepared:
         live, error = live_by_cluster[item['k8s_name']]
         error = item['error'] or error
-        current = (live or {}).get((item['namespace'], item['name']))
+        key = (item['namespace'], item['name'])
+        current = (live or {}).get(key)
         result.append({
             'vs_id': item['vs_id'], 'k8s_name': item['k8s_name'],
             'namespace': item['namespace'], 'name': item['name'],
@@ -1532,6 +1558,8 @@ async def apply_preview(request):
             'same': error is None and current is not None and S.spec_hash(current) == item['hash'],
             # 集群现状(左)→ 将要下发(右):right_only 是要新增的规则,left_only 是要删掉的
             'diff': S.diff_specs(current, item['spec']) if current is not None and error is None else None,
+            'domain_issues': [] if error else S.apply_domain_issues(item['spec'], current, after, before,
+                                                                    item['k8s_name'], key),
         })
     return _ok(result)
 
