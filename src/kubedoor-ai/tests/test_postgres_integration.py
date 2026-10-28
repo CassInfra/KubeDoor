@@ -12,6 +12,7 @@ import sys
 import threading
 import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from types import SimpleNamespace
 from unittest.mock import AsyncMock
 from urllib.parse import urlsplit
 
@@ -581,6 +582,52 @@ def test_wecom_cluster_switch_keeps_a_clean_checkpoint_on_postgres(harness):
         results = [text_content(message) for message in messages if isinstance(message, ToolMessage)]
         assert len(results) == 1 and "已请求切换到集群 cluster-b" in results[0]
         assert text_content(messages[-1]) == "cluster-b 一切正常。"
+
+    runner.run(verify())
+
+
+def test_wecom_approval_card_is_pushed_and_a_reply_approves_on_postgres(harness):
+    """企微里发起写操作:审批记录存进 kubedoor_ai_wecom_approvals,卡片主动推送(不对那条消息回复卡片,企微不收);
+    成员直接回复「批准」按真实的查询找到这个审批,执行结果流式回在「批准」这条消息里"""
+    h, runner = harness
+
+    async def verify():
+        from kubedoor_ai.wecom import WeComIntegration
+        store, wecom = h.service.store, WeComIntegration(h.service)
+        userid, identity = "wx-" + uuid.uuid4().hex, Identity(h.username, "rw")
+        wecom._identity = AsyncMock(return_value=identity)   # 测试 master 不认识这个账号
+        wecom._member_clusters = AsyncMock(return_value=[{"env": "cluster-a", "permission": "rw"}])
+        wecom.config = {"enabled": True, **PROVIDER}
+        client = wecom.client = SimpleNamespace(is_connected=True, reply_stream=AsyncMock(), send_message=AsyncMock(),
+                                                reply_template_card=AsyncMock(), update_template_card=AsyncMock())
+
+        def frame(text):
+            return {"headers": {"req_id": uuid.uuid4().hex},
+                    "body": {"msgid": uuid.uuid4().hex, "from": {"userid": userid}, "chattype": "single", "text": {"content": text}}}
+
+        await wecom._mapped_user(userid)
+        await store.execute("UPDATE kubedoor_ai_wecom_users SET username=$2,default_env='cluster-a' WHERE wecom_userid=$1", userid, h.username)
+        h.model(tool_message("scale_deployment", {"namespace": "other-ns", "deployment": "app", "replicas": 3}),
+                AIMessage(content="已扩容到 3 个副本。"))
+        try:
+            await wecom._handle_text(frame("把 other-ns/app 扩到 3 个副本"))
+            client.reply_template_card.assert_not_awaited()
+            (chatid, body), = [call.args for call in client.send_message.await_args_list]
+            assert chatid == userid and body["chat_type"] == 1 and body["msgtype"] == "template_card"
+            approval = await store.one("SELECT * FROM kubedoor_ai_wecom_approvals WHERE wecom_userid=$1", userid)
+            assert approval["task_id"] == body["template_card"]["task_id"] and approval["username"] == h.username
+            assert client.reply_stream.await_args.args[2].endswith("请核对后在下方卡片批准或拒绝，也可以直接回复「批准」或「拒绝」。")
+            assert not any(call[1] == "/api/scale" for call in h.upstream)
+
+            await wecom._handle_text(frame("批准"))
+            await h.wait(str(approval["run_id"]))
+            writes = [call for call in h.upstream if call[1] == "/api/scale"]
+            assert len(writes) == 1 and writes[0][3]["deployment_list"] == [{"namespace": "other-ns", "deployment_name": "app", "num": 3}]
+            assert await store.one("SELECT 1 FROM kubedoor_ai_wecom_approvals WHERE wecom_userid=$1", userid) is None
+            final = client.reply_stream.await_args.args[2]
+            assert final.startswith("已扩容到 3 个副本。") and "集群：cluster-a" in final
+        finally:
+            await store.execute("DELETE FROM kubedoor_ai_wecom_users WHERE wecom_userid=$1", userid)
 
     runner.run(verify())
 

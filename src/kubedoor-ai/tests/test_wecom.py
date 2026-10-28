@@ -14,7 +14,7 @@ import pytest
 from kubedoor_ai.domain import BEIJING_TZ, AIError, Identity
 from kubedoor_ai.gateway import RunContext, request_cluster_switch
 from kubedoor_ai.http import create_app
-from kubedoor_ai.wecom import (WeComIntegration, _PushReply, _StreamReply, _approval_summary, _approval_text,
+from kubedoor_ai.wecom import (WeComIntegration, _PushReply, _StreamReply, _approval_summary, _approval_text, _brief,
                                _limit_stream, _mentioned_cluster, _pick_cluster, _retention_days)
 
 
@@ -38,7 +38,9 @@ class Store:
             self.seen.add(msgid)
             return {"msgid": msgid}
         if "FROM kubedoor_ai_wecom_approvals" in sql:
-            return self.approval if self.approval and args[0] == self.approval["task_id"] else None
+            # 点卡片按 task_id 查;直接回复「批准」按成员查他最近一个还在等待的
+            key = "wecom_userid" if "a.wecom_userid=$1" in sql else "task_id"
+            return self.approval if self.approval and args[0] == self.approval[key] else None
         if "SET pending_at=NULL" in sql:
             text, self.pending = self.pending, None
             return {"pending_text": text} if text else None
@@ -56,6 +58,8 @@ class Store:
         self.executes.append((sql, args))
         if "SET pending_text=$2" in sql:
             self.pending = args[1]
+        if sql.startswith("DELETE FROM kubedoor_ai_wecom_approvals WHERE task_id=$1") and (self.approval or {}).get("task_id") == args[0]:
+            self.approval = None
 
     async def fetch(self, sql, *args):
         if "FROM kubedoor_ai_events" not in sql:
@@ -231,9 +235,15 @@ def last_reply(client):
     return client.reply_stream.await_args.args[2]
 
 
+def pushed_cards(client):
+    """主动推送的模板卡片:卡片一律主动推送,长连接下回复过流式消息的那条消息不能再回复卡片"""
+    client.reply_template_card.assert_not_awaited()
+    return [call.args[1]["template_card"] for call in client.send_message.await_args_list
+            if call.args[1].get("msgtype") == "template_card"]
+
+
 def last_card(client):
-    """跟在流式回复后面的模板卡片"""
-    return client.reply_template_card.await_args.args[1]
+    return pushed_cards(client)[-1]
 
 
 def updated_card(client):
@@ -508,6 +518,145 @@ async def test_approval_that_fails_is_shown_on_the_card():
     assert card["main_title"]["title"] == "审批未完成" and card["sub_title_text"] == "批准已过期，请停止本轮后重新生成操作"
 
 
+class ApprovalStore(Store):
+    """发审批卡片要读的待审批动作和任务;记下存进 kubedoor_ai_wecom_approvals 的行"""
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.saved = []
+
+    async def one(self, sql, *args):
+        if sql.startswith("INSERT INTO kubedoor_ai_wecom_approvals"):
+            self.saved.append(args)
+            return {"task_id": args[0]}
+        if "FROM kubedoor_ai_actions" in sql:
+            return {"operation": "restart_deployment", "arguments": {"namespace": "kmw", "name": "deploy-panda-interfaces"},
+                    "preview": {}, "expires_at": (datetime.now(timezone.utc) + timedelta(minutes=10)).isoformat()}
+        if sql.startswith("SELECT session_id,scope FROM kubedoor_ai_runs"):
+            return {"session_id": "session-1", "scope": {"env": "cassmall-beta-kunlun"}}
+        return await super().one(sql, *args)
+
+
+RESTART_APPROVAL = [
+    {"seq": 1, "type": "token", "data": {"content": "已确认该 Deployment 位于 kmw 命名空间。"}},
+    {"seq": 2, "type": "approval", "data": {"action_id": "action-1", "name": "restart_deployment", "env": "cassmall-beta-kunlun",
+                                             "arguments": {"namespace": "kmw", "name": "deploy-panda-interfaces"}}},
+]
+
+
+def record_order(client):
+    """流式回复(是否结束)和主动推送(消息类型)按发生的顺序记下来"""
+    order = []
+    client.reply_stream.side_effect = lambda frame, stream_id, content, finish: order.append(("stream", finish))
+    client.send_message.side_effect = lambda chatid, body: order.append(("push", body["msgtype"]))
+    return order
+
+
+@pytest.mark.asyncio
+async def test_approval_card_is_pushed_below_the_explanation_before_the_stream_ends():
+    # 长连接下回复过流式消息的那条消息,企微不再接受模板卡片回复(审批卡片以前就这样一直没出来):卡片主动推送
+    store = ApprovalStore()
+    store.events = RESTART_APPROVAL
+    integration, _ = make_integration(store=store)
+    client = connect(integration)
+    order = record_order(client)
+    reply = _StreamReply(integration, text_frame("wx-bob", "重启 kmw 的 deploy-panda-interfaces"))
+    await integration._watch_run(reply, "wx-bob", IDENTITY, "run-1", 0, env="cassmall-beta-kunlun")
+    # 说明先写进流式消息,卡片推出去排在它下面,然后流式消息才结束
+    assert order[-3:] == [("stream", False), ("push", "template_card"), ("stream", True)]
+    card = last_card(client)
+    assert card["card_type"] == "button_interaction" and [button["key"] for button in card["button_list"]] == ["approve", "reject"]
+    assert card["task_id"] == store.saved[0][0] and client.send_message.await_args.args[0] == "wx-bob"
+    final = last_reply(client)
+    assert "已确认该 Deployment 位于 kmw 命名空间。\n\n**待审批：滚动重启**（集群 cassmall-beta-kunlun）" in final
+    assert final.endswith("\n请核对后在下方卡片批准或拒绝，也可以直接回复「批准」或「拒绝」。")
+
+
+@pytest.mark.asyncio
+async def test_when_the_approval_card_cannot_be_pushed_the_member_is_told_to_reply(caplog):
+    store = ApprovalStore()
+    store.events = RESTART_APPROVAL
+    integration, _ = make_integration(store=store)
+    client = connect(integration)
+    client.send_message.side_effect = RuntimeError("Reply ack error: errcode=45009, errmsg=api freq out of limit")
+    reply = _StreamReply(integration, text_frame("wx-bob", "重启 kmw 的 deploy-panda-interfaces"))
+    await integration._watch_run(reply, "wx-bob", IDENTITY, "run-1", 0, env="cassmall-beta-kunlun")
+    assert last_reply(client).endswith("\n审批卡片没有发出来，请核对后直接回复「批准」或「拒绝」。")
+    assert store.saved   # 审批照样记下:直接回复「批准」处理的就是它
+    assert "企微主动推送 template_card 失败: Reply ack error (errcode=45009, errmsg=api freq out of limit)" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_pushed_explanation_comes_before_its_card_and_a_lost_card_is_explained():
+    # 点过卡片按钮之后没有能回复的消息:说明和卡片都主动推送,卡片没发出去时再推一条文字的办法
+    integration, _ = make_integration()
+    client = connect(integration)
+    order = record_order(client)
+    reply = _PushReply(integration, "wx-bob")
+    await reply.finish_with_card("说明", {"card_type": "button_interaction"}, "没有卡片时的说明")
+    assert order == [("push", "markdown"), ("push", "template_card")]
+    client.send_message.side_effect = [None, RuntimeError("Reply ack error: errcode=45009, errmsg=api freq out of limit"), None]
+    await reply.finish_with_card("说明", {"card_type": "button_interaction"}, "没有卡片时的说明")
+    assert client.send_message.await_args.args[1]["markdown"]["content"] == "没有卡片时的说明"
+
+
+def waiting_approval(**mapping):
+    """未绑定成员 wx-bob(默认账号 guest)有一个在等待的审批"""
+    approval = {"task_id": "task-1", "wecom_userid": "wx-bob", "username": "guest", "run_id": "run-1",
+                "action_id": "action-1", "resume_after_seq": 3}
+    store = Store(approval=approval, mapping={"wecom_userid": "wx-bob", "username": None, **mapping}, unbound="guest")
+    master = AsyncMock(return_value={"username": "guest", "permission": "rw", "clusters": {}})
+    integration, service = make_integration(store=store, master=master)
+    integration.config = PROVIDER_CONFIG
+    return integration, service, store, connect(integration)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("text, decision", [("批准", "approve"), ("同意。", "approve"), ("拒绝", "reject"), ("Reject", "reject")])
+async def test_member_can_approve_or_reject_by_replying(text, decision):
+    integration, service, store, client = waiting_approval()
+    store.events = done("已滚动重启 kmw/deploy-panda-interfaces。", seq=4)
+    await integration._handle_text(text_frame("wx-bob", text))
+    assert service.decision.await_args.args[2]["decision"] == decision and service.decision.await_args.args[0].username == "guest"
+    assert store.approval is None   # 处理过了,再点那张卡片就是「已失效」
+    # 执行结果流式回在这条消息里,不当作新的提问
+    assert last_reply(client).startswith("已滚动重启 kmw/deploy-panda-interfaces。") and "集群：prod" in last_reply(client)
+    service.new_run.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_approval_words_without_a_waiting_approval_are_an_ordinary_question():
+    # 比如在回答 AI「要继续吗」:没有等待的审批时照常交给 AI
+    integration, store, client = unbound_chat(current_env="cassmall-kunlun")
+    await integration._handle_text(text_frame("wx-bob", "同意"))
+    assert integration._run_message.await_args.args[5] == "同意"
+
+
+@pytest.mark.asyncio
+async def test_replying_approve_checks_the_account_like_the_card():
+    integration, service, store, client = waiting_approval(username="alice")   # 成员已经改绑到别的账号
+    await integration._handle_text(text_frame("wx-bob", "批准"))
+    assert last_reply(client) == "账号绑定已变更，该审批不能继续。"
+    service.decision.assert_not_awaited()
+
+    integration, service, store, client = waiting_approval()
+    service.gateway.master.return_value = {"username": "guest", "permission": "read", "clusters": {"prod": "none"}}
+    await integration._handle_text(text_frame("wx-bob", "批准"))
+    assert last_reply(client) == "该账号已失去目标集群权限，不能批准此操作。"
+    service.decision.assert_not_awaited()
+
+    integration, service, store, client = waiting_approval()
+    service.decision.side_effect = AIError("批准已过期，请停止本轮后重新生成操作", 409, "approval_expired")
+    await integration._handle_text(text_frame("wx-bob", "批准"))
+    assert last_reply(client) == "审批没有完成：批准已过期，请停止本轮后重新生成操作"
+    assert store.approval is not None
+
+
+def test_sdk_logs_keep_the_wecom_errcode_but_not_message_content():
+    assert _brief("Reply ack error: reqId=aibot_send_msg_1, errcode=40008, errmsg=invalid message type, hint: [x]") == \
+        "Reply ack error (errcode=40008, errmsg=invalid message type)"
+    assert _brief('Received frame: {"text": "内部数据"}') == "Received frame"
+
+
 @pytest.mark.asyncio
 async def test_new_session_never_binds_member_to_default_account():
     store = SessionStore(members={"wx-bob": {}})
@@ -646,12 +795,33 @@ async def test_without_any_cluster_the_member_must_pick_one_first(mapping, unbou
     integration._run_message = AsyncMock()
     client = connect(integration)
     await integration._handle_text(text_frame("wx-bob", "order 服务有几个 Pod"))
-    assert last_reply(client) == "请先选择这个对话要操作的集群，选好后接着处理你刚才的问题。"
+    assert last_reply(client) == "请在下方卡片里选择这个对话要操作的集群，选好后接着处理你刚才的问题。"
     card = last_card(client)
     assert card["main_title"]["desc"] == "当前集群：未选择" and "selected_id" not in card["button_selection"]
     assert card["sub_title_text"] == "选好后接着处理你刚才的问题。"
+    # 说明先写进流式消息,卡片推出去之后流式消息才结束
+    stream_calls = client.reply_stream.await_args_list
+    assert [call.args[3] for call in stream_calls[-2:]] == [False, True]
+    assert client.send_message.await_args.args[0] == "wx-bob"
     integration._run_message.assert_not_awaited()
     assert saved_envs(store) == [] and store.pending == "order 服务有几个 Pod"
+
+
+@pytest.mark.asyncio
+async def test_without_a_cluster_card_the_member_can_still_pick_by_name(caplog):
+    # 卡片推送被企微拒绝(比如超过频率):说明换成集群列表和文字切换的办法,问题照样先存下
+    store = Store(mapping={"wecom_userid": "wx-bob", "username": None}, unbound="guest")
+    integration, service = make_integration(store=store, master=AsyncMock(
+        return_value={"username": "guest", "permission": "read", "clusters": {}}))
+    service.bootstrap.return_value = {"clusters": CLUSTERS}
+    integration._current_session = AsyncMock(return_value=("session-1", [], None, False))
+    client = connect(integration)
+    client.send_message.side_effect = RuntimeError("Reply ack error: errcode=45009, errmsg=api freq out of limit")
+    await integration._handle_text(text_frame("wx-bob", "order 服务有几个 Pod"))
+    reply = last_reply(client)
+    assert reply.startswith("请先选择这个对话要操作的集群，选好后接着处理你刚才的问题。\n\n当前集群：未选择\n可访问的集群：")
+    assert "发送「切换集群 序号、名称或别名」切换" in reply and store.pending == "order 服务有几个 Pod"
+    assert "企微主动推送 template_card 失败: Reply ack error (errcode=45009, errmsg=api freq out of limit)" in caplog.text
 
 
 @pytest.mark.asyncio
@@ -964,8 +1134,10 @@ async def test_busy_conversation_reply_offers_a_new_conversation_for_pending_app
     store.runs["run-1"] = {"id": "run-1", "session_id": "old", "status": status, "expires": [store.now + expires_in] if expires_in else []}
     await integration._handle_text(text_frame("wx-bob", "查一下 Pod"))
     reply = last_reply(client)
-    assert reply.startswith("该会话已有任务运行或等待审批，请稍后重试。")
-    assert ("发送「新对话」可以放弃它并重新开始。" in reply) is offered
+    if offered:   # 等待审批时说明怎么审批,也可以放弃
+        assert reply == "当前对话有操作在等待审批：在审批卡片上处理，或直接回复「批准」「拒绝」；发送「新对话」可以放弃它并重新开始。"
+    else:
+        assert reply == "该会话已有任务运行或等待审批，请稍后重试。"
     service.new_run.assert_not_awaited()
 
 
@@ -1012,7 +1184,7 @@ async def test_held_question_continues_after_a_cluster_is_picked_on_the_card():
     own(store, "old", hours_ago=3, rounds=4)
     await integration._handle_text(text_frame("wx-bob", "order 服务有几个 Pod"))
     reply = last_reply(client)
-    assert reply.startswith("距上次对话已超过 2 小时，已开始新对话") and reply.endswith("请先选择这个对话要操作的集群，选好后接着处理你刚才的问题。")
+    assert reply.startswith("距上次对话已超过 2 小时，已开始新对话") and reply.endswith("请在下方卡片里选择这个对话要操作的集群，选好后接着处理你刚才的问题。")
     card = last_card(client)
     assert card["button_selection"]["selected_id"] == "prod"   # 下拉框默认选中上一个对话用的集群
     assert store.pending == "order 服务有几个 Pod"

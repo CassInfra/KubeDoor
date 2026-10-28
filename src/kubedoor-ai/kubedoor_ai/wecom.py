@@ -27,6 +27,9 @@ SWITCH_COMMAND = re.compile(r"^/?(切换到集群|切换集群|切换到|切换)
 # 企微只有一个聊天窗口:开新对话、回到上一个对话都靠聊天命令
 NEW_SESSION_COMMANDS = {"新对话", "新会话", "开始新对话", "清空上下文", "重新开始", "/new", "/reset"}
 RESUME_COMMANDS = {"继续上次", "继续上次对话", "回到上次", "/resume"}
+# 有等待的审批时直接回复这些词就是批准 / 拒绝(审批卡片发不出来时也能审批);没有时照常当提问
+APPROVAL_WORDS = {"批准": "approve", "同意": "approve", "approve": "approve",
+                  "拒绝": "reject", "驳回": "reject", "reject": "reject"}
 # 自助绑定:花折用户在 Web 右上角用户菜单为自己的账号生成 6 位绑定码,成员在企微里发「绑定 123456」
 # (匹配前做 NFKC,手机输入法打出的全角数字、冒号也认)
 BIND_COMMAND = re.compile(r"^/?绑定\s*[:：]?\s*([0-9]{6})$")
@@ -51,6 +54,7 @@ CARD_OPTIONS = 10
 # 上下文占用(最近一次输入 ÷ 模型窗口)达到这个比例时,回答末尾提示可以开新对话
 CONTEXT_HINT_RATIO = 0.25
 BUSY_HINT = "该会话已有任务运行或等待审批，请稍后重试。"
+APPROVAL_HINT = "当前对话有操作在等待审批：在审批卡片上处理，或直接回复「批准」「拒绝」；发送「新对话」可以放弃它并重新开始。"
 PROVIDER_KEYS = ("base_url", "api_key", "model", "max_input_tokens", "max_output_tokens", "compression_ratio", "reasoning_effort")
 # 企微里再也不会继续的旧对话(不是任何成员的当前对话或上一个对话、没有进行中的任务),
 # 最后活跃超过 RETENTION_AI_CHECKPOINT_DAYS 天后删除检查点;会话和消息记录保留用于审计
@@ -69,25 +73,40 @@ UNBIND_COLUMNS = ("username=NULL,default_env=NULL,current_env=NULL,session_id=NU
 PERMISSION_LABELS = {"rw": "读写", "read": "只读"}
 
 
+def _brief(message):
+    """SDK 日志和异常只记冒号前的概要(后面可能带着消息内容),企微回执的 errcode / errmsg 留着,排查要用"""
+    codes = re.findall(r"errcode=-?\d+|errmsg=[^,]{0,120}", message)
+    head = message.split(":", 1)[0]
+    return f"{head} ({', '.join(codes)})" if codes else head
+
+
 class _SdkLogger:
     def debug(self, message, *args):
         return
 
     def info(self, message, *args):
-        LOGGER.info("企微 SDK: %s", message.split(":", 1)[0])
+        LOGGER.info("企微 SDK: %s", _brief(message))
 
     def warn(self, message, *args):
-        LOGGER.warning("企微 SDK: %s", message.split(":", 1)[0])
+        LOGGER.warning("企微 SDK: %s", _brief(message))
 
     def error(self, message, *args):
-        LOGGER.error("企微 SDK: %s", message.split(":", 1)[0])
+        LOGGER.error("企微 SDK: %s", _brief(message))
 
 
-class _StreamReply:
-    """回复成员发来的消息:进度在同一条流式消息里刷新,最后结束;卡片跟在后面回复"""
+class _Reply:
+    async def card(self, card):
+        """卡片一律主动推送(aibot_send_msg),返回是否发出。长连接下一条消息回复过流式消息,企微就不再接受这条消息的
+        模板卡片回复(流式 + 卡片的组合消息长连接也不支持),而每条消息都先回了流式的进度。推送的卡片照样能点、能更新"""
+        return await self.integration._push(self.userid, {"msgtype": "template_card", "template_card": card})
+
+
+class _StreamReply(_Reply):
+    """回复成员发来的消息:进度在同一条流式消息里刷新,最后结束;卡片推送出来排在它下面"""
 
     def __init__(self, integration, frame, stream_id=None):
         self.integration, self.frame = integration, frame
+        self.userid = ((frame.get("body") or {}).get("from") or {}).get("userid")
         self.stream_id = stream_id or generate_req_id("stream")
 
     async def update(self, content):
@@ -100,13 +119,13 @@ class _StreamReply:
         """流式消息结束后另起一条"""
         await self.integration._reply(self.frame, content)
 
-    async def card(self, card):
-        client = self.integration.client
-        if client and client.is_connected:
-            await client.reply_template_card(self.frame, card)
+    async def finish_with_card(self, text, card, fallback):
+        """说明 + 要成员操作的卡片:说明先写进流式消息,卡片推出去后再结束;卡片没发出去时结尾换成 fallback(文字的办法)"""
+        await self.update(text)
+        await self.finish(text if await self.card(card) else fallback)
 
 
-class _PushReply:
+class _PushReply(_Reply):
     """点卡片按钮之后没有能回复的消息(卡片事件只能更新那张卡片):结果和新卡片主动推送给成员,中间进度不发"""
 
     def __init__(self, integration, userid):
@@ -120,8 +139,10 @@ class _PushReply:
 
     say = finish
 
-    async def card(self, card):
-        await self.integration._push(self.userid, {"msgtype": "template_card", "template_card": card})
+    async def finish_with_card(self, text, card, fallback):
+        await self.finish(text)
+        if not await self.card(card):
+            await self.finish(fallback)
 
 
 class WeComIntegration:
@@ -342,13 +363,15 @@ class WeComIntegration:
                                            _limit_stream(content), finish)
 
     async def _push(self, userid, body):
-        """主动推送(aibot_send_msg),单聊的会话 ID 就是成员的 UserID。在后台任务里发,失败只记日志"""
-        if not (self.client and self.client.is_connected):
-            return
+        """主动推送(aibot_send_msg),单聊的会话 ID 就是成员的 UserID。失败只记日志,返回是否发出"""
+        if not (self.client and self.client.is_connected and userid):
+            return False
         try:
             await self.client.send_message(userid, {"chat_type": 1, **body})
+            return True
         except Exception as exc:
-            LOGGER.warning("企微主动推送失败: %s", str(exc)[:200])
+            LOGGER.warning("企微主动推送 %s 失败: %s", body.get("msgtype"), _brief(str(exc)))
+            return False
 
     async def _update_card(self, frame, card):
         """更新被点的那张卡片(企微要求 5 秒内)。失败只记日志:SDK 把企微回执的 errcode 放在异常信息里"""
@@ -357,7 +380,7 @@ class WeComIntegration:
         try:
             await self.client.update_template_card(frame, card)
         except Exception as exc:
-            LOGGER.warning("企微卡片更新失败: %s", str(exc)[:200])
+            LOGGER.warning("企微卡片更新失败: %s", _brief(str(exc)))
 
     async def _on_text(self, frame):
         self._spawn(self._handle_text(frame), "wecom-message")
@@ -381,8 +404,10 @@ class WeComIntegration:
         try:
             await self._dispatch_text(reply, userid, mapped, text)
         except Exception as exc:
-            LOGGER.warning("企业微信消息处理失败: %s", type(exc).__name__)
-            await reply.finish("处理失败，请检查花折 AI 服务状态后重试。")
+            # 只记冒号前的概要(asyncpg 是「invalid input for query argument $8」这类,参数值在冒号后面)
+            LOGGER.warning("企业微信消息处理失败: %s: %s", type(exc).__name__, _brief(str(exc))[:160])
+            with suppress(Exception):   # 流式消息可能已经结束
+                await reply.finish("处理失败，请检查花折 AI 服务状态后重试。")
 
     async def _dispatch_text(self, reply, userid, mapped, text):
         command = text.lower()
@@ -397,6 +422,9 @@ class WeComIntegration:
             return
         if command in NEW_SESSION_COMMANDS | RESUME_COMMANDS:
             await self._switch_command(reply, userid, mapped, command)
+            return
+        decision = APPROVAL_WORDS.get(command.rstrip("。.!！~～"))
+        if decision and await self._text_decision(reply, userid, mapped, decision):
             return
         identity, default_env, problem = await self._member_identity(mapped)
         if problem:
@@ -462,7 +490,7 @@ class WeComIntegration:
         发集群卡片让成员选,选好后接着处理。提问里提到另一个集群时切过去(集群名或别名)"""
         session_id, notices, active, reset = await self._current_session(userid, identity)
         if active:
-            hint = BUSY_HINT + ("发送「新对话」可以放弃它并重新开始。" if active["status"] == "waiting_approval" else "")
+            hint = APPROVAL_HINT if active["status"] == "waiting_approval" else BUSY_HINT
             await reply.finish(_with_notice("\n".join(notices), hint))
             return
         previous = _usable(mapped.get("current_env"), clusters)
@@ -476,8 +504,11 @@ class WeComIntegration:
         notice = "\n".join(notices)
         if current is None:
             await self._hold_question(userid, text)
-            await reply.finish(_with_notice(notice, "请先选择这个对话要操作的集群，选好后接着处理你刚才的问题。"))
-            await reply.card(_cluster_card(clusters, None, previous, "选好后接着处理你刚才的问题。"))
+            await reply.finish_with_card(
+                _with_notice(notice, "请在下方卡片里选择这个对话要操作的集群，选好后接着处理你刚才的问题。"),
+                _cluster_card(clusters, None, previous, "选好后接着处理你刚才的问题。"),
+                _with_notice(notice, "请先选择这个对话要操作的集群，选好后接着处理你刚才的问题。\n\n" + _cluster_menu(clusters, None)),
+            )
             return
         await self._run_message(reply, userid, identity, session_id, current, text,
                                 notice=notice, status=status, clusters=clusters)
@@ -659,8 +690,9 @@ class WeComIntegration:
         if not clusters:
             await reply.finish(text + "发送「集群」选择这个对话要操作的集群。")
             return
-        await reply.finish(text + "请在下面的卡片里选择这个对话要操作的集群。")
-        await reply.card(_cluster_card(clusters, None, mapped.get("current_env")))
+        await reply.finish_with_card(text + "请在下面的卡片里选择这个对话要操作的集群。",
+                                     _cluster_card(clusters, None, mapped.get("current_env")),
+                                     text + "请选择这个对话要操作的集群。\n\n" + _cluster_menu(clusters, None))
 
     async def _resume_previous_session(self, userid, identity):
         """「继续上次」:和上一个对话互换;上一个对话必须属于同一个花折账号"""
@@ -768,8 +800,8 @@ class WeComIntegration:
                     updated = True
                 elif kind == "approval":
                     # 卡片只放得下一行摘要：完整的管控状态、步骤、变化和差异写在卡片上方
-                    await reply.finish(_with_notice(notice, (content + "\n\n" + _approval_text(data)).strip()))
-                    await self._send_approval(reply, userid, identity, run_id, data, cursor)
+                    text = _with_notice(notice, (content + "\n\n" + _approval_text(data)).strip())
+                    await self._send_approval(reply, userid, identity, run_id, data, cursor, text)
                     return None
                 elif kind == "message" and isinstance(data.get("content"), str):
                     content = data["content"]
@@ -797,7 +829,8 @@ class WeComIntegration:
                 return None
             await asyncio.sleep(0.35)
 
-    async def _send_approval(self, reply, userid, identity, run_id, event, after):
+    async def _send_approval(self, reply, userid, identity, run_id, event, after, text):
+        """审批说明(text)+ 批准 / 拒绝卡片。卡片没发出去时成员可以直接回复「批准」「拒绝」(_text_decision)"""
         action_id = event.get("action_id")
         action = await self.service.store.one(
             "SELECT * FROM kubedoor_ai_actions WHERE id=$1::uuid AND run_id=$2::uuid AND state='pending'",
@@ -805,13 +838,15 @@ class WeComIntegration:
         )
         run = await self.service.store.one("SELECT session_id,scope FROM kubedoor_ai_runs WHERE id=$1::uuid", run_id)
         if not action or not run:
-            await reply.say("审批信息已过期，请重新发起操作。")
+            await reply.finish(text + "\n\n审批信息已过期，请重新发起操作。")
             return
         task_id = secrets.token_urlsafe(18)
+        # 过期时间在库里直接取动作表的:store 读出来的时间是字符串(storage.plain),原样写回 timestamptz 会报 DataError
         await self.service.store.one(
             "INSERT INTO kubedoor_ai_wecom_approvals(task_id,action_id,run_id,wecom_userid,username,session_id,resume_after_seq,expires_at) "
-            "VALUES($1,$2::uuid,$3::uuid,$4,$5,$6::uuid,$7,$8) ON CONFLICT(action_id) DO UPDATE SET task_id=EXCLUDED.task_id "
-            "RETURNING task_id", task_id, action_id, run_id, userid, identity.username, run["session_id"], after, action["expires_at"],
+            "SELECT $1,id,run_id,$3,$4,$5::uuid,$6,expires_at FROM kubedoor_ai_actions WHERE id=$2::uuid "
+            "ON CONFLICT(action_id) DO UPDATE SET task_id=EXCLUDED.task_id RETURNING task_id",
+            task_id, action_id, userid, identity.username, run["session_id"], after,
         )
         env = run["scope"]["env"]
         preview = action.get("preview") or {}
@@ -823,7 +858,8 @@ class WeComIntegration:
                 "button_list": [{"text": "批准", "key": "approve", "style": 1},
                                 {"text": "拒绝", "key": "reject", "style": 2}],
                 "task_id": task_id}
-        await reply.card(card)
+        await reply.finish_with_card(text + "\n请核对后在下方卡片批准或拒绝，也可以直接回复「批准」或「拒绝」。", card,
+                                     text + "\n审批卡片没有发出来，请核对后直接回复「批准」或「拒绝」。")
 
     async def _on_card_event(self, frame):
         self._spawn(self._handle_card_event(frame), "wecom-card")
@@ -933,25 +969,19 @@ class WeComIntegration:
         if not approval or approval["wecom_userid"] != userid:
             await self._update_card(frame, _result_card(task_id, "审批卡片已失效", detail="该审批已处理、已过期或不属于当前账号。", status="已失效"))
             return
-        mapped = await self._mapped_user(userid)
-        if (mapped.get("username") or (await self.unbound_setting())["unbound_username"]) != approval["username"]:
-            await self._update_card(frame, _result_card(task_id, "审批卡片已失效", detail="账号绑定已变更，该审批不能继续。", status="已失效"))
+        problem = await self._approval_problem(approval, await self._mapped_user(userid))
+        if problem:
+            await self._update_card(frame, _result_card(task_id, "审批卡片已失效", detail=problem, status="已失效"))
             return
         loop = asyncio.get_running_loop()
         deadline = loop.time() + CARD_SECONDS
         try:
             async with asyncio.timeout_at(deadline):
-                identity = await self._identity(approval["username"])
-            env = (await store.one(
-                "SELECT scope->>'env' AS env FROM kubedoor_ai_runs WHERE id=$1::uuid", approval["run_id"],
-            ) or {}).get("env")
-            if not identity.can_read(env):
+                identity, env, allowed = await self._approver(approval)
+            if not allowed:
                 await self._update_card(frame, _result_card(task_id, "不能批准", f"集群：{env}", "该账号已失去目标集群权限，不能批准此操作。", "已失效"))
                 return
-            provider = Provider.parse(self._provider_settings())
-            decision = asyncio.ensure_future(self.service.decision(identity, approval["run_id"], {
-                "action_id": str(approval["action_id"]), "decision": choice, "provider": provider.__dict__,
-            }))
+            decision = asyncio.ensure_future(self._decide(identity, approval, choice))
             try:
                 # 恢复任务前还要问 master 集群状态:master 慢时决定照常生效,卡片先写「处理中」,结果推送
                 result = await asyncio.wait_for(asyncio.shield(decision), max(0.1, deadline - loop.time()))
@@ -972,6 +1002,59 @@ class WeComIntegration:
         if running:
             self._spawn(self._watch_run(_PushReply(self, userid), userid, identity, approval["run_id"],
                                         approval["resume_after_seq"], env=env), "wecom-run-resume")
+
+    async def _approval_problem(self, approval, mapped):
+        """卡片和文字审批共用:成员换了账号(或未绑定成员的默认账号变了),这个审批就不能继续"""
+        if (mapped.get("username") or (await self.unbound_setting())["unbound_username"]) != approval["username"]:
+            return "账号绑定已变更，该审批不能继续。"
+        return None
+
+    async def _approver(self, approval):
+        """审批人的实时权限(问 master)和目标集群,返回 (账号, 集群, 能否批准)"""
+        identity = await self._identity(approval["username"])
+        env = (await self.service.store.one(
+            "SELECT scope->>'env' AS env FROM kubedoor_ai_runs WHERE id=$1::uuid", approval["run_id"],
+        ) or {}).get("env")
+        return identity, env, identity.can_read(env)
+
+    def _decide(self, identity, approval, choice):
+        provider = Provider.parse(self._provider_settings())
+        return self.service.decision(identity, approval["run_id"], {
+            "action_id": str(approval["action_id"]), "decision": choice, "provider": provider.__dict__,
+        })
+
+    async def _text_decision(self, reply, userid, mapped, choice):
+        """成员直接回复「批准」「拒绝」:处理他最近一个还在等待的审批,卡片没发出来也能审批,执行结果流式回在这条消息里。
+        没有等待的审批返回 False,这句话照常当提问处理(比如在回答 AI 的问题)"""
+        store = self.service.store
+        approval = await store.one(
+            "SELECT a.* FROM kubedoor_ai_wecom_approvals a JOIN kubedoor_ai_runs r ON r.id=a.run_id "
+            "WHERE a.wecom_userid=$1 AND a.expires_at>now() AND r.status='waiting_approval' "
+            "ORDER BY a.created_at DESC LIMIT 1", userid,
+        )
+        if not approval:
+            return False
+        problem = await self._approval_problem(approval, mapped)
+        if problem:
+            await reply.finish(problem)
+            return True
+        try:
+            identity, env, allowed = await self._approver(approval)
+            if not allowed:
+                await reply.finish("该账号已失去目标集群权限，不能批准此操作。")
+                return True
+            result = await self._decide(identity, approval, choice)
+            await store.execute("DELETE FROM kubedoor_ai_wecom_approvals WHERE task_id=$1", approval["task_id"])
+        except AIError as exc:
+            await reply.finish(f"审批没有完成：{exc}")
+            return True
+        approved = choice == "approve"
+        if result.get("status") == "running":
+            await self._watch_run(reply, userid, identity, approval["run_id"], approval["resume_after_seq"], env=env,
+                                  status="已批准，正在执行..." if approved else "已拒绝，AI 正在说明情况...")
+        else:
+            await reply.finish(f"{'已批准' if approved else '已拒绝'}（集群：{env}）。")
+        return True
 
     async def _finish_decision(self, userid, identity, approval, decision, env):
         """没赶上 5 秒更新卡片的审批:等决定处理完,结果推送给成员"""
@@ -1319,7 +1402,6 @@ def _approval_text(event):
     detail = _approval_detail(event)
     if detail:
         lines.append("```\n" + _clip(detail, APPROVAL_DETAIL_LIMIT).replace("```", "'''") + "\n```")
-    lines.append("请核对后在下方卡片批准或拒绝。")
     return "\n".join(lines)
 
 
