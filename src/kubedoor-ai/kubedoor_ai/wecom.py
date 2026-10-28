@@ -853,7 +853,9 @@ class WeComIntegration:
         detail = {"name": action["operation"], "env": env, "arguments": action.get("arguments"), "preview": preview,
                   "command": preview.get("command"), "diff": preview.get("diff")}
         name = OPERATION_NAMES.get(action["operation"], action["operation"])
-        card = {"card_type": "button_interaction", "main_title": {"title": "K8S 操作待审批", "desc": _clip(f"{name} / {env}", 40)},
+        # 卡片只有来源行(source,在标题上方)能设颜色:集群用红色放在最上面,批准前一眼看清是哪个集群
+        card = {"card_type": "button_interaction", "source": {"desc": f"集群：{env}", "desc_color": 2},
+                "main_title": {"title": "K8S 操作待审批", "desc": _clip(name, 40)},
                 "sub_title_text": _approval_summary(detail) or "请核对操作内容后决定。",
                 "button_list": [{"text": "批准", "key": "approve", "style": 1},
                                 {"text": "拒绝", "key": "reject", "style": 2}],

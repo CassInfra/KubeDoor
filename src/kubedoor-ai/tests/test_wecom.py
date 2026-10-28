@@ -565,6 +565,9 @@ async def test_approval_card_is_pushed_below_the_explanation_before_the_stream_e
     assert order[-3:] == [("stream", False), ("push", "template_card"), ("stream", True)]
     card = last_card(client)
     assert card["card_type"] == "button_interaction" and [button["key"] for button in card["button_list"]] == ["approve", "reject"]
+    # 集群在标题上方的来源行里用红色(卡片上只有这一行能设颜色),标题下面只写操作
+    assert card["source"] == {"desc": "集群：cassmall-beta-kunlun", "desc_color": 2}
+    assert card["main_title"] == {"title": "K8S 操作待审批", "desc": "滚动重启"}
     assert card["task_id"] == store.saved[0][0] and client.send_message.await_args.args[0] == "wx-bob"
     final = last_reply(client)
     assert "已确认该 Deployment 位于 kmw 命名空间。\n\n**待审批：滚动重启**（集群 cassmall-beta-kunlun）" in final
