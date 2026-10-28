@@ -404,7 +404,13 @@ class Gateway:
         call_id = call_id or f"{ctx.run['id']}:{uuid.uuid4().hex}"
         action = await self.store.one("SELECT * FROM kubedoor_ai_actions WHERE call_id=$1", call_id)
         if not action:
-            if not read_only:
+            # pod_exec:非高危命令直接执行(相当于 Web 终端),只有 rm -rf / kill / 重定向等高危命令才审批
+            skip_approval = False
+            if operation == "pod_exec" and not read_only:
+                from kubedoor_tools import classify_operation
+                policy = classify_operation("pod_exec", args)
+                skip_approval = not policy.get("dangerous", False)
+            if not read_only and not skip_approval:
                 await self.guard_direct_edits(ctx, source, operation, args)
             prepared = await self.prepare(ctx, source, operation, args, call_id) if not read_only else {"arguments": args, "preview": {"operation": operation, "arguments": args}, "read_only": True}
             if prepared.get("success") is False:

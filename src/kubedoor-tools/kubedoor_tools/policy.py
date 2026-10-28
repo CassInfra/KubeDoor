@@ -25,6 +25,23 @@ def cli_verb(argv: list[str]) -> tuple[str, int]:
     return "", -1
 
 
+def _is_dangerous_command(argv: list[str]) -> bool:
+    """判断 Pod 内命令是否高危:rm/kill 等必须审批,即使该 Pod 已信任。"""
+    if not argv:
+        return False
+    text = " ".join(argv)
+    # rm 带 -r/-f,或删根目录/系统目录;kill/pkill/killall;重定向 >;管道后接写操作;find -delete/-exec rm
+    dangerous = [
+        r"\brm\s+.*(-r|-f|--recursive|--force)",  # rm -rf
+        r"\brm\s+.*/($|bin|boot|dev|etc|lib|proc|root|sbin|sys|usr)\b",  # 删根
+        r"\b(kill|pkill|killall)\b",  # 杀进程
+        r">",  # 重定向(覆盖或追加)
+        r"\|\s*(rm|kill|pkill|dd|mkfs|fdisk|parted|reboot|shutdown|halt|poweroff)",  # 管道后接危险命令
+        r"\bfind\b.*(-delete|-exec\s+rm)",  # find -delete 或 find -exec rm
+    ]
+    return any(re.search(pattern, text) for pattern in dangerous)
+
+
 def classify_operation(operation: str, arguments: dict) -> dict:
     """Unknown commands and all Pod execution require explicit approval."""
     read_only = False
@@ -67,5 +84,8 @@ def classify_operation(operation: str, arguments: dict) -> dict:
             read_only = False
         reason = "Read diagnostic input" if read_only else "Diagnostic execution may have side effects; approval required"
     elif operation == "pod_exec":
-        reason = "Commands inside a Pod always require approval"
+        argv = arguments.get("argv", [])
+        dangerous = _is_dangerous_command(argv) if isinstance(argv, list) else False
+        reason = "高危命令必须审批(rm/kill/重定向等)" if dangerous else "Pod 内查看命令直接执行"
+        return {"read_only": False, "reason": reason, "dangerous": dangerous}
     return {"read_only": bool(read_only), "reason": reason}
