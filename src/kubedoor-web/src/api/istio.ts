@@ -165,7 +165,7 @@ export interface MatrixRow {
   route_count: number;
   has_default: boolean;
   lint: string[];
-  /** 重复的域名(同一集群里多个 VS 的 hosts、同一个 VS 里不同规则的域名),每条前面是集群名 */
+  /** 域名冲突(同一集群里绑定同一个 gateway 的多个 VS 的 hosts 重复、规则被前面的规则挡住不会生效),每条前面是集群名 */
   domain_issues: string[];
   updated_at: string | null;
   updated_by: string;
@@ -246,7 +246,7 @@ export interface VSDetail extends VSFields {
   clusters: VSClusterRow[];
   routes: IstioRoute[];
   lint: string[];
-  /** 部署到的集群里重复的域名(按组标准要下发的内容查),每条前面是集群名 */
+  /** 部署到的集群里的域名冲突(按组标准要下发的内容查),每条前面是集群名 */
   domain_issues: string[];
   /** 在本组的范围判断:被忽略时不显示在列表里,也不能下发 */
   scope: VSScopeResult;
@@ -407,7 +407,7 @@ export interface ApplyItem {
   k8s_name: string;
 }
 
-/** 下发后重复的域名;new:集群里原来没有,是这次下发带来的 */
+/** 下发后的域名冲突;new:集群里原来没有、是这次下发带来的,这样的项不能下发(后端也会拒绝) */
 export interface DomainIssue {
   text: string;
   new: boolean;
@@ -423,7 +423,7 @@ export interface ApplyPreviewItem extends ApplyItem {
   same: boolean;
   /** 集群现状(左)→ 将要下发(右);集群里还没有时为空 */
   diff: SpecDiff | null;
-  /** 这批都下发之后,这一项在该集群里重复的域名 */
+  /** 这批都下发之后,这一项在该集群里的域名冲突 */
   domain_issues: DomainIssue[];
 }
 

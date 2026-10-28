@@ -633,24 +633,27 @@ async def apply_to(client, vs_id, k8s_name):
 
 
 @pytest.mark.asyncio
-async def test_duplicate_domains_in_pages_and_apply_preview(env):
-    """同一个集群里的域名不能重复:矩阵和详情页按组标准要下发的内容查(集群里被忽略的、不在本组的 VS 也算),
-    未纳管的按现状查;下发预览标出哪些是这次下发带来的。"""
+async def test_domain_conflicts_in_pages_and_apply(env):
+    """同一个集群里的域名冲突:矩阵和详情页按组标准要下发的内容查(集群里被忽略的、不在本组的 VS 也算),
+    未纳管的按现状查;绑定的 gateway 不同的 host 不算。下发预览标出哪些是这次下发带来的,下发时有这样的就整批拒绝,
+    原来就有的不拦;要挪的 host 两边一起下发就不冲突。"""
     client, agent, _ = env
     group_id = await setup_group(client, agent)
     agent.put('beta-k', 'c', vs(['a-beta-k.x.com'], [route('/c/', 3)]))  # 和 a 在 beta-k 的 host 重复
-    agent.put('prod-a', 'd', vs(['d.x.com'], [  # 两条规则匹配同一个域名(authority / host 头各写一次)
+    agent.put('beta-k', 'e', vs(['a-beta-k.x.com'], [route('/e/', 5)], gateway='istio-system/internal-1080'))
+    agent.put('prod-a', 'd', vs(['d.x.com'], [  # 两条规则都只按同一个域名匹配(authority / host 头各写一次)
         {'match': [{'authority': {'exact': 'd.x.com'}}], 'route': [{'destination': {'host': 'd1'}}]},
-        {'match': [{'headers': {'host': {'exact': 'D.x.com'}}}], 'route': [{'destination': {'host': 'd2'}}]}]))
+        {'match': [{'headers': {'host': {'exact': 'd.x.com'}}}], 'route': [{'destination': {'host': 'd2'}}]}]))
     await call(client, 'POST', '/api/istio/collect', {'group_id': group_id})
     imported = await call(client, 'POST', '/api/istio/import', {'group_id': group_id, 'items': [
         {'namespace': NS, 'name': 'a', 'base': 'beta-k', 'clusters': ['beta-k', 'beta-p', 'prod-a']}]})
     a_id = imported['data'][0]['vs_id']
     a_issue = f'beta-k:host a-beta-k.x.com 也在 {NS}/c 里'
-    d_issue = '域名 d.x.com 在第 1 条(→ d1)、第 2 条(→ d2)规则里重复;第 2 条对这个域名不会生效'
+    d_issue = '域名 d.x.com:第 2 条(→ d2)被第 1 条(→ d1)挡住,不会生效'
     rows = await matrix(client, group_id)
     assert rows['a']['domain_issues'] == [a_issue] and rows['b']['domain_issues'] == []
     assert rows['c']['domain_issues'] == [f'beta-k:host a-beta-k.x.com 也在 {NS}/a 里']
+    assert rows['e']['domain_issues'] == []  # gateway 不同
     assert rows['d']['domain_issues'] == [f'prod-a:{d_issue}']
     assert (await call(client, 'GET', '/api/istio/vs', vs_id=a_id))['data']['domain_issues'] == [a_issue]
 
@@ -672,19 +675,49 @@ async def test_duplicate_domains_in_pages_and_apply_preview(env):
     assert (await matrix(client, group_id, headers=reader))['a']['domain_issues'] == [a_issue]
 
     # 下发预览:beta-k 的是集群里原来就有的,beta-p 的是这次下发带来的
-    preview = (await call(client, 'POST', '/api/istio/apply/preview', {'items': [
-        {'vs_id': a_id, 'k8s_name': 'beta-k'}, {'vs_id': a_id, 'k8s_name': 'beta-p'}]}))['data']
+    both = [{'vs_id': a_id, 'k8s_name': 'beta-k'}, {'vs_id': a_id, 'k8s_name': 'beta-p'}]
+    preview = (await call(client, 'POST', '/api/istio/apply/preview', {'items': both}))['data']
     assert {p['k8s_name']: p['domain_issues'] for p in preview} == {
         'beta-k': [{'text': f'host a-beta-k.x.com 也在 {NS}/c 里', 'new': False}],
         'beta-p': [{'text': f'host b-beta.x.com 也在 {NS}/b 里', 'new': True}]}
 
-    # 纳管 d:组标准里还是两条规则匹配同一个域名,下发预览里是原来就有的
+    # 下发:有这次带来的冲突就整批拒绝,哪个集群都不改、也不备份;原来就有冲突的 beta-k 单独下发不拦
+    rejected = await call(client, 'POST', '/api/istio/apply', {'items': both}, status=409)
+    assert f'beta-p · {NS}/a:host b-beta.x.com 也在 {NS}/b 里' in rejected['error']
+    assert agent.applied == [] and (await backups(client, group_id, 'beta-k'))['backups'] == []
+    assert (await apply_to(client, a_id, 'beta-k'))['success']
+
+    # 把 b-beta.x.com 从 b 挪到 a:两边一起下发就不冲突
+    imported = await call(client, 'POST', '/api/istio/import', {'group_id': group_id, 'items': [
+        {'namespace': NS, 'name': 'b', 'base': 'beta-p', 'clusters': ['beta-p']}]})
+    b_id = imported['data'][0]['vs_id']
+    await call(client, 'PUT', '/api/istio/vs/cluster', {'vs_id': b_id, 'k8s_name': 'beta-p', 'hosts': ['b-new.x.com']})
+    moved = [{'vs_id': a_id, 'k8s_name': 'beta-p'}, {'vs_id': b_id, 'k8s_name': 'beta-p'}]
+    preview = (await call(client, 'POST', '/api/istio/apply/preview', {'items': moved}))['data']
+    assert [p['domain_issues'] for p in preview] == [[], []]
+    applied = await call(client, 'POST', '/api/istio/apply', {'items': moved})
+    assert all(r['success'] for r in applied['data'])
+    assert agent.clusters['beta-p'][(NS, 'a')]['hosts'] == ['a-beta.x.com', 'b-beta.x.com']
+    assert agent.clusters['beta-p'][(NS, 'b')]['hosts'] == ['b-new.x.com']
+
+    # 纳管 d:第 2 条被挡住是原来就有的,照样能下发;再加一条被挡住的规则就是这次带来的,下发被拒
     imported = await call(client, 'POST', '/api/istio/import', {'group_id': group_id, 'items': [
         {'namespace': NS, 'name': 'd', 'base': 'prod-a', 'clusters': ['prod-a']}]})
-    preview = (await call(client, 'POST', '/api/istio/apply/preview', {'items': [
-        {'vs_id': imported['data'][0]['vs_id'], 'k8s_name': 'prod-a'}]}))['data'][0]
+    d_item = [{'vs_id': imported['data'][0]['vs_id'], 'k8s_name': 'prod-a'}]
+    preview = (await call(client, 'POST', '/api/istio/apply/preview', {'items': d_item}))['data'][0]
     assert preview['same'] and preview['domain_issues'] == [{'text': d_issue, 'new': False}]
-    assert (await matrix(client, group_id))['d']['domain_issues'] == [f'prod-a:{d_issue}']
+    assert (await call(client, 'POST', '/api/istio/apply', {'items': d_item}))['data'][0]['success']
+    await call(client, 'POST', '/api/istio/httproute', {
+        'match_rules': [{'$domains': True, 'uri': {'prefix': '/v2/'}}], 'forward_type': 'route',
+        'forward_detail': [{'destination': {'host': 'd3', 'port': {'number': 80}}}],
+        'domains': {'prod-a': [[{'field': 'authority', 'op': 'exact', 'value': 'd.x.com'}]]}},
+        vs_id=d_item[0]['vs_id'])
+    d3_issue = '域名 d.x.com:第 3 条(→ d3)被第 1 条(→ d1)挡住,不会生效'
+    preview = (await call(client, 'POST', '/api/istio/apply/preview', {'items': d_item}))['data'][0]
+    assert preview['domain_issues'] == [{'text': d_issue, 'new': False}, {'text': d3_issue, 'new': True}]
+    rejected = await call(client, 'POST', '/api/istio/apply', {'items': d_item}, status=409)
+    assert f'prod-a · {NS}/d:{d3_issue}' in rejected['error']
+    assert (await matrix(client, group_id))['d']['domain_issues'] == [f'prod-a:{d_issue}', f'prod-a:{d3_issue}']
 
 
 @pytest.mark.asyncio
@@ -859,7 +892,7 @@ async def test_domain_conditions_are_kept_per_cluster(env):
         hosts = [f'svc-{site}.x.com', 'svc.x.com']
         host_rule = {'match': [{'authority': {'exact': h}} for h in hosts],
                      'route': [{'destination': {'host': 'svc.b2c.svc.cluster.local'}}]}
-        return vs(hosts, [host_rule, route('/api/', 6001)])
+        return vs([*hosts, f'admin-{site}.x.com'], [host_rule, route('/api/', 6001)])
 
     agent.put('prod-p', 'svc', site_vs('p'))
     agent.put('prod-k', 'svc', site_vs('k'))
@@ -892,14 +925,15 @@ async def test_domain_conditions_are_kept_per_cluster(env):
     assert all(not c['missing_domains'] for c in detail['clusters'] if c['bound']) and detail['lint'] == []
 
     # 新增一条带域名条件的规则:纳入了的集群都要设置,而且至少一个域名
+    # (生产用单独的 admin 域名:svc-* 的请求都被第 1 条接走了,这条排在后面不会生效,下发会被拒)
     rule = {'match_rules': [{'uri': {'prefix': '/admin/'}, S.DOMAIN_KEY: True}], 'forward_type': 'route',
             'forward_detail': [{'destination': {'host': 'admin.b2c.svc.cluster.local'}}],
-            'domains': {'beta-k': [[{'value': 'svc-beta.x.com'}]], 'prod-p': [[{'value': 'svc-p.x.com'}]]}}
+            'domains': {'beta-k': [[{'value': 'svc-beta.x.com'}]], 'prod-p': [[{'value': 'admin-p.x.com'}]]}}
     path = f'/api/istio/httproute?vs_id={vs_id}'
     assert '请设置集群 prod-k 的域名' in (await call(client, 'POST', path, rule, status=400))['error']
     rule['domains']['prod-k'] = [[]]
     assert '一个域名都没选' in (await call(client, 'POST', path, rule, status=400))['error']
-    rule['domains']['prod-k'] = [[{'value': 'svc-k.x.com'}, {'value': ' svc-k.x.com '}]]  # 重复的去掉
+    rule['domains']['prod-k'] = [[{'value': 'admin-k.x.com'}, {'value': ' admin-k.x.com '}]]  # 重复的去掉
     rule['domains']['prod-x'] = [[{'value': 'svc-x.x.com'}]]
     assert '没有部署到集群 prod-x' in (await call(client, 'POST', path, rule, status=400))['error']
     rule['domains'].pop('prod-x')
@@ -910,9 +944,9 @@ async def test_domain_conditions_are_kept_per_cluster(env):
     await call(client, 'POST', '/api/istio/apply', {'items': [{'vs_id': vs_id, 'k8s_name': 'prod-k'}]})
     env_name, body = agent.applied[-1]
     http = body['spec']['http']
-    assert env_name == 'prod-k' and body['spec']['hosts'] == ['svc-k.x.com', 'svc.x.com']
+    assert env_name == 'prod-k' and body['spec']['hosts'] == ['svc-k.x.com', 'svc.x.com', 'admin-k.x.com']
     assert http[0]['match'] == [{'authority': {'exact': 'svc-k.x.com'}}, {'authority': {'exact': 'svc.x.com'}}]
-    assert http[2]['match'] == [{'uri': {'prefix': '/admin/'}, 'authority': {'exact': 'svc-k.x.com'}}]
+    assert http[2]['match'] == [{'uri': {'prefix': '/admin/'}, 'authority': {'exact': 'admin-k.x.com'}}]
     assert cells((await matrix(client, group_id))['svc'])['prod-k'] == S.SYNCED
 
     # 部署到新集群只填了 hosts:缺少域名,不能下发;补上域名后才行

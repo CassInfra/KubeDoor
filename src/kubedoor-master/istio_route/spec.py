@@ -11,8 +11,8 @@
   只是域名不同的规则单独标出。
 - lint_http / lint_domains:规范检查 —— 用了重写就要有名称,没用重写就不要名称(名称用于访问日志展示);
   域名条件里的域名要在本集群的 hosts 里。
-- hosts_index / domain_issues / apply_domain_issues:同一个集群里的域名不能重复 —— 多个 VS 的 hosts 不能重复,
-  同一个 VS 里不同 http 规则匹配的域名(authority / headers.host)也不能重复。
+- hosts_index / domain_issues / apply_domain_issues:同一个集群里的域名不能冲突 —— 绑定同一个 gateway 的多个 VS
+  的 hosts 不能重复;同一个 VS 里的规则不能被前面的规则挡住、对某个域名永远不会生效(shadowed_rules)。
 - VSScope / find_conflicts:组的 VS 范围(包含 / 忽略规则 + 单个 VS 的手动忽略 / 单独纳入),
   以及同一个 VS 是否也在共用集群的其他组里(同一个 VS 只能属于一个组)。
 - build_matrix:组矩阵,每行一个 VS,每列一个集群;search_lines 把规则内容展平成「字段路径: 值」供页面全文搜索。
@@ -484,11 +484,15 @@ def lint_domains(spec: Optional[dict], where: str = '') -> List[str]:
 
 
 # ---------------------------------------------------------------------------
-# 重复的域名:同一个集群里,多个 VS 的 hosts 不能重复,同一个 VS 里不同 http 规则匹配的域名也不能重复
+# 域名冲突:同一个集群里,绑定同一个 gateway 的多个 VS 的 hosts 不能重复;
+# 同一个 VS 里的规则不能被前面的规则挡住、对某个域名永远不会生效
 # ---------------------------------------------------------------------------
 # {集群: {host(小写): {(命名空间, 名称): 绑定的 gateway}}}
 HostsIndex = Dict[str, Dict[str, Dict[Tuple[str, str], frozenset]]]
-_NO_CONDITION = canonical({})
+# match 条目里不是匹配条件的字段
+_NOT_CONDITIONS = ('name', 'statPrefix')
+# 按键匹配的条件:前面的条目要求的键,后面的条目也要求、而且一样,前面的才更宽
+_MAP_CONDITIONS = ('headers', 'queryParams', 'withoutHeaders', 'sourceLabels')
 
 
 def _gateway_set(gateways, namespace: str) -> frozenset:
@@ -518,50 +522,118 @@ def hosts_index(live: Dict[tuple, dict], planned: Optional[Dict[tuple, dict]] = 
     return index
 
 
-def duplicate_hosts(index: HostsIndex, k8s_name: str, key: Tuple[str, str], hosts) -> Dict[str, Dict[tuple, bool]]:
-    """这个 VS 的 hosts 里,同一个集群里别的 VS 也有的:{host: {别的 VS: 两个 VS 是否绑定了同一个 gateway}}"""
+def duplicate_hosts(index: HostsIndex, k8s_name: str, key: Tuple[str, str], hosts) -> Dict[str, List[tuple]]:
+    """这个 VS 的 hosts 里,同一个集群里绑定了同一个 gateway 的别的 VS 也有的:{host: [别的 VS]}。
+    gateway 不同的不算:各走各的入口,互不影响。"""
     owners_by_host = index.get(k8s_name) or {}
     result = {}
     for host in dict.fromkeys(h.lower() for h in hosts or [] if isinstance(h, str) and h):
         owners = owners_by_host.get(host) or {}
         mine = owners.get(key, frozenset())
-        others = {other: bool(gateways & mine) for other, gateways in owners.items() if other != key}
+        others = sorted(other for other, gateways in owners.items() if other != key and gateways & mine)
         if others:
             result[host] = others
     return result
 
 
-def rule_domains(entry: dict) -> List[Tuple[str, str]]:
-    """一条规则匹配的域名,和同一个 match 条目里的其余条件:[(域名, 其余条件)]。
-    authority 和 headers.host 是同一个东西,不分写法和匹配方式,域名转小写比较;按集群的占位不算。"""
-    result = []
+def _match_entries(entry: dict) -> List[Tuple[Optional[dict], dict]]:
+    """一条规则的 match 条目:[(域名条件 {field, op, value}, 其余条件)]。域名条件为 None 是不按域名区分
+    (对 hosts 里的域名都生效),没有 match 的规则算一个没有条件的条目;域名条件拿不准的
+    (按集群的占位、同时写了 authority 和 headers.host 等)跳过。"""
     match = entry.get('match')
+    if not match:
+        return [(None, {})]
+    result = []
     for cond in match if isinstance(match, list) else []:
+        if not isinstance(cond, dict):
+            continue
         parsed = domain_condition(cond)
-        if parsed and parsed[0]['value'] != DOMAIN_PLACEHOLDER:
-            result.append((parsed[0]['value'].lower(), canonical(parsed[1])))
+        headers = cond.get('headers')
+        if parsed:
+            if parsed[0]['value'] != DOMAIN_PLACEHOLDER:
+                result.append(parsed)
+        elif 'authority' not in cond and not (isinstance(headers, dict) and 'host' in headers):
+            result.append((None, cond))
     return result
 
 
-def rule_domain_dups(spec: Optional[dict]) -> Tuple[List[dict], Dict[str, dict]]:
-    """同一个 VS 里不同的 http 规则匹配了同一个域名(默认路由不算):(普通规则, {域名: {rules, dead}})。
-    rules 是用到这个域名的规则下标;dead 是其中对这个域名永远不会生效的 —— 它匹配这个域名的每个条目,
-    前面都有规则匹配这个域名时没有别的条件,或者别的条件和它一样。"""
+def _domain_covers(a: Optional[dict], b: dict) -> bool:
+    """域名条件 a 能不能接住 b 的全部请求(authority 和 headers.host 是同一个东西,a 为 None 是不按域名区分):
+    一样,或者 a 是更短的前缀。"""
+    if a is None:
+        return True
+    if a['op'] == 'prefix':
+        return b['op'] in ('exact', 'prefix') and b['value'].startswith(a['value'])
+    return a['op'] == b['op'] and a['value'] == b['value']
+
+
+def _uri_covers(a, b, a_nocase: bool, b_nocase: bool) -> bool:
+    """uri 条件 a 能不能接住 b:一样,或者 a 是更短的前缀;ignoreUriCase 只对 exact / prefix 有效。"""
+    if not (isinstance(a, dict) and isinstance(b, dict) and len(a) == len(b) == 1):
+        return False
+    (op_a, value_a), (op_b, value_b) = next(iter(a.items())), next(iter(b.items()))
+    if not (isinstance(value_a, str) and isinstance(value_b, str)):
+        return False
+    if 'regex' in (op_a, op_b):
+        return op_a == op_b and value_a == value_b
+    if op_a not in ('exact', 'prefix') or op_b not in ('exact', 'prefix') or (b_nocase and not a_nocase):
+        return False
+    if a_nocase:
+        value_a, value_b = value_a.lower(), value_b.lower()
+    return value_b.startswith(value_a) if op_a == 'prefix' else op_b == 'exact' and value_a == value_b
+
+
+def _rest_covers(a: dict, b: dict) -> bool:
+    """match 条目里域名以外的条件 a 能不能接住 b 的全部请求:a 要求的 b 也要求、而且一样(a 的条件更少、更宽),
+    uri 可以是更短的前缀(前面 /api、后面 /api/v1)。拿不准的(正则、头部的前缀匹配等)一律算接不住,宁可漏报。"""
+    def conditions(entry):
+        return {k: v for k, v in entry.items() if k not in _NOT_CONDITIONS and v not in (None, [], {}, False)}
+
+    a, b = conditions(a), conditions(b)
+    for key, value in a.items():
+        other = b.get(key)
+        if key == 'ignoreUriCase':
+            continue  # 只会让 a 更宽,在 uri 里一起看
+        if key == 'uri':
+            ok = _uri_covers(value, other, bool(a.get('ignoreUriCase')), bool(b.get('ignoreUriCase')))
+        elif key in _MAP_CONDITIONS:
+            ok = isinstance(value, dict) and isinstance(other, dict) and all(
+                name in other and canonical(other[name]) == canonical(cond) for name, cond in value.items())
+        elif key == 'gateways':
+            ok = isinstance(value, list) and isinstance(other, list) and all(g in value for g in other)
+        else:
+            ok = canonical(value) == canonical(other)
+        if not ok:
+            return False
+    return True
+
+
+def shadowed_rules(spec: Optional[dict]) -> Tuple[List[dict], List[dict]]:
+    """同一个 VS 里被前面的规则挡住、对某个域名永远不会生效的规则(默认路由不算):
+    (普通规则, [{rule: 下标, domain: 域名, by: [挡住它的规则下标]}])。
+
+    一条规则匹配这个域名的每个条目,前面都有条目能接住它才算 —— 域名一样(前面不按域名区分、域名前缀更短也行),
+    其余条件也接得住:前面没有别的条件(兜底写在了前面)、别的条件一样,或者更宽(uri 前缀更短、条件更少)。
+    by 是每个条目最先被哪条规则接住;同一条规则里的条目之间不算。"""
     entries, _ = split_http((spec or {}).get('http'))
-    uses: Dict[str, List[Tuple[int, str]]] = {}
-    for index, entry in enumerate(entries):
-        for value, rest in rule_domains(entry):
-            uses.setdefault(value, []).append((index, rest))
-    dups = {}
-    for value, items in uses.items():
-        rules = list(dict.fromkeys(index for index, _ in items))
-        if len(rules) < 2:
-            continue
-        dead = [j for j in rules[1:]
-                if all(any(i < j and rest_i in (_NO_CONDITION, rest_j) for i, rest_i in items)
-                       for k, rest_j in items if k == j)]
-        dups[value] = {'rules': rules, 'dead': dead}
-    return entries, dups
+    parsed = [_match_entries(entry) for entry in entries]
+    result = []
+    for j, items in enumerate(parsed):
+        by_domain: Dict[str, List[Tuple[dict, dict]]] = {}
+        for cond, rest in items:
+            if cond is not None:
+                by_domain.setdefault(cond['value'], []).append((cond, rest))
+        for value, conds in by_domain.items():
+            blockers = []
+            for cond, rest in conds:
+                first = next((i for i in range(j) for cond_i, rest_i in parsed[i]
+                              if _domain_covers(cond_i, cond) and _rest_covers(rest_i, rest)), None)
+                if first is None:
+                    break
+                blockers.append(first)
+            else:
+                result.append({'rule': j, 'domain': value, 'by': sorted(set(blockers))})
+    return entries, result
 
 
 def _rule_tag(entry: dict) -> str:
@@ -572,24 +644,23 @@ def _rule_tag(entry: dict) -> str:
     return f'→ {target}' if target else describe_match(entry.get('match'))
 
 
-def _hosts_text(host: str, others: Dict[tuple, bool]) -> str:
-    names = '、'.join(f"{ns}/{name}{'' if shared else '(gateway 不同)'}" for (ns, name), shared in sorted(others.items()))
-    return f'host {host} 也在 {names} 里'
+def _hosts_text(host: str, others: List[tuple]) -> str:
+    return f"host {host} 也在 {'、'.join(f'{ns}/{name}' for ns, name in others)} 里"
 
 
-def _rule_domain_text(entries: List[dict], value: str, dup: dict) -> str:
-    rules = '、'.join(f'第 {i + 1} 条({_rule_tag(entries[i])})' for i in dup['rules'])
-    dead = f";第 {'、'.join(str(i + 1) for i in dup['dead'])} 条对这个域名不会生效" if dup['dead'] else ''
-    return f'域名 {value} 在{rules}规则里重复{dead}'
+def _shadow_text(entries: List[dict], item: dict) -> str:
+    rule = item['rule']
+    by = '、'.join(f'第 {i + 1} 条({_rule_tag(entries[i])})' for i in item['by'])
+    return f"域名 {item['domain']}:第 {rule + 1} 条({_rule_tag(entries[rule])})被{by}挡住,不会生效"
 
 
 def domain_issues(spec: Optional[dict], index: HostsIndex, k8s_name: str, key: Tuple[str, str]) -> List[str]:
-    """同一个集群里的域名不能重复:这个 VS(spec 是它在该集群的内容)的 hosts 不能和集群里别的 VS 重复,
-    不同 http 规则匹配的域名(authority / headers.host)也不能重复。"""
+    """这个 VS(spec 是它在该集群的内容)在该集群的域名冲突:hosts 和集群里绑定同一个 gateway 的别的 VS 重复,
+    规则被前面的规则挡住、对某个域名不会生效。"""
     spec = spec or {}
     issues = [_hosts_text(host, others) for host, others in duplicate_hosts(index, k8s_name, key, spec.get('hosts')).items()]
-    entries, dups = rule_domain_dups(spec)
-    return issues + [_rule_domain_text(entries, value, dup) for value, dup in dups.items()]
+    entries, shadowed = shadowed_rules(spec)
+    return issues + [_shadow_text(entries, item) for item in shadowed]
 
 
 def by_cluster(pairs: Iterable[Tuple[str, str]]) -> List[str]:
@@ -604,18 +675,22 @@ def by_cluster(pairs: Iterable[Tuple[str, str]]) -> List[str]:
 
 def apply_domain_issues(spec: dict, current: Optional[dict], after: HostsIndex, before: HostsIndex,
                         k8s_name: str, key: Tuple[str, str]) -> List[dict]:
-    """下发预览:下发后这个 VS 的重复域名 [{text, new}]。after / before 是这批下发之后 / 之前集群里的 hosts,
-    current 是集群里这个 VS 现在的内容(没有为 None);new 表示集群里原来没有、是这次下发带来的。"""
+    """下发预览和下发前的检查:下发后这个 VS 的域名冲突 [{text, new}]。after / before 是这批下发之后 / 之前集群里的
+    hosts,current 是集群里这个 VS 现在的内容(没有为 None)。new = 集群里原来没有、是这次下发带来的,这样的不能下发;
+    原来就有的只提示(拦了的话,这个 VS 别的改动也下发不了)。被挡住的规则按「域名 + 规则的匹配条件」认是不是原来就有。"""
     issues = []
-    previous = (before.get(k8s_name) or {})
+    previous = duplicate_hosts(before, k8s_name, key, current.get('hosts')) if current is not None else {}
     for host, others in duplicate_hosts(after, k8s_name, key, spec.get('hosts')).items():
-        owners = previous.get(host) or {}
-        new = key not in owners or any(other not in owners for other in others)
-        issues.append({'text': _hosts_text(host, others), 'new': new})
-    existing = rule_domain_dups(current)[1] if current is not None else {}
-    entries, dups = rule_domain_dups(spec)
-    for value, dup in dups.items():
-        issues.append({'text': _rule_domain_text(entries, value, dup), 'new': value not in existing})
+        issues.append({'text': _hosts_text(host, others),
+                       'new': any(other not in previous.get(host, []) for other in others)})
+    existing = set()
+    if current is not None:
+        old_entries, old = shadowed_rules(current)
+        existing = {(item['domain'], canonical(old_entries[item['rule']].get('match'))) for item in old}
+    entries, shadowed = shadowed_rules(spec)
+    for item in shadowed:
+        identity = (item['domain'], canonical(entries[item['rule']].get('match')))
+        issues.append({'text': _shadow_text(entries, item), 'new': identity not in existing})
     return issues
 
 
@@ -1078,7 +1153,7 @@ def build_matrix(clusters: List[dict], standards: List[dict], snapshots: Dict[tu
     snapshots:{(k8s_name, namespace, name): spec};
     hosts:这些集群里每个 host 被哪些 VS 用(hosts_index,含不在本组的),查重复的 host。
     每行的 search_lines 是组标准(按这些集群展开域名)和这些集群现状的规则内容,页面全文搜索用;
-    domain_issues 是重复的域名:部署了的按组标准要下发的内容查,未纳管的按集群现状查。
+    domain_issues 是域名冲突(重复的 host、被挡住不会生效的规则):部署了的按组标准要下发的内容查,未纳管的按集群现状查。
     """
     hosts = hosts or {}
     names = [c['k8s_name'] for c in clusters]
@@ -1093,7 +1168,7 @@ def build_matrix(clusters: List[dict], standards: List[dict], snapshots: Dict[tu
         live = {k: snapshots[(k, namespace, name)] for k in names if (k, namespace, name) in snapshots}
         labels, versions = version_labels(live, names)
         row = {'namespace': namespace, 'name': name, 'vs_id': None, 'versions': versions, 'cells': {}}
-        issues = []  # 重复的域名:[(集群, 提示)]
+        issues = []  # 域名冲突:[(集群, 提示)]
         searched = []  # 搜索的内容:组标准(共用部分和各集群展开后的),再加各集群现状
         if standard:
             shared = standard_spec(standard)

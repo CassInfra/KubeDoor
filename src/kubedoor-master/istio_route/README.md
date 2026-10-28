@@ -137,28 +137,35 @@ http 规则从规则里的字段写起(`match.uri.prefix: /api/`、`route.destin
 用了重写就要有名称,没用重写就不要名称(名称用于访问日志里展示原始前缀)。新增 / 修改规则时后端强制校验,
 启用重写时前端默认带出「uri 前缀去掉末尾 /」;采集来的不合规规则在矩阵和详情页标为「规范问题」。
 
-### 域名重复检查
+### 域名冲突检查
 
-同一个集群里的域名不能重复:多个 VirtualService 的 hosts 不能重复,同一个 VirtualService 里不同规则的域名条件
-(`authority`、`headers.host`)也不能重复。纯逻辑在 `spec.py`(`hosts_index`、`domain_issues`、`apply_domain_issues`)。
+同一个集群里的域名不能冲突。纯逻辑在 `spec.py`(`hosts_index`、`shadowed_rules`、`domain_issues`、`apply_domain_issues`)。
 
-- hosts:同一个集群里的 VirtualService 都算 —— 本组的、其他组的、被忽略的、没纳管的。本组部署了的按组标准要下发的
-  hosts 算(改了还没下发的也按改后的),其他的按集群现状(采集的快照)算;不区分大小写。
-  gateway 不同的也报,提示里标「gateway 不同」(没写 gateways 的算 `mesh`,没写命名空间的 gateway 补上 VirtualService 的命名空间)。
-- 规则域名:不分 `authority` / `headers.host` 写法和 exact / prefix / regex,值一样(不区分大小写)就算重复;
-  默认路由和还没设置的域名不算,同一条规则里的几个 match 条目重复不算(条目之间是「或」)。
-  后面的规则对这个域名不会生效的(它匹配该域名的每个条目,前面都有规则对这个域名不带其他条件,或其他条件和它一样)另外标出来;
-  同一个域名按不同路径分到几条规则(如 `/a`、`/b`、兜底)也会报,但不标「不会生效」。
+- **hosts 重复**:同一个集群里,绑定了同一个 gateway 的多个 VirtualService 的 hosts 不能重复(不区分大小写)。
+  gateway 不同的不算,各走各的入口;没写 gateways 的算 `mesh`,没写命名空间的 gateway 补上 VirtualService 的命名空间。
+  同一个集群里的 VirtualService 都算 —— 本组的、其他组的、被忽略的、没纳管的:本组部署了的按组标准要下发的 hosts 算
+  (改了还没下发的也按改后的),其他的按集群现状(采集的快照)算。
+- **规则被挡住**:同一个 VirtualService 里,一条规则对某个域名永远不会生效 —— 它匹配这个域名的每个 match 条目,
+  前面都有规则能接住:
+  - 前面的规则对这个域名没有别的条件(兜底写在了前面),或者别的条件和它一样;
+  - 前面的条件更宽:uri 前缀更短(前面 `/api`、后面 `/api/v1`,顺序写反了)、条件更少(后面多了 header 之类的条件)、
+    域名是更短的前缀,或者前面的规则不按域名区分(只按路径匹配、中间没有 match 的,对 hosts 里的域名都生效)。
+
+  同一个域名按路径分到几条规则、兜底放在最后,是正常写法,不报。`authority` 和 `headers.host` 是同一个东西
+  (Envoy 把 Host 头当 `:authority`),域名的值区分大小写;默认路由、还没设置的域名不算,同一条规则里的条目之间不算。
+  拿不准的一律算接不住(正则只认一模一样的,头部的前缀匹配、同时写了 `authority` 和 `headers.host` 的条目等),宁可漏报。
 - 什么时候检查:
-  - 矩阵:随矩阵接口一起算(几十个集群、上百个 VirtualService 也只要几十毫秒,不另开后台任务),名称旁标「域名重复」,
-    鼠标移上去看明细;顶部汇总个数,筛选里有「域名重复」。部署了的按要下发的内容查,未纳管的按现状查。
-  - 详情页:顶部列出部署到的各集群里重复的域名。
-  - 下发预览:按「列表里的都下发之后」逐项检查,标出是这次下发带来的(集群里原来没有),还是集群里原有的;
-    勾选的项里有这次下发带来的,确认下发时再列出来。**只提示、不拦截**:按路径分流是常见写法,
-    把 host 从一个 VirtualService 挪到另一个、只先下发了新的那个时也会短暂重复。
+  - 矩阵:随矩阵接口一起算(按线上数据算一遍只要几十毫秒,不另开后台任务),名称旁标「域名冲突」,
+    鼠标移上去看明细;顶部汇总个数,筛选里有「域名冲突」。部署了的按要下发的内容查,未纳管的按现状查。
+  - 详情页:顶部列出部署到的各集群里的域名冲突。
+  - 下发预览:按「列表里能下发的都下发之后」逐项检查,标出是这次下发带来的(集群里原来没有),还是集群里原有的。
+    这次下发带来的不能勾选。被挡住的规则按「域名 + 规则的匹配条件」认是不是原来就有的(只改了超时、转发目标的不算新的)。
+  - 下发:从集群取最新现状后、改集群之前再按实际勾选的查一遍,有这次下发带来的冲突就**整批拒绝**(409,什么都不改、
+    也不备份)。集群里原来就有的不拦,否则这个 VirtualService 别的改动也下发不了。把 host 从一个 VirtualService
+    挪到另一个时,两边一起下发(或者先下发去掉 host 的那个)。
 - 提示里相同的内容合并成一条,前面列出集群(规则是组内共用的,各集群一样的问题只说一遍)。
-- 局限:只比较写法相同的值,通配 host(`*.example.com`)和具体域名、prefix / regex 匹配范围的重叠不判断;
-  其他组改了还没下发的 hosts 不算,只算集群现状;集群现状以最近一次采集为准,集群里刚改过的先刷新现状。
+- 局限:通配 host(`*.example.com`)和具体域名的重叠不判断;其他组改了还没下发的 hosts 不算,只算集群现状;
+  集群现状以最近一次采集为准,集群里刚改过的先刷新现状(下发和下发预览都取的是实时现状)。
 
 ### 状态
 
@@ -204,7 +211,7 @@ http 规则从规则里的字段写起(`match.uri.prefix: /api/`、`route.destin
 | GET | `/api/istio/groups` | 组列表(含包含 / 忽略规则);管理员额外返回所有集群,以及各自已在哪些组里 |
 | POST / PUT / DELETE | `/api/istio/groups`(`?id=`) | 新建 / 修改 / 删除组。body:`{name, description, clusters:[{k8s_name, env_type, remark}], include_patterns, ignore_patterns}`,规则每条 `{type: glob\|regex, pattern}`,集群顺序即显示顺序;移出组的集群,它在本组的部署关系删除,不再属于任何组的集群,现状和备份也删除 |
 | GET | `/api/istio/groups/preview?group_id=&clusters=&include=&ignore=` | 组管理里预览规则(`include` / `ignore` 是 JSON 数组):按所选集群已采集的现状,每个 VS 归本组还是被忽略、和哪些组冲突;不保存 |
-| GET | `/api/istio/matrix?group_id=` | 组矩阵:只列本组范围内的 VS,`cells` 按集群给出 hosts、状态、版本、最近一次下发的时间和下发人,`conflicts` 冲突的组,`search_lines` 搜索用的规则内容(见「矩阵搜索」),`domain_issues` 重复的域名(见「域名重复检查」,每条前面是集群);另给 `ignored`(被忽略的 VS 和原因)和 `stats`(总数、忽略数) |
+| GET | `/api/istio/matrix?group_id=` | 组矩阵:只列本组范围内的 VS,`cells` 按集群给出 hosts、状态、版本、最近一次下发的时间和下发人,`conflicts` 冲突的组,`search_lines` 搜索用的规则内容(见「矩阵搜索」),`domain_issues` 域名冲突(见「域名冲突检查」,每条前面是集群);另给 `ignored`(被忽略的 VS 和原因)和 `stats`(总数、忽略数) |
 | POST | `/api/istio/collect` | 刷新现状:`{group_id, k8s_names?}`,逐个集群返回成功 / 失败,以及 VS 总数、归本组的个数、被忽略的个数 |
 | POST | `/api/istio/ignore` / `/api/istio/unignore` | `{group_id, items:[{namespace, name}]}`:在本组忽略 / 取消忽略(被组规则排除的取消忽略后单独纳入) |
 | GET | `/api/istio/live?group_id=&k8s_name=&namespace=&name=` | 查看集群里 VS 的现状(实时取完整对象,见上文):`{object, full}`,`full=false` 是旧版 agent,只有 spec |
@@ -215,7 +222,7 @@ http 规则从规则里的字段写起(`match.uri.prefix: /api/`、`route.destin
 | POST | `/api/istio/import` | 纳管:`{group_id, items:[{namespace, name, base, clusters}]}`,以 base 集群现状生成组标准,各集群 hosts 和域名取自己的现状 |
 | POST | `/api/istio/vs/sync/preview`、`/api/istio/vs/sync` | 从集群现状同步到组标准(见上文):`{group_id, namespace, name, standard: standard\|standard@集群, k8s_name, rules:[{standard_index, live_index}], gateways, default, extra, standard_version, live_version}`。`rules` 是对比里要同步的规则行(两边的序号,从 0 开始),`*_version` 是对比接口两边的 `version`;preview 不保存,返回保存后的组标准(和对比里组标准一侧一样显示)、改动统计、会缺少域名的集群 |
 | POST | `/api/istio/vs/reset` | 以某集群现状更新组标准的共用部分:`{vs_id, k8s_name}`,hosts 不变;域名见上文 |
-| GET | `/api/istio/vs?vs_id=` | 组标准详情:共用部分、规则(`domains`:各集群的域名)、各集群的 hosts 和状态(`missing_domains` 缺哪些规则的域名,`live_domains` 现状里对应规则的域名,`backup_count` 回退用的备份份数,`rolled_back` 下发之后又回退过时是谁、什么时候)、规范检查、`domain_issues` 部署到的集群里重复的域名(按要下发的内容查) |
+| GET | `/api/istio/vs?vs_id=` | 组标准详情:共用部分、规则(`domains`:各集群的域名)、各集群的 hosts 和状态(`missing_domains` 缺哪些规则的域名,`live_domains` 现状里对应规则的域名,`backup_count` 回退用的备份份数,`rolled_back` 下发之后又回退过时是谁、什么时候)、规范检查、`domain_issues` 部署到的集群里的域名冲突(按要下发的内容查) |
 | GET | `/api/istio/vs/check?group_id=&namespace=&name=` | 新建前检查:本组是否已有组标准、集群里是否已有同名的、其他组里是否已有、名称是否被本组排除 |
 | POST | `/api/istio/vs` | 新建:`{group_id, namespace, name, gateways, df_*, clusters:[{k8s_name, hosts}], force_include?}`;集群里已有同名 VS 时要求用纳管,其他组里已有的拒绝;名称被本组排除的要 `force_include`(单独纳入) |
 | PUT / DELETE | `/api/istio/vs?vs_id=` | 修改 gateways 和默认路由 / 删除组标准(名称、命名空间不可改) |
@@ -223,8 +230,8 @@ http 规则从规则里的字段写起(`match.uri.prefix: /api/`、`route.destin
 | POST | `/api/istio/httproute?vs_id=` | 新增规则;`priority` 不传追加到最后,传了检查是否占用;有域名块时带 `domains: {集群: [[域名]]}`,已纳入的集群都要给 |
 | PUT / DELETE | `/api/istio/httproute?route_id=` | 修改(`priority` 不传保持原位置,未建模字段保留,各集群域名整体替换)/ 删除(删除后重排优先级) |
 | POST | `/api/istio/httproute/reorder?vs_id=` | 优先级重排为 10、20、30…… |
-| POST | `/api/istio/apply/preview` | `{items:[{vs_id, k8s_name}]}`:从集群取最新现状(顺便刷新快照),逐项给出现状、将要下发的 spec 和结构化差异;不能下发的项(在本组被忽略、和其他组冲突、缺少域名)给出 error;`domain_issues: [{text, new}]` 是列表里的都下发之后这一项重复的域名,`new` = 集群里原来没有、是这次下发带来的 |
-| POST | `/api/istio/apply` | 下发:同一集群依次、不同集群并行;有不能下发的项整个请求拒绝;每个集群先取最新现状备份(取不到就不下发这个集群,内容不会变的项不备份);成功的记下发人和内容哈希,完成后重新采集该集群现状;每项记审计 `istio.apply` |
+| POST | `/api/istio/apply/preview` | `{items:[{vs_id, k8s_name}]}`:从集群取最新现状(顺便刷新快照),逐项给出现状、将要下发的 spec 和结构化差异;不能下发的项(在本组被忽略、和其他组冲突、缺少域名)给出 error;`domain_issues: [{text, new}]` 是列表里能下发的都下发之后这一项的域名冲突,`new` = 集群里原来没有、是这次下发带来的(这样的不能下发) |
+| POST | `/api/istio/apply` | 下发:同一集群依次、不同集群并行;有不能下发的项整个请求拒绝;先取各集群最新现状,有这次下发带来的域名冲突就整批拒绝(409,见「域名冲突检查」),再用它备份(取不到就不下发这个集群,内容不会变的项不备份);成功的记下发人和内容哈希,完成后重新采集该集群现状;每项记审计 `istio.apply` |
 
 ## 测试
 

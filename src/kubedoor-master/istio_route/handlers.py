@@ -1522,10 +1522,22 @@ def _by_cluster(prepared: List[dict]) -> Dict[str, List[dict]]:
     return grouped
 
 
+def _domain_check(prepared: List[dict], live_by_cluster: Dict[str, tuple]) -> Dict[tuple, List[dict]]:
+    """这批都下发之后,每一项在该集群里的域名冲突:{(集群, 命名空间, 名称): [{text, new}]},new 的不能下发。
+    live_by_cluster 是 {集群: ({(命名空间, 名称): spec} 或 None, 取现状的错误)};不能下发、取不到现状的项不查。"""
+    everything = {(name, *key): spec for name, (live, _) in live_by_cluster.items() for key, spec in (live or {}).items()}
+    batch = {(i['k8s_name'], i['namespace'], i['name']): i['spec'] for i in prepared
+             if i['error'] is None and live_by_cluster[i['k8s_name']][1] is None}
+    before, after = S.hosts_index(everything), S.hosts_index(everything, batch)
+    return {key: S.apply_domain_issues(spec, everything.get(key), after, before, key[0], key[1:])
+            for key, spec in batch.items()}
+
+
 @handler
 async def apply_preview(request):
-    """下发前预览:从集群取最新现状(顺便刷新快照),和要下发的内容逐项对比;并检查下发后的重复域名
-    (这批都下发之后,和集群里别的 VS 的 hosts 重复、规则之间的域名重复),标出是不是这次下发带来的。"""
+    """下发前预览:从集群取最新现状(顺便刷新快照),和要下发的内容逐项对比;并检查这批都下发之后的域名冲突
+    (和集群里绑定同一个 gateway 的别的 VS 的 hosts 重复、规则被前面的规则挡住),标出是不是这次下发带来的
+    (这样的不能下发,下发时会被拒绝)。"""
     req = ApplyRequest(**await _body(request))
     prepared = await _prepare(req.items)
     username = _username(request)
@@ -1540,10 +1552,7 @@ async def apply_preview(request):
 
     loaded = await asyncio.gather(*(load(name) for name in _by_cluster(prepared)))
     live_by_cluster = {name: (live, error) for name, live, error in loaded}
-    everything = {(name, *key): spec for name, (live, _) in live_by_cluster.items() for key, spec in (live or {}).items()}
-    batch = {(i['k8s_name'], i['namespace'], i['name']): i['spec'] for i in prepared
-             if i['error'] is None and live_by_cluster[i['k8s_name']][1] is None}
-    before, after = S.hosts_index(everything), S.hosts_index(everything, batch)
+    conflicts = _domain_check(prepared, live_by_cluster)
     result = []
     for item in prepared:
         live, error = live_by_cluster[item['k8s_name']]
@@ -1558,8 +1567,7 @@ async def apply_preview(request):
             'same': error is None and current is not None and S.spec_hash(current) == item['hash'],
             # 集群现状(左)→ 将要下发(右):right_only 是要新增的规则,left_only 是要删掉的
             'diff': S.diff_specs(current, item['spec']) if current is not None and error is None else None,
-            'domain_issues': [] if error else S.apply_domain_issues(item['spec'], current, after, before,
-                                                                    item['k8s_name'], key),
+            'domain_issues': conflicts.get((item['k8s_name'], *key), []),
         })
     return _ok(result)
 
@@ -1592,24 +1600,44 @@ async def _apply_one(item: dict, live: Optional[dict], username: str, ip: str) -
     return _apply_result(item, username, ip, None if ok else _agent_error(resp))
 
 
+async def _fetch_cluster(k8s_name: str) -> tuple:
+    """(集群, 集群里 VS 的现状列表,取不到时为 None, 取不到的原因)"""
+    try:
+        return k8s_name, await fetch_live(k8s_name), None
+    except IstioError as exc:
+        return k8s_name, None, exc.message
+
+
 @handler
 async def apply(request):
-    """按组标准 + 各集群 hosts 下发(agent 用 Server-Side Apply)。同一集群依次下发,不同集群并行;
-    下发前从集群取最新现状备份(取不到就不下发这个集群),下发完重新采集该集群现状,状态以集群里的实际内容为准。"""
+    """按组标准 + 各集群 hosts 下发(agent 用 Server-Side Apply)。同一集群依次下发,不同集群并行。
+    下发前从集群取最新现状:先检查这批下发会不会带来域名冲突(会就整批拒绝,什么都不下发),
+    再用它备份(取不到就不下发这个集群);下发完重新采集该集群现状,状态以集群里的实际内容为准。"""
     req = ApplyRequest(**await _body(request))
     prepared = await _prepare(req.items)
     blocked = [f"{i['namespace']}/{i['name']} → {i['error']}" for i in prepared if i['error']]
     if blocked:
         raise IstioError('；'.join(blocked))
     username, ip = _username(request), client_ip(request)
+    grouped = _by_cluster(prepared)
+    fetched = await asyncio.gather(*(_fetch_cluster(name) for name in grouped))
+    current = {name: (None if items is None else {(i['namespace'], i['name']): i for i in items}, error)
+               for name, items, error in fetched}
+    specs = {name: (None if live is None else {key: i['spec'] for key, i in live.items()}, error)
+             for name, (live, error) in current.items()}
+    conflicts = [f"{k8s_name} · {namespace}/{name}:{issue['text']}"
+                 for (k8s_name, namespace, name), issues in _domain_check(prepared, specs).items()
+                 for issue in issues if issue['new']]
+    if conflicts:
+        raise IstioError('下发后会带来域名冲突,整批都没有下发:' + '；'.join(conflicts)
+                         + '。可能是预览之后集群里的内容变了,或者相关的项没有一起下发,请重新预览', 409)
 
     async def run(k8s_name, items):
-        try:
-            current = {(i['namespace'], i['name']): i for i in await fetch_live(k8s_name)}
-        except IstioError as exc:
-            error = f'下发前取集群现状(用于备份)失败,没有下发:{exc.message}'
+        live, error = current[k8s_name]
+        if live is None:
+            error = f'下发前取集群现状(用于备份)失败,没有下发:{error}'
             return [_apply_result(item, username, ip, error) for item in items]
-        results = [await _apply_one(item, current.get((item['namespace'], item['name'])), username, ip)
+        results = [await _apply_one(item, live.get((item['namespace'], item['name'])), username, ip)
                    for item in items]
         try:
             await store.replace_snapshots(k8s_name, await fetch_live(k8s_name), username)
@@ -1617,8 +1645,8 @@ async def apply(request):
             logger.warning(f'下发后刷新集群 {k8s_name} 的现状失败: {exc}')
         return results
 
-    grouped = await asyncio.gather(*(run(name, items) for name, items in _by_cluster(prepared).items()))
-    return _ok([result for results in grouped for result in results])
+    done = await asyncio.gather(*(run(name, items) for name, items in grouped.items()))
+    return _ok([result for results in done for result in results])
 
 
 def register_routes(app, call_agent_api):

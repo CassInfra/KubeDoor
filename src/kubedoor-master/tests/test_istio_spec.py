@@ -570,7 +570,7 @@ def test_matrix_domain_only_difference_is_one_version():
     assert row['cells']['k']['status'] == S.INCOMPLETE
 
 
-# ---------------------------------------------------------------- 重复的域名
+# ---------------------------------------------------------------- 域名冲突
 def domain_rule(*domains, uri=None, service='gw', field='authority'):
     """按域名转发的规则;每个域名一个 match 条目,给了 uri 就每个条目都带上。"""
     match = []
@@ -582,78 +582,128 @@ def domain_rule(*domains, uri=None, service='gw', field='authority'):
     return {'match': match, 'route': [{'destination': {'host': f'{service}.ns.svc.cluster.local'}}]}
 
 
-def test_rule_domains_repeated_across_rules():
-    """同一个 VS 里不同规则的域名不能重复:authority 和 headers.host 算同一个,不分大小写;
-    前面的规则匹配这个域名时没有别的条件,后面的对它不会生效。"""
+def match_rule(*match, service='gw'):
+    return {'match': list(match), 'route': [{'destination': {'host': f'{service}.ns.svc.cluster.local'}}]}
+
+
+def shadowed(http):
+    """[(被挡住的规则序号, 域名, [挡住它的规则序号])],序号从 1 开始。"""
+    return [(item['rule'] + 1, item['domain'], [i + 1 for i in item['by']])
+            for item in S.shadowed_rules({'http': http})[1]]
+
+
+def test_shadowed_rules_same_domain_without_other_conditions():
+    """同一个域名的两条规则都没有别的条件:后面的被挡住、不会生效。authority 和 headers.host 是同一个东西;
+    域名的值区分大小写(Envoy 按原值比较),不一样的不算。"""
     spec = {'hosts': ['api.example.com'], 'http': [
         domain_rule('api.example.com'),
-        domain_rule('API.example.com', field='host'),
+        domain_rule('api.example.com', field='host', service='b'),
+        domain_rule('API.example.com', service='c'),
         domain_rule('other.example.com', service='other'),
     ]}
-    assert S.rule_domain_dups(spec)[1] == {'api.example.com': {'rules': [0, 1], 'dead': [1]}}
+    assert shadowed(spec['http']) == [(2, 'api.example.com', [1])]
     assert S.domain_issues(spec, {}, 'k', ('ns', 'a')) == [
-        '域名 api.example.com 在第 1 条(→ gw.ns)、第 2 条(→ gw.ns)规则里重复;第 2 条对这个域名不会生效']
+        '域名 api.example.com:第 2 条(→ b.ns)被第 1 条(→ gw.ns)挡住,不会生效']
 
 
-def test_rule_domains_repeated_with_different_paths():
-    """同一个域名按路径分到不同规则也算重复;路径不同、兜底的放在最后时,没有不会生效的规则。"""
-    by_path = [domain_rule('f.example.com', uri='/pay', service='pay'),
+def test_shadowed_rules_by_path_is_normal():
+    """同一个域名按路径分到几条规则、兜底放在最后,是正常写法,不报;兜底放在前面,后面按路径的都不会生效;
+    条件一样的第二条也不会生效。一条规则里还有条目能命中(路径不同),这条规则就不算。"""
+    by_path = [domain_rule('f.example.com', uri='/pay/', service='pay'),
                domain_rule('f.example.com', uri='/passport', service='passport'),
-               domain_rule('f.example.com')]
-    assert S.rule_domain_dups({'http': by_path})[1] == {'f.example.com': {'rules': [0, 1, 2], 'dead': []}}
-    # 兜底的放在前面,后面按路径的都不会生效;别的条件和前面一样的也不会生效
-    reordered = [by_path[2], by_path[0], by_path[1], by_path[1]]
-    assert S.rule_domain_dups({'http': reordered})[1]['f.example.com']['dead'] == [1, 2, 3]
-    # 一条规则里还有条目能匹配到(路径不同),这条规则就不算不会生效
-    mixed = domain_rule('f.example.com', uri='/pay')
-    mixed['match'].append({'authority': {'exact': 'f.example.com'}, 'uri': {'prefix': '/refund'}})
-    assert S.rule_domain_dups({'http': [by_path[0], mixed]})[1] == {'f.example.com': {'rules': [0, 1], 'dead': []}}
+               domain_rule('f.example.com', service='gateway')]
+    assert shadowed(by_path) == []
+    assert shadowed([by_path[2], by_path[0], by_path[1]]) == [(2, 'f.example.com', [1]), (3, 'f.example.com', [1])]
+    assert shadowed([by_path[0], by_path[1], by_path[1]]) == [(3, 'f.example.com', [2])]
+    mixed = domain_rule('f.example.com', uri='/pay/')
+    mixed['match'].append({'authority': {'exact': 'f.example.com'}, 'uri': {'prefix': '/refund/'}})
+    assert shadowed([by_path[0], mixed]) == []
 
 
-def test_rule_domains_skip_placeholders_and_same_rule():
-    """组标准共用部分里的域名是占位,不算重复;同一条规则里多个条目用同一个域名(按路径)也不算。"""
-    two = {'hosts': ['a.example.com', 'b.example.com'],
-           'http': [domain_rule('a.example.com'), domain_rule('b.example.com', service='b')]}
-    assert S.rule_domain_dups(S.standard_spec(make_standard(two, {})))[1] == {}
-    one = domain_rule('a.example.com', uri='/x')
-    one['match'].append({'authority': {'exact': 'a.example.com'}, 'uri': {'prefix': '/y'}})
-    assert S.rule_domain_dups({'http': [one, DEFAULT]})[1] == {}
+def test_shadowed_rules_wider_conditions_first():
+    """前面的条件更宽也会挡住后面的:uri 前缀更短、条件更少、域名前缀更短,或者前面不按域名区分(对 hosts 里的
+    域名都生效)。拿不准的(正则不一样、头部的值不同、只有后面不分大小写)不算。"""
+    api = {'authority': {'exact': 'a.example.com'}, 'uri': {'prefix': '/api'}}
+    v1 = {'authority': {'exact': 'a.example.com'}, 'uri': {'prefix': '/api/v1'}}
+    assert shadowed([match_rule(api), match_rule(v1, service='v1')]) == [(2, 'a.example.com', [1])]
+    assert shadowed([match_rule(v1, service='v1'), match_rule(api)]) == []  # 顺序对了
+    exact = {'authority': {'exact': 'a.example.com'}, 'uri': {'exact': '/api/v1/x'}}
+    assert shadowed([match_rule(api), match_rule(exact, service='x')]) == [(2, 'a.example.com', [1])]
+    canary = {**api, 'headers': {'x-canary': {'exact': '1'}}}
+    assert shadowed([match_rule(api), match_rule(canary, service='canary')]) == [(2, 'a.example.com', [1])]
+    assert shadowed([match_rule(canary, service='canary'), match_rule(api)]) == []
+    other = {**api, 'headers': {'x-canary': {'exact': '2'}}}
+    assert shadowed([match_rule(canary, service='canary'), match_rule(other, service='b')]) == []
+    # 正则只认一模一样的
+    regex = {'authority': {'exact': 'a.example.com'}, 'uri': {'regex': '/api/.*'}}
+    assert shadowed([match_rule(regex), match_rule(v1, service='v1')]) == []
+    assert shadowed([match_rule(regex), match_rule(regex, service='b')]) == [(2, 'a.example.com', [1])]
+    # ignoreUriCase:前面不分大小写能接住后面的;只有后面不分大小写时,大小写不同的请求前面接不住
+    nocase = {**api, 'uri': {'prefix': '/API'}, 'ignoreUriCase': True}
+    assert shadowed([match_rule(nocase), match_rule(v1, service='v1')]) == [(2, 'a.example.com', [1])]
+    assert shadowed([match_rule(api), match_rule({**v1, 'ignoreUriCase': True}, service='v1')]) == []
+    # 域名前缀更短
+    assert shadowed([match_rule({'authority': {'prefix': 'a.'}}), match_rule(v1, service='v1')]) == [
+        (2, 'a.example.com', [1])]
+    # 前面不按域名区分的规则(只按路径的,中间没有 match 的)对 hosts 里的域名都生效
+    assert shadowed([match_rule({'uri': {'prefix': '/api'}}), match_rule(v1, service='v1')]) == [
+        (2, 'a.example.com', [1])]
+    no_match = {'route': [{'destination': {'host': 'all.ns.svc.cluster.local'}}]}
+    assert shadowed([no_match, match_rule(v1, service='v1'), DEFAULT]) == [(2, 'a.example.com', [1])]
+    # 同时写了 authority 和 headers.host 的条目拿不准,不拿来挡后面的
+    both = {'authority': {'exact': 'a.example.com'}, 'headers': {'host': {'exact': 'a.example.com'}}}
+    assert shadowed([match_rule(both), match_rule(v1, service='v1')]) == []
 
 
-def test_duplicate_hosts_in_the_same_cluster():
-    """同一个集群里多个 VS 的 hosts 不能重复(不分大小写);gateway 不同的也报,并标出来;不同集群的不算。"""
+def test_shadowed_rules_skip_placeholders_and_same_rule():
+    """组标准共用部分里的域名是占位,不算;同一条规则里的条目之间不算。"""
+    two = {'hosts': ['a.example.com'], 'http': [domain_rule('a.example.com'), domain_rule('a.example.com', service='b')]}
+    assert shadowed(two['http']) == [(2, 'a.example.com', [1])]
+    assert S.shadowed_rules(S.standard_spec(make_standard(two, {})))[1] == []
+    one = domain_rule('a.example.com', 'a.example.com', uri='/x')
+    one['match'].append({'authority': {'exact': 'a.example.com'}})
+    assert shadowed([one, DEFAULT]) == []
+
+
+def test_duplicate_hosts_only_with_the_same_gateway():
+    """同一个集群里绑定同一个 gateway 的多个 VS 的 hosts 不能重复(不分大小写);gateway 不同的不算
+    (网格内部 mesh 也是一个 gateway),不同集群的也不算。"""
     live = {
         ('k', 'istio-system', 'a'): {'hosts': ['x.example.com', 'y.example.com'], 'gateways': ['istio-system/internal']},
         ('k', 'istio-system', 'b'): {'hosts': ['X.example.com'], 'gateways': ['internal']},  # 省略了命名空间,同一个
         ('k', 'istio-system', 'c'): {'hosts': ['y.example.com'], 'gateways': ['istio-system/internal-1080']},
         ('k', 'mesh-ns', 'd'): {'hosts': ['y.example.com']},  # 没写 gateways:网格内部
-        ('p', 'istio-system', 'e'): {'hosts': ['x.example.com'], 'gateways': ['istio-system/internal']},
+        ('k', 'mesh-ns', 'e'): {'hosts': ['y.example.com'], 'gateways': ['mesh']},
+        ('p', 'istio-system', 'f'): {'hosts': ['x.example.com'], 'gateways': ['istio-system/internal']},
     }
     a = ('istio-system', 'a')
     index = S.hosts_index(live)
     assert S.duplicate_hosts(index, 'k', a, ['x.example.com', 'y.example.com']) == {
-        'x.example.com': {('istio-system', 'b'): True},
-        'y.example.com': {('istio-system', 'c'): False, ('mesh-ns', 'd'): False}}
-    assert S.domain_issues(live[('k', *a)], index, 'k', a) == [
-        'host x.example.com 也在 istio-system/b 里',
-        'host y.example.com 也在 istio-system/c(gateway 不同)、mesh-ns/d(gateway 不同) 里']
-    assert S.duplicate_hosts(index, 'p', ('istio-system', 'e'), ['x.example.com']) == {}
-    # 以要下发的为准:b 部署后 hosts 改成 z,a 的 x 就不重复了
-    planned = {('k', 'istio-system', 'b'): {'hosts': ['z.example.com'], 'gateways': ['istio-system/internal']}}
+        'x.example.com': [('istio-system', 'b')]}
+    assert S.domain_issues(live[('k', *a)], index, 'k', a) == ['host x.example.com 也在 istio-system/b 里']
+    assert S.duplicate_hosts(index, 'k', ('mesh-ns', 'd'), ['y.example.com']) == {'y.example.com': [('mesh-ns', 'e')]}
+    assert S.duplicate_hosts(index, 'p', ('istio-system', 'f'), ['x.example.com']) == {}
+    # 以要下发的为准:b 部署后 hosts 改成 z,a 的 x 就不重复了;c 改绑 internal,y 就重复了
+    planned = {('k', 'istio-system', 'b'): {'hosts': ['z.example.com'], 'gateways': ['istio-system/internal']},
+               ('k', 'istio-system', 'c'): {'hosts': ['y.example.com'], 'gateways': ['istio-system/internal']}}
     index = S.hosts_index(live, planned)
-    assert list(S.duplicate_hosts(index, 'k', a, ['x.example.com', 'y.example.com'])) == ['y.example.com']
+    assert S.duplicate_hosts(index, 'k', a, ['x.example.com', 'y.example.com']) == {
+        'y.example.com': [('istio-system', 'c')]}
 
 
 def test_apply_domain_issues_mark_what_this_apply_brings():
-    """下发预览:这批都下发之后的重复域名,集群里原来没有的标为新出现(同一批里一起加的也算)。"""
+    """下发预览 / 下发前:这批都下发之后的域名冲突,集群里原来没有的标为这次下发带来的(同一批里一起加的、
+    换绑到同一个 gateway 的也算),这样的不能下发;原来就有的只提示。被挡住的规则按「域名 + 匹配条件」认。"""
     live = {
-        ('k', 'ns', 'a'): {'hosts': ['x.example.com'], 'gateways': ['ns/gw'],
+        ('k', 'ns', 'a'): {'hosts': ['x.example.com', 'w.example.com'], 'gateways': ['ns/gw'],
                            'http': [domain_rule('d.example.com'), domain_rule('d.example.com', service='other')]},
         ('k', 'ns', 'b'): {'hosts': ['x.example.com'], 'gateways': ['ns/gw']},
         ('k', 'ns', 'c'): {'hosts': ['y.example.com'], 'gateways': ['ns/gw']},
+        ('k', 'ns', 'g'): {'hosts': ['w.example.com'], 'gateways': ['ns/other-gw']},
     }
-    a = {'hosts': ['x.example.com', 'y.example.com', 'z.example.com'], 'gateways': ['ns/gw'],
-         'http': [*live[('k', 'ns', 'a')]['http'], domain_rule('e.example.com', uri='/e'), domain_rule('e.example.com')]}
+    a = {'hosts': ['x.example.com', 'y.example.com', 'z.example.com', 'w.example.com'], 'gateways': ['ns/gw'],
+         'http': [domain_rule('d.example.com'), {**domain_rule('d.example.com', service='other'), 'timeout': '9s'},
+                  domain_rule('e.example.com'), domain_rule('e.example.com', uri='/e', service='e')]}
     b = {'hosts': ['x.example.com', 'z.example.com'], 'gateways': ['ns/gw']}
     before = S.hosts_index(live)
     after = S.hosts_index(live, {('k', 'ns', 'a'): a, ('k', 'ns', 'b'): b})
@@ -662,9 +712,13 @@ def test_apply_domain_issues_mark_what_this_apply_brings():
         ('host x.example.com 也在 ns/b 里', False),
         ('host y.example.com 也在 ns/c 里', True),
         ('host z.example.com 也在 ns/b 里', True),
-        ('域名 d.example.com 在第 1 条(→ gw.ns)、第 2 条(→ other.ns)规则里重复;第 2 条对这个域名不会生效', False),
-        ('域名 e.example.com 在第 3 条(→ gw.ns)、第 4 条(→ gw.ns)规则里重复', True)]
-    # 集群里还没有这个 VS:都是新出现的
+        ('域名 d.example.com:第 2 条(→ other.ns)被第 1 条(→ gw.ns)挡住,不会生效', False),  # 原来就有,只改了超时
+        ('域名 e.example.com:第 4 条(→ e.ns)被第 3 条(→ gw.ns)挡住,不会生效', True)]
+    g = {'hosts': ['w.example.com'], 'gateways': ['ns/gw']}
+    after = S.hosts_index(live, {('k', 'ns', 'g'): g})
+    assert S.apply_domain_issues(g, live[('k', 'ns', 'g')], after, before, 'k', ('ns', 'g')) == [
+        {'text': 'host w.example.com 也在 ns/a 里', 'new': True}]
+    # 集群里还没有这个 VS:都是这次带来的
     fresh = {'hosts': ['x.example.com'], 'gateways': ['ns/gw']}
     after = S.hosts_index(live, {('k', 'ns', 'n'): fresh})
     assert S.apply_domain_issues(fresh, None, after, before, 'k', ('ns', 'n')) == [
@@ -688,9 +742,8 @@ def test_matrix_domain_issues_use_planned_hosts_and_other_vs():
     rows = {r['name']: r for r in S.build_matrix(clusters, [standard], shown, hosts)}
     assert set(rows) == {'demo', 'u'}
     assert rows['demo']['domain_issues'] == ['k:host dup.example.com 也在 other-ns/theirs 里']
-    assert rows['u']['domain_issues'] == [
-        'k、p:域名 u.example.com 在第 1 条(→ gw.ns)、第 2 条(→ b.ns)规则里重复;第 2 条对这个域名不会生效']
-    # 没给 hosts:只查规则之间的
+    assert rows['u']['domain_issues'] == ['k、p:域名 u.example.com:第 2 条(→ b.ns)被第 1 条(→ gw.ns)挡住,不会生效']
+    # 没给 hosts:只查规则
     assert S.build_matrix(clusters, [standard], shown)[0]['domain_issues'] == []
     assert S.by_cluster([('k', 'a'), ('p', 'b'), ('p', 'a'), ('p', 'a')]) == ['k、p:a', 'p:b']
 
