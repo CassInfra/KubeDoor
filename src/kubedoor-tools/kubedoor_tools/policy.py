@@ -36,7 +36,7 @@ def _is_dangerous_command(argv: list[str]) -> bool:
         r"\brm\s+.*/($|bin|boot|dev|etc|lib|proc|root|sbin|sys|usr)\b",  # 删根
         r"\b(kill|pkill|killall)\b",  # 杀进程
         r">",  # 重定向(覆盖或追加)
-        r"\|\s*(rm|kill|pkill|dd|mkfs|fdisk|parted|reboot|shutdown|halt|poweroff)",  # 管道后接危险命令
+        r"\|.*\b(rm|kill|pkill|dd|mkfs|fdisk|parted|reboot|shutdown|halt|poweroff)\b",  # 管道后出现危险命令
         r"\bfind\b.*(-delete|-exec\s+rm)",  # find -delete 或 find -exec rm
     ]
     return any(re.search(pattern, text) for pattern in dangerous)
@@ -86,6 +86,8 @@ def classify_operation(operation: str, arguments: dict) -> dict:
     elif operation == "pod_exec":
         argv = arguments.get("argv", [])
         dangerous = _is_dangerous_command(argv) if isinstance(argv, list) else False
+        # 非高危命令是只读的(只读用户也能执行),高危命令需要写权限
+        read_only = not dangerous
         reason = "高危命令必须审批(rm/kill/重定向等)" if dangerous else "Pod 内查看命令直接执行"
-        return {"read_only": False, "reason": reason, "dangerous": dangerous}
+        return {"read_only": read_only, "reason": reason, "dangerous": dangerous}
     return {"read_only": bool(read_only), "reason": reason}

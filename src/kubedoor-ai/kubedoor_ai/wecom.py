@@ -25,7 +25,8 @@ MAX_STREAM_BYTES = 18000
 MENU_COMMANDS = {"集群", "当前集群", "查看集群", "集群列表", "选择集群", "切换集群", "帮助", "help", "?", "？"}
 SWITCH_COMMAND = re.compile(r"^/?(切换到集群|切换集群|切换到|切换)\s*[:：]?\s*(\S.*)$")
 # 企微只有一个聊天窗口:开新对话、回到上一个对话都靠聊天命令
-NEW_SESSION_COMMANDS = {"新对话", "新会话", "开始新对话", "清空上下文", "重新开始", "/new", "/reset"}
+NEW_SESSION_COMMANDS = {"新对话", "新会话", "开始新对话", "清空上下文", "重新开始", "/new", "/reset",
+                        "new", "新建会话", "创建新对话", "新建对话"}
 RESUME_COMMANDS = {"继续上次", "继续上次对话", "回到上次", "/resume"}
 # 有等待的审批时直接回复这些词就是批准 / 拒绝(审批卡片发不出来时也能审批);没有时照常当提问
 APPROVAL_WORDS = {"批准": "approve", "同意": "approve", "approve": "approve",
@@ -1119,15 +1120,16 @@ class WeComIntegration:
         return f"已记下你的名字「{name}」，管理员在花折里能看到，方便为你绑定账号（只用来辨认，不影响权限）。"
 
     async def admin_config(self):
-        row = await self.service.store.one("SELECT enabled,encrypted_config,session_idle_minutes,updated_by,updated_at FROM kubedoor_ai_wecom_config WHERE singleton=true")
+        row = await self.service.store.one("SELECT enabled,encrypted_config,session_idle_minutes,read_only_can_exec,updated_by,updated_at FROM kubedoor_ai_wecom_config WHERE singleton=true")
         if not row:
-            return {**self.status, "has_bot_secret": False, "has_api_key": False, "session_idle_minutes": DEFAULT_IDLE_MINUTES}
+            return {**self.status, "has_bot_secret": False, "has_api_key": False, "session_idle_minutes": DEFAULT_IDLE_MINUTES, "read_only_can_exec": False}
         config = self.service.gateway.cipher.decrypt("wecom", bytes(row["encrypted_config"]))
         return {**self.status, "enabled": row["enabled"], "bot_id": config.get("bot_id", ""),
                 "base_url": config.get("base_url", ""), "model": config.get("model", ""),
                 "max_input_tokens": config.get("max_input_tokens"), "max_output_tokens": config.get("max_output_tokens"),
                 "compression_ratio": config.get("compression_ratio"), "reasoning_effort": config.get("reasoning_effort"),
                 "session_idle_minutes": row.get("session_idle_minutes", DEFAULT_IDLE_MINUTES),
+                "read_only_can_exec": row.get("read_only_can_exec", False),
                 "has_bot_secret": bool(config.get("bot_secret")), "has_api_key": bool(config.get("api_key")),
                 "updated_by": row["updated_by"], "updated_at": row["updated_at"]}
 
@@ -1149,6 +1151,9 @@ class WeComIntegration:
         idle = raw.get("session_idle_minutes")
         if idle is not None and (type(idle) is not int or not 0 <= idle <= 10080):
             raise AIError("对话空闲超时必须为 0–10080 之间的整数（分钟），0 表示关闭")
+        read_only_can_exec = raw.get("read_only_can_exec")
+        if read_only_can_exec is not None and type(read_only_can_exec) is not bool:
+            raise AIError("只读用户执行权限必须为布尔值")
         enabled = config["enabled"]
         if enabled:
             if not config["bot_id"] or not config["bot_secret"]:
@@ -1156,11 +1161,12 @@ class WeComIntegration:
             Provider.parse({key: config[key] for key in PROVIDER_KEYS})
         encrypted = self.service.gateway.cipher.encrypt("wecom", config)
         row = await self.service.store.one(
-            "INSERT INTO kubedoor_ai_wecom_config(singleton,enabled,encrypted_config,updated_by,session_idle_minutes) "
-            "VALUES(true,$1,$2,$3,COALESCE($4::int,$5::int)) "
+            "INSERT INTO kubedoor_ai_wecom_config(singleton,enabled,encrypted_config,updated_by,session_idle_minutes,read_only_can_exec) "
+            "VALUES(true,$1,$2,$3,COALESCE($4::int,$5::int),COALESCE($6::boolean,false)) "
             "ON CONFLICT(singleton) DO UPDATE SET enabled=EXCLUDED.enabled,encrypted_config=EXCLUDED.encrypted_config,updated_by=EXCLUDED.updated_by,"
-            "session_idle_minutes=COALESCE($4::int,kubedoor_ai_wecom_config.session_idle_minutes),updated_at=now() "
-            "RETURNING enabled,encrypted_config", enabled, encrypted, identity.username, idle, DEFAULT_IDLE_MINUTES,
+            "session_idle_minutes=COALESCE($4::int,kubedoor_ai_wecom_config.session_idle_minutes),"
+            "read_only_can_exec=COALESCE($6::boolean,kubedoor_ai_wecom_config.read_only_can_exec),updated_at=now() "
+            "RETURNING enabled,encrypted_config", enabled, encrypted, identity.username, idle, DEFAULT_IDLE_MINUTES, read_only_can_exec,
         )
         saved = self.service.gateway.cipher.decrypt("wecom", bytes(row["encrypted_config"]))
         saved["enabled"] = row["enabled"]

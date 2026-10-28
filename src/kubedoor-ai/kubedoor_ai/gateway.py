@@ -395,7 +395,12 @@ class Gateway:
             if operation == "update_deployment_image" and (not isinstance(args.get("image_tag"), str) or not args["image_tag"]):
                 raise AIError("image_tag 不能为空")
         guard_scope(scope, operation, args, read_only)
-        if not read_only:
+        # 企微里只读用户执行 Pod 查看命令:根据配置决定是否允许(配置关闭时要求写权限)
+        wecom_readonly_exec = False
+        if read_only and operation == "pod_exec" and ctx.run.get("origin") == "wecom":
+            cfg = await self.store.one("SELECT read_only_can_exec FROM kubedoor_ai_wecom_config WHERE singleton=true")
+            wecom_readonly_exec = cfg and cfg.get("read_only_can_exec", False)
+        if not read_only or (operation == "pod_exec" and ctx.run.get("origin") == "wecom" and not wecom_readonly_exec):
             ctx.identity.require_write(scope["env"])
             # 用户自己的 MCP 结果未知和集群无关，不拦集群上的修改
             unknown = await self.store.one("SELECT id FROM kubedoor_ai_actions WHERE run_id=$1::uuid AND state='unknown' AND read_only=false AND source<>'mcp' LIMIT 1", ctx.run["id"])

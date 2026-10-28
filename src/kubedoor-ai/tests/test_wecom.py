@@ -886,16 +886,18 @@ async def test_admin_config_never_returns_stored_bot_secret_or_model_key():
 
 
 class ConfigStore:
-    """kubedoor_ai_wecom_config 单行:加密配置 + 空闲超时列"""
+    """kubedoor_ai_wecom_config 单行:加密配置 + 空闲超时列 + 只读用户执行权限"""
     def __init__(self):
         self.row = None
 
     async def one(self, sql, *args):
         if sql.startswith("INSERT INTO kubedoor_ai_wecom_config"):
-            enabled, encrypted, username, idle, default = args
+            enabled, encrypted, username, idle, default, read_only_exec = args
             previous = self.row["session_idle_minutes"] if self.row else default
+            previous_exec = self.row.get("read_only_can_exec", False) if self.row else False
             self.row = {"enabled": enabled, "encrypted_config": encrypted, "updated_by": username, "updated_at": "now",
-                        "session_idle_minutes": previous if idle is None else idle}
+                        "session_idle_minutes": previous if idle is None else idle,
+                        "read_only_can_exec": previous_exec if read_only_exec is None else read_only_exec}
             return self.row
         assert "FROM kubedoor_ai_wecom_config" in sql
         return self.row
@@ -906,23 +908,25 @@ async def test_wecom_model_window_and_idle_timeout_are_saved_and_returned():
     cipher = SimpleNamespace(encrypt=lambda env, value: json.dumps(value).encode(), decrypt=lambda env, data: json.loads(data))
     integration = WeComIntegration(SimpleNamespace(store=ConfigStore(), gateway=SimpleNamespace(cipher=cipher)))
     admin = Identity("admin", "admin")
-    assert (await integration.admin_config())["session_idle_minutes"] == 120
+    cfg = await integration.admin_config()
+    assert cfg["session_idle_minutes"] == 120
+    assert cfg["read_only_can_exec"] is False
     base = {"enabled": False, "bot_id": "bot-1", "base_url": "https://api.deepseek.com", "model": "deepseek-flash"}
     saved = await integration.save_config(admin, {**base, "max_input_tokens": 262_144, "max_output_tokens": 65_536,
                                                   "compression_ratio": 0.6, "session_idle_minutes": 90,
-                                                  "reasoning_effort": "low"})
-    window = ("max_input_tokens", "max_output_tokens", "compression_ratio", "session_idle_minutes", "reasoning_effort")
-    assert [saved[key] for key in window] == [262_144, 65_536, 0.6, 90, "low"]
+                                                  "reasoning_effort": "low", "read_only_can_exec": True})
+    window = ("max_input_tokens", "max_output_tokens", "compression_ratio", "session_idle_minutes", "reasoning_effort", "read_only_can_exec")
+    assert [saved[key] for key in window] == [262_144, 65_536, 0.6, 90, "low", True]
     # 不传的字段沿用已保存的值,企微提问用的 Provider 带上这些字段
     saved = await integration.save_config(admin, base)
-    assert [saved[key] for key in window] == [262_144, 65_536, 0.6, 90, "low"]
+    assert [saved[key] for key in window] == [262_144, 65_536, 0.6, 90, "low", True]
     assert integration._provider_settings()["max_input_tokens"] == 262_144
     assert integration._provider_settings()["reasoning_effort"] == "low"
     # null = 按模型推断 / 用模型默认;0 = 关闭空闲自动开新对话
     saved = await integration.save_config(admin, {**base, "max_input_tokens": None, "max_output_tokens": None,
                                                   "compression_ratio": None, "session_idle_minutes": 0,
                                                   "reasoning_effort": None})
-    assert [saved[key] for key in window] == [None, None, None, 0, None]
+    assert [saved[key] for key in window] == [None, None, None, 0, None, True]
     for invalid in ({"max_input_tokens": 1024}, {"max_output_tokens": 512}, {"compression_ratio": 0.9},
                     {"session_idle_minutes": 10081}, {"session_idle_minutes": -1},
                     {"session_idle_minutes": True}, {"session_idle_minutes": "30"}, {"reasoning_effort": "medium"}):

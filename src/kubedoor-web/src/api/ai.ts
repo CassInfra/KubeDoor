@@ -178,6 +178,8 @@ export interface WeComConfig {
   reasoning_effort?: AIReasoningEffort | null;
   /** 对话空闲多少分钟后，新消息自动进入新对话；0 表示关闭 */
   session_idle_minutes?: number;
+  /** 只读权限用户是否可以在企微里执行 Pod 内查看命令 */
+  read_only_can_exec?: boolean;
   has_bot_secret: boolean;
   has_api_key: boolean;
   updated_by?: string;
@@ -517,6 +519,7 @@ export const aiApi = {
     compression_ratio: number | null;
     reasoning_effort: AIReasoningEffort | null;
     session_idle_minutes: number;
+    read_only_can_exec: boolean;
   }) => request<WeComConfig>("/wecom", "PUT", data),
   testWecomProvider: (provider: AIProvider) =>
     request<Record<string, any>>("/wecom/test", "POST", { provider }),

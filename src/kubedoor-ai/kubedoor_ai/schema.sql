@@ -87,6 +87,8 @@ ALTER TABLE kubedoor_ai_wecom_config ADD COLUMN IF NOT EXISTS unbound_default_en
 -- 企微对话空闲多少分钟后，新消息自动进入新对话;0 = 关闭
 ALTER TABLE kubedoor_ai_wecom_config ADD COLUMN IF NOT EXISTS session_idle_minutes integer NOT NULL DEFAULT 120
     CHECK (session_idle_minutes BETWEEN 0 AND 10080);
+-- 只读权限用户是否可以在企微里执行 Pod 内查看命令(ls/cat 等,不含高危命令)
+ALTER TABLE kubedoor_ai_wecom_config ADD COLUMN IF NOT EXISTS read_only_can_exec boolean NOT NULL DEFAULT false;
 CREATE TABLE IF NOT EXISTS kubedoor_ai_wecom_users (
     wecom_userid text PRIMARY KEY,
     username text,

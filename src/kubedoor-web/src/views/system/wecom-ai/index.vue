@@ -55,7 +55,8 @@ const form = reactive({
   base_url: "https://api.openai.com/v1",
   api_key: "",
   model: "",
-  session_idle_minutes: DEFAULT_IDLE_MINUTES as number | undefined
+  session_idle_minutes: DEFAULT_IDLE_MINUTES as number | undefined,
+  read_only_can_exec: false
 });
 const limits = ref<AIModelLimits>(modelLimitsFor(""));
 const effort = ref<AIReasoningEffort | null>(null);
@@ -195,6 +196,7 @@ async function loadConfig() {
   effort.value = value.reasoning_effort ?? null;
   form.session_idle_minutes =
     value.session_idle_minutes ?? DEFAULT_IDLE_MINUTES;
+  form.read_only_can_exec = value.read_only_can_exec ?? false;
   form.bot_secret = "";
   form.api_key = "";
 }
@@ -308,7 +310,8 @@ async function saveConfig() {
       model: form.model.trim(),
       ...limits.value,
       reasoning_effort: effort.value,
-      session_idle_minutes: form.session_idle_minutes ?? DEFAULT_IDLE_MINUTES
+      session_idle_minutes: form.session_idle_minutes ?? DEFAULT_IDLE_MINUTES,
+      read_only_can_exec: form.read_only_can_exec
     });
     form.bot_secret = "";
     form.api_key = "";
@@ -546,6 +549,14 @@ onBeforeUnmount(() => {
           <div class="form-tip">
             距上次对话超过这个时间，成员的新消息自动进入新对话（0 表示关闭，默认
             120）。成员也可以发送「新对话」「继续上次」手动切换。
+          </div>
+        </el-form-item>
+        <el-form-item label="只读用户执行权限">
+          <el-switch v-model="form.read_only_can_exec" />
+          <div class="form-tip">
+            允许只读权限用户在企微里执行 Pod 内查看命令（ls、cat、env、ps
+            等），高危命令（rm -rf、kill、重定向等）仍然需要写权限。关闭时只读用户执行任何
+            Pod 内命令都会被拒绝。
           </div>
         </el-form-item>
         <div class="form-actions">
