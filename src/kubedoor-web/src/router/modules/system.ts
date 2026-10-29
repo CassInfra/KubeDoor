@@ -19,6 +19,15 @@ export default {
       }
     },
     {
+      path: "/system/permissions",
+      name: "SystemPermissions",
+      component: () => import("@/views/system/permissions/index.vue"),
+      meta: {
+        title: "权限与审批",
+        roles: ["admin"]
+      }
+    },
+    {
       path: "/system/ldap",
       name: "SystemLdap",
       component: () => import("@/views/system/ldap/index.vue"),

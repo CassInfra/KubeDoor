@@ -392,20 +392,38 @@ test("restoring a waiting run approves only its current pending action, never ol
   assert.equal(h.ai.messages[0].tools[0].pending, true);
 });
 
-test("permission loss and a change of signed-in account disable automatic approval", async t => {
+test("a read-only cluster keeps automatic approval and leaves the permission check to the server", async t => {
   const h = await harness(t);
   await h.start(true);
-  h.state.permission = "ro";
+  h.state.permission = "read";
   await h.ai.refreshBootstrap();
   await flush();
-  assert.equal(h.ai.writable, false);
-  assert.equal(h.ai.autoApprove, false);
+  // 只读用户能执行什么由「权限与审批」决定,浏览器不再关掉自动批准
+  assert.equal(h.ai.readOnly, true);
+  assert.equal(h.ai.autoApprove, true);
+  h.state.decision = async () => {
+    throw new AIRequestError(
+      "当前账号在集群 cluster-a 是「只读」权限,不能执行「删除 Pod」",
+      403,
+      "permission_denied"
+    );
+  };
   h.emit("approval", action("read-only"));
   h.emit("status", { status: "waiting_approval" });
   await flush();
-  assert.equal(h.requests.length, 0);
-  h.state.permission = "rw";
-  await h.ai.refreshBootstrap();
+  assert.deepEqual(
+    h.requests.map(item => [item.actionId, item.decision]),
+    [["read-only", "approve"]]
+  );
+  // 服务端复核不通过:关掉自动批准,操作留在卡片上
+  assert.equal(h.ai.autoApprove, false);
+  assert.match(h.ai.error, /只读/);
+  assert.equal(h.ai.pendingTools[0].action_id, "read-only");
+});
+
+test("a change of signed-in account disables automatic approval", async t => {
+  const h = await harness(t);
+  await h.start(true);
   await h.ai.cancel();
   h.ai.autoApprove = true;
   await flush();
@@ -676,13 +694,13 @@ test("a completed stream cannot be resurrected by a late successful decision res
   assert.equal(h.requests.length, 1);
 });
 
-test("a read-only account can approve its own MCP calls but not cluster changes", async t => {
+test("a read-only account's approvals go to the server, which checks cluster permissions", async t => {
   const h = await harness(t);
   h.state.permission = "read";
   await h.ai.refreshBootstrap();
   await h.start();
-  assert.equal(h.ai.writable, false);
-  // 用户自己接入的 MCP 和集群权限无关
+  assert.equal(h.ai.readOnly, true);
+  // 用户自己接入的 MCP 和集群权限无关;集群操作能不能批准由服务端按「权限与审批」复核
   h.emit("approval", {
     ...action("ticket"),
     name: "jira/create_issue",
@@ -691,10 +709,15 @@ test("a read-only account can approve its own MCP calls but not cluster changes"
   h.emit("approval", action("cluster"));
   h.emit("status", { status: "waiting_approval" });
   await flush();
-  await assert.rejects(h.ai.decide("cluster", "approve"), /只读/);
   await h.ai.decide("ticket", "approve");
+  h.emit("status", { status: "waiting_approval" });
+  await flush();
+  await h.ai.decide("cluster", "approve");
   assert.deepEqual(
     h.requests.map(item => [item.actionId, item.decision]),
-    [["ticket", "approve"]]
+    [
+      ["ticket", "approve"],
+      ["cluster", "approve"]
+    ]
   );
 });

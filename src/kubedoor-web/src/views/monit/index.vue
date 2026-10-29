@@ -103,7 +103,12 @@
         </el-form-item>
         <!-- 新建按钮放置在表单最右侧 -->
         <el-form-item class="right-auto">
-          <el-button type="success" @click="openCreateDialog">新建</el-button>
+          <el-button
+            type="success"
+            :disabled="!can('resource.apply', searchForm.env)"
+            @click="openCreateDialog"
+            >新建</el-button
+          >
         </el-form-item>
       </el-form>
     </div>
@@ -158,6 +163,7 @@
           <el-button
             type="primary"
             :loading="updateLoading"
+            :disabled="!canUpdateImage(selectedDeployment?.env)"
             @click="handleUpdate"
           >
             确定
@@ -186,6 +192,7 @@
             <el-button
               type="primary"
               :loading="saveLoading"
+              :disabled="!can('resource.apply', currentEditDeployment?.env)"
               @click="handleSave"
             >
               提交
@@ -245,6 +252,7 @@
             <el-button
               type="primary"
               :loading="createSaveLoading"
+              :disabled="!can('resource.apply', searchForm.env)"
               @click="handleCreateSave"
             >
               提交
@@ -589,7 +597,7 @@
                               >问 AI</el-dropdown-item
                             >
                             <el-dropdown-item
-                              :disabled="!canWrite(scope.row.env)"
+                              :disabled="!can('pod.shell', scope.row.env)"
                               @click="
                                 openPodShell({
                                   env: scope.row.env,
@@ -612,6 +620,7 @@
                               >日志</el-dropdown-item
                             >
                             <el-dropdown-item
+                              :disabled="!can('pod.isolate', scope.row.env)"
                               @click="
                                 handleModifyPod(
                                   scope.row.env,
@@ -623,12 +632,14 @@
                               >隔离</el-dropdown-item
                             >
                             <el-dropdown-item
+                              :disabled="!can('pod.delete', scope.row.env)"
                               @click="
                                 handleDeletePod(scope.row, podScope.row.name)
                               "
                               >删除</el-dropdown-item
                             >
                             <el-dropdown-item
+                              :disabled="!can('pod.jvm', scope.row.env)"
                               @click="
                                 handleAutoDump(
                                   scope.row.env,
@@ -639,6 +650,7 @@
                               >Dump</el-dropdown-item
                             >
                             <el-dropdown-item
+                              :disabled="!can('pod.jvm', scope.row.env)"
                               @click="
                                 handleAutoJstack(
                                   scope.row.env,
@@ -649,6 +661,7 @@
                               >Jstack</el-dropdown-item
                             >
                             <el-dropdown-item
+                              :disabled="!can('pod.jvm', scope.row.env)"
                               @click="
                                 handleAutoJfr(
                                   scope.row.env,
@@ -659,6 +672,7 @@
                               >JFR</el-dropdown-item
                             >
                             <el-dropdown-item
+                              :disabled="!can('pod.jvm', scope.row.env)"
                               @click="
                                 handleAutoJvmMem(
                                   scope.row.env,
@@ -805,19 +819,33 @@
                       "
                       >问 AI</el-dropdown-item
                     >
-                    <el-dropdown-item @click="handleCapacity(scope.row)"
+                    <el-dropdown-item
+                      :disabled="
+                        !can('workload.scale', scope.row.env) &&
+                        !can('workload.schedule', scope.row.env)
+                      "
+                      @click="handleCapacity(scope.row)"
                       >扩缩容</el-dropdown-item
                     >
-                    <el-dropdown-item @click="onReboot(scope.row)"
+                    <el-dropdown-item
+                      :disabled="
+                        !can('workload.restart', scope.row.env) &&
+                        !can('workload.schedule', scope.row.env)
+                      "
+                      @click="onReboot(scope.row)"
                       >重启</el-dropdown-item
                     >
                     <el-dropdown-item @click="handleEdit(scope.row)"
                       >编辑</el-dropdown-item
                     >
-                    <el-dropdown-item @click="handleDeleteDeployment(scope.row)"
+                    <el-dropdown-item
+                      :disabled="!can('resource.delete', scope.row.env)"
+                      @click="handleDeleteDeployment(scope.row)"
                       >删除</el-dropdown-item
                     >
-                    <el-dropdown-item @click="openUpdateDialog(scope.row)"
+                    <el-dropdown-item
+                      :disabled="!canUpdateImage(scope.row.env)"
+                      @click="openUpdateDialog(scope.row)"
                       >更新</el-dropdown-item
                     >
                     <el-dropdown-item @click="handleViewDeployLogs(scope.row)"
@@ -915,7 +943,7 @@ import {
   type PodsPush
 } from "./utils/useWorkloadStream";
 import { useSearchStoreHook } from "@/store/modules/search";
-import { useClusterPermission } from "@/utils/permission";
+import { usePermission } from "@/utils/usePermission";
 import { openPodShell } from "@/utils/podShell";
 import { deploymentQuestion, podQuestion } from "@/utils/ai";
 import { useAskAI } from "@/utils/useAskAI";
@@ -931,8 +959,9 @@ import {
 const { onChangeCapacity, onReboot, onUpdateImage } = useResource();
 const searchStore = useSearchStoreHook();
 const askAI = useAskAI();
-// 终端能在容器里执行任意命令,只读用户置灰(后端同样校验)
-const { canWrite } = useClusterPermission();
+// 没有权限的操作置灰(按「权限与审批」的配置,后端同样校验);
+// 扩缩容、重启可以立即执行或定时执行,两者有一个有权限就能打开,提交时后端按所选方式校验
+const { can, canUpdateImage } = usePermission();
 
 // 定义表单数据
 const searchForm = reactive({

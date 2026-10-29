@@ -393,6 +393,7 @@ p, li, figcaption, .doc-text span, .stat-label { text-wrap: pretty; }
 .perm-head { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 6px 12px; font-size: 13px; font-weight: 700; }
 .perm-legend { display: inline-flex; align-items: center; gap: 5px; font-size: 11.5px; font-weight: 500; color: var(--text-3); }
 .pm-dot { width: 8px; height: 8px; margin-left: 6px; border-radius: 3px; }
+.pm-dot.pm-admin { background: var(--amber); }
 .pm-dot.pm-rw { background: var(--green); }
 .pm-dot.pm-read { background: #38bdf8; }
 .pm-dot.pm-none { background: var(--red); }
@@ -404,6 +405,7 @@ p, li, figcaption, .doc-text span, .stat-label { text-wrap: pretty; }
 .perm-table td:first-child { font-family: var(--mono); color: var(--text); }
 .perm-table td em { display: block; margin-top: 1px; font-family: var(--font); font-style: normal; font-size: 11px; color: var(--text-3); }
 .pm { display: inline-block; min-width: 42px; padding: 1px 8px; border-radius: 999px; border: 1px solid; font-size: 11.5px; font-weight: 600; line-height: 18px; }
+.pm.pm-admin { color: #fde68a; background: rgba(251, 191, 36, 0.14); border-color: rgba(251, 191, 36, 0.55); }
 .pm.pm-rw { color: #a7f3d0; background: rgba(52, 211, 153, 0.14); border-color: rgba(52, 211, 153, 0.55); }
 .pm.pm-read { color: #bae6fd; background: rgba(56, 189, 248, 0.12); border-color: rgba(56, 189, 248, 0.5); }
 .pm.pm-none { color: #fecaca; background: rgba(248, 113, 113, 0.1); border-color: rgba(248, 113, 113, 0.5); }

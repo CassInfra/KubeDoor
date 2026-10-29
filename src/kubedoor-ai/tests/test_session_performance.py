@@ -161,6 +161,8 @@ async def test_history_and_recovered_pending_approval_keep_existing_response_fie
             "action_id": "action-1", "name": "restart_deployment", "tool": "restart_deployment", "source": "kubedoor",
             "arguments": ACTION["arguments"], "preview": {"method": "POST", "path": "/api/restart"},
             "diff": None, "command": None, "expires_at": NOW.isoformat(),
+            # 升级前建的动作没有 ops / approval_fixed:按空列表和 false 返回
+            "approval_fixed": False, "ops": [],
         }],
     }
     assert "internal-fingerprint" not in str(result)

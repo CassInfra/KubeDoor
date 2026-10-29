@@ -377,10 +377,10 @@ const timestamp = (value?: string) => {
         <span class="ai-badge">AI</span>
         <span class="ai-title">KubeDoor 助手</span>
         <el-tag
-          v-if="ai.scope.env && !ai.writable"
+          v-if="ai.scope.env && ai.readOnly"
           size="small"
           effect="plain"
-          :title="`当前账号对集群 ${ai.scope.env} 只有只读权限,只能查询,不能批准修改`"
+          :title="`当前账号对集群 ${ai.scope.env} 是只读权限：可以查询，修改类操作按「权限与审批」的配置判断，没有权限的会被拒绝`"
           >只读</el-tag
         >
         <span v-if="ai.bootstrap?.username" class="ai-owner">{{
@@ -525,12 +525,7 @@ const timestamp = (value?: string) => {
               <el-checkbox
                 v-model="ai.autoApprove"
                 class="auto-approve"
-                :disabled="!ai.writable"
-                :title="
-                  ai.writable
-                    ? '勾选后自动批准工具操作；取消勾选后恢复逐次确认。'
-                    : '当前账号对所选集群只读，不能批准执行。'
-                "
+                title="勾选后需要审批的操作自动批准"
                 >自动批准执行</el-checkbox
               >
               <el-select
@@ -581,8 +576,8 @@ const timestamp = (value?: string) => {
               <p>
                 {{
                   ai.autoApprove
-                    ? "助手会选择合适的数据来源，工具操作将自动批准执行。"
-                    : "助手会选择合适的数据来源，修改前展示操作供你批准。"
+                    ? "助手会选择合适的数据来源，需要审批的操作将自动批准执行。"
+                    : "助手会选择合适的数据来源，需要审批的操作先展示给你批准。"
                 }}
               </p>
               <el-button
@@ -651,7 +646,6 @@ const timestamp = (value?: string) => {
                 :tools="message.tools"
                 :expanded="isToolGroupExpanded(message)"
                 :active="ai.busy && message === ai.messages.at(-1)"
-                :writable="ai.writable && ai.sessionReady"
                 :ready="ai.sessionReady"
                 :deciding="ai.deciding"
                 :secret="ai.provider.api_key"

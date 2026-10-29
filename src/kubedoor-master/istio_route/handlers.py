@@ -1,6 +1,11 @@
 """Istio VirtualService 管理接口(/api/istio/*),设计见 README.md。
 
-权限(auth/policy.py 登记):查看按集群读权限,看不到的集群不返回;所有修改只允许管理员。
+权限:查看按集群读权限,看不到的集群不返回。修改要操作权限表里的「Istio 修改」(network.istio):
+auth/policy.py 只粗检至少一个集群有,这里再按口径细检(_require_istio)——
+  组级修改(组的增删改、组标准 VS、规则、各集群 hosts、忽略 / 取消忽略、纳管、按现状重置 / 同步):组内每个集群都要有,
+  改组成员时新旧成员都算;没有集群的组按全局角色;
+  集群级修改(下发及预览、回退、删除集群里的 VS、刷新现状):只看目标集群。
+列表 / 矩阵 / 详情返回 can_manage(组级)和每个集群的 can_istio,前端据此置灰。
 集群里的 VS 只经这里读写:master 调 agent 的 /api/agent/istio/vs(列出)、/api/agent/istio/vs/detail(查看单个)、
 /api/agent/istio/vs/apply(下发)和 /api/agent/istio/vs/delete(删除),下发内容由 master 按组标准生成,
 不接受前端传来的 spec;浏览器不能经通用转发直接调这些 agent 接口。
@@ -18,7 +23,7 @@ from aiohttp import web
 from loguru import logger
 from pydantic import BaseModel, Field, ValidationError, field_validator, model_validator
 
-from auth import audit, client_ip, principal_of
+from auth import PERM_LABELS, audit, client_ip, permissions, principal_of
 from . import spec as S
 from . import store
 from .store import IstioError
@@ -29,6 +34,7 @@ AGENT_APPLY_PATH = '/api/agent/istio/vs/apply'
 AGENT_DELETE_PATH = '/api/agent/istio/vs/delete'
 AGENT_TIMEOUT = 60
 BEIJING = timezone(timedelta(hours=8))
+ISTIO_OP = 'network.istio'
 
 _call_agent = None  # register_routes 时注入 kubedoor-master 的 call_agent_api
 
@@ -117,6 +123,54 @@ def _visible(request, group: dict) -> List[dict]:
     if not clusters:
         raise IstioError('没有该 Istio 组内任何集群的访问权限', 403)
     return clusters
+
+
+def _can_manage(principal, group: dict) -> bool:
+    """组级修改:组内每个集群都要有「Istio 修改」;没有集群的组按全局角色。"""
+    names = [c['k8s_name'] for c in group['clusters']]
+    if not names:
+        return principal.can_global(ISTIO_OP)
+    return all(principal.can(ISTIO_OP, name) for name in names)
+
+
+def _with_flags(principal, clusters: List[dict]) -> List[dict]:
+    """每个集群加上 can_istio(当前用户在该集群能不能做 Istio 修改)。"""
+    return [{**c, 'can_istio': principal.can(ISTIO_OP, c['k8s_name'])} for c in clusters]
+
+
+GROUP_HINT = '组级修改要求组内每个集群都有该权限'
+
+
+async def _require_istio(request, envs: Iterable[str], hint: str = '') -> None:
+    """修改前检查「Istio 修改」:envs 里每个集群都要有,否则 403;envs 为空(没有集群的组)按全局角色。"""
+    await permissions.load_policy()  # 鉴权中间件已刷新过,没过期不查库
+    principal = principal_of(request)
+    names = list(dict.fromkeys(envs))
+    suffix = f'({hint})' if hint else ''
+    if not names:
+        if not principal.can_global(ISTIO_OP):
+            raise IstioError('当前账号的全局角色不能执行「Istio 修改」(没有集群的组按全局角色判断)', 403)
+        return
+    denied = [name for name in names if not principal.can(ISTIO_OP, name)]
+    if not denied:
+        return
+    parts = [f'在集群 {name} 是「{PERM_LABELS.get(principal.permission(name), principal.permission(name))}」权限'
+             for name in denied if principal.can_read(name)]
+    hidden = sum(1 for name in denied if not principal.can_read(name))
+    if hidden:  # 看不到的集群不报名字
+        parts.append(f'没有其中 {hidden} 个集群的访问权限')
+    raise IstioError(f"当前账号{'、'.join(parts)},不能执行「Istio 修改」{suffix}", 403)
+
+
+async def _require_group(request, group: dict, extra: Iterable[str] = ()) -> None:
+    """组级修改:组内每个集群(和 extra,改组成员时的新成员)都要有「Istio 修改」。"""
+    await _require_istio(request, [*(c['k8s_name'] for c in group['clusters']), *extra], GROUP_HINT)
+
+
+async def _vs_group(vs_id: int) -> Tuple[dict, dict]:
+    """组标准和它所属的组。"""
+    standard = await _standard(vs_id)
+    return standard, await _group(standard['group_id'])
 
 
 def _members(group: dict, names, what='集群') -> None:
@@ -714,28 +768,36 @@ async def _collect_cluster(k8s_name: str, username: str) -> dict:
 @handler
 async def list_groups(request):
     principal = principal_of(request)
+    await permissions.load_policy()
     groups = await store.list_groups()
     result = []
     for group in groups:
-        visible = [c for c in group['clusters'] if principal.can_read(c['k8s_name'])]
-        if principal.is_admin or visible:
-            result.append({**group, 'clusters': group['clusters'] if principal.is_admin else visible})
+        visible = group['clusters'] if principal.is_admin else [
+            c for c in group['clusters'] if principal.can_read(c['k8s_name'])]
+        manage = _can_manage(principal, group)
+        # 没有集群的组:系统管理员,以及按全局角色能管理它的人能看到
+        if visible or principal.is_admin or (manage and not group['clusters']):
+            result.append({**group, 'clusters': _with_flags(principal, visible), 'can_manage': manage})
     data = {'groups': result}
-    if principal.is_admin:  # 组管理弹框:所有已接入的集群,以及各自已在哪些组里(一个集群可以属于多个组)
+    if principal.can_any(ISTIO_OP):
+        # 组管理弹框(建组 / 改组选集群):能看到的已接入集群、各自已在哪些组里(一个集群可以属于多个组),
+        # can_istio 为 false 的不能选
         import utils
 
         owners: Dict[str, List[str]] = {}
         for g in groups:
             for c in g['clusters']:
                 owners.setdefault(c['k8s_name'], []).append(g['name'])
-        names = sorted(set(await utils.get_k8s_names()) | set(owners))
-        data['clusters'] = [{'k8s_name': name, 'groups': owners.get(name, [])} for name in names]
+        names = sorted(name for name in set(await utils.get_k8s_names()) | set(owners) if principal.can_read(name))
+        data['clusters'] = [{'k8s_name': name, 'groups': owners.get(name, []),
+                             'can_istio': principal.can(ISTIO_OP, name)} for name in names]
     return _ok(data)
 
 
 @handler
 async def create_group(request):
     req = GroupRequest(**await _body(request))
+    await _require_istio(request, [c.k8s_name for c in req.clusters], GROUP_HINT)
     group_id = await store.save_group(None, req.name, req.description, [c.model_dump() for c in req.clusters],
                                       *req.rules())
     return _ok({'id': group_id}, msg='Istio 组已创建')
@@ -745,6 +807,7 @@ async def create_group(request):
 async def update_group(request):
     group_id = _int(request.query.get('id'), 'id')
     req = GroupRequest(**await _body(request))
+    await _require_group(request, await _group(group_id), [c.k8s_name for c in req.clusters])  # 新旧成员都算
     await store.save_group(group_id, req.name, req.description, [c.model_dump() for c in req.clusters],
                            *req.rules())
     return _ok(msg='Istio 组已保存')
@@ -753,6 +816,7 @@ async def update_group(request):
 @handler
 async def delete_group(request):
     group_id = _int(request.query.get('id'), 'id')
+    await _require_group(request, await _group(group_id))
     if not await store.delete_group(group_id):
         raise IstioError('Istio 组不存在', 404)
     return _ok(msg='Istio 组已删除,集群里的 VirtualService 不受影响')
@@ -798,6 +862,7 @@ async def group_matrix(request):
     """组矩阵:只列本组范围内的 VS(按组规则和手动忽略 / 单独纳入),同时给出被忽略的列表和统计。"""
     group = await _group(_int(request.query.get('group_id'), 'group_id'))
     visible = _visible(request, group)
+    await permissions.load_policy()  # 返回 can_manage / can_istio 用(鉴权中间件已刷新过,没过期不查库)
     names = [c['k8s_name'] for c in visible]
     view = await _view_of(group)
     standards = {(s['namespace'], s['name']): s for s in await store.list_standards(group['id'])}
@@ -843,7 +908,9 @@ async def group_matrix(request):
     manual = sum(1 for key in keys - shown if classes[key]['reason'] == S.SCOPE_MANUAL)
     stats = {'total': len(keys), 'visible': len(shown), 'ignored': len(keys) - len(shown), 'manual': manual,
              'by_rule': len(keys) - len(shown) - manual, 'conflict': len(conflicts)}
-    return _ok({'group': {**group, 'clusters': visible}, 'rows': rows, 'ignored': ignored, 'stats': stats})
+    principal = principal_of(request)
+    group_data = {**group, 'clusters': _with_flags(principal, visible), 'can_manage': _can_manage(principal, group)}
+    return _ok({'group': group_data, 'rows': rows, 'ignored': ignored, 'stats': stats})
 
 
 @handler
@@ -856,6 +923,7 @@ async def collect(request):
     if not isinstance(targets, list) or not all(isinstance(t, str) and t for t in targets):
         raise IstioError('k8s_names 必须是集群名数组')
     _members(group, targets)
+    await _require_istio(request, targets)
     username = _username(request)
     results = await asyncio.gather(*(_collect_cluster(name, username) for name in targets))
     overrides = (await store.load_overrides([group['id']]))[group['id']]
@@ -918,6 +986,7 @@ async def import_standards(request):
     (集群里没有这个 VS 的,hosts 先用基准集群的;对应规则对不上的域名留空,显示「缺少域名」,补上才能下发)。"""
     req = ImportRequest(**await _body(request))
     group = await _group(req.group_id)
+    await _require_group(request, group)
     names = [c['k8s_name'] for c in group['clusters']]
     snapshots = await store.load_snapshots(names)
     view = await _view_of(group)
@@ -972,6 +1041,7 @@ async def reset_standard(request):
     standard = await _standard(_int(body.get('vs_id'), 'vs_id'))
     k8s_name = body.get('k8s_name') or ''
     group = await _group(standard['group_id'])
+    await _require_group(request, group)
     _members(group, [k8s_name])
     namespace, name = standard['namespace'], standard['name']
     snapshots = await store.load_snapshots([k8s_name, *standard['bindings']], namespace, name)
@@ -1001,6 +1071,7 @@ async def _sync_draft(request) -> Tuple[SyncRequest, dict, Optional[str], dict]:
     打开对比之后组标准或现状变了(对齐结果可能不一样)就拒绝,让用户刷新后重选。"""
     req = SyncRequest(**await _body(request))
     group = await _group(req.group_id)
+    await _require_group(request, group)  # 预览也是这个修改的一步,同样按组级检查
     render_k8s = req.standard.partition('@')[2]
     _members(group, [req.k8s_name, *([render_k8s] if render_k8s else [])])
     standard = await store.find_standard(group['id'], req.namespace, req.name)
@@ -1106,6 +1177,7 @@ async def get_vs(request):
     standard = await _standard(_int(request.query.get('vs_id'), 'vs_id'))
     group = await _group(standard['group_id'])
     visible = _visible(request, group)
+    await permissions.load_policy()  # 返回 can_manage / can_istio 用
     names = {c['k8s_name'] for c in visible}
     vs_key = (standard['namespace'], standard['name'])
     snapshots = await store.load_snapshots(names)  # 这些集群里全部的 VS:这个 VS 的现状,以及查重复的 host
@@ -1117,6 +1189,9 @@ async def get_vs(request):
                'domains': {k: v for k, v in route['domains'].items() if k in names}}
               for route in S.sort_routes(standard['routes'])]
     clusters = _cluster_rows(visible, standard, snapshots, backups, hosts)
+    principal = principal_of(request)
+    for row in clusters:
+        row['can_istio'] = principal.can(ISTIO_OP, row['k8s_name'])
     data = {key: standard[key] for key in (
         'id', 'group_id', 'namespace', 'name', 'gateways', 'df_forward_type', 'df_forward_detail',
         'df_forward_timeout', 'df_extra', 'extra_spec', 'updated_by', 'created_at', 'updated_at')}
@@ -1128,6 +1203,7 @@ async def get_vs(request):
         domain_issues=S.by_cluster((row['k8s_name'], text) for row in clusters for text in row.pop('domain_issues')),
         scope=view.classify(vs_key),
         conflicts=view.conflicts([vs_key]).get(vs_key, []),
+        can_manage=_can_manage(principal, group),
     )
     return _ok(data)
 
@@ -1160,6 +1236,7 @@ async def check_vs(request):
 async def create_vs(request):
     req = VSCreateRequest(**await _body(request))
     group = await _group(req.group_id)
+    await _require_group(request, group)
     names = [c.k8s_name for c in req.clusters]
     if len(names) != len(set(names)):
         raise IstioError('集群不能重复')
@@ -1191,22 +1268,27 @@ async def create_vs(request):
 async def update_vs(request):
     vs_id = _int(request.query.get('vs_id'), 'vs_id')
     req = VSFields(**await _body(request))
+    await _require_group(request, (await _vs_group(vs_id))[1])
     await store.update_standard_fields(vs_id, req.model_dump(), _username(request))
     return _ok(msg='已保存,下发后生效')
 
 
 @handler
 async def delete_vs(request):
-    await store.delete_standard(_int(request.query.get('vs_id'), 'vs_id'))
+    vs_id = _int(request.query.get('vs_id'), 'vs_id')
+    await _require_group(request, (await _vs_group(vs_id))[1])
+    await store.delete_standard(vs_id)
     return _ok(msg='组标准已删除;集群里的 VirtualService 不受影响,如需删除请到集群里处理')
 
 
 @handler
 async def save_vs_cluster(request):
-    """VS 部署到某个集群 / 修改该集群的 hosts,可以同时设置该集群在各规则里的域名。"""
+    """VS 部署到某个集群 / 修改该集群的 hosts,可以同时设置该集群在各规则里的域名。
+    hosts 是组标准里按集群存的内容,按组级修改检查权限。"""
     req = BindingRequest(**await _body(request))
-    standard = await _standard(req.vs_id)
-    _members(await _group(standard['group_id']), [req.k8s_name])
+    standard, group = await _vs_group(req.vs_id)
+    await _require_group(request, group)
+    _members(group, [req.k8s_name])
     domains = None
     if req.domains is not None:
         routes = S.sort_routes(standard['routes'])
@@ -1233,6 +1315,7 @@ async def save_vs_cluster(request):
 async def remove_vs_cluster(request):
     vs_id = _int(request.query.get('vs_id'), 'vs_id')
     k8s_name = request.query.get('k8s_name') or ''
+    await _require_group(request, (await _vs_group(vs_id))[1])
     await store.delete_binding(vs_id, k8s_name)
     return _ok(msg=f'已不再部署到 {k8s_name};集群里的 VirtualService 不受影响,如需删除请到集群里处理')
 
@@ -1244,7 +1327,7 @@ async def remove_vs_cluster(request):
 async def ignore_vs(request):
     """在本组忽略这些 VS:不再显示、不能纳管和下发;组标准(如果有)保留,取消忽略后恢复。集群里的 VS 不受影响。"""
     req = ScopeChangeRequest(**await _body(request))
-    await _group(req.group_id)
+    await _require_group(request, await _group(req.group_id))
     actions = {(item.namespace, item.name): S.OVERRIDE_IGNORE for item in req.items}
     await store.set_overrides(req.group_id, actions, _username(request))
     return _ok(msg=f'已忽略 {len(actions)} 个 VirtualService,可以在「查看忽略」里取消')
@@ -1255,6 +1338,7 @@ async def unignore_vs(request):
     """取消忽略:组规则本来就纳入的,去掉手动忽略;被组规则排除的,单独纳入本组(不受规则影响)。"""
     req = ScopeChangeRequest(**await _body(request))
     group = await _group(req.group_id)
+    await _require_group(request, group)
     scope = _safe_scope(group['include_patterns'], group['ignore_patterns'], {})
     actions = {}
     for item in req.items:
@@ -1357,6 +1441,7 @@ async def rollback_live(request):
     req = RollbackRequest(**await _body(request))
     group = await _group(req.group_id)
     _members(group, [req.k8s_name])
+    await _require_istio(request, [req.k8s_name])
     key, target = (req.k8s_name, req.namespace, req.name), f'{req.namespace}/{req.name}'
     backup = await store.get_backup(req.backup_id)
     if backup is None or (backup['k8s_name'], backup['namespace'], backup['name']) != key:
@@ -1407,6 +1492,7 @@ async def delete_live(request):
     req = LiveDeleteRequest(**await _body(request))
     group = await _group(req.group_id)
     _members(group, [req.k8s_name])
+    await _require_istio(request, [req.k8s_name])
     username, ip = _username(request), client_ip(request)
     target = f'{req.namespace}/{req.name}'
     items = await fetch_live(req.k8s_name)
@@ -1447,32 +1533,45 @@ async def delete_live(request):
 async def create_route(request):
     vs_id = _int(request.query.get('vs_id'), 'vs_id')
     req = RouteRequest(**await _body(request))
-    route = _route_payload(req, await _standard(vs_id))
+    standard, group = await _vs_group(vs_id)
+    await _require_group(request, group)
+    route = _route_payload(req, standard)
     route_id = await store.create_route(vs_id, route, _username(request))
     return _ok({'id': route_id}, msg='规则已添加,下发后生效')
+
+
+async def _route_group(route_id: int) -> Tuple[int, dict, dict]:
+    """规则所属的 (vs_id, 组标准, 组)。"""
+    vs_id = await store.route_vs_id(route_id)
+    if vs_id is None:
+        raise IstioError('规则不存在', 404)
+    return (vs_id, *await _vs_group(vs_id))
 
 
 @handler
 async def update_route(request):
     route_id = _int(request.query.get('route_id'), 'route_id')
     req = RouteRequest(**await _body(request))
-    vs_id = await store.route_vs_id(route_id)
-    if vs_id is None:
-        raise IstioError('规则不存在', 404)
-    route = _route_payload(req, await _standard(vs_id))
+    _, standard, group = await _route_group(route_id)
+    await _require_group(request, group)
+    route = _route_payload(req, standard)
     await store.update_route(route_id, route, _username(request))
     return _ok(msg='规则已保存,下发后生效')
 
 
 @handler
 async def delete_route(request):
-    await store.delete_route(_int(request.query.get('route_id'), 'route_id'), _username(request))
+    route_id = _int(request.query.get('route_id'), 'route_id')
+    await _require_group(request, (await _route_group(route_id))[2])
+    await store.delete_route(route_id, _username(request))
     return _ok(msg='规则已删除,下发后生效')
 
 
 @handler
 async def reorder_routes(request):
-    await store.reorder_routes(_int(request.query.get('vs_id'), 'vs_id'), _username(request))
+    vs_id = _int(request.query.get('vs_id'), 'vs_id')
+    await _require_group(request, (await _vs_group(vs_id))[1])
+    await store.reorder_routes(vs_id, _username(request))
     return _ok(msg='优先级已重新整理')
 
 
@@ -1539,6 +1638,7 @@ async def apply_preview(request):
     (和集群里绑定同一个 gateway 的别的 VS 的 hosts 重复、规则被前面的规则挡住),标出是不是这次下发带来的
     (这样的不能下发,下发时会被拒绝)。"""
     req = ApplyRequest(**await _body(request))
+    await _require_istio(request, [item.k8s_name for item in req.items])
     prepared = await _prepare(req.items)
     username = _username(request)
 
@@ -1614,6 +1714,7 @@ async def apply(request):
     下发前从集群取最新现状:先检查这批下发会不会带来域名冲突(会就整批拒绝,什么都不下发),
     再用它备份(取不到就不下发这个集群);下发完重新采集该集群现状,状态以集群里的实际内容为准。"""
     req = ApplyRequest(**await _body(request))
+    await _require_istio(request, [item.k8s_name for item in req.items])
     prepared = await _prepare(req.items)
     blocked = [f"{i['namespace']}/{i['name']} → {i['error']}" for i in prepared if i['error']]
     if blocked:

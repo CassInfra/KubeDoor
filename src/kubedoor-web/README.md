@@ -41,6 +41,7 @@ npm run build
 
 ## 账号与权限相关页面
 
-- 「系统管理」（`src/views/system/`，仅管理员可见）：`users` 用户与权限（本地 / LDAP 账号、全局权限、按集群授权、重置口令、强制下线），`ldap` LDAP 设置（含连接测试），`audit` 操作审计。
-- 当前用户对某个集群的权限用 `useUserStoreHook().permissionOf(env)` 取；集群下拉框旁的 `ClusterPermTag` 在只读集群上显示「只读」。写操作一律由 master 按集群校验，前端提示只是体验优化。
-- 修改口令是 `src/components/ChangePasswordDialog.vue`；账号被标记为必须改密（如内置管理员用出厂口令登录）时会强制弹出，改完才能继续使用。
+- 「系统管理」（`src/views/system/`，仅系统管理员可见）：`users` 用户与权限（本地 / LDAP 账号、全局角色、按集群授权、重置口令、强制下线），`permissions` 权限与审批（每级集群权限能做哪些操作、AI 做这类操作前要不要批准、Pod 内的查看 / 高危命令清单），`ldap` LDAP 设置（含连接测试），`wecom-ai` 企微 AI 机器人，`ai-usage` AI 用量看板📊，`audit` 操作审计。
+- 页面里取当前用户的权限用 `usePermission()`（`src/utils/usePermission.ts`）：`permissionOf(env)` 是对某个集群的有效权限（管理员 / 读写 / 只读 / 无），`can(op, env)` 判断能不能在该集群做「权限与审批」里的某种操作（按 `/api/auth/me` 返回的 `operations` 查表），`canGlobal(op)` 用于和具体集群无关的配置（按全局角色查表），改镜像、告警屏蔽另有 `canUpdateImage`、`canSilence`。判断逻辑是 `src/utils/permission.ts` 里的纯函数（单测 `tests/permission.test.cjs`，这个文件只能有 type import）。
+- 集群下拉框旁的 `ClusterPermTag` 在「只读」集群上显示「只读」，在「管理员」集群上显示「管理员」；没有权限的按钮置灰。修改一律由 master 按集群和操作类型校验，前端判断只是体验优化。
+- 修改口令是 `src/components/ChangePasswordDialog.vue`；账号被标记为必须改密（如内置超级管理员用出厂口令登录）时会强制弹出，改完才能继续使用。

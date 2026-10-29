@@ -12,8 +12,7 @@ import {
 const props = withDefaults(
   defineProps<{
     tool: AITool;
-    writable: boolean;
-    /** 会话状态已核验：用户自己接入的 MCP 只看这个，不看集群写权限 */
+    /** 会话状态已核验才能批准;批准的权限由服务端按动作涉及的操作复核 */
     ready?: boolean;
     deciding?: string;
     secret?: string;
@@ -30,13 +29,10 @@ const text = (value: unknown) => {
 };
 // 用户自己接入的外部 MCP：和集群无关，会话本人就能批准
 const mcp = computed(() => props.tool.source === "mcp");
-const approvable = computed(() => (mcp.value ? props.ready : props.writable));
+const approvable = computed(() => props.ready);
 const approvalHint = computed(() => {
-  if (mcp.value)
-    return props.ready
-      ? "批准后调用这个 MCP 工具"
-      : "正在核验会话状态，稍后可以批准";
-  return props.writable ? "批准后执行以上动作" : "当前账号只读，不能批准修改";
+  if (!props.ready) return "正在核验会话状态，稍后可以批准";
+  return mcp.value ? "批准后调用这个 MCP 工具" : "批准后执行以上动作";
 });
 const mcpInfo = computed(() => {
   const preview = props.tool.preview;

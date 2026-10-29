@@ -16,6 +16,7 @@ class FakeStore(AuthStore):
         self.grants = {}
         self.sessions = {}
         self.settings = {}
+        self.setting_meta = {}
         self._ids = itertools.count(1)
 
     # ---- 用户 ----
@@ -122,6 +123,16 @@ class FakeStore(AuthStore):
 
     async def put_setting(self, key, value, updated_by):
         self.settings[key] = value
+
+    async def get_setting_row(self, key):
+        if key not in self.settings:
+            return None
+        return {'value': self.settings[key], **self.setting_meta.get(key, {'updated_by': '', 'updated_at': None})}
+
+    async def put_setting_row(self, key, value, updated_by):
+        self.settings[key] = value
+        self.setting_meta[key] = {'updated_by': updated_by, 'updated_at': datetime.now(timezone.utc)}
+        return await self.get_setting_row(key)
 
 
 def install(monkeypatch, fake):

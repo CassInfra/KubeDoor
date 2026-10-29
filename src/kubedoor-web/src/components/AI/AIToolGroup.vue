@@ -7,8 +7,7 @@ import AIToolCard from "./AIToolCard.vue";
 const props = withDefaults(
   defineProps<{
     tools: AITool[];
-    writable: boolean;
-    /** 会话状态已核验：用户自己接入的 MCP 只看这个，不看集群写权限 */
+    /** 会话状态已核验才能批准;批准的权限由服务端复核 */
     ready?: boolean;
     deciding?: string;
     secret?: string;
@@ -95,7 +94,6 @@ const failed = (tool: AITool) =>
         v-for="tool in tools"
         :key="tool.id"
         :tool="tool"
-        :writable="writable"
         :ready="ready"
         :deciding="deciding"
         :secret="secret"

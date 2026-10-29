@@ -51,8 +51,13 @@
     <el-alert type="info" :closable="false" class="mb-2">
       <template #title>
         集群权限
-        =「单独授权」优先,没有单独授权的集群按「全局权限」兜底;管理员拥有全部权限,不能再单独授权。
-        LDAP 用户首次登录会自动开通(默认全局权限在「LDAP
+        =「单独授权」优先,没有单独授权的集群按「全局权限」兜底;系统管理员在所有集群都是「管理员」,不能再单独授权。
+        集群权限分管理员 / 读写 / 只读 / 无,各自能做哪些操作在「<router-link
+          to="/system/permissions"
+          class="link"
+          >权限与审批</router-link
+        >」里配置(CoreDNS、Istio 默认只有管理员能改)。 LDAP
+        用户首次登录会自动开通(默认全局权限在「LDAP
         设置」里配置),也可以先在这里添加再授权。
       </template>
     </el-alert>
@@ -110,7 +115,7 @@
               v-if="row.role === 'admin' || row.role === 'agent'"
               class="sub-text"
             >
-              {{ row.role === "admin" ? "全部集群读写" : "不访问集群数据" }}
+              {{ row.role === "admin" ? "全部集群管理员" : "不访问集群数据" }}
             </span>
             <template v-else-if="grantList(row).length">
               <el-tag
@@ -609,7 +614,7 @@ async function saveEdit() {
     Object.keys(original.clusters ?? {}).length
   ) {
     const ok = await ElMessageBox.confirm(
-      "设为管理员后会清空该用户的集群单独授权(管理员拥有全部集群读写权限),继续吗?",
+      "设为系统管理员后会清空该用户的集群单独授权(系统管理员在所有集群都是管理员),继续吗?",
       "提示",
       { type: "warning" }
     ).catch(() => false);
@@ -877,5 +882,9 @@ onMounted(load);
   gap: 8px;
   align-items: center;
   margin-top: 12px;
+}
+
+.link {
+  color: var(--el-color-primary);
 }
 </style>

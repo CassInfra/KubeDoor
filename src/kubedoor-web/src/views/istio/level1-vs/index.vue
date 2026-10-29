@@ -11,7 +11,7 @@ import {
   Warning
 } from "@element-plus/icons-vue";
 import { message } from "@/utils/message";
-import { useClusterPermission } from "@/utils/permission";
+import { useIstioPermission } from "./useIstioPermission";
 import {
   type ApplyItem,
   type IstioGroup,
@@ -55,7 +55,7 @@ defineOptions({ name: "Level1VirtualService" });
 
 const route = useRoute();
 const router = useRouter();
-const { isAdmin } = useClusterPermission();
+const { clusterCan, groupCan } = useIstioPermission();
 
 const GROUP_KEY = "kubedoor-istio-group";
 const groupList = ref<IstioGroupList>({ groups: [] });
@@ -84,6 +84,17 @@ const ACTION_STATUSES = ["pending", "diff", "missing", "incomplete", "unbound"];
 
 const group = computed(() => matrix.value?.group ?? null);
 const clusters = computed(() => group.value?.clusters ?? []);
+/** 组级修改:组、组标准、忽略 / 纳入、纳管、同步(组内每个集群都要有「Istio 修改」权限) */
+const canManage = computed(() => groupCan(group.value));
+/** 集群级修改:下发、删除集群里的 VirtualService、刷新现状(只看目标集群) */
+const canIstio = (k8s: string) =>
+  clusterCan(clusters.value.find(c => c.k8s_name === k8s));
+/** 本组里有「Istio 修改」权限的集群 */
+const istioClusters = computed(() => clusters.value.filter(c => clusterCan(c)));
+/** 组管理入口:至少一个集群有「Istio 修改」权限;建组 / 改组时后端再按新旧成员检查 */
+const canGroupAdmin = computed(() =>
+  (groupList.value.clusters ?? []).some(c => clusterCan(c))
+);
 const visibleClusters = computed(() =>
   clusters.value.filter(c => shownClusters.value.includes(c.k8s_name))
 );
@@ -236,7 +247,12 @@ async function collect() {
   if (groupId.value === null) return;
   collecting.value = true;
   try {
-    const res = await collectIstio(groupId.value);
+    // 只刷新有权限的集群(全部有权限时不传,按全组)
+    const targets = istioClusters.value.map(c => c.k8s_name);
+    const res = await collectIstio(
+      groupId.value,
+      targets.length < clusters.value.length ? targets : undefined
+    );
     const failed = res.data.filter(r => !r.success);
     const ok = res.data.filter(r => r.success);
     const done = ok
@@ -323,13 +339,21 @@ function openApply(items: ApplyItem[]) {
 /** 所选行里纳入了、且不一致的集群 */
 function applySelected() {
   const items: ApplyItem[] = [];
+  const skipped = new Set<string>();
   for (const row of selectedRows.value) {
     if (row.vs_id === null) continue;
     for (const c of visibleClusters.value) {
       const cell = row.cells[c.k8s_name];
-      if (cell?.bound && cell.status !== "synced")
-        items.push({ vs_id: row.vs_id, k8s_name: c.k8s_name });
+      if (!cell?.bound || cell.status === "synced") continue;
+      if (clusterCan(c)) items.push({ vs_id: row.vs_id, k8s_name: c.k8s_name });
+      else skipped.add(c.k8s_name);
     }
+  }
+  if (skipped.size) {
+    message(`没有「Istio 修改」权限的集群不下发:${[...skipped].join("、")}`, {
+      type: "warning"
+    });
+    if (!items.length) return;
   }
   openApply(items);
 }
@@ -523,7 +547,10 @@ onMounted(async () => {
           :value="g.id"
         />
       </el-select>
-      <el-button v-if="isAdmin" :icon="Setting" @click="groupDialog = true"
+      <el-button
+        v-if="canGroupAdmin"
+        :icon="Setting"
+        @click="groupDialog = true"
         >组管理</el-button
       >
       <el-input
@@ -562,20 +589,27 @@ onMounted(async () => {
       <el-button v-if="group" :icon="Hide" @click="ignoredDialog = true"
         >查看忽略({{ summary.ignored }})</el-button
       >
-      <template v-if="isAdmin && group">
-        <el-button type="success" :loading="collecting" @click="collect"
+      <template v-if="group">
+        <el-button
+          v-if="istioClusters.length"
+          type="success"
+          :loading="collecting"
+          @click="collect"
           >刷新现状</el-button
         >
-        <el-button type="primary" :icon="Plus" @click="vsDialog = true"
-          >新建 VS</el-button
-        >
+        <template v-if="canManage">
+          <el-button type="primary" :icon="Plus" @click="vsDialog = true"
+            >新建 VS</el-button
+          >
+          <el-button
+            :disabled="!selectedRows.some(r => r.vs_id === null)"
+            @click="openImport(selectedRows.filter(r => r.vs_id === null))"
+          >
+            纳管所选
+          </el-button>
+        </template>
         <el-button
-          :disabled="!selectedRows.some(r => r.vs_id === null)"
-          @click="openImport(selectedRows.filter(r => r.vs_id === null))"
-        >
-          纳管所选
-        </el-button>
-        <el-button
+          v-if="istioClusters.length"
           type="warning"
           plain
           :disabled="!selectedRows.some(r => r.vs_id !== null)"
@@ -584,6 +618,7 @@ onMounted(async () => {
           下发所选
         </el-button>
         <el-button
+          v-if="canManage"
           :disabled="!selectedRows.length"
           @click="ignoreRows(selectedRows)"
         >
@@ -595,12 +630,12 @@ onMounted(async () => {
     <el-empty
       v-if="!groupList.groups.length"
       :description="
-        isAdmin
+        canGroupAdmin
           ? '还没有 Istio 组:点「组管理」把一套业务的集群建成一个组'
           : '没有可以查看的 Istio 组'
       "
     >
-      <el-button v-if="isAdmin" type="primary" @click="groupDialog = true"
+      <el-button v-if="canGroupAdmin" type="primary" @click="groupDialog = true"
         >创建 Istio 组</el-button
       >
     </el-empty>
@@ -668,7 +703,7 @@ onMounted(async () => {
         @selection-change="onSelectionChange"
       >
         <el-table-column
-          v-if="isAdmin"
+          v-if="canManage || istioClusters.length"
           type="selection"
           width="36"
           fixed
@@ -911,39 +946,43 @@ onMounted(async () => {
                     >查看现状</el-dropdown-item
                   >
                   <el-dropdown-item command="compare">对比</el-dropdown-item>
-                  <template v-if="isAdmin && row.vs_id !== null">
+                  <template v-if="row.vs_id !== null">
+                    <template v-if="canManage">
+                      <el-dropdown-item
+                        v-if="row.cells[c.k8s_name].bound"
+                        command="hosts"
+                      >
+                        编辑 hosts 和域名
+                      </el-dropdown-item>
+                      <el-dropdown-item v-else command="hosts"
+                        >部署到此集群</el-dropdown-item
+                      >
+                    </template>
                     <el-dropdown-item
-                      v-if="row.cells[c.k8s_name].bound"
-                      command="hosts"
-                    >
-                      编辑 hosts 和域名
-                    </el-dropdown-item>
-                    <el-dropdown-item v-else command="hosts"
-                      >部署到此集群</el-dropdown-item
-                    >
-                    <el-dropdown-item
-                      v-if="row.cells[c.k8s_name].bound"
+                      v-if="canIstio(c.k8s_name) && row.cells[c.k8s_name].bound"
                       command="apply"
                     >
                       下发到此集群
                     </el-dropdown-item>
-                    <el-dropdown-item
-                      v-if="row.cells[c.k8s_name].in_cluster"
-                      command="reset"
-                      divided
-                    >
-                      以此集群现状更新组标准
-                    </el-dropdown-item>
-                    <el-dropdown-item
-                      v-if="row.cells[c.k8s_name].bound"
-                      command="unbind"
-                    >
-                      不再部署到此集群
-                    </el-dropdown-item>
+                    <template v-if="canManage">
+                      <el-dropdown-item
+                        v-if="row.cells[c.k8s_name].in_cluster"
+                        command="reset"
+                        divided
+                      >
+                        以此集群现状更新组标准
+                      </el-dropdown-item>
+                      <el-dropdown-item
+                        v-if="row.cells[c.k8s_name].bound"
+                        command="unbind"
+                      >
+                        不再部署到此集群
+                      </el-dropdown-item>
+                    </template>
                   </template>
                   <el-dropdown-item
                     v-if="
-                      isAdmin &&
+                      canManage &&
                       row.vs_id === null &&
                       row.cells[c.k8s_name].in_cluster
                     "
@@ -952,7 +991,9 @@ onMounted(async () => {
                     以此集群为准纳管
                   </el-dropdown-item>
                   <el-dropdown-item
-                    v-if="isAdmin && row.cells[c.k8s_name].in_cluster"
+                    v-if="
+                      canIstio(c.k8s_name) && row.cells[c.k8s_name].in_cluster
+                    "
                     command="delete"
                     divided
                   >
@@ -976,14 +1017,14 @@ onMounted(async () => {
               >对比</el-button
             >
             <el-button
-              v-if="isAdmin && row.vs_id === null"
+              v-if="canManage && row.vs_id === null"
               link
               type="success"
               @click="openImport([row])"
               >纳管</el-button
             >
             <el-button
-              v-if="isAdmin"
+              v-if="canManage"
               link
               type="info"
               @click="ignoreRows([row])"
@@ -1019,7 +1060,7 @@ onMounted(async () => {
         "
         :include-patterns="group.include_patterns"
         :ignore-patterns="group.ignore_patterns"
-        :is-admin="isAdmin"
+        :can-manage="canManage"
         @changed="loadMatrix"
         @edit-rules="editRules"
       />
@@ -1036,7 +1077,7 @@ onMounted(async () => {
             .filter(c => compare.row?.cells[c.k8s_name]?.bound)
             .map(c => c.k8s_name)
         "
-        :is-admin="isAdmin"
+        :can-manage="canManage"
         :left="compare.left"
         :right="compare.right"
         @changed="loadMatrix"

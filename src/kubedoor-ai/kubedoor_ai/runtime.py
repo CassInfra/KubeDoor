@@ -42,10 +42,9 @@ resource_inventory 返回 CPU/内存 requests/limits 及四个已入库 JVM 参�
 stored/historical 数据不是实时状态，null JVM 字段表示未采集，不等于 0；有疑点或用户要求核验时用 direct 的 Kubernetes API/CLI 实时查询。
 根据本轮上下文块中的来源能力选择工具；agent 通用工具仅在 online=true 且 ai_tools=true 时可用。缺少 kubeconfig 时可用已升级在线 agent；agent 不在线或未升级且 kubeconfig 可用时用 direct。数据库、master 目录及指标查询仍可独立使用，目录内 live 操作需要在线 Agent。
 source=kubedoor 的 operation 使用目录名；source=direct/agent 的 operation 使用 api/kubectl/istioctl/diagnostic/pod_exec。
-api arguments={method,path,query?,body?,content_type?}，kubectl/istioctl arguments={argv:[...],files?:{basename:text},stdin?}，Pod exec arguments={namespace,pod,container?,argv:[...]}。diagnostic arguments={program:jq|yq|curl|dig|openssl|rg,argv:[...],files?,stdin?}；不使用 shell。
+api arguments={method,path,query?,body?,content_type?}，kubectl/istioctl arguments={argv:[...],files?:{basename:text},stdin?}，Pod exec arguments={namespace,pod,container?,argv:[...]}。diagnostic arguments={program,argv:[...],files?,stdin?}；program 可选 jq|yq|curl|dig|openssl|rg|nc|nmap|tcpdump|iperf3|traceroute|mtr|ps|top|pgrep|pmap|pwdx|lsof|free|vmstat|uptime|w|slabtop|iostat|mpstat|pidstat|xxd|hexdump|base64，只开放安全的参数子集（nc 只做 -z 端口探测，tcpdump 要 -c，ps 不能含字母 e、用 -A 和 --format=），被拒时按报错调整；进程类工具只看得到执行端（agent 或 kubedoor-ai）自己 Pod 里的进程，业务进程用 Pod exec；不使用 shell。
 对照观察时间、历史区间、来源及截断标记，查找根因后再建议修改。
-本轮范围里的集群是硬边界；范围只包含用户已选资源，未列出的 namespace/deployment/pod 表示没有默认目标，并不限制查询全部资源。资源选择仅为上下文和默认目标，可以按问题需要查询或批准操作同集群其他资源。只读查询自动运行，修改、未知 CLI 会暂停并要求用户批准。
-Pod 内执行命令(pod_exec):查看命令(ls/cat/grep/ps/curl 等)直接执行，只有高危命令(rm -rf、kill/pkill/killall、重定向、find -delete 等)才审批，和 Web 终端一致。
+本轮范围里的集群是硬边界；范围只包含用户已选资源，未列出的 namespace/deployment/pod 表示没有默认目标，并不限制查询全部资源。资源选择仅为上下文和默认目标，可以按问题需要查询或操作同集群其他资源。只读查询自动运行；修改是否需要批准由管理员配置，需要时工具会暂停等待用户决定。账号没有权限时工具返回 permission_denied，如实告诉用户，不要换工具或来源绕过。
 批准卡中的完整参数与差异是实际执行对象。拒绝后解释并继续查询，不以另一个工具绕过拒绝。
 服务异常、取消或写入结果未知时查询实际状态，不盲目重试。
 所有集群工具只能调用 kubedoor_tool。不得访问或修改共享 Istio 数据库模板；Istio 实际资源使用通用 K8S 工具。
@@ -396,7 +395,8 @@ class Runtime:
             direct for live SDK/CLI with saved kubeconfig; agent for in-cluster
             generic execution, also available without kubeconfig. Use api,
             kubectl, istioctl, diagnostic or pod_exec on direct/agent. Mutations
-            pause for a human decision after the exact operation is prepared.
+            are prepared exactly first; whether they pause for a human decision
+            is configured by the administrator.
             """
             try:
                 result = await self.gateway.invoke(ctx, operation, arguments, source,

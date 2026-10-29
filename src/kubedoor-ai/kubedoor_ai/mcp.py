@@ -54,43 +54,43 @@ def create_mcp(service, token):
     async def get_pods_logs(namespace: str, pod: str, k8s: str, lines: int = 100) -> dict:
         return await invoke("logs", k8s, namespace, pod=pod, lines=lines)
 
-    @server.tool(description="重启 Deployment；准备参数后返回浏览器批准链接")
+    @server.tool(description="重启 Deployment；需要批准时返回浏览器链接")
     async def restart_deployment(namespace: str, deployment: str, k8s: str) -> dict:
         return await invoke("restart_deployment", k8s, namespace, deployment)
 
-    @server.tool(description="扩缩容 Deployment；需要浏览器批准。mode=persistent（默认）受花折资源管控时同时写入管控副本数，temporary 只临时扩缩")
+    @server.tool(description="扩缩容 Deployment；需要批准时返回浏览器链接。mode=persistent（默认）受花折资源管控时同时写入管控副本数，temporary 只临时扩缩")
     async def scale_deployment(namespace: str, deployment: str, replicas: int, k8s: str, mode: str = "persistent") -> dict:
         return await invoke("scale_deployment", k8s, namespace, deployment, replicas=replicas, mode=mode)
 
-    @server.tool(description="更新 Deployment 镜像标签，沿用 KubeDoor 权限策略，需要批准")
+    @server.tool(description="更新 Deployment 镜像标签，沿用 KubeDoor 权限策略；需要批准时返回浏览器链接")
     async def update_deployment(namespace: str, deployment: str, image_tag: str, k8s: str) -> dict:
         return await invoke("update_deployment_image", k8s, namespace, deployment, image_tag=image_tag)
 
-    @server.tool(description="删除 Pod；需要浏览器批准")
+    @server.tool(description="删除 Pod；需要批准时返回浏览器链接")
     async def delete_pod(namespace: str, pod: str, k8s: str) -> dict:
         return await invoke("delete_pod", k8s, namespace, pod=pod)
 
-    @server.tool(description="隔离 Pod；需要浏览器批准")
+    @server.tool(description="隔离 Pod；需要批准时返回浏览器链接")
     async def modify_pod(namespace: str, pod: str, k8s: str) -> dict:
         return await invoke("isolate_pod", k8s, namespace, pod=pod)
 
-    @server.tool(description="进入 Pod 查询 JVM 内存，需要批准 exec")
+    @server.tool(description="进入 Pod 查询 JVM 内存；需要批准时返回浏览器链接")
     async def get_pod_jvm_mem(namespace: str, pod: str, k8s: str) -> dict:
         return await invoke("jvm_mem", k8s, namespace, pod=pod)
 
-    @server.tool(description="生成 JVM heap dump，需要批准")
+    @server.tool(description="生成 JVM heap dump；需要批准时返回浏览器链接")
     async def get_pod_jvm_dump(namespace: str, pod: str, k8s: str) -> dict:
         return await invoke("jvm_dump", k8s, namespace, pod=pod)
 
-    @server.tool(description="生成 JVM jstack，需要批准")
+    @server.tool(description="生成 JVM jstack；需要批准时返回浏览器链接")
     async def get_pod_jvm_jstack(namespace: str, pod: str, k8s: str) -> dict:
         return await invoke("jvm_jstack", k8s, namespace, pod=pod)
 
-    @server.tool(description="生成 JVM 飞行记录，需要批准")
+    @server.tool(description="生成 JVM 飞行记录；需要批准时返回浏览器链接")
     async def get_pod_jvm_jfr(namespace: str, pod: str, k8s: str) -> dict:
         return await invoke("jvm_jfr", k8s, namespace, pod=pod)
 
-    @server.tool(description="统一工具网关，按调用选择 kubedoor/direct/agent；所有修改冻结参数后批准")
+    @server.tool(description="统一工具网关，按调用选择 kubedoor/direct/agent；修改先冻结参数，需要批准时返回浏览器链接")
     async def kubedoor_tool(operation: str, arguments: dict, k8s: str, source: str = "auto", namespace: str | None = None) -> dict:
         return await service().mcp_call(identity(), operation, arguments, normalize_scope({"env": k8s, "namespace": namespace}), source)
 

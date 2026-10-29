@@ -5,7 +5,7 @@ import os
 
 from aiohttp import web
 
-from . import audit, passwords
+from . import audit, passwords, permissions
 from .authn import AuthFailure, check_credentials
 from .context import client_ip
 from .ratelimit import limiter
@@ -42,11 +42,15 @@ def _clear_cookie(response, request):
 
 
 async def me_payload(principal):
+    policy = await permissions.load_policy()  # 登录接口不经过鉴权中间件的刷新
     envs = set(await known_envs()) if known_envs else set()
     envs |= set(principal.clusters)
     data = principal.to_public()
     data['can_change_password'] = principal.source == 'local'
     data['cluster_permissions'] = {env: principal.permission(env) for env in sorted(envs)}
+    # 操作权限表:{操作: 允许的集群权限级别},前端 can(op, env) = 列表里有该集群的有效权限;
+    # 与集群无关的配置按 default_permission 查。只给权限,不含审批和命令清单
+    data['operations'] = permissions.operations_levels(policy)
     # Grafana 看板按集群隔离不了,只给能看到全部集群的人用(前端据此隐藏看板菜单)
     data['all_clusters'] = principal.env_scope()[0] == 'all'
     return data

@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import copy
 import difflib
+import getopt
 import json
 import os
 import re
@@ -13,7 +14,7 @@ import signal
 import subprocess
 import tempfile
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -90,6 +91,227 @@ def _workspace_files(arguments: dict) -> dict[str, str]:
     return dict(files)
 
 
+# Additional diagnostic programs only accept the options listed below, parsed
+# with the same getopt rules as the real tool. A whitelist is used instead of
+# denied_flags because combined short options (busybox "nc -ve sh"), inline
+# values ("iperf3 -F/path") and single-dash long options ("nmap -script") slip
+# past a blacklist. Operands must match the rule and may never start with "-",
+# so permutation differences cannot turn an operand into an option. Process
+# tools only see the executing Pod (kubedoor-agent or kubedoor-ai): neither
+# runs with hostPID, so business processes need pod_exec.
+# Intentionally not enabled (some are installed for interactive terminals):
+#   strace          starts arbitrary commands; -p only reaches the executing Pod,
+#                   needs SYS_PTRACE, can read that Pod's I/O and never exits by itself
+#   watch, time, stdbuf, timeout  run arbitrary commands
+#   awk, sed        run commands (system(), sed "e" and "w")
+#   tar, zip, gzip  exec hooks (--to-command, --checkpoint-action=exec, zip -TT); workspace
+#                   files are UTF-8 text, so archives cannot be supplied anyway
+#   pkill           kills processes; htop needs a terminal
+#   file            "-m" magic files print the contents of arbitrary host files
+#   crictl          not installed: needs the node's container runtime socket (node root)
+_HOST = r"[A-Za-z0-9:][A-Za-z0-9.:%_-]{0,252}"  # DNS name, IPv4/IPv6 address, port or port range
+_PIDS = r"[0-9]{1,9}(?:,[0-9]{1,9}){0,63}"
+_USERS = r"[A-Za-z0-9_][A-Za-z0-9._,-]{0,63}"
+_SECONDS = r"[0-9]{1,4}(?:\.[0-9]{1,3})?"
+_OFFSET = r"(?:0[xX][0-9a-fA-F]{1,16}|[0-9]{1,16})"
+
+
+@dataclass(frozen=True)
+class _Options:
+    short: str = ""                             # getopt short options; "x:" takes a value
+    long: tuple = ()                            # exact long names; "name=" takes a value
+    values: dict = field(default_factory=dict)  # option -> regex its value must fully match
+    operand: str | None = None                  # regex for every operand; None forbids operands
+    max_operands: int = 64
+    required: tuple = ()                        # at least one of these options must be given
+    file_options: tuple = ()                    # options whose value is a supplied workspace file
+    data: bool = False                          # reads stdin; operands are supplied workspace files
+
+
+_DIAGNOSTIC_OPTIONS = {
+    # Port probes only (-z sends no data); exec (-e/-c), listening (-l), proxies and stdin are rejected.
+    "nc": _Options("zvnu46w:", values={"-w": "[0-9]{1,3}"}, operand=_HOST, max_operands=8, required=("-z",)),
+    # TCP connect scans (--unprivileged is added); NSE scripts, output and target files,
+    # spoofing, payloads and version/OS probes are rejected.
+    "nmap": _Options("p:s:P:T:nvFr46", ("top-ports=", "open", "reason", "max-retries=", "host-timeout=", "min-rate=", "max-rate="),
+                     {"-p": "[0-9][0-9,-]{0,199}|-", "-s": "[Tn]", "-P": "n", "-T": "[0-5]", "--top-ports": "[0-9]{1,5}",
+                      "--max-retries": "[0-9]{1,2}", "--host-timeout": "[0-9]{1,5}(?:ms|s|m|h)?",
+                      "--min-rate": "[0-9]{1,6}", "--max-rate": "[0-9]{1,6}"},
+                     operand=r"[A-Za-z0-9:][A-Za-z0-9.:%/_-]{0,252}"),
+    # A bounded packet count (-c, or -D to list interfaces); reading/writing pcap files (-r/-w),
+    # filter files (-F) and post-rotate commands (-z) are rejected. Needs root with CAP_NET_RAW.
+    "tcpdump": _Options("c:i:nveqtAXxs:lpDS", values={"-c": "[1-9][0-9]{0,3}|10000", "-s": "[0-9]{1,6}",
+                                                      "-i": "[A-Za-z0-9][A-Za-z0-9._:@-]{0,31}"},
+                        operand=r"[A-Za-z0-9_.:/\[\]&|!=<>()+*%^~, -]{1,200}", required=("-c", "-D")),
+    # UDP/ICMP route tracing; TCP and port probes (-T/-p/-M/-P/-U) and source routing are rejected.
+    "traceroute": _Options("nI46Fem:f:q:w:z:N:", values={"-m": "[0-9]{1,3}", "-f": "[0-9]{1,3}", "-q": "[0-9]{1,2}",
+                                                         "-w": "[0-9.,]{1,20}", "-z": "[0-9.]{1,8}", "-N": "[0-9]{1,3}"},
+                           operand=_HOST, max_operands=2),
+    # Non-interactive reports (--report is added unless another format is chosen); TCP/UDP/SCTP
+    # port probes, host-list files (-F) and the curses/GTK interfaces are rejected.
+    "mtr": _Options("rwjCnb46em:f:i:c:s:G:Z:o:", ("report", "report-wide", "json", "csv", "no-dns", "show-ips", "report-cycles="),
+                    {"-m": "[0-9]{1,3}", "-f": "[0-9]{1,3}", "-i": _SECONDS, "-c": "[1-9][0-9]?|100",
+                     "--report-cycles": "[1-9][0-9]?|100", "-s": "[0-9]{1,5}", "-G": _SECONDS, "-Z": "[0-9]{1,3}",
+                     "-o": "[A-Z ]{1,20}"},
+                    operand=_HOST, max_operands=1),
+    # Client tests of at most 60 s; server/daemon mode, payload files (-F), log/pid files and
+    # authentication files are rejected.
+    "iperf3": _Options("c:p:t:P:Rub:l:w:N46Ji:f:O:", ("bidir", "connect-timeout="),
+                       {"-c": _HOST, "-p": "[0-9]{1,5}", "-t": "[1-9]|[1-5][0-9]|60", "-P": "[1-9]|1[0-6]",
+                        "-b": r"[0-9]{1,6}(?:\.[0-9]{1,3})?[KMGkmg]?", "-l": "[0-9]{1,7}[KMkm]?", "-w": "[0-9]{1,7}[KMkm]?",
+                        "-i": _SECONDS, "-f": "[kmgtKMGT]", "-O": "[0-9]{1,2}", "--connect-timeout": "[0-9]{1,6}"},
+                       required=("-c",)),
+    # Batch mode only (-b, and -n 1 unless given); the ENVIRON field is rejected.
+    "top": _Options("bcd:Hin:o:p:Su:U:1E:e:s", values={"-d": _SECONDS, "-n": "[1-9][0-9]?", "-o": "[+-]?[%A-Za-z+]{1,10}",
+                                                       "-p": _PIDS, "-u": _USERS, "-U": _USERS,
+                                                       "-E": "[kmgtpeKMGTPE]", "-e": "[kmgtpeKMGTPE]"}),
+    # Matching only (pkill is not enabled); pidfiles (-F/-L) and environment matching (--env) are rejected.
+    "pgrep": _Options("acd:fg:G:ilnoO:P:r:s:t:u:U:vwxA",
+                      values={"-d": "[ ,;:|]{1,4}", "-g": _PIDS, "-G": _USERS, "-O": "[0-9]{1,9}", "-P": _PIDS,
+                              "-r": "[A-Za-z,]{1,16}", "-s": _PIDS, "-t": "[A-Za-z0-9/,]{1,32}", "-u": _USERS, "-U": _USERS},
+                      operand=r"[^-\x00-\x1f][^\x00-\x1f]{0,255}", max_operands=1),
+    # Reading or writing rc files (-c/-C/-n/-N) is rejected.
+    "pmap": _Options("xXdqpA:", values={"-A": "[0-9a-fA-Fx,]{1,40}"}, operand="[0-9]{1,9}"),
+    "pwdx": _Options(operand="[0-9]{1,9}"),
+    # -s (repeat) also needs -c (count): the command must finish on its own.
+    "free": _Options("bkmghltwvLs:c:", ("si",), {"-s": _SECONDS, "-c": "[1-9][0-9]{0,2}"}),
+    # A delay also needs a count.
+    "vmstat": _Options("afmnsdDtwyS:p:", values={"-S": "[kKmM]", "-p": "[A-Za-z][A-Za-z0-9._-]{0,31}"},
+                       operand="[0-9]{1,5}", max_operands=2),
+    "uptime": _Options("ps"),
+    "w": _Options("hisfoup", operand="[A-Za-z0-9_][A-Za-z0-9._-]{0,31}", max_operands=1),
+    # One snapshot (--once is added); /proc/slabinfo is readable by root only.
+    "slabtop": _Options("os:", values={"-s": "[abcdlnopsu]"}),
+    # At most one input operand, so no output file is written.
+    "xxd": _Options("abeEiprudc:g:l:o:s:", values={"-c": "[0-9]{1,4}", "-g": "[0-9]{1,4}", "-l": _OFFSET,
+                                                   "-o": _OFFSET, "-s": "[+-]{0,2}" + _OFFSET},
+                    max_operands=1, data=True),
+    "hexdump": _Options("bcCdovxe:f:n:s:", values={"-e": r"[^\x00]{1,256}", "-n": _OFFSET, "-s": _OFFSET + "[bkm]?"},
+                        file_options=("-f",), data=True),
+    "base64": _Options("diw:", ("decode", "ignore-garbage", "wrap="), {"-w": "[0-9]{1,5}", "--wrap": "[0-9]{1,5}"},
+                       max_operands=1, data=True),
+}
+# sysstat parses its own arguments: combinable letters, options with a value
+# and numbers (interval and count; an interval without a count never exits).
+# pidstat -e (runs a program) and iostat -f/+f (alternate sysfs directory) are rejected.
+_SYSSTAT_OPTIONS = {
+    "iostat": ("cdhkmNstxyz", {"-o": "JSON", "-p": r"ALL|[A-Za-z][A-Za-z0-9,._-]{0,127}"}, r"[A-Za-z][A-Za-z0-9._-]{0,63}"),
+    "mpstat": ("AnTuH", {"-o": "JSON", "-I": "(?:SUM|CPU|SCPU|ALL)(?:,(?:SUM|CPU|SCPU|ALL)){0,3}",
+                         "-N": "ALL|[0-9][0-9,-]{0,63}", "-P": "ALL|[0-9][0-9,-]{0,63}"}, None),
+    "pidstat": ("dHhIlRrstuvw", {"-C": "[A-Za-z0-9_][A-Za-z0-9._-]{0,63}", "-G": "[A-Za-z0-9_][A-Za-z0-9._-]{0,63}",
+                                 "-p": "ALL|SELF|" + _PIDS, "-T": "TASK|CHILD|ALL"}, None),
+}
+# ps and lsof only read /proc and are checked separately below.
+EXTRA_DIAGNOSTIC_PROGRAMS = frozenset(_DIAGNOSTIC_OPTIONS) | frozenset(_SYSSTAT_OPTIONS) | {"ps", "lsof"}
+# Appended to a failed result so the assistant can explain missing privileges.
+_PRIVILEGE_HINTS = {
+    "tcpdump": "tcpdump needs root with CAP_NET_RAW. kubedoor-agent runs as root, but its container may lack NET_RAW "
+               "(CRI-O default or a restricted Pod security policy): add securityContext.capabilities.add: [NET_RAW] to the "
+               "kubedoor-agent container. kubedoor-ai runs as a non-root user and cannot capture packets.",
+    "mtr": "mtr sends probes through mtr-packet, which needs CAP_NET_RAW in the container; use traceroute without -I "
+           "(unprivileged UDP probes) instead.",
+    "traceroute": "ICMP tracing (-I) needs raw sockets (CAP_NET_RAW); omit -I to use unprivileged UDP probes.",
+    "slabtop": "/proc/slabinfo is readable by root only; kubedoor-ai runs as a non-root user.",
+}
+
+
+def _failure_message(operation: str, program: str, exit_code: int, stderr: str) -> str:
+    message = f"{program} exited with status {exit_code}"
+    hint = _PRIVILEGE_HINTS.get(program) if operation == "diagnostic" else None
+    if hint and re.search(r"(?i)permission|not permitted", stderr):
+        message = f"{message}. {hint}"
+    return message
+
+
+def _check_sysstat(program: str, argv: list[str]) -> None:
+    letters, values, operand = _SYSSTAT_OPTIONS[program]
+    numbers, index = 0, 0
+    while index < len(argv):
+        token = argv[index]
+        index += 1
+        if token in values:
+            value = argv[index] if index < len(argv) else ""
+            # iostat -p takes the following device list only when it is not a number or an option.
+            if program == "iostat" and token == "-p" and (not value or value.isdigit() or value.startswith("-")):
+                continue
+            if not re.fullmatch(values[token], value):
+                raise ToolError("INVALID_ARGUMENT", f"Invalid value for {program} {token}")
+            index += 1
+        elif re.fullmatch(rf"-[{letters}]+|--(?:human|compact|pretty)|--dec=[0-2]", token):
+            continue
+        elif re.fullmatch(r"[0-9]{1,6}", token):
+            numbers += 1
+        elif not (operand and re.fullmatch(operand, token)):
+            raise ToolError("UNSUPPORTED_COMMAND", f"{program} option or operand is not enabled: {token[:40]}")
+    if numbers not in {0, 2}:
+        raise ToolError("INVALID_ARGUMENT", f"{program} needs an interval and a count together, for example: {program} 1 5")
+
+
+def _extra_diagnostic_argv(program: str, argv: list[str], files: dict, arguments: dict) -> list[str]:
+    """Validate an additional diagnostic program and return the argv to run."""
+    if program == "ps":
+        # procps falls back to BSD parsing when SYSV parsing fails, so any short
+        # option group or value containing "e" could become BSD "e" (environment).
+        if any("environ" in token.lower() or not token.startswith("--") and "e" in token for token in argv):
+            raise ToolError("UNSUPPORTED_COMMAND", "ps only allows the letter e inside --name=value options because BSD-style "
+                                                   "e prints process environments; use -A instead of -e and --format=, "
+                                                   "--sort= or --user= for values")
+        return argv
+    if program == "lsof":
+        if any(re.match(r"[+-]r", token) for token in argv):
+            raise ToolError("UNSUPPORTED_COMMAND", "lsof repeat mode (-r/+r) never exits")
+        return argv
+    if program in _SYSSTAT_OPTIONS:
+        _check_sysstat(program, argv)
+        return argv
+    spec = _DIAGNOSTIC_OPTIONS[program]
+    if arguments.get("stdin") is not None and not spec.data:
+        raise ToolError("INVALID_ARGUMENT", f"{program} does not read stdin")
+    long_names = {name.rstrip("=") for name in spec.long}
+    for token in argv:
+        # getopt accepts abbreviations; require exact names so the tool cannot resolve them differently.
+        if token.startswith("--") and token != "--" and token[2:].split("=", 1)[0] not in long_names:
+            raise ToolError("UNSUPPORTED_COMMAND", f"{program} option is not enabled: {token.split('=', 1)[0][:40]}")
+    try:
+        options, operands = getopt.gnu_getopt(argv, spec.short, list(spec.long))
+    except getopt.GetoptError as exc:
+        raise ToolError("UNSUPPORTED_COMMAND", f"{program}: {exc.msg}; only a safe subset of options is enabled") from None
+    names = {name for name, _ in options}
+    for name, value in options:
+        if name in spec.file_options:
+            _basename(value)
+            if value not in files:
+                raise ToolError("INVALID_ARGUMENT", "Referenced files must be supplied in files")
+        elif name in spec.values and not re.fullmatch(spec.values[name], value):
+            raise ToolError("INVALID_ARGUMENT", f"Invalid value for {program} {name}")
+    if spec.required and not names & set(spec.required):
+        raise ToolError("INVALID_ARGUMENT", f"{program} requires {' or '.join(spec.required)}")
+    if len(operands) > spec.max_operands:
+        raise ToolError("INVALID_ARGUMENT", f"Too many {program} operands")
+    for operand in operands:
+        if spec.data and operand != "-":
+            _basename(operand)
+            if operand not in files:
+                raise ToolError("INVALID_ARGUMENT", "Diagnostic files must be supplied in files")
+        elif not spec.data and (spec.operand is None or operand.startswith("-") or not re.fullmatch(spec.operand, operand)):
+            raise ToolError("INVALID_ARGUMENT", f"Invalid {program} operand: {operand[:40]}")
+    if program == "free" and "-s" in names and "-c" not in names:
+        raise ToolError("INVALID_ARGUMENT", "free -s also needs -c so the command finishes")
+    if program == "vmstat" and len(operands) == 1:
+        raise ToolError("INVALID_ARGUMENT", "vmstat needs a delay and a count together, for example: vmstat 1 5")
+    if program == "top" and any("environ" in value.lower() for _, value in options):
+        raise ToolError("UNSUPPORTED_COMMAND", "top ENVIRON field is not allowed")
+    if program == "nmap":
+        return ["--unprivileged", *argv]
+    if program == "top":
+        return ["-b", *argv, *([] if "-n" in names else ["-n", "1"])]
+    if program == "mtr" and not names & {"-r", "-w", "-j", "-C", "--report", "--report-wide", "--json", "--csv"}:
+        return ["--report", *argv]
+    if program == "slabtop":
+        return ["--once", *argv]
+    return argv
+
+
 def _validate_cli(operation: str, arguments: dict) -> tuple[str, list[str], dict]:
     program = operation if operation in {"kubectl", "istioctl"} else arguments.get("program")
     if operation == "diagnostic" and program not in DIAGNOSTIC_PROGRAMS:
@@ -117,6 +339,10 @@ def _validate_cli(operation: str, arguments: dict) -> tuple[str, list[str], dict
     # Only remote kubectl/istioctl arguments after -- may address Pod paths.
     # Diagnostic operands remain local and must be validated after -- as well.
     before_separator = argv if operation == "diagnostic" else (argv[:argv.index("--")] if "--" in argv else argv)
+    # Additional programs are whitelisted first so errors name the offending option;
+    # their -f/-o/-T style flags are not files, but host path checks below still apply.
+    extra = operation == "diagnostic" and program in EXTRA_DIAGNOSTIC_PROGRAMS
+    run_argv = _extra_diagnostic_argv(program, argv, files, arguments) if extra else argv
     if operation == "diagnostic":
         for token in argv:
             if not token.startswith("-") or token.startswith("--") or len(token) <= 2:
@@ -167,7 +393,7 @@ def _validate_cli(operation: str, arguments: dict) -> tuple[str, list[str], dict
             flag, equal, inline = token[:2], "=", token[2:]
         if program == "curl" and token.startswith(("-T", "-b", "-c", "-E", "-D")) and not token.startswith("--") and len(token) > 2:
             flag, equal, inline = token[:2], "=", token[2:]
-        is_file = flag in file_flags
+        is_file = flag in file_flags and not extra
         if operation in {"kubectl", "istioctl"} and flag in {"-o", "--output"}:
             is_file = False  # Kubernetes -o selects an output format, not a host file.
             output = inline if equal else (before_separator[index + 1] if index + 1 < len(before_separator) else "")
@@ -211,7 +437,7 @@ def _validate_cli(operation: str, arguments: dict) -> tuple[str, list[str], dict
                 raise ToolError("INVALID_ARGUMENT", "curl upload files must be supplied in files")
         if operation in {"kubectl", "istioctl"} and flag in {"-f", "--filename", "-k", "--kustomize"} and equal and "://" in inline:
             raise ToolError("INVALID_ARGUMENT", "Remote manifests are forbidden")
-    return str(program), argv, files
+    return str(program), run_argv, files
 
 
 class KubernetesExecutor:
@@ -484,7 +710,8 @@ class KubernetesExecutor:
                 data = {"stdout": self._cli_export(stdout[0]), "stderr": self._cli_export(stderr[0])}
                 return self._result(exit_code == 0, data, source=program, exit_code=exit_code,
                                     truncated=stdout[1] or stderr[1],
-                                    error={"code": "COMMAND_FAILED", "message": f"{program} exited with status {exit_code}"} if exit_code else None)
+                                    error={"code": "COMMAND_FAILED", "message": _failure_message(operation, program, exit_code, stderr[0])}
+                                    if exit_code else None)
 
             # Parsing and redacting megabytes of output must not block the event loop.
             return await asyncio.to_thread(export)
@@ -660,12 +887,12 @@ class KubernetesExecutor:
             await asyncio.to_thread(self._client.close)
         self._cert_dir.cleanup()
 
-    async def prepare(self, operation: str, arguments: dict, timeout: float = 120) -> dict:
+    async def prepare(self, operation: str, arguments: dict, timeout: float = 120, commands: dict = None) -> dict:
         if not isinstance(arguments, dict):
             return {"success": False, "arguments": {}, "preview": {}, "read_only": False,
                     "reason": "Invalid arguments", "error": {"code": "INVALID_ARGUMENT", "message": "arguments must be an object"}}
         frozen = copy.deepcopy(arguments)
-        policy = classify_operation(operation, frozen)
+        policy = classify_operation(operation, frozen, commands)
         preview = {"operation": operation, "arguments": self._export(frozen), "dry_run_supported": False}
         result = {"success": True, "arguments": frozen, "preview": preview, **policy}
         run = _Run()

@@ -18,10 +18,11 @@ import {
 import MonacoDiff from "./MonacoDiff.vue";
 import LineDiff from "./LineDiff.vue";
 import { ENV_TYPE_LABEL, toYaml } from "../utils";
+import { useIstioPermission } from "../useIstioPermission";
 
 defineOptions({ name: "IstioCompareDialog" });
 
-/** 对比两个对象(组标准 / 组标准 · 集群 / 集群现状)。一边是组标准、一边是集群现状时,管理员可以把现状里的
+/** 对比两个对象(组标准 / 组标准 · 集群 / 集群现状)。一边是组标准、一边是集群现状时,有组级修改权限的账号可以把现状里的
  *  规则整条同步到组标准(只能这个方向),也能同步 gateways、默认路由、其他字段;选好后「保存组标准」一次写入 */
 const props = defineProps<{
   groupId: number;
@@ -32,7 +33,8 @@ const props = defineProps<{
   vsId: number | null;
   /** 已纳入组标准的集群 */
   boundClusters: string[];
-  isAdmin: boolean;
+  /** 组级修改权限:同步到组标准、纳管、以现状更新组标准 */
+  canManage: boolean;
   left: string;
   right: string;
 }>();
@@ -102,7 +104,7 @@ function syncSides(left: string, right: string) {
 }
 
 const sync = computed(() => {
-  if (!props.isAdmin || props.vsId === null || !result.value) return null;
+  if (!props.canManage || props.vsId === null || !result.value) return null;
   const sides = syncSides(result.value.left.side, result.value.right.side);
   if (!sides) return null;
   const std = result.value[sides.std];
@@ -503,6 +505,8 @@ const missingDomains = computed(() =>
     .map(side => `${side?.label}:${side?.missing_domains?.join("、")}`)
 );
 
+const { clusterCan } = useIstioPermission();
+
 /** 对比里涉及的集群现状(右侧优先),用于「以现状为准」「下发」 */
 const clusterSide = computed(() => {
   for (const side of [rightSide.value, leftSide.value]) {
@@ -516,6 +520,14 @@ const clusterSide = computed(() => {
     }
   }
   return null;
+});
+/** 下发组标准到对比里的集群:只看这个集群的「Istio 修改」权限 */
+const canApplySide = computed(() => {
+  const k8s = clusterSide.value?.k8s;
+  if (!k8s) return false;
+  return clusterCan(
+    props.clusters.find(c => c.k8s_name === k8s) ?? { k8s_name: k8s }
+  );
 });
 
 async function resetFromCluster() {
@@ -888,9 +900,9 @@ function rowClass({ row }: { row: RouteDiffRow }) {
             >保存组标准</el-button
           >
         </template>
-        <template v-if="isAdmin && clusterSide">
+        <template v-if="clusterSide">
           <el-button
-            v-if="vsId === null && clusterSide.exists"
+            v-if="canManage && vsId === null && clusterSide.exists"
             type="primary"
             plain
             @click="emit('import', clusterSide.k8s)"
@@ -898,7 +910,7 @@ function rowClass({ row }: { row: RouteDiffRow }) {
             以 {{ clusterSide.k8s }} 为准纳管
           </el-button>
           <el-button
-            v-if="vsId !== null && clusterSide.exists"
+            v-if="canManage && vsId !== null && clusterSide.exists"
             type="warning"
             plain
             :disabled="dirty"
@@ -908,7 +920,11 @@ function rowClass({ row }: { row: RouteDiffRow }) {
             以 {{ clusterSide.k8s }} 现状更新组标准
           </el-button>
           <el-button
-            v-if="vsId !== null && boundClusters.includes(clusterSide.k8s)"
+            v-if="
+              canApplySide &&
+              vsId !== null &&
+              boundClusters.includes(clusterSide.k8s)
+            "
             type="primary"
             plain
             :disabled="dirty"

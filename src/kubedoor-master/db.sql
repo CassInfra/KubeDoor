@@ -449,11 +449,11 @@ CREATE TRIGGER trg_alert_silences_updated BEFORE UPDATE ON alert_silences
 -- =============================================================================
 -- 10. 账号与权限(详见 auth/README.md)
 --
---   auth_users          本地 / LDAP 账号与全局权限 role:
---                         admin 管理员 / rw 读写 / read 只读 / none 无 / agent 仅供 agent 连接
---   auth_user_clusters  按集群单独授权(rw / read / none),优先于全局权限;管理员和 Agent 账号没有
+--   auth_users          本地 / LDAP 账号与全局权限 role:admin 系统管理员 / cluster_admin 集群管理员 /
+--                         rw 读写 / read 只读 / none 无 / agent 仅供 agent 连接
+--   auth_user_clusters  按集群单独授权(admin / rw / read / none),优先于全局权限;系统管理员和 Agent 账号没有
 --   auth_sessions       登录会话。只存 token 的 SHA-256,token 本身只在浏览器 Cookie 里
---   auth_settings       认证相关设置(LDAP 配置等,JSON;LDAP 绑定密码加密存储)
+--   auth_settings       认证相关设置(JSON):LDAP 配置(绑定密码加密存储)、权限与审批(permission_policy)
 -- =============================================================================
 CREATE TABLE IF NOT EXISTS auth_users (
     id                   serial PRIMARY KEY,
@@ -474,7 +474,7 @@ CREATE TABLE IF NOT EXISTS auth_users (
     created_at           timestamptz NOT NULL DEFAULT now(),
     updated_at           timestamptz NOT NULL DEFAULT now(),
     CONSTRAINT ck_auth_users_source CHECK (source IN ('local', 'ldap')),
-    CONSTRAINT ck_auth_users_role CHECK (role IN ('admin', 'rw', 'read', 'none', 'agent'))
+    CONSTRAINT ck_auth_users_role CHECK (role IN ('admin', 'cluster_admin', 'rw', 'read', 'none', 'agent'))
 );
 -- 用户名不区分大小写唯一
 CREATE UNIQUE INDEX IF NOT EXISTS uq_auth_users_username ON auth_users (lower(username));
@@ -486,8 +486,26 @@ CREATE TABLE IF NOT EXISTS auth_user_clusters (
     updated_by text        NOT NULL DEFAULT '',
     updated_at timestamptz NOT NULL DEFAULT now(),
     PRIMARY KEY (user_id, env),
-    CONSTRAINT ck_auth_user_clusters_perm CHECK (permission IN ('rw', 'read', 'none'))
+    CONSTRAINT ck_auth_user_clusters_perm CHECK (permission IN ('admin', 'rw', 'read', 'none'))
 );
+
+-- 升级:全局角色加集群管理员(cluster_admin),集群授权加管理员(admin)。
+-- 按约束定义判断,已经改过的不再改(避免每次启动都重建约束);约束不存在时补上
+DO $$
+BEGIN
+    IF NOT COALESCE((SELECT pg_get_constraintdef(oid) LIKE '%cluster_admin%' FROM pg_constraint
+                     WHERE conname = 'ck_auth_users_role' AND conrelid = 'auth_users'::regclass), false) THEN
+        ALTER TABLE auth_users DROP CONSTRAINT IF EXISTS ck_auth_users_role;
+        ALTER TABLE auth_users ADD CONSTRAINT ck_auth_users_role
+            CHECK (role IN ('admin', 'cluster_admin', 'rw', 'read', 'none', 'agent'));
+    END IF;
+    IF NOT COALESCE((SELECT pg_get_constraintdef(oid) LIKE '%''admin''%' FROM pg_constraint
+                     WHERE conname = 'ck_auth_user_clusters_perm' AND conrelid = 'auth_user_clusters'::regclass), false) THEN
+        ALTER TABLE auth_user_clusters DROP CONSTRAINT IF EXISTS ck_auth_user_clusters_perm;
+        ALTER TABLE auth_user_clusters ADD CONSTRAINT ck_auth_user_clusters_perm
+            CHECK (permission IN ('admin', 'rw', 'read', 'none'));
+    END IF;
+END $$;
 
 CREATE TABLE IF NOT EXISTS auth_sessions (
     token_hash   text        PRIMARY KEY,

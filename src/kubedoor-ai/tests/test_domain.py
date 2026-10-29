@@ -26,14 +26,34 @@ def test_identity_cluster_permissions_follow_master_rules():
     with pytest.raises(AIError):
         identity.require_admin()
     admin = authenticate({**base, "x-user-permission": "admin", "x-user-clusters": '{"prod":"none"}'}, "secret")
-    assert admin.permission_for("prod") == "rw" and admin.is_admin
+    assert admin.permission_for("prod") == "admin" and admin.is_admin   # 系统管理员所有集群都是管理员,不能单独授权
     reader = authenticate({**base, "x-user-permission": "read", "x-user-clusters": '{"prod":"none"}'}, "secret")
     assert not reader.can_read("prod") and reader.can_read("staging")
-    for bad in ("[]", '{"prod":"admin"}', "not-json"):
+    for bad in ("[]", '{"prod":"superuser"}', '{"prod":"cluster_admin"}', "not-json"):
         with pytest.raises(AIError):
             authenticate({**base, "x-user-permission": "read", "x-user-clusters": bad}, "secret")
     with pytest.raises(AIError):
         authenticate({**base, "x-user-permission": "superuser"}, "secret")
+
+
+def test_cluster_admin_role_defaults_to_admin_and_can_be_lowered_per_cluster():
+    base = {"x-kubedoor-token": "secret", "x-user-name": "dora"}
+    dora = authenticate({**base, "x-user-permission": "cluster_admin", "x-user-clusters": '{"prod":"read","test":"none"}'}, "secret")
+    assert not dora.is_admin   # 不能做系统管理
+    with pytest.raises(AIError):
+        dora.require_admin()
+    assert dora.permission_for("other") == "admin" and dora.can_read("other")
+    assert dora.permission_for("prod") == "read" and not dora.can_read("test")
+    dora.require_write("other")
+    dora.require_write()   # 全局共享记忆:集群管理员可写
+    with pytest.raises(AIError):
+        dora.require_write("prod")
+    # 单独授权的集群管理员
+    erin = authenticate({**base, "x-user-permission": "read", "x-user-clusters": '{"prod":"admin"}'}, "secret")
+    assert erin.permission_for("prod") == "admin" and erin.can_read("prod") and erin.permission_for("other") == "read"
+    erin.require_write("prod")
+    with pytest.raises(AIError):
+        erin.require_write()
 
 
 def test_credential_cipher_authenticates_cluster_and_never_stores_plaintext():

@@ -12,7 +12,7 @@ import { WebglAddon } from "@xterm/addon-webgl";
 import "@xterm/xterm/css/xterm.css";
 import QuestionFilled from "@iconify-icons/ep/question-filled";
 import { createNodeExecUrl, createPodExecUrl } from "@/api/monit";
-import { useClusterPermission } from "@/utils/permission";
+import { usePermission } from "@/utils/usePermission";
 
 defineOptions({ name: "PodShell" });
 
@@ -65,7 +65,7 @@ const THEME = {
 
 const route = useRoute();
 const router = useRouter();
-const { canWrite } = useClusterPermission();
+const { can } = usePermission();
 
 const env = String(route.query.env || "");
 const namespace = String(route.query.namespace || "");
@@ -236,7 +236,7 @@ const connect = () => {
       notice(
         gotMessage
           ? "连接已断开"
-          : "无法建立连接:登录可能已过期,或没有该集群的读写权限,请刷新页面重试",
+          : "无法建立连接:登录可能已过期,或没有该集群的终端权限,请刷新页面重试",
         "31"
       );
     }
@@ -430,13 +430,13 @@ onMounted(() => {
   const problem = isNode
     ? !env || !node
       ? "缺少集群或节点参数,请从节点管理页打开终端"
-      : !canWrite(env)
-        ? `当前账号对集群 ${env} 没有读写权限,不能打开节点终端`
+      : !can("node.shell", env)
+        ? `当前账号在集群 ${env} 没有「网页节点终端」权限,不能打开节点终端`
         : ""
     : !env || !namespace || !pod
       ? "缺少集群、命名空间或 Pod 参数,请从 Pod 列表打开终端"
-      : !canWrite(env)
-        ? `当前账号对集群 ${env} 没有读写权限,不能打开终端`
+      : !can("pod.shell", env)
+        ? `当前账号在集群 ${env} 没有「网页 Pod 终端」权限,不能打开终端`
         : "";
   if (problem) {
     blocked = true;

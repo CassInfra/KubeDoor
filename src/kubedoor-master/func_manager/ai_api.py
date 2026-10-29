@@ -22,7 +22,7 @@ from urllib.parse import unquote, urlsplit, urlunsplit
 import aiohttp
 from aiohttp import web
 
-from auth import audit
+from auth import audit, permissions
 from auth.context import client_ip
 from func_manager.deployment_control import deployment_control as control_status, valid_target
 
@@ -38,6 +38,28 @@ def authorize(request):
 def require_cluster(principal, env):
     if not principal.can_read(env):
         raise web.HTTPForbidden(text=f"没有集群 {env} 的访问权限")
+
+
+def declared_ops(body):
+    """AI 网关判定的操作类型(body.ops);没有这个键返回 None(升级前建的动作),格式不对 400。"""
+    if "ops" not in body:
+        return None
+    ops = body["ops"]
+    if not isinstance(ops, list) or not all(isinstance(op, str) and op for op in ops) or len(ops) > 50:
+        raise web.HTTPBadRequest(text="ops 必须是操作类型数组")
+    return list(dict.fromkeys(ops))
+
+
+def check_approved_ops(principal, env, ops):
+    """批准执行(approved=true)时按当前身份复核:声明的每个操作都要允许。审批期间被降权也会在这里拦下。"""
+    if not ops:
+        raise web.HTTPForbidden(text="缺少操作类型,不能执行集群修改")
+    denied = [op for op in ops if not principal.can(op, env)]
+    if denied:
+        names = "、".join(permissions.op_name(op) for op in denied)
+        perm = principal.permission(env)
+        raise web.HTTPForbidden(text=f"当前账号在集群 {env} 是「{permissions.LEVEL_LABELS.get(perm, perm)}」权限,"
+                                     f"不能执行「{names}」")
 
 
 def _timestamp(value):
@@ -156,22 +178,48 @@ def register_routes(app, clients, utils):
             raise web.HTTPBadRequest(text="arguments 必须为对象")
         if clients.get(env, {}).get("online") and not clients[env].get("ai_tools"):
             raise web.HTTPNotImplemented(text="此 Agent 版本不支持通用 AI 工具，请升级 Agent 或上传 kubeconfig；现有数据接口仍可查询")
-        writable = principal.can_write(env)
-        if not writable and body.get("approved"):
-            raise web.HTTPForbidden(text=f"当前账号对集群 {env} 只有只读权限，不能批准集群修改")
+        approved = body.get("approved") is True
+        ops = declared_ops(body)
+        policy = await permissions.load_policy()  # 鉴权中间件已刷新过,没过期不查库
+        if ops is None:
+            # 升级前建的动作(没有 ops):沿用原来的集群读写检查。Pod 内执行的命令 master 判断不了类别,
+            # 新版 AI 一定带 ops,没带的按修改处理,只读用户不能执行
+            if not principal.can_write(env):
+                if approved:
+                    raise web.HTTPForbidden(text=f"当前账号对集群 {env} 只有只读权限，不能批准集群修改")
+                if body["operation"] == "pod_exec":
+                    raise web.HTTPForbidden(text=f"当前账号对集群 {env} 只有只读权限，不能在 Pod 内执行命令")
+            ops_ok = False
+        else:
+            if approved:
+                check_approved_ops(principal, env, ops)
+            ops_ok = bool(ops) and all(principal.can(op, env, policy) for op in ops)
         timeout = min(max(float(body.get("timeout", 120)), 1), 300)
-        approved_write = body.get("approved") is True and body.get("phase", "execute") == "execute"
-        result = await agent_rpc(clients, env, {
+        approved_write = approved and body.get("phase", "execute") == "execute"
+        packet = {
             "phase": body.get("phase", "execute"), "operation": body["operation"],
             "arguments": body.get("arguments", {}), "call_id": body.get("call_id", ""),
-            "approved": body.get("approved") is True, "timeout": timeout,
-            "username": principal.username, "permission": "rw" if writable else "read",
-        }, timeout=timeout + 10)
+            "approved": approved, "timeout": timeout, "username": principal.username, "env": env,
+            # 旧 agent 只认 read / rw:声明的操作都允许时给 rw,否则按集群读写权限
+            "permission": "rw" if ops_ok or principal.can_write(env) else "read",
+            "commands": policy["commands"],
+        }
+        if ops is not None:
+            # 新 agent 带 allowed_ops 时按清单重新分类并二次校验;没有 ops 的旧动作不带,让新 agent 走旧逻辑
+            packet.update(ops=ops, allowed_ops=principal.allowed_ops(env, policy))
+        result = await agent_rpc(clients, env, packet, timeout=timeout + 10)
         if approved_write:
             audit.record_bg(principal.username, "ai.agent_execute", env=env, target=str(body["operation"]),
                             ip=client_ip(request), success=bool(isinstance(result, dict) and result.get("success", True)),
-                            detail={"call_id": str(body.get("call_id", ""))[:160]})
+                            detail={"call_id": str(body.get("call_id", ""))[:160], "ops": ops})
         return web.json_response(result)
+
+    async def permission_policy(request):
+        # 权限与审批配置(和用户无关);AI 服务缓存 5 秒,取不到时修改类操作一律拒绝
+        authorize(request)
+        policy = await permissions.load_policy()
+        return web.json_response({"version": permissions.version_of(policy), "ops": policy["ops"],
+                                  "commands": policy["commands"]})
 
     async def cancel(request):
         principal = authorize(request)
@@ -241,6 +289,7 @@ def register_routes(app, clients, utils):
 
     app.router.add_get("/api/ai/internal/bootstrap", bootstrap)
     app.router.add_get("/api/ai/internal/identity", identity)
+    app.router.add_get("/api/ai/internal/permission-policy", permission_policy)
     app.router.add_post("/api/ai/internal/agent-execute", execute)
     app.router.add_post("/api/ai/internal/agent-cancel", cancel)
     app.router.add_post("/api/ai/internal/metrics", metrics)

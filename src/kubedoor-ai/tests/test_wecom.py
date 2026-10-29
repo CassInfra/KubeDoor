@@ -400,8 +400,9 @@ async def test_bound_member_keeps_own_account_when_default_is_set():
 
 
 @pytest.mark.asyncio
-async def test_default_account_promoted_to_admin_is_refused():
-    master = AsyncMock(return_value={"username": "guest", "permission": "admin", "clusters": {}})
+@pytest.mark.parametrize("role", ["admin", "cluster_admin"])
+async def test_default_account_promoted_to_admin_is_refused(role):
+    master = AsyncMock(return_value={"username": "guest", "permission": role, "clusters": {}})
     store = Store(mapping={"wecom_userid": "wx-bob", "username": None}, unbound="guest")
     integration, service = make_integration(store=store, master=master)
     client = connect(integration)
@@ -416,10 +417,34 @@ async def test_default_permission_rejects_admin_and_accounts_without_clusters():
     integration, service = make_integration(master=master)
     with pytest.raises(AIError, match="管理员"):
         await integration.save_unbound(Identity("admin", "admin"), {"username": "boss"})
+    # 集群管理员同样不能作为未绑定成员的默认权限
+    master.return_value = {"username": "lead", "permission": "cluster_admin", "clusters": {"prod": "read"}}
+    with pytest.raises(AIError, match="集群管理员"):
+        await integration.save_unbound(Identity("admin", "admin"), {"username": "lead"})
     master.return_value = {"username": "nobody", "permission": "none", "clusters": {}}
     with pytest.raises(AIError, match="没有任何 K8S"):
         await integration.save_unbound(Identity("admin", "admin"), {"username": "nobody"})
     assert service.store.executes == []
+
+
+@pytest.mark.asyncio
+async def test_member_identity_accepts_cluster_admin_and_admin_cluster_permission():
+    """master 返回的新角色和集群权限值:集群管理员按集群单独授权降低,单独授权的「管理员」照常提问"""
+    master = AsyncMock(return_value={"username": "lead", "permission": "cluster_admin", "clusters": {"prod": "read"}})
+    store = Store(mapping={"wecom_userid": "wx-lead", "username": "lead"})
+    integration, service = make_integration(store=store, master=master)
+    identity = await integration._identity("lead")
+    assert identity.permission_for("prod") == "read" and identity.permission_for("test") == "admin"
+    service.bootstrap.return_value = {"clusters": [{"env": "prod", "permission": "read"}, {"env": "test", "permission": "admin"}]}
+    assert [item["env"] for item in await integration._member_clusters(identity)] == ["prod", "test"]
+    integration._current_session = AsyncMock(return_value=("session-1", [], None, False))
+    client = connect(integration)
+    await integration._handle_text(text_frame("wx-lead", "当前集群"))
+    assert "test · 管理员" in last_reply(client)
+    # 权限值不认识时不放行
+    master.return_value = {"username": "lead", "permission": "cluster_admin", "clusters": {"prod": "owner"}}
+    with pytest.raises(AIError):
+        await integration._identity("lead")
 
 
 @pytest.mark.asyncio
@@ -886,18 +911,16 @@ async def test_admin_config_never_returns_stored_bot_secret_or_model_key():
 
 
 class ConfigStore:
-    """kubedoor_ai_wecom_config 单行:加密配置 + 空闲超时列 + 只读用户执行权限"""
+    """kubedoor_ai_wecom_config 单行:加密配置 + 空闲超时列"""
     def __init__(self):
         self.row = None
 
     async def one(self, sql, *args):
         if sql.startswith("INSERT INTO kubedoor_ai_wecom_config"):
-            enabled, encrypted, username, idle, default, read_only_exec = args
+            enabled, encrypted, username, idle, default = args
             previous = self.row["session_idle_minutes"] if self.row else default
-            previous_exec = self.row.get("read_only_can_exec", False) if self.row else False
             self.row = {"enabled": enabled, "encrypted_config": encrypted, "updated_by": username, "updated_at": "now",
-                        "session_idle_minutes": previous if idle is None else idle,
-                        "read_only_can_exec": previous_exec if read_only_exec is None else read_only_exec}
+                        "session_idle_minutes": previous if idle is None else idle}
             return self.row
         assert "FROM kubedoor_ai_wecom_config" in sql
         return self.row
@@ -908,25 +931,27 @@ async def test_wecom_model_window_and_idle_timeout_are_saved_and_returned():
     cipher = SimpleNamespace(encrypt=lambda env, value: json.dumps(value).encode(), decrypt=lambda env, data: json.loads(data))
     integration = WeComIntegration(SimpleNamespace(store=ConfigStore(), gateway=SimpleNamespace(cipher=cipher)))
     admin = Identity("admin", "admin")
-    cfg = await integration.admin_config()
-    assert cfg["session_idle_minutes"] == 120
-    assert cfg["read_only_can_exec"] is False
+    assert (await integration.admin_config())["session_idle_minutes"] == 120
     base = {"enabled": False, "bot_id": "bot-1", "base_url": "https://api.deepseek.com", "model": "deepseek-flash"}
     saved = await integration.save_config(admin, {**base, "max_input_tokens": 262_144, "max_output_tokens": 65_536,
                                                   "compression_ratio": 0.6, "session_idle_minutes": 90,
-                                                  "reasoning_effort": "low", "read_only_can_exec": True})
-    window = ("max_input_tokens", "max_output_tokens", "compression_ratio", "session_idle_minutes", "reasoning_effort", "read_only_can_exec")
-    assert [saved[key] for key in window] == [262_144, 65_536, 0.6, 90, "low", True]
+                                                  "reasoning_effort": "low"})
+    window = ("max_input_tokens", "max_output_tokens", "compression_ratio", "session_idle_minutes", "reasoning_effort")
+    assert [saved[key] for key in window] == [262_144, 65_536, 0.6, 90, "low"]
     # 不传的字段沿用已保存的值,企微提问用的 Provider 带上这些字段
     saved = await integration.save_config(admin, base)
-    assert [saved[key] for key in window] == [262_144, 65_536, 0.6, 90, "low", True]
+    assert [saved[key] for key in window] == [262_144, 65_536, 0.6, 90, "low"]
     assert integration._provider_settings()["max_input_tokens"] == 262_144
     assert integration._provider_settings()["reasoning_effort"] == "low"
     # null = 按模型推断 / 用模型默认;0 = 关闭空闲自动开新对话
     saved = await integration.save_config(admin, {**base, "max_input_tokens": None, "max_output_tokens": None,
                                                   "compression_ratio": None, "session_idle_minutes": 0,
                                                   "reasoning_effort": None})
-    assert [saved[key] for key in window] == [None, None, None, 0, None, True]
+    assert [saved[key] for key in window] == [None, None, None, 0, None]
+    # 「只读用户执行权限」开关已由「权限与审批」页面取代:不再返回,传了也不保存
+    assert "read_only_can_exec" not in saved
+    saved = await integration.save_config(admin, {**base, "read_only_can_exec": True})
+    assert "read_only_can_exec" not in saved and "read_only_can_exec" not in integration.service.store.row
     for invalid in ({"max_input_tokens": 1024}, {"max_output_tokens": 512}, {"compression_ratio": 0.9},
                     {"session_idle_minutes": 10081}, {"session_idle_minutes": -1},
                     {"session_idle_minutes": True}, {"session_idle_minutes": "30"}, {"reasoning_effort": "medium"}):

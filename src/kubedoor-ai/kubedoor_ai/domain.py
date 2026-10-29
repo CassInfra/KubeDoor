@@ -35,15 +35,16 @@ class AIError(Exception):
         self.details = details
 
 
-ROLES = ("admin", "rw", "read", "none")
-CLUSTER_PERMISSIONS = ("rw", "read", "none")
+ROLES = ("admin", "cluster_admin", "rw", "read", "none")
+CLUSTER_PERMISSIONS = ("admin", "rw", "read", "none")
 
 
 @dataclass(frozen=True)
 class Identity:
-    """KubeDoor 登录用户。permission 是全局角色(admin/rw/read/none),clusters 是单独授权的集群。
+    """KubeDoor 登录用户。permission 是全局角色(admin/cluster_admin/rw/read/none),clusters 是单独授权的集群。
 
-    某个集群的有效权限:管理员一律读写;有单独授权按授权;否则按全局角色兜底(与 master 的规则一致)。
+    某个集群的有效权限(admin/rw/read/none):系统管理员一律是管理员;有单独授权按授权;否则按全局角色兜底,
+    集群管理员兜底为管理员(与 master 的规则一致)。能做哪些操作由「权限与审批」按有效权限判定(permissions.py)。
     """
     username: str
     permission: str
@@ -55,21 +56,25 @@ class Identity:
 
     def permission_for(self, env: str) -> str:
         if self.permission == "admin":
-            return "rw"
+            return "admin"
         if env in self.clusters:
             return self.clusters[env]
+        # 集群管理员在没有单独授权的集群是管理员
+        if self.permission == "cluster_admin":
+            return "admin"
         return self.permission if self.permission in ("rw", "read") else "none"
 
     def can_read(self, env: str) -> bool:
-        return self.permission_for(env) in ("read", "rw")
+        return self.permission_for(env) in ("read", "rw", "admin")
 
     def require_write(self, env: str | None = None) -> None:
-        """env 为空时检查全局读写(与集群无关的资源,如共享记忆)。"""
+        """读写及以上。env 为空时检查全局权限(与集群无关的资源,如共享记忆)。
+        集群上的 AI 操作改由「权限与审批」按操作类型判定,这里只给共享记忆和升级前建的动作用。"""
         if env is None:
-            if self.permission not in ("admin", "rw"):
+            if self.permission not in ("admin", "cluster_admin", "rw"):
                 raise AIError("当前用户没有全局读写权限", 403, "permission_denied")
             return
-        if self.permission_for(env) != "rw":
+        if self.permission_for(env) not in ("rw", "admin"):
             raise AIError(f"当前用户对集群 {env} 只有查询权限", 403, "permission_denied")
 
     def require_admin(self) -> None:

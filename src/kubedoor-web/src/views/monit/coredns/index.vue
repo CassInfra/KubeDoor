@@ -59,14 +59,14 @@
             >解析测试</el-button
           >
           <el-tooltip
-            :disabled="!env || canWrite(env)"
-            content="端口测试会从集群内向任意地址发起连接,需要这个集群的读写权限"
+            :disabled="!env || can('network.tcp', env)"
+            content="端口测试会从集群内向任意地址发起连接,当前账号在这个集群没有「端口测试」权限"
             placement="bottom"
           >
             <span>
               <el-button
                 :icon="Connection"
-                :disabled="!env || !canWrite(env)"
+                :disabled="!env || !can('network.tcp', env)"
                 @click="openNetTools('tcp')"
                 >端口测试</el-button
               >
@@ -480,7 +480,7 @@
       v-model="netVisible"
       :env="env"
       :mode="netMode"
-      :can-tcp="canWrite(env)"
+      :can-tcp="can('network.tcp', env)"
     />
     <AdvancedEditDialog
       v-model="advancedVisible"
@@ -529,7 +529,7 @@ import {
   type CoreDnsConfigMap
 } from "@/api/coredns";
 import { useSearchStoreHook } from "@/store/modules/search";
-import { useClusterPermission } from "@/utils/permission";
+import { usePermission } from "@/utils/usePermission";
 import {
   buildCorefile,
   COREFILE_KEY,
@@ -559,7 +559,7 @@ import AdvancedEditDialog from "./components/AdvancedEditDialog.vue";
 defineOptions({ name: "CoreDnsManager" });
 
 const searchStore = useSearchStoreHook();
-const { canWrite } = useClusterPermission();
+const { can } = usePermission();
 
 const envOptions = ref<string[]>([]);
 const env = ref(searchStore.env || "");
@@ -592,7 +592,7 @@ const block = computed(
   () => blocks.value.find(item => item.index === blockIndex.value) ?? null
 );
 const canSave = computed(
-  () => !!model.value && !model.value.error && canWrite(env.value)
+  () => !!model.value && !model.value.error && can("network.coredns", env.value)
 );
 const canEdit = computed(() => canSave.value && !!block.value?.editable);
 const hasReload = computed(
@@ -770,10 +770,11 @@ const alerts = computed(() => {
       });
     }
   }
-  if (env.value && !canWrite(env.value)) {
+  if (env.value && !can("network.coredns", env.value)) {
     list.push({
       type: "info",
-      title: "当前账号对这个集群只读:可以查看和检查解析,不能修改"
+      title:
+        "当前账号在这个集群没有「CoreDNS 修改」权限(默认只有管理员):可以查看和检查解析,不能修改"
     });
   }
   return list;

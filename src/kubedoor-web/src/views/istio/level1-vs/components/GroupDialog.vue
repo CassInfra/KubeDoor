@@ -21,13 +21,14 @@ import {
 } from "@/api/istio";
 import PatternList from "./PatternList.vue";
 import { ENV_TYPE_LABEL, conflictText, scopeText } from "../utils";
+import { useIstioPermission } from "../useIstioPermission";
 
 defineOptions({ name: "IstioGroupDialog" });
 
 const props = defineProps<{
   groups: IstioGroup[];
-  /** 所有已接入的集群,以及各自已在哪些组里 */
-  clusters: { k8s_name: string; groups: string[] }[];
+  /** 能看到的集群,以及各自已在哪些组里;can_istio = 当前账号在这个集群有「Istio 修改」权限 */
+  clusters: { k8s_name: string; groups: string[]; can_istio?: boolean }[];
   /** 打开时选中的组 */
   current?: number | null;
 }>();
@@ -59,6 +60,12 @@ const selectedGroup = computed(() =>
   props.groups.find(group => group.id === selected.value)
 );
 
+const { clusterCan, groupCan } = useIstioPermission();
+/** 新建组随时可以(只能加有权限的集群);已有的组要组内每个集群都有「Istio 修改」权限才能改、删 */
+const editable = computed(
+  () => selected.value === null || groupCan(selectedGroup.value)
+);
+
 /** 可加入的集群:还不在本组的(一个集群可以属于多个组,如共用的测试集群) */
 const addable = computed(() => {
   const inForm = new Set(form.clusters.map(c => c.k8s_name));
@@ -67,7 +74,8 @@ const addable = computed(() => {
     .filter(c => !inForm.has(c.k8s_name))
     .map(c => ({
       k8s_name: c.k8s_name,
-      others: c.groups.filter(g => g !== own)
+      others: c.groups.filter(g => g !== own),
+      allowed: clusterCan(c)
     }));
 });
 
@@ -244,6 +252,14 @@ async function remove() {
       </div>
 
       <el-form label-width="80px" class="group-form">
+        <el-alert
+          v-if="!editable"
+          type="info"
+          :closable="false"
+          show-icon
+          class="mb-3"
+          title="当前账号不是在这个组的每个集群都有「Istio 修改」权限,只能查看,不能修改或删除这个组"
+        />
         <el-form-item label="组名" required>
           <el-input
             v-model="form.name"
@@ -331,9 +347,13 @@ async function remove() {
                   :key="item.k8s_name"
                   :label="item.k8s_name"
                   :value="item.k8s_name"
+                  :disabled="!item.allowed"
                 >
                   <span>{{ item.k8s_name }}</span>
-                  <span v-if="item.others.length" class="option-sub">
+                  <span v-if="!item.allowed" class="option-sub">
+                    没有「Istio 修改」权限
+                  </span>
+                  <span v-else-if="item.others.length" class="option-sub">
                     已在组 {{ item.others.join("、") }}
                   </span>
                 </el-option>
@@ -457,12 +477,19 @@ async function remove() {
         type="danger"
         plain
         style="float: left"
+        :disabled="!editable"
         @click="remove"
       >
         删除组
       </el-button>
       <el-button @click="visible = false">取消</el-button>
-      <el-button type="primary" :loading="saving" @click="save">保存</el-button>
+      <el-button
+        type="primary"
+        :loading="saving"
+        :disabled="!editable"
+        @click="save"
+        >保存</el-button
+      >
     </template>
   </el-dialog>
 </template>

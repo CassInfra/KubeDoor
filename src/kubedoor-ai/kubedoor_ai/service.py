@@ -178,7 +178,8 @@ class Service:
         merged = {row["env"]: {**row, **summaries.get(row["env"], {}), "configured": row["env"] in summaries} for row in clusters}
         for env, summary in summaries.items():
             merged.setdefault(env, {**summary, "online": False, "ai_tools": False})
-        # 对当前用户为「无」权限的集群完全不可见;permission 为该集群的有效权限,前端据此决定能否批准修改
+        # 对当前用户为「无」权限的集群完全不可见;permission 是该集群的有效权限(read / rw / admin),
+        # 能不能执行、要不要批准由网关按「权限与审批」判定
         visible = [{**row, "permission": identity.permission_for(row["env"])}
                    for row in merged.values() if identity.can_read(row["env"])]
         return {"enabled": True, "username": identity.username, "permission": identity.permission,
@@ -395,9 +396,10 @@ class Service:
         action = await self.store.one("SELECT * FROM kubedoor_ai_actions WHERE id=$1::uuid AND run_id=$2::uuid", action_id, rid)
         if not action:
             raise AIError("批准操作不存在", 404, "not_found")
-        # 用户自己接入的 MCP 和集群权限无关，会话本人就能批准；集群上的操作要该集群的读写权限
-        if action["source"] != "mcp":
-            identity.require_write(run["scope"]["env"])
+        # 批准：按动作记下的 ops 用当前身份复核权限（网页、企微一样；用户自己接入的 MCP 和集群权限无关）。
+        # 拒绝只要求是提问人本人，store.run 已经按用户名匹配
+        if decision == "approve":
+            await self.gateway.recheck(identity, run["scope"]["env"], action)
         if action["state"] != "pending":
             return {"run_id": rid, "status": run["status"], "action_status": action["state"]}
         if run["status"] != "waiting_approval" or run["cancel_requested"]:

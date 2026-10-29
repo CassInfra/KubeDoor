@@ -70,7 +70,7 @@ def test_global_none_only_sees_granted_clusters():
 
 def test_admin_and_agent_ignore_cluster_grants():
     admin = make_principal({'id': 1, 'username': 'a', 'role': 'admin', 'source': 'local'}, {'prod': 'none'})
-    assert admin.can_write('prod') and admin.env_scope() == ('all', ())
+    assert admin.permission('prod') == 'admin' and admin.can_write('prod') and admin.env_scope() == ('all', ())
     agent = make_principal({'id': 2, 'username': 'g', 'role': 'agent', 'source': 'local'}, {'prod': 'rw'})
     assert not agent.can_read('prod') and not agent.is_human
 
@@ -92,26 +92,35 @@ def test_env_condition_sql():
     ('DELETE', '/api/admin/users/3', 'admin'),
     ('GET', '/ws', 'agent'),
     ('GET', '/ws/pod-logs', 'env_read'),
-    ('GET', '/ws/pod-exec', 'env_write'),  # 终端能执行任意命令
-    ('GET', '/ws/node-exec', 'env_write'),  # 节点终端在宿主机以 root 执行
+    ('GET', '/ws/pod-exec', 'op'),  # 终端能执行任意命令
+    ('GET', '/ws/node-exec', 'op'),  # 节点终端在宿主机以 root 执行
     ('GET', '/api/agent/pods', 'env_read'),
     ('HEAD', '/api/agent/pods', 'env_read'),
     ('GET', '/api/pod/task_status/abc', 'env_read'),
-    ('GET', '/api/pod/delete_pod', 'env_write'),  # GET 但会删 Pod
-    ('GET', '/api/pod/auto_dump', 'env_write'),
+    ('GET', '/api/pod/delete_pod', 'op'),  # GET 但会删 Pod
+    ('GET', '/api/pod/auto_dump', 'op'),
     ('GET', '/api/admis_switch', 'admin'),
     ('GET', '/api/agent/istio/vs', 'admin'),
-    ('POST', '/api/scale', 'env_write'),
+    ('POST', '/api/scale', 'op'),
+    ('PUT', '/api/scale', 'op'),  # 转发给 agent 的修改不限方法
     ('POST', '/api/db/agent/collect', 'admin'),
     ('POST', '/api/db/agent/aliases', 'admin'),
     ('GET', '/api/agent/res/content', 'custom'),
     ('GET', '/api/agent/coredns', 'env_read'),
     ('GET', '/api/agent/net/resolve', 'env_read'),  # 从 agent 所在 Pod 解析域名
-    ('GET', '/api/agent/net/tcp', 'env_write'),  # 端口测试会从集群内向任意地址发起连接
-    ('POST', '/api/agent/coredns/save', 'env_write'),
-    ('GET', '/api/agent/coredns/save', 'env_write'),  # 只登记了 GET 的只读路径,别的子路径不放宽
+    ('GET', '/api/agent/net/tcp', 'op'),  # 端口测试会从集群内向任意地址发起连接
+    ('POST', '/api/agent/coredns/save', 'op'),
+    ('GET', '/api/agent/coredns/save', 'op'),  # 只登记了 GET 的只读路径,别的子路径不放宽
     ('POST', '/api/db/silence/add', 'custom'),
-    ('PUT', '/api/load-balance/config', 'global_write'),
+    ('PUT', '/api/load-balance/config', 'custom'),
+    ('POST', '/api/agent/res/ops', 'custom'),
+    ('DELETE', '/api/agent/res/delete', 'custom'),
+    ('POST', '/api/istio/groups', 'op_any'),
+    ('GET', '/api/istio/groups', 'login'),
+    ('GET', '/api/admin/permission-policy', 'admin'),
+    ('PUT', '/api/admin/permission-policy', 'admin'),
+    ('GET', '/api/ai/internal/permission-policy', 'internal'),
+    ('POST', '/api/admis', 'env_write'),  # 准入 webhook 由 K8S 直接调 agent,不经过 master
     ('GET', '/api/something/new', 'env_write'),  # 没登记的接口默认按集群写
 ])
 def test_rule_matching(method, path, kind):
@@ -171,8 +180,15 @@ async def test_env_rules_check_permission_of_target_cluster():
     assert denied.value.status == 403 and 'prod' in denied.value.message
     with pytest.raises(policy.Deny) as denied:
         await authorize(p, 'POST', '/api/scale', {'env': 'staging'})
-    assert denied.value.code == 'cluster_read_only'
+    assert denied.value.code == 'operation_forbidden'
+    assert denied.value.message == '当前账号在集群 staging 是「只读」权限,不能执行「扩缩容」'
+    with pytest.raises(policy.Deny) as denied:  # 看不到的集群按无权访问
+        await authorize(p, 'POST', '/api/scale', {'env': 'prod'})
+    assert denied.value.code == 'cluster_forbidden'
     await authorize(p, 'POST', '/api/scale', {'env': 'dev'})
+    with pytest.raises(policy.Deny) as denied:  # 兜底规则仍按集群读写
+        await authorize(p, 'POST', '/api/something/new', {'env': 'staging'})
+    assert denied.value.code == 'cluster_read_only'
     with pytest.raises(policy.Deny) as denied:
         await authorize(p, 'GET', '/api/agent/pods')
     assert denied.value.status == 400
@@ -225,7 +241,7 @@ def test_silence_scope():
     policy.check_silence_write(cluster_rw, [{'key': 'k8s', 'op': '=', 'value': 'prod'}])
     with pytest.raises(policy.Deny) as denied:
         policy.check_silence_write(cluster_rw, [{'key': 'alertname', 'op': '=', 'value': 'x'}])
-    assert denied.value.code == 'global_write_required'
+    assert denied.value.code == 'operation_forbidden'
     policy.check_silence_write(user('rw'), [{'key': 'alertname', 'op': '=', 'value': 'x'}])
     hidden = user('read', {'prod': 'none'})
     assert not policy.silence_visible(hidden, [{'key': 'env', 'op': '=', 'value': 'prod'}])
@@ -276,17 +292,32 @@ def test_top_queries_keep_cluster_filter_and_add_visibility():
     ('PUT', '/api/istio/vs/cluster'), ('DELETE', '/api/istio/vs/cluster'),
     ('POST', '/api/istio/httproute'), ('PUT', '/api/istio/httproute'), ('DELETE', '/api/istio/httproute'),
     ('POST', '/api/istio/httproute/reorder'), ('POST', '/api/istio/apply/preview'), ('POST', '/api/istio/apply'),
+])
+async def test_istio_changes_need_istio_permission_on_some_cluster(method, path):
+    """粗检:至少一个集群有「Istio 修改」(默认只有管理员列);具体集群由 handler 再判断(test_istio_api)。"""
+    rule = policy.match(method, path)
+    assert rule.kind == 'op_any' and rule.op == 'network.istio'
+    for principal in (user('rw'), user('read', {'a': 'rw'})):  # 所有集群读写也不行
+        with pytest.raises(policy.Deny) as denied:
+            await authorize(principal, method, path, {'env': 'a', 'vs_id': '1'})
+        assert denied.value.code == 'operation_forbidden'
+    for principal in (user('admin'), user('cluster_admin'), user('none', {'a': 'admin'}),
+                      user('cluster_admin', {'a': 'read'})):  # 后者其他集群仍按全局角色是管理员
+        await authorize(principal, method, path, {'env': 'a', 'vs_id': '1'})
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('method,path', [
     # 集群里的 VS 不能经通用转发直接读写(下发内容必须由 master 按组标准生成)
     ('GET', '/api/agent/istio/vs'), ('GET', '/api/agent/istio/vs/detail'), ('POST', '/api/agent/istio/vs/apply'),
     ('DELETE', '/api/agent/istio/vs/delete'),
 ])
-async def test_istio_changes_are_admin_only(method, path):
-    rule = policy.match(method, path)
-    assert rule.kind == 'admin'
-    with pytest.raises(policy.Deny) as denied:  # 所有集群读写也不行
-        await authorize(user('rw'), method, path, {'env': 'a', 'vs_id': '1'})
+async def test_agent_istio_relay_is_admin_only(method, path):
+    assert policy.match(method, path).kind == 'admin'
+    with pytest.raises(policy.Deny) as denied:
+        await authorize(user('cluster_admin'), method, path, {'env': 'a'})
     assert denied.value.code == 'admin_required'
-    await authorize(user('admin'), method, path, {'env': 'a', 'vs_id': '1'})
+    await authorize(user('admin'), method, path, {'env': 'a'})
 
 
 @pytest.mark.parametrize('path', ['/api/istio/groups', '/api/istio/groups/preview', '/api/istio/matrix',
@@ -312,3 +343,127 @@ def test_pepper_protects_hashes_and_upgrades_old_ones(monkeypatch):
     assert not passwords.verify_password('S3cure-pass', peppered)
     monkeypatch.delenv('AI_ENCRYPTION_KEY')
     assert not passwords.verify_password('S3cure-pass', peppered)
+
+
+# ---------------------------------------------------------------- 操作权限表
+@pytest.mark.parametrize('method,path,op', [
+    ('GET', '/ws/pod-exec', 'pod.shell'), ('GET', '/ws/node-exec', 'node.shell'),
+    ('POST', '/api/restart', 'workload.restart'), ('POST', '/api/agent/statefulset/restart', 'workload.restart'),
+    ('POST', '/api/agent/daemonset/restart', 'workload.restart'),
+    ('POST', '/api/scale', 'workload.scale'), ('POST', '/api/agent/statefulset/scale', 'workload.scale'),
+    ('POST', '/api/db/res/pod_count', 'workload.scale'), ('POST', '/api/cron', 'workload.schedule'),
+    ('GET', '/api/pod/delete_pod', 'pod.delete'), ('DELETE', '/api/pod/delete_pods', 'pod.delete'),
+    ('POST', '/api/pod/modify_pod', 'pod.isolate'),
+    ('GET', '/api/pod/auto_dump', 'pod.jvm'), ('GET', '/api/pod/auto_jstack', 'pod.jvm'),
+    ('GET', '/api/pod/auto_jfr', 'pod.jvm'), ('GET', '/api/pod/auto_jvm_mem', 'pod.jvm'),
+    ('POST', '/api/nodes/cordon', 'node.cordon'), ('POST', '/api/nodes/uncordon', 'node.cordon'),
+    ('POST', '/api/load-balance/analyze', 'balance.run'), ('POST', '/api/load-balance/execute', 'balance.run'),
+    ('POST', '/api/load-balance/cleanup', 'balance.run'),
+    ('GET', '/api/init_peak_data', 'control.edit'),
+    ('POST', '/api/agent/coredns/save', 'network.coredns'), ('GET', '/api/agent/net/tcp', 'network.tcp'),
+])
+def test_operation_rules(method, path, op):
+    rule = policy.match(method, path)
+    assert (rule.kind, rule.op) == ('op', op) and rule.write
+
+
+@pytest.mark.asyncio
+async def test_operation_columns_and_system_admin(set_policy):
+    reader, rw, cluster_admin, admin = user('read'), user('rw'), user('cluster_admin'), user('admin')
+    with pytest.raises(policy.Deny):
+        await authorize(reader, 'GET', '/ws/pod-exec', {'env': 'prod'})
+    await authorize(rw, 'GET', '/ws/pod-exec', {'env': 'prod'})
+    # CoreDNS 默认只有管理员
+    with pytest.raises(policy.Deny) as denied:
+        await authorize(rw, 'POST', '/api/agent/coredns/save', {'env': 'prod'})
+    assert denied.value.message == '当前账号在集群 prod 是「读写」权限,不能执行「CoreDNS 修改」'
+    await authorize(cluster_admin, 'POST', '/api/agent/coredns/save', {'env': 'prod'})
+    await authorize(user('rw', {'prod': 'admin'}), 'POST', '/api/agent/coredns/save', {'env': 'prod'})
+    with pytest.raises(policy.Deny):  # 集群管理员可以单独降低某个集群的权限
+        await authorize(user('cluster_admin', {'prod': 'rw'}), 'POST', '/api/agent/coredns/save', {'env': 'prod'})
+    # 勾上只读列后只读用户也能开终端;取消管理员列后包括系统管理员在内谁都不能重启
+    set_policy({'pod.shell': {'read': True}, 'workload.restart': {'read': False, 'rw': False, 'admin': False}})
+    await authorize(reader, 'GET', '/ws/pod-exec', {'env': 'prod'})
+    for principal in (rw, cluster_admin, admin):
+        with pytest.raises(policy.Deny) as denied:
+            await authorize(principal, 'POST', '/api/restart', {'env': 'prod'})
+        assert denied.value.code == 'operation_forbidden'
+    with pytest.raises(policy.Deny) as denied:  # 不带集群参数的操作一律 400(系统管理员也是)
+        await authorize(admin, 'POST', '/api/scale')
+    assert denied.value.status == 400
+
+
+@pytest.mark.asyncio
+async def test_update_image_whitelist_only_for_read_users(set_policy):
+    set_policy({'workload.image': {'rw': False}})
+    with pytest.raises(policy.Deny):  # 读写用户没有该操作就是没有,不走白名单
+        await authorize(user('rw'), 'POST', '/api/update-image', {'env': 'prod'})
+    request = await authorize(user('read'), 'POST', '/api/update-image', {'env': 'prod'})
+    assert request.state['update_image_direct'] is False
+    request = await authorize(user('cluster_admin'), 'POST', '/api/update-image', {'env': 'prod'})
+    assert request.state['update_image_direct'] is True
+    set_policy({'workload.image': {'rw': False, 'admin': False}})  # 全站关闭:白名单也不放行
+    with pytest.raises(policy.Deny):
+        await authorize(user('read'), 'POST', '/api/update-image', {'env': 'prod'})
+
+
+@pytest.mark.asyncio
+async def test_resource_yaml_needs_target_operations():
+    coredns = 'apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: coredns\n  namespace: kube-system\n'
+    vs = 'apiVersion: networking.istio.io/v1\nkind: VirtualService\nmetadata:\n  name: a\n'
+    plain = 'apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: app\n  namespace: kube-system\n'
+    rw, cluster_admin = user('rw'), user('cluster_admin')
+    await authorize(rw, 'POST', '/api/agent/res/ops', {'env': 'prod', 'method': 'apply'}, {'yaml_content': plain})
+    for content, name in ((coredns, 'CoreDNS 修改'), (f'{plain}---\n{vs}', 'Istio 修改')):
+        with pytest.raises(policy.Deny) as denied:
+            await authorize(rw, 'POST', '/api/agent/res/ops', {'env': 'prod'}, {'yaml_content': content})
+        assert denied.value.message.endswith(f'不能执行「{name}」')
+        await authorize(cluster_admin, 'POST', '/api/agent/res/ops', {'env': 'prod'}, {'yaml_content': content})
+    with pytest.raises(policy.Deny) as denied:  # 解析不了的 YAML 按都涉及处理
+        await authorize(rw, 'POST', '/api/agent/res/ops', {'env': 'prod'}, {'yaml_content': 'a: [1'})
+    assert denied.value.message.startswith('YAML 解析失败')
+    with pytest.raises(policy.Deny) as denied:
+        await authorize(user('read'), 'POST', '/api/agent/res/ops', {'env': 'prod'}, {'yaml_content': plain})
+    assert denied.value.message.endswith('不能执行「新建 / 编辑资源 YAML」')
+
+
+@pytest.mark.asyncio
+async def test_resource_delete_needs_target_operations():
+    query = {'env': 'prod', 'namespace': 'kube-system', 'resource_type': 'configmap', 'resource_name': 'coredns'}
+    with pytest.raises(policy.Deny) as denied:
+        await authorize(user('rw'), 'DELETE', '/api/agent/res/delete', query)
+    assert denied.value.message.endswith('不能执行「CoreDNS 修改」')
+    await authorize(user('cluster_admin'), 'DELETE', '/api/agent/res/delete', query)
+    await authorize(user('rw'), 'DELETE', '/api/agent/res/delete', {**query, 'resource_name': 'other'})
+    with pytest.raises(policy.Deny) as denied:
+        await authorize(user('read'), 'DELETE', '/api/agent/res/delete', {**query, 'resource_name': 'other'})
+    assert denied.value.message.endswith('不能执行「删除资源」')
+
+
+@pytest.mark.asyncio
+async def test_global_configs_use_global_role_column(set_policy):
+    await authorize(user('rw'), 'PUT', '/api/load-balance/config')
+    await authorize(user('cluster_admin'), 'PUT', '/api/load-balance/config')
+    for principal in (user('read', {'prod': 'rw'}), user('none', {'prod': 'admin'})):
+        with pytest.raises(policy.Deny) as denied:
+            await authorize(principal, 'PUT', '/api/load-balance/config')
+        assert denied.value.code == 'operation_forbidden'
+    set_policy({'balance.run': {'rw': False}})
+    with pytest.raises(policy.Deny):
+        await authorize(user('rw'), 'PUT', '/api/load-balance/config')
+    set_policy({'alert.silence': {'read': True}})
+    policy.check_silence_write(user('read'), [{'key': 'alertname', 'op': '=', 'value': 'x'}])
+
+
+@pytest.mark.asyncio
+async def test_policy_unavailable_fails_closed(monkeypatch):
+    from auth import permissions, store as store_module
+
+    async def broken(key):
+        raise RuntimeError('db down')
+
+    permissions.invalidate_cache()
+    monkeypatch.setattr(store_module.store, 'get_setting_row', broken)
+    with pytest.raises(policy.Deny) as denied:
+        await authorize(user('admin'), 'POST', '/api/scale', {'env': 'prod'})
+    assert denied.value.status == 503

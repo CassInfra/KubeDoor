@@ -79,7 +79,12 @@
           </el-button>
         </el-form-item>
         <el-form-item class="right-auto">
-          <el-button type="success" @click="openCreateDialog">新建</el-button>
+          <el-button
+            type="success"
+            :disabled="!can('resource.apply', searchForm.env)"
+            @click="openCreateDialog"
+            >新建</el-button
+          >
         </el-form-item>
       </el-form>
     </div>
@@ -275,11 +280,13 @@
                               日志
                             </el-dropdown-item>
                             <el-dropdown-item
+                              :disabled="!can('pod.isolate', scope.row.env)"
                               @click="handleIsolatePod(scope.row, podScope.row)"
                             >
                               隔离
                             </el-dropdown-item>
                             <el-dropdown-item
+                              :disabled="!can('pod.delete', scope.row.env)"
                               @click="handleDeletePod(scope.row, podScope.row)"
                             >
                               删除
@@ -379,16 +386,22 @@
                 </el-button>
                 <template #dropdown>
                   <el-dropdown-menu>
-                    <el-dropdown-item @click="handleScale(scope.row)"
+                    <el-dropdown-item
+                      :disabled="!can('workload.scale', scope.row.env)"
+                      @click="handleScale(scope.row)"
                       >扩缩容</el-dropdown-item
                     >
-                    <el-dropdown-item @click="handleRestart(scope.row)"
+                    <el-dropdown-item
+                      :disabled="!can('workload.restart', scope.row.env)"
+                      @click="handleRestart(scope.row)"
                       >重启</el-dropdown-item
                     >
                     <el-dropdown-item @click="handleEdit(scope.row)"
                       >编辑</el-dropdown-item
                     >
-                    <el-dropdown-item @click="handleDelete(scope.row)"
+                    <el-dropdown-item
+                      :disabled="!can('resource.delete', scope.row.env)"
+                      @click="handleDelete(scope.row)"
                       >删除</el-dropdown-item
                     >
                   </el-dropdown-menu>
@@ -414,6 +427,7 @@
             <el-button
               type="primary"
               :loading="createSaveLoading"
+              :disabled="!can('resource.apply', searchForm.env)"
               @click="handleCreateSave"
             >
               提交
@@ -484,6 +498,7 @@
             <el-button
               type="primary"
               :loading="saveLoading"
+              :disabled="!can('resource.apply', currentEditResource?.env)"
               @click="handleSave"
             >
               提交
@@ -680,6 +695,7 @@ import {
   deleteK8sResource
 } from "@/api/service";
 import { useSearchStoreHook } from "@/store/modules/search";
+import { usePermission } from "@/utils/usePermission";
 import * as monaco from "monaco-editor";
 import * as yaml from "js-yaml";
 import { YAMLException } from "js-yaml";
@@ -690,6 +706,8 @@ defineOptions({
 });
 
 const searchStore = useSearchStoreHook();
+// 没有权限的操作置灰(按「权限与审批」的配置,后端同样校验)
+const { can } = usePermission();
 
 const searchForm = reactive({
   env: searchStore.env || "",

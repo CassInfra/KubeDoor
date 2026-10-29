@@ -88,7 +88,8 @@ http 规则从规则里的字段写起(`match.uri.prefix: /api/`、`route.destin
 
 ### 从集群现状同步到组标准
 
-对比时一边是组标准(`standard` 或 `standard@集群`)、一边是集群现状(`cluster@集群`),管理员可以把现状里的内容
+对比时一边是组标准(`standard` 或 `standard@集群`)、一边是集群现状(`cluster@集群`),能做组级修改的账号(组内每个集群都有
+「Istio 修改」)可以把现状里的内容
 整条同步到组标准 —— 只能从现状到组标准(组标准只有一份,各集群的现状可能各不相同)。在要同步的规则后面点按钮,
 可以选多处、可以撤销,选好后「保存组标准」一次写入(保存前确认改了什么、哪些集群会缺少域名);下发后才在集群里生效。
 
@@ -203,12 +204,22 @@ http 规则从规则里的字段写起(`match.uri.prefix: /api/`、`route.destin
 
 ## 接口
 
-查看(GET)要登录,看不到的集群不返回(组里一个都看不到就 403);**所有修改只允许管理员**(`auth/policy.py`)。
+查看(GET)要登录,看不到的集群不返回(组里一个都看不到就 403)。修改要操作权限表里的「Istio 修改」(`network.istio`,
+默认只有对该集群是管理员权限的账号有,可在「系统管理 → 权限与审批」调整,见 [auth/README.md](../auth/README.md)):
+`auth/policy.py` 只粗检至少一个集群有,`handlers.py` 的 `_require_istio` 再按下面的口径细检。
+
+- **组级修改**要求组内每个集群都有:组的新建 / 修改 / 删除(改组成员时新旧成员都算)、组标准的新建 / 修改 / 删除、
+  规则的新增 / 修改 / 删除 / 重排、各集群的 hosts 和域名(部署到某集群 / 不再部署)、忽略 / 取消忽略、纳管、
+  按现状重置组标准、同步到组标准(含预览)。没有集群的组按全局角色对应的那一列判断。
+- **集群级修改**只看目标集群:下发(含预览)、回退、删除集群里的 VirtualService、刷新现状。
+- 组列表、矩阵、详情返回组的 `can_manage`(能否做组级修改)和每个集群的 `can_istio`,前端据此置灰按钮。
+- 通过资源 YAML 编辑 / 删除或 AI(kubectl、K8S API、`resource_apply` 等)改集群里的 Istio 资源,同样要该集群的「Istio 修改」。
+
 浏览器不能经通用转发直接调 `/api/agent/istio/*`(master 的 `http_handler` 直接拒绝)。
 
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
-| GET | `/api/istio/groups` | 组列表(含包含 / 忽略规则);管理员额外返回所有集群,以及各自已在哪些组里 |
+| GET | `/api/istio/groups` | 组列表(含包含 / 忽略规则、`can_manage`、各集群的 `can_istio`);至少一个集群有「Istio 修改」的账号额外返回能看到的已接入集群、各自已在哪些组里和 `can_istio`(组管理弹框选集群用) |
 | POST / PUT / DELETE | `/api/istio/groups`(`?id=`) | 新建 / 修改 / 删除组。body:`{name, description, clusters:[{k8s_name, env_type, remark}], include_patterns, ignore_patterns}`,规则每条 `{type: glob\|regex, pattern}`,集群顺序即显示顺序;移出组的集群,它在本组的部署关系删除,不再属于任何组的集群,现状和备份也删除 |
 | GET | `/api/istio/groups/preview?group_id=&clusters=&include=&ignore=` | 组管理里预览规则(`include` / `ignore` 是 JSON 数组):按所选集群已采集的现状,每个 VS 归本组还是被忽略、和哪些组冲突;不保存 |
 | GET | `/api/istio/matrix?group_id=` | 组矩阵:只列本组范围内的 VS,`cells` 按集群给出 hosts、状态、版本、最近一次下发的时间和下发人,`conflicts` 冲突的组,`search_lines` 搜索用的规则内容(见「矩阵搜索」),`domain_issues` 域名冲突(见「域名冲突检查」,每条前面是集群);另给 `ignored`(被忽略的 VS 和原因)和 `stats`(总数、忽略数) |

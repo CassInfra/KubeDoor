@@ -245,7 +245,9 @@
                   type="primary"
                   size="small"
                   plain
-                  :disabled="!scope.row.collect"
+                  :disabled="
+                    !scope.row.collect || !can('control.edit', scope.row.key)
+                  "
                   @click="handleCollectHistory(scope.row)"
                 >
                   采集
@@ -584,7 +586,7 @@ import {
 import { getPromNamespace } from "@/api/monit";
 
 import { message } from "@/utils/message";
-import { useClusterPermission } from "@/utils/permission";
+import { usePermission } from "@/utils/usePermission";
 import { transformI18n } from "@/plugins/i18n";
 import { aiApi, type AIConnection } from "@/api/ai";
 
@@ -614,7 +616,7 @@ async function refreshConnections() {
   }
 }
 function manageConnection(env: string) {
-  // kubeconfig 直连属于集群接入配置,只有管理员能改(后端同样校验)
+  // kubeconfig 直连属于集群接入配置,只有系统管理员能改(后端同样校验)
   if (aiPermission.value !== "admin") return;
   connectionEnv.value = env;
   connectionDialogMounted.value = true;
@@ -626,7 +628,7 @@ function connectionSummary(env: string) {
   if (!connection?.configured)
     return aiPermission.value === "admin"
       ? "上传 YAML / JSON Kubeconfig 并测试连接"
-      : "只有管理员可以管理共享配置";
+      : "只有系统管理员可以管理共享配置";
   return `context: ${connection.context || ""}；测试: ${connection.test_status || "未测试"} ${connection.tested_at || ""}`;
 }
 
@@ -966,8 +968,8 @@ const handleSchedulerChange = async (val: boolean, row: AgentData) => {
 };
 
 // ---- 集群别名(AI 助手按别名识别集群)----
-// 只有管理员能编辑(后端同样校验);按登录账号判断,不依赖 AI 服务是否启用
-const { isAdmin } = useClusterPermission();
+// 只有系统管理员能编辑(属于 Agent 管理,后端同样校验);按登录账号判断,不依赖 AI 服务是否启用
+const { isAdmin, can } = usePermission();
 // 和 master func_manager/db_api.py 的校验保持一致
 const ALIAS_MAX_COUNT = 20;
 const ALIAS_MAX_LENGTH = 64;

@@ -20,7 +20,7 @@ from aiohttp.test_utils import TestClient, TestServer
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 
 import db  # noqa: E402
-from auth import audit  # noqa: E402
+from auth import audit, permissions  # noqa: E402
 from auth.principal import Principal  # noqa: E402
 from istio_route import handlers  # noqa: E402
 from istio_route import spec as S  # noqa: E402
@@ -126,6 +126,9 @@ async def env(monkeypatch):
     monkeypatch.setattr(db, '_loop', asyncio.get_running_loop())
     await db.run_ddl_file(str(DB_SQL))
     await db.pg_execute('TRUNCATE istio_group, istio_vs_backup RESTART IDENTITY CASCADE')
+    # 权限与审批用库里的(默认值),不用 conftest 放进缓存的那份
+    await db.pg_execute("DELETE FROM auth_settings WHERE key = 'permission_policy'")
+    permissions.invalidate_cache()
     audits = []
     monkeypatch.setattr(audit, 'record_bg', lambda username, action, **kw: audits.append((username, action, kw)))
     agent = FakeAgent()
@@ -1094,3 +1097,109 @@ async def test_sync_rules_from_cluster_to_standard(env):
     await call(client, 'POST', '/api/istio/collect', {'group_id': group_id})
     gone = await call(client, 'POST', '/api/istio/vs/sync', {**body, 'rules': [{'standard_index': 0}]}, status=404)
     assert '现状里没有' in gone['error']
+
+
+def as_user(role, clusters=None):
+    return {'X-Test-Role': role, 'X-Test-Clusters': json.dumps(clusters or {})}
+
+
+@pytest.mark.asyncio
+async def test_istio_permissions_by_cluster(env, monkeypatch):
+    """修改要「Istio 修改」(默认只有管理员列):组级修改看组内每个集群,集群级修改只看目标集群。"""
+    client, agent, _ = env
+    import utils
+
+    async def names():
+        return ['beta-k', 'beta-p', 'prod-a', 'prod-b']
+
+    monkeypatch.setattr(utils, 'get_k8s_names', names)
+    group_id = await setup_group(client, agent)
+    await call(client, 'POST', '/api/istio/collect', {'group_id': group_id})
+    await call(client, 'POST', '/api/istio/import', {'group_id': group_id, 'items': [
+        {'namespace': NS, 'name': 'a', 'base': 'beta-k', 'clusters': ['beta-k', 'beta-p', 'prod-a']}]})
+    a_id = (await matrix(client, group_id))['a']['vs_id']
+
+    # 只在 beta-k 是管理员:能刷新、预览、下发 beta-k;组级修改和别的集群都不行
+    one = as_user('none', {'beta-k': 'admin', 'beta-p': 'read', 'prod-a': 'rw'})
+    groups = (await call(client, 'GET', '/api/istio/groups', headers=one))['data']
+    group = groups['groups'][0]
+    assert group['can_manage'] is False
+    assert {c['k8s_name']: c['can_istio'] for c in group['clusters']} == {'beta-k': True, 'beta-p': False, 'prod-a': False}
+    assert [(c['k8s_name'], c['can_istio']) for c in groups['clusters']] == [
+        ('beta-k', True), ('beta-p', False), ('prod-a', False)]  # 看不到的 prod-b 不列
+    data = (await call(client, 'GET', '/api/istio/matrix', group_id=group_id, headers=one))['data']
+    assert data['group']['can_manage'] is False and data['group']['clusters'][0]['can_istio'] is True
+    detail = (await call(client, 'GET', '/api/istio/vs', vs_id=a_id, headers=one))['data']
+    assert detail['can_manage'] is False
+    assert {c['k8s_name']: c['can_istio'] for c in detail['clusters']} == {'beta-k': True, 'beta-p': False, 'prod-a': False}
+
+    await call(client, 'POST', '/api/istio/collect', {'group_id': group_id, 'k8s_names': ['beta-k']}, headers=one)
+    denied = await call(client, 'POST', '/api/istio/collect', {'group_id': group_id}, headers=one, status=403)
+    assert denied['error'] == '当前账号在集群 beta-p 是「只读」权限、在集群 prod-a 是「读写」权限,不能执行「Istio 修改」'
+    preview = await call(client, 'POST', '/api/istio/apply/preview', {'items': [{'vs_id': a_id, 'k8s_name': 'beta-k'}]},
+                         headers=one)
+    assert preview['data'][0]['error'] is None
+    await call(client, 'POST', '/api/istio/apply', {'items': [{'vs_id': a_id, 'k8s_name': 'beta-k'}]}, headers=one)
+    for path, body in (('/api/istio/apply/preview', {'items': [{'vs_id': a_id, 'k8s_name': 'prod-a'}]}),
+                       ('/api/istio/apply', {'items': [{'vs_id': a_id, 'k8s_name': 'beta-k'},
+                                                       {'vs_id': a_id, 'k8s_name': 'beta-p'}]}),
+                       ('/api/istio/live/delete', {'group_id': group_id, 'k8s_name': 'beta-p', 'namespace': NS, 'name': 'b'}),
+                       ('/api/istio/live/rollback', {'group_id': group_id, 'k8s_name': 'prod-a', 'namespace': NS,
+                                                     'name': 'a', 'backup_id': 1})):
+        await call(client, 'POST', path, body, headers=one, status=403)
+    applied = len(agent.applied)
+    # 组级修改:组内每个集群都要有
+    for method, path, body, params in (
+            ('POST', '/api/istio/import', {'group_id': group_id, 'items': [
+                {'namespace': NS, 'name': 'b', 'base': 'beta-k', 'clusters': ['beta-k']}]}, {}),
+            ('POST', '/api/istio/ignore', {'group_id': group_id, 'items': [{'namespace': NS, 'name': 'b'}]}, {}),
+            ('POST', '/api/istio/vs/reset', {'vs_id': a_id, 'k8s_name': 'beta-k'}, {}),
+            ('PUT', '/api/istio/vs', {'gateways': ['istio-system/x']}, {'vs_id': a_id}),
+            ('PUT', '/api/istio/vs/cluster', {'vs_id': a_id, 'k8s_name': 'beta-k', 'hosts': ['x.com']}, {}),
+            ('DELETE', '/api/istio/vs/cluster', None, {'vs_id': a_id, 'k8s_name': 'beta-k'}),
+            ('POST', '/api/istio/httproute', {'match_rules': [{'uri': {'prefix': '/x/'}}], 'forward_type': 'route',
+                                              'forward_detail': [{'destination': {'host': 'x'}}]}, {'vs_id': a_id}),
+            ('POST', '/api/istio/httproute/reorder', None, {'vs_id': a_id}),
+            ('DELETE', '/api/istio/vs', None, {'vs_id': a_id}),
+            ('DELETE', '/api/istio/groups', None, {'id': group_id})):
+        denied = await call(client, method, path, body, headers=one, status=403, **params)
+        assert '组级修改要求组内每个集群都有该权限' in denied['error']
+    assert len(agent.applied) == applied and (await matrix(client, group_id))['a']['vs_id'] == a_id
+
+    # 集群管理员(全局角色):单独降为读写的集群算没有;改组成员时新旧成员都算
+    manager = as_user('cluster_admin', {'prod-b': 'rw'})
+    created = await call(client, 'POST', '/api/istio/groups', {'name': 'mine', 'clusters': [{'k8s_name': 'beta-k'}]},
+                         headers=manager)
+    mine = created['data']['id']
+    denied = await call(client, 'PUT', f'/api/istio/groups?id={mine}', {
+        'name': 'mine', 'clusters': [{'k8s_name': 'beta-k'}, {'k8s_name': 'prod-b', 'env_type': 'prod'}]},
+        headers=manager, status=403)
+    assert 'prod-b 是「读写」权限' in denied['error']
+    await call(client, 'POST', '/api/istio/groups', {'name': 'x', 'clusters': [{'k8s_name': 'prod-b'}]},
+               headers=manager, status=403)
+    # 组里有看不到的集群:不报它的名字
+    hidden = await call(client, 'POST', '/api/istio/ignore', {'group_id': group_id, 'items': [{'namespace': NS, 'name': 'b'}]},
+                        headers=as_user('none', {'beta-k': 'admin', 'beta-p': 'admin'}), status=403)
+    assert hidden['error'].startswith('当前账号没有其中 1 个集群的访问权限,') and 'prod-a' not in hidden['error']
+    assert (await call(client, 'GET', '/api/istio/vs', vs_id=a_id, headers=manager))['data']['can_manage'] is True
+    await call(client, 'POST', '/api/istio/ignore', {'group_id': group_id, 'items': [{'namespace': NS, 'name': 'b'}]},
+               headers=manager)
+    # 没有集群的组按全局角色:集群管理员能看到也能管理,读写看不到
+    empty = (await call(client, 'POST', '/api/istio/groups', {'name': 'empty'}, headers=manager))['data']['id']
+    listed = {g['id']: g for g in (await call(client, 'GET', '/api/istio/groups', headers=manager))['data']['groups']}
+    assert listed[empty]['can_manage'] is True and listed[mine]['can_manage'] is True
+    rw = as_user('rw')
+    listed = {g['id']: g for g in (await call(client, 'GET', '/api/istio/groups', headers=rw))['data']['groups']}
+    assert empty not in listed and listed[group_id]['can_manage'] is False
+    await call(client, 'POST', '/api/istio/unignore', {'group_id': group_id, 'items': [{'namespace': NS, 'name': 'b'}]},
+               headers=rw, status=403)
+
+    # 「权限与审批」里给读写列勾上 Istio 修改(写库,下次读库生效)
+    await permissions.save_policy({'network.istio': {'read': False, 'rw': True, 'admin': True, 'approval': True}},
+                                  permissions.default_commands(), 'admin')
+    permissions.invalidate_cache()
+    assert (await permissions.load_policy())['ops']['network.istio']['rw'] is True
+    await call(client, 'POST', '/api/istio/unignore', {'group_id': group_id, 'items': [{'namespace': NS, 'name': 'b'}]},
+               headers=rw)
+    listed = {g['id']: g for g in (await call(client, 'GET', '/api/istio/groups', headers=rw))['data']['groups']}
+    assert listed[group_id]['can_manage'] is True and listed[empty]['can_manage'] is True

@@ -19,6 +19,7 @@ from .catalogue import EXTRA_CATALOG, EXTRA_SCHEMAS, build_request, validate_arg
 from .control import (OUTSIDE_ADMISSION, PLANNED, STEP_NAMES, build_plan, changed_fields, check_target, control_drift,
                       deployment_edits, deployment_path, main_step, rejection, snapshot, verify)
 from .user_mcp import McpServers, frozen_fingerprint, needs_approval
+from . import permissions
 
 
 # Logical operations are a closed catalogue: the model cannot choose URLs or
@@ -63,6 +64,8 @@ DEPLOYMENT_SCHEDULES = {
     "cron_deployment_scale": ("scale", "cron"),
 }
 DEPLOYMENT_CHANGES = {"restart_deployment", "scale_deployment", *DEPLOYMENT_SCHEDULES}
+# 取「权限与审批」配置的超时（秒）：master 卡住时不能一直挂着工具调用
+POLICY_FETCH_TIMEOUT = 10
 
 
 def validate_deployment_change(operation: str, args: dict):
@@ -156,9 +159,9 @@ def tool_catalog() -> list[dict]:
         "logs": (["namespace", "pod"], {"namespace": "string", "pod": "string", "lines": "integer 1..5000"}, "最新 Pod 日志；指定容器用通用 api Pod/log"),
         "previous_logs": (["namespace", "pod"], {"namespace": "string", "pod": "string", "lines": "integer 1..5000"}, "Pod 上一次退出容器的日志"),
         "metrics": (["query"], {"query": "MetricsQL/PromQL string", "start": "RFC3339 or UNIX seconds", "end": "RFC3339 or UNIX seconds", "step": "positive seconds"}, "即时查询；start/end 同时传为范围查询；服务器强制集群标签过滤"),
-        "scale_deployment": (["namespace", "deployment", "replicas"], {"namespace": "string", "deployment": "string", "replicas": "nonnegative integer", "mode": "persistent（默认，永久）/temporary（临时）", "scheduler": "boolean optional", "node_scheduler": "string[] optional; requires scheduler=true"}, "Deployment 立即扩缩容，需批准。网关按花折资源管控状态执行：受管控时 persistent 同时写入管控副本数（以后每次发布都按它），temporary 只临时扩缩（下次发布或重启恢复管控值）；不受管控时直接改副本数。定时一次用 schedule_deployment_scale，周期执行用 cron_deployment_scale"),
-        "restart_deployment": (["namespace", "deployment"], {"namespace": "string", "deployment": "string", "scheduler": "boolean optional", "node_scheduler": "string[] optional"}, "立即滚动重启 Deployment；指定日期执行用 schedule_deployment_restart，每日等重复执行用 cron_deployment_restart；需批准"),
-        "update_deployment_image": (["namespace", "deployment", "image_tag"], {"namespace": "string", "deployment": "string", "image_tag": "string"}, "更新镜像标签，沿用 UPDATE_IMAGE 策略，需批准"),
+        "scale_deployment": (["namespace", "deployment", "replicas"], {"namespace": "string", "deployment": "string", "replicas": "nonnegative integer", "mode": "persistent（默认，永久）/temporary（临时）", "scheduler": "boolean optional", "node_scheduler": "string[] optional; requires scheduler=true"}, "Deployment 立即扩缩容。网关按花折资源管控状态执行：受管控时 persistent 同时写入管控副本数（以后每次发布都按它），temporary 只临时扩缩（下次发布或重启恢复管控值）；不受管控时直接改副本数。定时一次用 schedule_deployment_scale，周期执行用 cron_deployment_scale"),
+        "restart_deployment": (["namespace", "deployment"], {"namespace": "string", "deployment": "string", "scheduler": "boolean optional", "node_scheduler": "string[] optional"}, "立即滚动重启 Deployment；指定日期执行用 schedule_deployment_restart，每日等重复执行用 cron_deployment_restart"),
+        "update_deployment_image": (["namespace", "deployment", "image_tag"], {"namespace": "string", "deployment": "string", "image_tag": "string"}, "更新镜像标签，沿用 UPDATE_IMAGE 策略"),
     }
     schemas.update(EXTRA_SCHEMAS)
     for name, (action_type, trigger) in DEPLOYMENT_SCHEDULES.items():
@@ -170,12 +173,12 @@ def tool_catalog() -> list[dict]:
             arguments["replicas"] = "nonnegative integer"
             arguments["mode"] = "可省略；受花折资源管控时到点只能临时扩缩（不写管控表，下次发布恢复管控值），不能传 persistent"
         arguments.update(scheduler="boolean optional", node_scheduler="string[] optional; requires scheduler=true")
-        schemas[name] = (required, arguments, f"{'指定日期时间执行一次' if trigger == 'once' else '按 Cron 重复执行'}的 Deployment {'重启' if action_type == 'restart' else '扩缩容'}；复用页面 /api/cron 注册任务，禁止用于 Pod/StatefulSet/DaemonSet，无需另写实现 YAML；创建不等于已执行；按北京时间执行（CronJob spec.timeZone=Asia/Shanghai），需批准")
+        schemas[name] = (required, arguments, f"{'指定日期时间执行一次' if trigger == 'once' else '按 Cron 重复执行'}的 Deployment {'重启' if action_type == 'restart' else '扩缩容'}；复用页面 /api/cron 注册任务，禁止用于 Pod/StatefulSet/DaemonSet，无需另写实现 YAML；创建不等于已执行；按北京时间执行（CronJob spec.timeZone=Asia/Shanghai）")
     result = []
     for name, item in CATALOG.items():
         required, arguments, description = schemas.get(name, ([], {"namespace": "string"}, "查询实际 K8S 资源"))
         if name in ("delete_pod", "isolate_pod", "jvm_mem", "jvm_dump", "jvm_jstack", "jvm_jfr"):
-            required, arguments, description = ["namespace", "pod"], {"namespace": "string", "pod": "string"}, "Pod 操作或 JVM exec，需批准，可能生成及上传文件"
+            required, arguments, description = ["namespace", "pod"], {"namespace": "string", "pod": "string"}, "Pod 操作或 JVM exec，可能生成及上传文件"
         result.append({"name": name, "description": description, "read_only": item[3], "freshness": item[2], "required": required, "arguments": arguments})
     return result
 
@@ -266,6 +269,8 @@ class Gateway:
         self.http = http or httpx.AsyncClient(timeout=httpx.Timeout(330, connect=10), follow_redirects=False)
         # 用户自己接入的外部 MCP（网页 AI 助手的「MCP 管理」）
         self.mcp = mcp or McpServers(store, cipher)
+        # master「权限与审批」的配置（操作权限表 + 命令清单），5 秒缓存
+        self.policy_cache = permissions.PolicyCache()
 
     async def master(self, identity, method, path, params=None, body=None, allow_failure=False):
         # master 按 X-User-Name 从库里重新计算该用户的集群权限,不采信这里带的权限
@@ -337,6 +342,36 @@ class Gateway:
         from kubedoor_tools import classify_operation
         return bool(classify_operation(operation, arguments).get("read_only"))
 
+    async def permission_policy(self, identity):
+        """master「权限与审批」的配置（5 秒缓存）；取不到返回 None，有 ops 的调用一律拒绝，查询不受影响"""
+        async def fetch():
+            async with asyncio.timeout(POLICY_FETCH_TIMEOUT):
+                return await self.master(identity, "GET", "/api/ai/internal/permission-policy")
+        return await self.policy_cache.get(fetch)
+
+    async def authorize(self, ctx, operation, args):
+        """权限先于审批：没有权限直接 403、不建动作；有权限时返回涉及的 ops 和是否要批准（permissions.evaluate）"""
+        policy = await self.permission_policy(ctx.identity) if permissions.needs_policy(operation, args) else None
+        decision = permissions.evaluate(ctx.identity, ctx.run["scope"]["env"], operation, args, policy)
+        if decision["denied"]:
+            raise AIError(decision["message"], 403, "permission_denied")
+        return decision
+
+    async def recheck(self, identity, env, action):
+        """批准和执行前按动作记下的 ops 用当前身份再查一次：审批期间被降权、权限表被改都会拦下"""
+        if action["source"] == "mcp":
+            return   # 用户自己接入的 MCP 和集群权限无关
+        ops = action.get("ops")
+        if ops is None:
+            # 升级前建的动作没有记 ops：沿用原来的读写权限检查
+            if not action["read_only"]:
+                identity.require_write(env)
+            return
+        if ops:
+            problem = permissions.check(identity, env, ops, await self.permission_policy(identity))
+            if problem:
+                raise AIError(problem, 403, "permission_denied")
+
     async def check_cancel(self, ctx):
         if ctx.cancelled.is_set():
             raise asyncio.CancelledError()
@@ -345,16 +380,21 @@ class Gateway:
             ctx.cancelled.set()
             raise asyncio.CancelledError()
 
-    async def prepare(self, ctx, source, operation, arguments, call_id):
+    async def prepare(self, ctx, source, operation, arguments, call_id, ops=None):
+        """修改先准备：校验参数、生成预览 / 执行计划、冻结 kubeconfig 指纹。ops 是判定出的操作类型，
+        经 agent 准备时 master / agent 按它校验权限"""
         env = ctx.run["scope"]["env"]
         if source == "kubedoor" and operation in PLANNED:
-            plan = await self.prepare_plan(ctx, operation, arguments, call_id)
+            plan = await self.prepare_plan(ctx, operation, arguments, call_id, ops)
             return {"success": True, "arguments": copy.deepcopy(arguments), "preview": {"operation": operation, "env": env, "arguments": arguments, "plan": plan}, "read_only": False}
         if source == "kubedoor":
             query, body = self.catalog_request(operation, arguments, env)
             return {"success": True, "arguments": copy.deepcopy(arguments), "preview": {"operation": operation, "env": env, "arguments": arguments, "method": CATALOG[operation][0], "path": CATALOG[operation][1], "query": query, "body": body}, "read_only": self.read_only(operation, arguments)}
         if source == "agent":
-            return await self.master(ctx.identity, "POST", "/api/ai/internal/agent-execute", {"env": env}, {"operation": operation, "arguments": arguments, "call_id": call_id, "phase": "prepare"}, allow_failure=True)
+            body = {"operation": operation, "arguments": arguments, "call_id": call_id, "phase": "prepare"}
+            if ops:
+                body["ops"] = list(ops)
+            return await self.master(ctx.identity, "POST", "/api/ai/internal/agent-execute", {"env": env}, body, allow_failure=True)
         binding = await self.executor_binding(ctx, source)
         prepared = await binding.executor.prepare(operation, arguments)
         prepared["credential_fingerprint"] = binding.fingerprint
@@ -395,29 +435,24 @@ class Gateway:
             if operation == "update_deployment_image" and (not isinstance(args.get("image_tag"), str) or not args["image_tag"]):
                 raise AIError("image_tag 不能为空")
         guard_scope(scope, operation, args, read_only)
-        # 企微里只读用户执行 Pod 查看命令:根据配置决定是否允许(配置关闭时要求写权限)
-        wecom_readonly_exec = False
-        if read_only and operation == "pod_exec" and ctx.run.get("origin") == "wecom":
-            cfg = await self.store.one("SELECT read_only_can_exec FROM kubedoor_ai_wecom_config WHERE singleton=true")
-            wecom_readonly_exec = cfg and cfg.get("read_only_can_exec", False)
-        if not read_only or (operation == "pod_exec" and ctx.run.get("origin") == "wecom" and not wecom_readonly_exec):
-            ctx.identity.require_write(scope["env"])
+        call_id = call_id or f"{ctx.run['id']}:{uuid.uuid4().hex}"
+        action = await self.store.one("SELECT * FROM kubedoor_ai_actions WHERE call_id=$1", call_id)
+        if action:
+            read_only = action["read_only"]
+        else:
+            # 权限先于审批：只在建动作前按「权限与审批」判定一次，结果记在动作上；批准和执行前按记下的 ops 复核
+            decision = await self.authorize(ctx, operation, args)
+            read_only = decision["read_only"]
+        if not read_only:
             # 用户自己的 MCP 结果未知和集群无关，不拦集群上的修改
             unknown = await self.store.one("SELECT id FROM kubedoor_ai_actions WHERE run_id=$1::uuid AND state='unknown' AND read_only=false AND source<>'mcp' LIMIT 1", ctx.run["id"])
             if unknown:
                 raise AIError("本轮已有写入结果未知，请查询实际状态并在新一轮重新提出操作，不能切换来源盲目重试", 409, "outcome_unknown")
-        call_id = call_id or f"{ctx.run['id']}:{uuid.uuid4().hex}"
-        action = await self.store.one("SELECT * FROM kubedoor_ai_actions WHERE call_id=$1", call_id)
         if not action:
-            # pod_exec:非高危命令直接执行(相当于 Web 终端),只有 rm -rf / kill / 重定向等高危命令才审批
-            skip_approval = False
-            if operation == "pod_exec" and not read_only:
-                from kubedoor_tools import classify_operation
-                policy = classify_operation("pod_exec", args)
-                skip_approval = not policy.get("dangerous", False)
-            if not read_only and not skip_approval:
+            # 不需要批准的修改也照样准备：参数校验、预览、执行计划、冻结 kubeconfig 指纹
+            if not read_only:
                 await self.guard_direct_edits(ctx, source, operation, args)
-            prepared = await self.prepare(ctx, source, operation, args, call_id) if not read_only else {"arguments": args, "preview": {"operation": operation, "arguments": args}, "read_only": True}
+            prepared = await self.prepare(ctx, source, operation, args, call_id, decision["ops"]) if not read_only else {"arguments": args, "preview": {"operation": operation, "arguments": args}, "read_only": True}
             if prepared.get("success") is False:
                 return prepared
             args = prepared.get("arguments", args)
@@ -428,7 +463,7 @@ class Gateway:
             preview = redact(prepared.get("preview", {}), ctx.secrets)
             if binding:
                 preview["credential_fingerprint"] = binding.fingerprint
-            action = await self.store.one("INSERT INTO kubedoor_ai_actions(id,run_id,call_id,operation,source,arguments,preview,read_only,connection_revision,state) VALUES($1::uuid,$2::uuid,$3,$4,$5,$6,$7,$8,$9,$10) ON CONFLICT(call_id) DO UPDATE SET call_id=EXCLUDED.call_id RETURNING *", str(uuid.uuid4()), ctx.run["id"], call_id, operation, source, args, preview, read_only, binding.revision if binding else None, "ready" if read_only else "pending")
+            action = await self.store.one("INSERT INTO kubedoor_ai_actions(id,run_id,call_id,operation,source,arguments,preview,read_only,connection_revision,ops,approval_fixed,state) VALUES($1::uuid,$2::uuid,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) ON CONFLICT(call_id) DO UPDATE SET call_id=EXCLUDED.call_id RETURNING *", str(uuid.uuid4()), ctx.run["id"], call_id, operation, source, args, preview, read_only, binding.revision if binding else None, decision["ops"], decision["approval_fixed"], "pending" if decision["approval"] else "ready")
         return await self.settle(ctx, action, mcp)
 
     async def settle(self, ctx, action, mcp=False):
@@ -493,14 +528,20 @@ class Gateway:
     @staticmethod
     def action_preview(action, scope):
         preview = redact({k: v for k, v in action["preview"].items() if k != "credential_fingerprint"})
-        return redact({"action_id": action["id"], "name": action["operation"], "tool": action["operation"], "env": scope["env"], "source": action["source"], "arguments": action["arguments"], "preview": preview, "diff": preview.get("diff"), "command": preview.get("command"), "expires_at": action.get("expires_at")})
+        # approval_fixed：高危命令固定要批准；ops：涉及的操作类型（升级前的动作为空）
+        return redact({"action_id": action["id"], "name": action["operation"], "tool": action["operation"], "env": scope["env"], "source": action["source"], "arguments": action["arguments"], "preview": preview, "diff": preview.get("diff"), "command": preview.get("command"), "expires_at": action.get("expires_at"),
+                       "approval_fixed": bool(action.get("approval_fixed")), "ops": action.get("ops") or []})
 
     async def dispatch(self, ctx, action):
         await self.check_cancel(ctx)
+        try:
+            await self.recheck(ctx.identity, ctx.run["scope"]["env"], action)
+        except AIError as exc:
+            # 还没执行：记成已知失败，重放这个调用直接返回同样的结果
+            result = {"success": False, "error": {"code": exc.code, "message": str(exc)}}
+            await self.store.execute("UPDATE kubedoor_ai_actions SET state=$2,result=$3,updated_at=now() WHERE id=$1::uuid AND state IN ('ready','pending','approved')", action["id"], "failed", result)
+            return result
         if not action["read_only"]:
-            # 用户自己接入的 MCP 和集群权限无关；集群上的修改要当前集群的读写权限
-            if action["source"] != "mcp":
-                ctx.identity.require_write(ctx.run["scope"]["env"])
             valid = await self.store.one("SELECT id FROM kubedoor_ai_actions WHERE id=$1::uuid AND expires_at>now()", action["id"])
             if not valid:
                 raise AIError("批准已过期，请重新生成操作", 409, "approval_expired")
@@ -512,7 +553,12 @@ class Gateway:
             current = await self.store.one("SELECT * FROM kubedoor_ai_actions WHERE id=$1::uuid", action["id"])
             return current["result"] or {"success": False, "error": {"code": "outcome_unknown", "message": "请求已经提交，不会重复执行；请查询实际状态"}}
         event = {"action_id": action["id"], "name": action["operation"], "tool": action["operation"], "source": action["source"], "arguments": redact(action["arguments"], ctx.secrets), "env": ctx.run["scope"]["env"]}
-        await self.store.event(ctx.run["id"], "tool_start", event)
+        start = event
+        if not action["read_only"]:
+            # 不需要批准的修改没有审批卡片：实时卡片要能看到改了什么
+            preview = redact({k: v for k, v in (action.get("preview") or {}).items() if k != "credential_fingerprint"}, ctx.secrets)
+            start = {**event, "preview": preview, "command": preview.get("command"), "diff": preview.get("diff")}
+        await self.store.event(ctx.run["id"], "tool_start", start)
         ctx.active_calls[action["call_id"]] = action
         try:
             await self.check_cancel(ctx)
@@ -586,7 +632,14 @@ class Gateway:
         if source == "direct":
             return await (await self.executor(ctx, source, action.get("preview", {}).get("credential_fingerprint"), action.get("connection_revision"))).execute(operation, args, call_id=action["call_id"], timeout=120)
         if source == "agent":
-            return await self.master(ctx.identity, "POST", "/api/ai/internal/agent-execute", {"env": env}, {"operation": operation, "arguments": args, "call_id": action["call_id"], "phase": "execute", "approved": not action["read_only"], "timeout": 120}, allow_failure=True)
+            # 通过了网关检查的 Pod 内命令和所有修改都是 approved（master 据此记 ai.agent_execute 审计），纯查询不是；
+            # ops 给 master / agent 复核。纯查询和升级前建的动作不带 ops，master 按原来的读写权限处理
+            ops = action.get("ops")
+            body = {"operation": operation, "arguments": args, "call_id": action["call_id"], "phase": "execute",
+                    "approved": not action["read_only"] or bool(ops), "timeout": 120}
+            if ops:
+                body["ops"] = list(ops)
+            return await self.master(ctx.identity, "POST", "/api/ai/internal/agent-execute", {"env": env}, body, allow_failure=True)
         method, path, freshness, _ = CATALOG[operation]
         query, body = self.catalog_request(operation, args, env)
         result = await self.master(ctx.identity, method, path, query, body, allow_failure=True)
@@ -620,16 +673,20 @@ class Gateway:
     async def k8s_source(self, ctx):
         return "direct" if await self.store.connection(ctx.run["scope"]["env"]) else "agent"
 
-    async def k8s_call(self, ctx, source, arguments, call_id, phase="execute", approved=False, timeout=60, expected=None):
-        """网关自己发起的 K8S API 调用（读 Deployment、管控计划里的直接修改），通道和通用 api 工具一致"""
+    async def k8s_call(self, ctx, source, arguments, call_id, phase="execute", approved=False, timeout=60, expected=None, ops=None):
+        """网关自己发起的 K8S API 调用（读 Deployment、管控计划里的直接修改），通道和通用 api 工具一致。
+        ops 是所属动作的操作类型，经 agent 时给 master / agent 复核权限"""
         if source == "direct":
             executor = await self.executor(ctx, "direct", *(expected or (None, None)))
             if phase == "prepare":
                 return await executor.prepare("api", arguments, timeout=timeout)
             return await executor.execute("api", arguments, call_id=call_id, timeout=timeout)
+        body = {"operation": "api", "arguments": arguments, "call_id": call_id, "phase": phase,
+                "approved": approved, "timeout": timeout}
+        if ops:
+            body["ops"] = list(ops)
         return await self.master(ctx.identity, "POST", "/api/ai/internal/agent-execute", {"env": ctx.run["scope"]["env"]},
-                                 {"operation": "api", "arguments": arguments, "call_id": call_id, "phase": phase,
-                                  "approved": approved, "timeout": timeout}, allow_failure=True)
+                                 body, allow_failure=True)
 
     async def read_deployment(self, ctx, namespace, name):
         """只读读取在线 Deployment：返回对象；不存在返回 {}；读不到（没有可用通道等）返回 None"""
@@ -646,7 +703,7 @@ class Gateway:
         error = result.get("error") or {}
         return {} if isinstance(error, dict) and (error.get("code") == "NOT_FOUND" or error.get("status") == 404) else None
 
-    async def prepare_plan(self, ctx, operation, args, call_id):
+    async def prepare_plan(self, ctx, operation, args, call_id, ops=None):
         env = ctx.run["scope"]["env"]
         namespace, name = args.get("namespace"), args.get("deployment")
         check_target(namespace, name)
@@ -664,14 +721,14 @@ class Gateway:
         plan = build_plan(operation, args, env, control, live, step)
         for index, item in enumerate(plan["steps"]):
             if item["kind"] == "k8s":
-                plan["steps"][index] = await self.prepare_k8s_step(ctx, item, f"{call_id}:k8s{index}")
+                plan["steps"][index] = await self.prepare_k8s_step(ctx, item, f"{call_id}:k8s{index}", ops)
         return plan
 
-    async def prepare_k8s_step(self, ctx, step, call_id):
+    async def prepare_k8s_step(self, ctx, step, call_id, ops=None):
         """直接修改 Deployment 的步骤先做 server dry-run：冻结 resourceVersion，审批卡片上给出 diff"""
         source = await self.k8s_source(ctx)
         try:
-            prepared = await self.k8s_call(ctx, source, step["arguments"], call_id, phase="prepare")
+            prepared = await self.k8s_call(ctx, source, step["arguments"], call_id, phase="prepare", ops=ops)
         except AIError as exc:
             raise AIError(f"不受管控时要直接修改 Deployment，需要在线且已升级的 Agent 或已配置的 kubeconfig：{exc}", exc.status, "k8s_unavailable") from None
         if not isinstance(prepared, dict) or prepared.get("success") is False:
@@ -685,12 +742,12 @@ class Gateway:
             step.update(credential_fingerprint=binding.fingerprint, connection_revision=binding.revision)
         return step
 
-    async def run_step(self, ctx, step):
+    async def run_step(self, ctx, step, ops=None):
         try:
             if step["kind"] == "master":
                 return await self.master(ctx.identity, step["method"], step["path"], step["query"], step["body"], allow_failure=True)
             expected = (step.get("credential_fingerprint"), step.get("connection_revision")) if step["source"] == "direct" else None
-            return await self.k8s_call(ctx, step["source"], step["arguments"], step["call_id"], approved=True, timeout=120, expected=expected)
+            return await self.k8s_call(ctx, step["source"], step["arguments"], step["call_id"], approved=True, timeout=120, expected=expected, ops=ops)
         except AIError as exc:
             return {"success": False, "error": {"code": "API_ERROR", "status": exc.status, "message": str(exc)}}
 
@@ -703,7 +760,7 @@ class Gateway:
                     "error": {"code": "control_changed", "message": f"{drift}，没有执行任何修改；请重新查询后再提出操作"}}
         done = []
         for step in plan["steps"]:
-            result = await self.run_step(ctx, step)
+            result = await self.run_step(ctx, step, action.get("ops"))
             ok = isinstance(result, dict) and result.get("success", True) and not result.get("error") and not result.get("error_list")
             if ok:
                 done.append(step["name"])

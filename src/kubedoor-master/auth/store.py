@@ -143,7 +143,7 @@ class AuthStore:
         args.append(user_id)
         await db.pg_execute(f"UPDATE auth_users SET {', '.join(sets)}, updated_at=now() WHERE id=${len(args)}", *args)
         if fields.get('role') in ('admin', 'agent'):
-            # 管理员拥有全部权限,Agent 账号不访问集群数据,两者都不保留集群授权
+            # 系统管理员拥有全部集群权限,Agent 账号不访问集群数据,两者都不保留集群授权
             await db.pg_execute('DELETE FROM auth_user_clusters WHERE user_id=$1', user_id)
         self.invalidate_user(user_id)
 
@@ -168,7 +168,7 @@ class AuthStore:
         self._users.pop(user_id, None)
 
     async def set_clusters(self, user_id, grants, updated_by):
-        """整体替换某个用户的集群授权。grants: {env: rw/read/none}"""
+        """整体替换某个用户的集群授权。grants: {env: admin/rw/read/none}"""
         async with db.get_pool().acquire() as conn:
             async with conn.transaction():
                 await conn.execute('DELETE FROM auth_user_clusters WHERE user_id=$1', user_id)
@@ -273,6 +273,28 @@ class AuthStore:
             'ON CONFLICT (key) DO UPDATE SET value=EXCLUDED.value, updated_by=EXCLUDED.updated_by, updated_at=now()',
             key, json.dumps(value, ensure_ascii=False), updated_by,
         )
+
+    async def get_setting_row(self, key):
+        """连同修改人、修改时间一起取:{'value', 'updated_by', 'updated_at'};没有返回 None。"""
+        row = await db.pg_fetchrow('SELECT value, updated_by, updated_at FROM auth_settings WHERE key=$1', key)
+        return _setting_row(row)
+
+    async def put_setting_row(self, key, value, updated_by):
+        """保存并返回保存后的行(格式同 get_setting_row)。"""
+        row = await db.pg_fetchrow(
+            'INSERT INTO auth_settings (key, value, updated_by, updated_at) VALUES ($1, $2, $3, $4) '
+            'ON CONFLICT (key) DO UPDATE SET value=$2, updated_by=$3, updated_at=$4 RETURNING *',
+            key, json.dumps(value, ensure_ascii=False), updated_by, _now(),
+        )
+        return _setting_row(row)
+
+
+def _setting_row(row):
+    if row is None:
+        return None
+    value = row['value']
+    return {'value': json.loads(value) if isinstance(value, str) else value,
+            'updated_by': row['updated_by'], 'updated_at': row['updated_at']}
 
 
 store = AuthStore()

@@ -58,6 +58,10 @@ CREATE TABLE IF NOT EXISTS kubedoor_ai_actions (
 CREATE INDEX IF NOT EXISTS kubedoor_ai_sessions_owner ON kubedoor_ai_sessions(username, updated_at DESC);
 CREATE INDEX IF NOT EXISTS kubedoor_ai_messages_session ON kubedoor_ai_messages(session_id, created_at);
 CREATE INDEX IF NOT EXISTS kubedoor_ai_actions_run ON kubedoor_ai_actions(run_id, created_at);
+-- 权限与审批(permissions.py):动作涉及的操作类型,批准和执行前按它用当前身份复核;升级前建的动作和用户接入的 MCP 为 NULL
+ALTER TABLE kubedoor_ai_actions ADD COLUMN IF NOT EXISTS ops jsonb;
+-- 高危命令固定要批准,不能在权限表里取消
+ALTER TABLE kubedoor_ai_actions ADD COLUMN IF NOT EXISTS approval_fixed boolean NOT NULL DEFAULT false;
 
 CREATE TABLE IF NOT EXISTS kubedoor_ai_memories (
     id uuid PRIMARY KEY, title text NOT NULL, content text NOT NULL,
@@ -87,8 +91,8 @@ ALTER TABLE kubedoor_ai_wecom_config ADD COLUMN IF NOT EXISTS unbound_default_en
 -- 企微对话空闲多少分钟后，新消息自动进入新对话;0 = 关闭
 ALTER TABLE kubedoor_ai_wecom_config ADD COLUMN IF NOT EXISTS session_idle_minutes integer NOT NULL DEFAULT 120
     CHECK (session_idle_minutes BETWEEN 0 AND 10080);
--- 只读权限用户是否可以在企微里执行 Pod 内查看命令(ls/cat 等,不含高危命令)
-ALTER TABLE kubedoor_ai_wecom_config ADD COLUMN IF NOT EXISTS read_only_can_exec boolean NOT NULL DEFAULT false;
+-- 原来的「只读用户执行权限」开关:已由 master「权限与审批」页面取代
+ALTER TABLE kubedoor_ai_wecom_config DROP COLUMN IF EXISTS read_only_can_exec;
 CREATE TABLE IF NOT EXISTS kubedoor_ai_wecom_users (
     wecom_userid text PRIMARY KEY,
     username text,

@@ -111,7 +111,8 @@ class Store:
 
     async def pending(self, rid):
         rows = await self.fetch("SELECT * FROM kubedoor_ai_actions WHERE run_id=$1::uuid AND state='pending' ORDER BY created_at", rid)
-        return redact([{"action_id": r["id"], "name": r["operation"], "tool": r["operation"], "source": r["source"], "arguments": r["arguments"], "preview": {k: v for k, v in r["preview"].items() if k != "credential_fingerprint"}, "diff": r["preview"].get("diff"), "command": r["preview"].get("command"), "expires_at": r["expires_at"]} for r in rows])
+        return redact([{"action_id": r["id"], "name": r["operation"], "tool": r["operation"], "source": r["source"], "arguments": r["arguments"], "preview": {k: v for k, v in r["preview"].items() if k != "credential_fingerprint"}, "diff": r["preview"].get("diff"), "command": r["preview"].get("command"), "expires_at": r["expires_at"],
+                        "approval_fixed": bool(r.get("approval_fixed")), "ops": r.get("ops") or []} for r in rows])
 
     async def recover(self):
         """A dispatched mutation is uncertain after a crash, never replay it."""

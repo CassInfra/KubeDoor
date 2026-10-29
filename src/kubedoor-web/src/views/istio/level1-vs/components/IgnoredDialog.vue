@@ -20,7 +20,8 @@ const props = defineProps<{
   stats: ScopeStats;
   includePatterns: VSPattern[];
   ignorePatterns: VSPattern[];
-  isAdmin: boolean;
+  /** 组级修改权限:取消忽略、改组的包含 / 忽略规则 */
+  canManage: boolean;
 }>();
 const emit = defineEmits<{
   (e: "changed"): void;
@@ -107,7 +108,11 @@ async function unignore(items: IgnoredVS[]) {
     <div class="rules">
       <span>包含:{{ ruleText(includePatterns) || "全部" }}</span>
       <span>忽略:{{ ruleText(ignorePatterns) || "无" }}</span>
-      <el-button v-if="isAdmin" link type="primary" @click="emit('edit-rules')"
+      <el-button
+        v-if="canManage"
+        link
+        type="primary"
+        @click="emit('edit-rules')"
         >修改规则</el-button
       >
     </div>
@@ -134,7 +139,7 @@ async function unignore(items: IgnoredVS[]) {
       empty-text="没有忽略的 VirtualService"
       @selection-change="selection = $event"
     >
-      <el-table-column v-if="isAdmin" type="selection" width="36" />
+      <el-table-column v-if="canManage" type="selection" width="36" />
       <el-table-column label="VirtualService" min-width="220">
         <template #default="{ row }">
           <span class="sub">{{ row.namespace }}/</span><b>{{ row.name }}</b>
@@ -171,7 +176,7 @@ async function unignore(items: IgnoredVS[]) {
           <span v-else class="sub">按组规则</span>
         </template>
       </el-table-column>
-      <el-table-column v-if="isAdmin" label="操作" width="100" align="center">
+      <el-table-column v-if="canManage" label="操作" width="100" align="center">
         <template #default="{ row }">
           <el-button link type="primary" @click="unignore([row])"
             >取消忽略</el-button
@@ -181,7 +186,7 @@ async function unignore(items: IgnoredVS[]) {
     </el-table>
     <template #footer>
       <el-button
-        v-if="isAdmin"
+        v-if="canManage"
         type="primary"
         plain
         :disabled="!selection.length"

@@ -179,7 +179,7 @@ export const createWorkloadStreamUrl = (env: string, namespace: string) => {
 };
 
 /**
- * Pod 终端的 WebSocket 地址(需要目标集群读写权限)
+ * Pod 终端的 WebSocket 地址(需要目标集群的「网页 Pod 终端」权限)
  * @param shell auto 自动识别(bash → ash → sh)或指定 bash / ash / sh
  * @param cols 终端列数,rows 行数:连上后先按这个尺寸打开 shell
  */
@@ -206,7 +206,7 @@ export const createPodExecUrl = (params: {
 };
 
 /**
- * 节点终端的 WebSocket 地址(需要目标集群读写权限)
+ * 节点终端的 WebSocket 地址(需要目标集群的「网页节点终端」权限)
  * agent 会在 kubedoor 命名空间建一个临时特权 pod,用 nsenter 进宿主机命名空间
  */
 export const createNodeExecUrl = (params: {

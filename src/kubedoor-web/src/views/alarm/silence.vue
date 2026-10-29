@@ -65,7 +65,11 @@
           </el-button-group>
         </el-tooltip>
 
-        <el-button type="primary" @click="handleCreate">
+        <el-button
+          type="primary"
+          :disabled="!canSilenceAny"
+          @click="handleCreate"
+        >
           <el-icon style="margin-right: 4px"><Plus /></el-icon>
           新建屏蔽
         </el-button>
@@ -210,6 +214,7 @@
               link
               type="warning"
               size="small"
+              :disabled="!canSilence(row.matchers)"
               @click="handleRevoke(row)"
             >
               解除
@@ -219,6 +224,7 @@
               link
               type="success"
               size="small"
+              :disabled="!canSilence(row.matchers)"
               @click="handleExtend(row, 120)"
             >
               重新启用
@@ -233,17 +239,28 @@
               </el-button>
               <template #dropdown>
                 <el-dropdown-menu>
-                  <el-dropdown-item command="edit">编辑</el-dropdown-item>
-                  <el-dropdown-item command="clone">克隆</el-dropdown-item>
+                  <el-dropdown-item
+                    command="edit"
+                    :disabled="!canSilence(row.matchers)"
+                    >编辑</el-dropdown-item
+                  >
+                  <el-dropdown-item command="clone" :disabled="!canSilenceAny"
+                    >克隆</el-dropdown-item
+                  >
                   <el-dropdown-item
                     v-for="preset in EXTEND_PRESETS"
                     :key="preset.minutes"
                     :command="'extend:' + preset.minutes"
                     :divided="preset.minutes === 30"
+                    :disabled="!canSilence(row.matchers)"
                   >
                     续期 {{ preset.label }}
                   </el-dropdown-item>
-                  <el-dropdown-item command="delete" divided>
+                  <el-dropdown-item
+                    command="delete"
+                    divided
+                    :disabled="!canSilence(row.matchers)"
+                  >
                     <span style="color: var(--el-color-danger)">删除</span>
                   </el-dropdown-item>
                 </el-dropdown-menu>
@@ -264,7 +281,12 @@
             <div class="empty-tip">
               屏蔽规则命中后，告警仍会入库留痕，只是不再推送通知。
             </div>
-            <el-button type="primary" plain @click="handleCreate">
+            <el-button
+              type="primary"
+              plain
+              :disabled="!canSilenceAny"
+              @click="handleCreate"
+            >
               新建屏蔽规则
             </el-button>
           </div>
@@ -310,12 +332,15 @@ import {
   type SilenceStats
 } from "@/api/silence";
 import { useUserStoreHook } from "@/store/modules/user";
+import { usePermission } from "@/utils/usePermission";
 import SilenceEditDialog from "./components/SilenceEditDialog.vue";
 
 defineOptions({ name: "AlarmSilence" });
 
 const route = useRoute();
 const router = useRouter();
+// 限定了集群(env=xxx)的规则按这些集群的「告警屏蔽」权限,没限定集群的按全局角色(后端同样校验)
+const { canSilence, canSilenceAny } = usePermission();
 
 const STATUS_META: Record<
   SilenceStatus,

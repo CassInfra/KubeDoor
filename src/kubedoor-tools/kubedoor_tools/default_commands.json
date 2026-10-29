@@ -1,0 +1,16 @@
+{
+  "view": [
+    "ls", "cat", "head", "tail", "grep", "egrep", "fgrep", "wc", "sort", "uniq",
+    "cut", "tr", "file", "stat", "du", "df", "find", "which", "echo", "printf",
+    "pwd", "whoami", "id", "groups", "hostname", "uname", "date", "uptime",
+    "env", "printenv", "ps", "top", "free", "nproc", "mount", "ip", "ss",
+    "netstat", "lsof", "ping", "nslookup", "dig", "host", "getent", "curl",
+    "wget", "nc", "md5sum", "sha256sum", "readlink", "realpath", "basename",
+    "dirname", "test", "true", "false", "jps", "jstat"
+  ],
+  "danger": [
+    "rm", "rmdir", "unlink", "shred", "truncate", "kill", "pkill", "killall",
+    "reboot", "shutdown", "halt", "poweroff", "dd", "mkfs*", "fdisk", "parted",
+    "find -delete"
+  ]
+}

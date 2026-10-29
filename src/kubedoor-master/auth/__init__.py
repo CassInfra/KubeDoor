@@ -3,7 +3,8 @@
 业务代码只需要:
     from auth import principal_of, env_condition
     principal = principal_of(request)
-    principal.can_read(env) / can_write(env) / filter_envs(envs) / env_scope()
+    principal.can_read(env) / filter_envs(envs) / env_scope()
+    principal.can(op, env) / can_global(op)   # 操作权限表(auth/permissions.py,Web「权限与审批」页)
 
 详细设计见 auth/README.md。
 """

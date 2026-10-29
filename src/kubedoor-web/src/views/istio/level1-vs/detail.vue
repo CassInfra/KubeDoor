@@ -4,7 +4,7 @@ import { useRoute, useRouter } from "vue-router";
 import { ElMessageBox } from "element-plus";
 import { ArrowLeft, Edit, Plus, Warning } from "@element-plus/icons-vue";
 import { message } from "@/utils/message";
-import { useClusterPermission } from "@/utils/permission";
+import { useIstioPermission } from "./useIstioPermission";
 import {
   type ApplyItem,
   type IstioRoute,
@@ -44,7 +44,7 @@ defineOptions({ name: "Level1VirtualServiceDetail" });
 
 const route = useRoute();
 const router = useRouter();
-const { isAdmin } = useClusterPermission();
+const { clusterCan, groupCan } = useIstioPermission();
 
 const vs = ref<VSDetail | null>(null);
 const loading = ref(false);
@@ -54,6 +54,21 @@ const vsId = computed(() => Number(route.params.id));
 const boundClusters = computed(() =>
   (vs.value?.clusters ?? []).filter(c => c.bound)
 );
+/** 组级修改:组标准、规则、各集群 hosts 和域名、忽略(组内每个集群都要有「Istio 修改」权限) */
+const canManage = computed(() => groupCan(vs.value));
+/** 有「Istio 修改」权限的集群才能下发、回退、从集群删除 */
+const canApplyAny = computed(() =>
+  (vs.value?.clusters ?? []).some(c => clusterCan(c))
+);
+
+function applyBound() {
+  const allowed = boundClusters.value.filter(c => clusterCan(c));
+  if (boundClusters.value.length && !allowed.length) {
+    message("纳入的集群都没有「Istio 修改」权限", { type: "info" });
+    return;
+  }
+  openApply(allowed);
+}
 /** 规则编辑时服务 / 端口候选取哪个集群:优先已纳入的测试集群 */
 const refEnv = computed(() => {
   const list = vs.value?.clusters ?? [];
@@ -274,14 +289,12 @@ onMounted(load);
           {{ formatTime(vs.updated_at) }}
         </span>
         <div class="spacer" />
-        <template v-if="isAdmin">
-          <el-button type="primary" @click="openApply(boundClusters)"
-            >下发到集群…</el-button
-          >
-          <el-button type="danger" plain @click="removeVS"
-            >删除组标准</el-button
-          >
-        </template>
+        <el-button v-if="canApplyAny" type="primary" @click="applyBound"
+          >下发到集群…</el-button
+        >
+        <el-button v-if="canManage" type="danger" plain @click="removeVS"
+          >删除组标准</el-button
+        >
       </template>
     </div>
 
@@ -404,10 +417,16 @@ onMounted(load);
               <el-button link type="primary" @click="openCompare(row)"
                 >对比</el-button
               >
-              <template v-if="isAdmin">
-                <el-button link type="primary" @click="openHosts(row)">{{
+              <el-button
+                v-if="canManage"
+                link
+                type="primary"
+                @click="openHosts(row)"
+                >{{
                   row.bound ? "编辑 hosts 和域名" : "部署到此集群"
-                }}</el-button>
+                }}</el-button
+              >
+              <template v-if="clusterCan(row)">
                 <el-button
                   v-if="row.bound"
                   link
@@ -431,34 +450,40 @@ onMounted(load);
                     >
                   </span>
                 </el-tooltip>
-                <el-dropdown
-                  v-if="row.in_cluster || row.bound"
-                  trigger="click"
-                  class="op"
-                >
-                  <el-button link type="info">更多</el-button>
-                  <template #dropdown>
-                    <el-dropdown-menu>
-                      <el-dropdown-item
-                        v-if="row.in_cluster"
-                        @click="resetFrom(row)"
-                      >
-                        以此集群现状更新组标准
-                      </el-dropdown-item>
-                      <el-dropdown-item v-if="row.bound" @click="unbind(row)">
-                        不再部署到此集群
-                      </el-dropdown-item>
-                      <el-dropdown-item
-                        v-if="row.in_cluster"
-                        divided
-                        @click="deleteLive(row)"
-                      >
-                        <span class="danger-text">从集群删除</span>
-                      </el-dropdown-item>
-                    </el-dropdown-menu>
-                  </template>
-                </el-dropdown>
               </template>
+              <el-dropdown
+                v-if="
+                  (canManage && (row.in_cluster || row.bound)) ||
+                  (clusterCan(row) && row.in_cluster)
+                "
+                trigger="click"
+                class="op"
+              >
+                <el-button link type="info">更多</el-button>
+                <template #dropdown>
+                  <el-dropdown-menu>
+                    <el-dropdown-item
+                      v-if="canManage && row.in_cluster"
+                      @click="resetFrom(row)"
+                    >
+                      以此集群现状更新组标准
+                    </el-dropdown-item>
+                    <el-dropdown-item
+                      v-if="canManage && row.bound"
+                      @click="unbind(row)"
+                    >
+                      不再部署到此集群
+                    </el-dropdown-item>
+                    <el-dropdown-item
+                      v-if="clusterCan(row) && row.in_cluster"
+                      divided
+                      @click="deleteLive(row)"
+                    >
+                      <span class="danger-text">从集群删除</span>
+                    </el-dropdown-item>
+                  </el-dropdown-menu>
+                </template>
+              </el-dropdown>
             </template>
           </el-table-column>
         </el-table>
@@ -471,7 +496,7 @@ onMounted(load);
             <span class="sub">全组一致,修改后需要下发到各集群</span>
             <div class="spacer" />
             <el-button
-              v-if="isAdmin"
+              v-if="canManage"
               size="small"
               :icon="Edit"
               @click="vsDialog = true"
@@ -514,7 +539,7 @@ onMounted(load);
               clearable
               style="width: 200px"
             />
-            <template v-if="isAdmin">
+            <template v-if="canManage">
               <el-button size="small" @click="reorder">整理优先级</el-button>
               <el-button
                 size="small"
@@ -623,7 +648,7 @@ onMounted(load);
             </template>
           </el-table-column>
           <el-table-column
-            v-if="isAdmin"
+            v-if="canManage"
             label="操作"
             width="110"
             fixed="right"
@@ -694,7 +719,7 @@ onMounted(load);
         :clusters="vs.clusters"
         :vs-id="vs.id"
         :bound-clusters="boundClusters.map(c => c.k8s_name)"
-        :is-admin="isAdmin"
+        :can-manage="canManage"
         :left="compare.left"
         :right="compare.right"
         @changed="load"

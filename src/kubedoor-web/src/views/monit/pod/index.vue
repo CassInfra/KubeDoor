@@ -113,13 +113,20 @@
           <el-button
             type="danger"
             plain
-            :disabled="!selectedPods.length"
+            :disabled="
+              !selectedPods.length || !can('pod.delete', searchForm.env)
+            "
             :loading="batchDeleting"
             @click="handleBatchDelete"
           >
             批量删除
           </el-button>
-          <el-button type="success" @click="handleCreate">新建</el-button>
+          <el-button
+            type="success"
+            :disabled="!can('resource.apply', searchForm.env)"
+            @click="handleCreate"
+            >新建</el-button
+          >
         </el-form-item>
       </el-form>
     </div>
@@ -415,7 +422,7 @@
                         >问 AI</el-dropdown-item
                       >
                       <el-dropdown-item
-                        :disabled="!canWrite(searchForm.env)"
+                        :disabled="!can('pod.shell', searchForm.env)"
                         @click="
                           openPodShell({
                             env: searchForm.env,
@@ -448,6 +455,7 @@
                         >日志</el-dropdown-item
                       >
                       <el-dropdown-item
+                        :disabled="!can('pod.isolate', searchForm.env)"
                         @click="
                           handleModifyPod(
                             searchForm.env,
@@ -460,6 +468,7 @@
                         >隔离</el-dropdown-item
                       >
                       <el-dropdown-item
+                        :disabled="!can('pod.delete', searchForm.env)"
                         @click="
                           handleDeletePod(
                             searchForm.env,
@@ -470,6 +479,7 @@
                         >删除</el-dropdown-item
                       >
                       <el-dropdown-item
+                        :disabled="!can('pod.jvm', searchForm.env)"
                         @click="
                           handleAutoDump(
                             searchForm.env,
@@ -480,6 +490,7 @@
                         >Dump</el-dropdown-item
                       >
                       <el-dropdown-item
+                        :disabled="!can('pod.jvm', searchForm.env)"
                         @click="
                           handleAutoJstack(
                             searchForm.env,
@@ -490,6 +501,7 @@
                         >Jstack</el-dropdown-item
                       >
                       <el-dropdown-item
+                        :disabled="!can('pod.jvm', searchForm.env)"
                         @click="
                           handleAutoJfr(
                             searchForm.env,
@@ -500,6 +512,7 @@
                         >JFR</el-dropdown-item
                       >
                       <el-dropdown-item
+                        :disabled="!can('pod.jvm', searchForm.env)"
                         @click="
                           handleAutoJvmMem(
                             searchForm.env,
@@ -545,6 +558,7 @@
             <el-button
               type="primary"
               :loading="createSaveLoading"
+              :disabled="!can('resource.apply', searchForm.env)"
               @click="handleCreateSave"
             >
               提交
@@ -616,6 +630,7 @@
             <el-button
               type="primary"
               :loading="editSaveLoading"
+              :disabled="!can('resource.apply', searchForm.env)"
               @click="handleEditSave"
             >
               提交
@@ -735,7 +750,7 @@ import {
 } from "@/api/alarm";
 import { updateServiceContent, getServiceContent } from "@/api/service";
 import { useSearchStoreHook } from "@/store/modules/search";
-import { useClusterPermission } from "@/utils/permission";
+import { usePermission } from "@/utils/usePermission";
 import { openPodShell } from "@/utils/podShell";
 import { podQuestion } from "@/utils/ai";
 import { useAskAI } from "@/utils/useAskAI";
@@ -757,8 +772,8 @@ interface SearchForm {
 
 const searchStore = useSearchStoreHook();
 const askAI = useAskAI();
-// 终端能在容器里执行任意命令,只读用户置灰(后端同样校验)
-const { canWrite } = useClusterPermission();
+// 没有权限的操作置灰(按「权限与审批」的配置,后端同样校验)
+const { can } = usePermission();
 
 const searchForm = reactive<SearchForm>({
   env: searchStore.env || "",

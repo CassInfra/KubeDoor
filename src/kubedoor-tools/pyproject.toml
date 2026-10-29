@@ -16,6 +16,10 @@ test = ["pytest>=8", "pytest-asyncio>=0.25"]
 where = ["."]
 include = ["kubedoor_tools*"]
 
+[tool.setuptools.package-data]
+# 默认命令清单(policy.default_commands),pip install 时要一起装进去
+kubedoor_tools = ["*.json"]
+
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]

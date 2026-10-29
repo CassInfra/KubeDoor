@@ -1,6 +1,6 @@
 """接口权限表:每个 (方法, 路径) 需要什么权限。
 
-按顺序匹配,第一条命中的规则生效;没登记的 /api/* 落到最后一条,按「目标集群读写」处理(默认拒绝)。
+按顺序匹配,第一条命中的规则生效;没登记的 /api/* 落到最后一条,按「目标集群读写及以上」处理(默认拒绝)。
 新增接口时在这里登记,tests/test_auth_policy.py 会检查 master 自己注册的路由都有显式规则。
 
 规则种类(kind):
@@ -8,19 +8,28 @@
   session       任何已登录的人(包括必须先改密的会话):/api/auth/*
   login         任何已登录的人;按集群过滤数据由 handler 自己做
   global_read   全局角色是只读及以上(与集群无关的数据)
-  global_write  全局角色是读写或管理员(与集群无关的写操作)
-  admin         管理员
+  global_write  全局角色是读写及以上(与集群无关的写操作)
+  admin         系统管理员
   env_read      目标集群可读(集群参数必填)
   env_read_opt  带了集群参数就校验可读;没带由 handler 按可见集群过滤
-  env_write     目标集群可写
+  env_write     目标集群读写及以上(兜底规则)
+  op            操作权限表里的一个操作(rule.op),每个目标集群都要允许(集群参数必填)
+  op_any        至少一个集群允许 rule.op(粗检,handler 再按具体集群判断;Istio 用)
   agent         kubedoor-agent 注册通道(中间件单独处理)
   internal      AI 服务内部桥(内部 token + 用户名),handler 再按集群校验
   custom        自定义校验函数
+
+操作权限表见 auth/permissions.py(Web「权限与审批」页)。鉴权前先 await permissions.load_policy() 刷新缓存,
+之后 principal.can / handler 里的判断都读同一份缓存。
 """
 
+import asyncio
 import re
 from dataclasses import dataclass, field
 
+from loguru import logger
+
+from . import permissions
 from .principal import PERM_LABELS
 
 
@@ -42,6 +51,20 @@ def need_env_write(principal, env):
     return no_env_access(env)
 
 
+def need_op(principal, op, env, code='operation_forbidden'):
+    """没有操作权限:看不到该集群按无权访问处理,否则说明当前权限和被拒的操作。"""
+    perm = principal.permission(env)
+    if not principal.can_read(env):
+        return no_env_access(env)
+    return Deny(403, f'当前账号在集群 {env} 是「{PERM_LABELS.get(perm, perm)}」权限,'
+                     f'不能执行「{permissions.op_name(op)}」', code)
+
+
+def need_global_op(op, what=''):
+    return Deny(403, f'{what}当前账号的全局角色不能执行「{permissions.op_name(op)}」'
+                     '(与集群无关的配置按全局角色判断)', 'operation_forbidden')
+
+
 NEED_GLOBAL_WRITE = '需要全局读写权限(与集群无关的配置只看全局权限)'
 
 
@@ -54,6 +77,7 @@ class Rule:
     many: bool = False  # 集群参数是数组
     check: object = None  # custom 校验:async def check(request, principal) -> None,不通过抛 Deny
     write: bool = False  # 写操作:记审计日志
+    op: str = ''  # kind 为 op / op_any 时的操作类型
     extra: dict = field(default_factory=dict)
 
     def matches(self, method, path):
@@ -61,15 +85,17 @@ class Rule:
         return (not self.methods or method in self.methods) and self.pattern.fullmatch(path) is not None
 
 
-def _rule(methods, path, kind, env=None, many=False, check=None, write=None):
+def _rule(methods, path, kind, env=None, many=False, check=None, write=None, op=''):
     method_set = frozenset(m.strip().upper() for m in methods.split('|')) if methods else frozenset()
     sources = ()
     if env:
         sources = tuple(tuple(item.split('.', 1)) for item in env.split('|'))
+    if kind in ('op', 'op_any') and op not in permissions.OPS_BY_KEY:
+        raise ValueError(f'{path}: 未知的操作类型 {op!r}')
     if write is None:
-        write = kind in ('env_write', 'global_write') or (
+        write = kind in ('env_write', 'global_write', 'op', 'op_any') or (
             kind in ('admin', 'custom') and bool(method_set) and not method_set <= {'GET', 'HEAD', 'OPTIONS'})
-    return Rule(method_set, re.compile(path), kind, sources, many, check, write)
+    return Rule(method_set, re.compile(path), kind, sources, many, check, write, op)
 
 
 # ---------------------------------------------------------------------------
@@ -106,6 +132,12 @@ def _require_envs(envs):
         raise Deny(400, '缺少 K8S 集群参数', 'missing_env')
 
 
+def _query_env(request):
+    env = (request.query.get('env') or '').strip()
+    _require_envs([env] if env else [])
+    return env
+
+
 def check_read_all(principal, envs):
     for env in envs:
         if not principal.can_read(env):
@@ -118,46 +150,89 @@ def check_write_all(principal, envs):
             raise need_env_write(principal, env)
 
 
+def check_op_all(principal, op, envs, code='operation_forbidden'):
+    for env in envs:
+        if not principal.can(op, env):
+            raise need_op(principal, op, env, code)
+
+
 # ---------------------------------------------------------------------------
 # 自定义校验
 # ---------------------------------------------------------------------------
 async def update_image_check(request, principal):
-    """改镜像:对集群有读写权限直接放行;只读用户继续走 UPDATE_IMAGE 白名单(时间段 + 用户名)。"""
-    env = request.query.get('env')
-    _require_envs([env] if env else [])
-    if principal.can_write(env):
+    """改镜像:有「更新镜像」权限直接放行;没有的只读用户继续走 UPDATE_IMAGE 白名单(集群、时间段、用户名,
+    由 kubedoor-master.py 判断)。「管理员」列也取消(全站关闭)时白名单也不放行。"""
+    env = _query_env(request)
+    if principal.can('workload.image', env):
         request['update_image_direct'] = True
         return
-    if not principal.can_read(env):
-        raise no_env_access(env)
-    request['update_image_direct'] = False
+    if principal.permission(env) == 'read' and permissions.allowed('workload.image', 'admin'):
+        request['update_image_direct'] = False
+        return
+    raise need_op(principal, 'workload.image', env)
 
 
 async def res_content_check(request, principal):
-    """查看资源 YAML:Secret 内容需要读写权限(同 K8S 内置 view 角色不含 Secret)。"""
-    env = request.query.get('env')
-    _require_envs([env] if env else [])
+    """查看资源 YAML:Secret 内容要「查看 Secret 内容」权限(同 K8S 内置 view 角色不含 Secret),其他资源可读即可。"""
+    env = _query_env(request)
     if (request.query.get('resource_type') or '').strip().lower() in ('secret', 'secrets'):
-        if not principal.can_write(env):
-            raise Deny(403, f'查看 Secret 内容需要集群 {env} 的读写权限', 'secret_forbidden')
+        check_op_all(principal, 'resource.secret', [env], 'secret_forbidden')
         return
     check_read_all(principal, [env])
 
 
+_LARGE_YAML = 64 * 1024  # 超过这么大的 YAML 放到线程里解析,免得卡住 event loop
+
+
+async def res_ops_check(request, principal):
+    """新建 / 编辑资源 YAML:要「新建 / 编辑资源 YAML」;YAML 里有 kube-system/coredns 或 Istio 资源,
+    还要「CoreDNS 修改」/「Istio 修改」(解析不了的 YAML 按都涉及处理)。"""
+    env = _query_env(request)
+    check_op_all(principal, 'resource.apply', [env])
+    content = (await _json_body(request)).get('yaml_content')
+    if isinstance(content, str) and len(content) > _LARGE_YAML:
+        extra, parsed = await asyncio.to_thread(permissions.yaml_targets, content)
+    else:
+        extra, parsed = permissions.yaml_targets(content)
+    for op in extra:
+        if not principal.can(op, env):
+            denied = need_op(principal, op, env)
+            if not parsed:
+                denied.message = f'YAML 解析失败,无法判断是否涉及 CoreDNS / Istio,按涉及处理:{denied.message}'
+            raise denied
+
+
+async def res_delete_check(request, principal):
+    """删除资源:要「删除资源」;删的是 kube-system/coredns 或 Istio 资源还要对应的网络权限。"""
+    env = _query_env(request)
+    check_op_all(principal, 'resource.delete', [env])
+    query = request.query
+    extra = permissions.identify_targets_master(resource_type=query.get('resource_type'),
+                                                name=query.get('resource_name'), namespace=query.get('namespace'))
+    for op in extra:
+        check_op_all(principal, op, [env])
+
+
 async def res_upsert_check(request, principal):
-    """新增/编辑管控服务:当前集群可写;勾选了同步到其它集群,目标集群也要可写。"""
+    """新增 / 编辑管控服务:当前集群要「资源管控」;勾选了同步到其它集群,目标集群也要。"""
     body = await _json_body(request)
     env = body.get('env')
-    _require_envs([env] if isinstance(env, str) and env else [])
-    envs = [env]
+    _require_envs([env] if isinstance(env, str) and env.strip() else [])
+    envs = [env.strip()]
     sync_env = body.get('sync_env')
-    if isinstance(sync_env, str) and sync_env.strip():
+    if isinstance(sync_env, str) and sync_env.strip() and sync_env.strip() not in envs:
         envs.append(sync_env.strip())
-    check_write_all(principal, envs)
+    check_op_all(principal, 'control.edit', envs)
+
+
+async def load_balance_config_check(request, principal):
+    """节点均衡全局配置与集群无关:按全局角色查「节点均衡」那一行。"""
+    if not principal.can_global('balance.run'):
+        raise need_global_op('balance.run', '节点均衡的全局配置对所有集群生效,')
 
 
 async def alert_operate_check(request, principal):
-    """修改告警处理状态:按这条告警所属集群判断。"""
+    """修改告警处理状态:按这条告警所属集群查「告警处理状态」。"""
     from datetime import datetime
 
     import db
@@ -173,7 +248,7 @@ async def alert_operate_check(request, principal):
     )
     if env is None:
         raise Deny(404, '告警不存在', 'not_found')
-    check_write_all(principal, [env])
+    check_op_all(principal, 'alert.operate', [env])
 
 
 SILENCE_ENV_KEYS = ('env', 'k8s', 'cluster')
@@ -199,13 +274,17 @@ def silence_visible(principal, matchers):
     return any(principal.can_read(env) for env in envs)
 
 
+_GLOBAL_SILENCE = '没有限定集群(env=xxx)的屏蔽规则对所有集群生效,'
+
+
 def check_silence_write(principal, matchers):
+    """改屏蔽规则:限定了集群的,这些集群都要「告警屏蔽」;全局规则按全局角色查表。"""
     envs = silence_envs(matchers)
     if envs is None:
-        if not principal.global_write:
-            raise Deny(403, '没有限定集群(env=xxx)的屏蔽规则对所有集群生效,' + NEED_GLOBAL_WRITE, 'global_write_required')
+        if not principal.can_global('alert.silence'):
+            raise need_global_op('alert.silence', _GLOBAL_SILENCE)
         return
-    check_write_all(principal, envs)
+    check_op_all(principal, 'alert.silence', envs)
 
 
 async def _silence_matchers(silence_id):
@@ -239,8 +318,8 @@ async def silence_write_check(request, principal):
                 matchers = None
         if isinstance(matchers, list):
             check_silence_write(principal, matchers)
-        elif not principal.global_write:
-            raise Deny(403, NEED_GLOBAL_WRITE, 'global_write_required')
+        elif not principal.can_global('alert.silence'):
+            raise need_global_op('alert.silence', _GLOBAL_SILENCE)
 
 
 # ---------------------------------------------------------------------------
@@ -253,8 +332,7 @@ _AGENT_READ_PATHS = '|'.join([
     'agent/jvm/configs', 'agent/statefulsets', 'agent/statefulset/pods', 'agent/daemonsets',
     'agent/daemonset/pods', 'load-balance/isolated', 'load-balance/nodes-cpu', 'load-balance/namespaces',
     'pod/get_logs', 'pod/download_logs', 'pod/get_previous_logs', r'pod/task_status/[^/]+',
-    # CoreDNS:查看 coredns ConfigMap;从 agent 所在 Pod 解析域名(保存、TCP 端口测试走默认的集群写:
-    # 端口测试会从集群内向任意地址发起连接,只给读写用户,并记审计)
+    # CoreDNS:查看 coredns ConfigMap;从 agent 所在 Pod 解析域名
     'agent/coredns', 'agent/net/resolve',
 ])
 
@@ -264,17 +342,17 @@ RULES = (
     _rule('', '/api/auth/verify', 'public'),
     _rule('POST', '/api/auth/logout', 'public'),  # 会话失效时也要能清 Cookie
     _rule('GET|POST', '/api/auth/(me|password)', 'session'),
-    # ---- 系统管理:用户、集群授权、LDAP、审计 ----
+    # ---- 系统管理:用户、集群授权、LDAP、审计、权限与审批 ----
     _rule('', '/api/admin/.+', 'admin'),
     # ---- AI 服务内部桥 ----
     _rule('', '/api/ai/internal/.+', 'internal'),
     # ---- WebSocket ----
     _rule('GET', '/ws', 'agent'),
     _rule('GET', '/ws/(pod-logs|workload-status)', 'env_read', env='query.env'),
-    # Pod 终端能在容器里执行任意命令:要目标集群读写权限(handler 另记 pod.exec 审计)
-    _rule('GET', '/ws/pod-exec', 'env_write', env='query.env'),
-    # 节点终端在宿主机上以 root 执行命令,权限更高:同样要集群读写(handler 记 node.exec 审计)
-    _rule('GET', '/ws/node-exec', 'env_write', env='query.env'),
+    # Pod 终端能在容器里执行任意命令(handler 另记 pod.exec 审计)
+    _rule('GET', '/ws/pod-exec', 'op', env='query.env', op='pod.shell'),
+    # 节点终端在宿主机上以 root 执行命令(handler 记 node.exec 审计)
+    _rule('GET', '/ws/node-exec', 'op', env='query.env', op='node.shell'),
     # ---- 集群列表(handler 按可见集群过滤)----
     _rule('GET', '/api/(prom_env|agent_names|agent_status)', 'login'),
     _rule('GET', '/api/prom_(ns|services|query|node_rank)', 'env_read', env='query.env'),
@@ -284,15 +362,15 @@ RULES = (
     _rule('POST', '/api/events/query', 'env_read', env='body.k8s'),
     _rule('GET', '/api/events/menu', 'env_read', env='query.k8s'),
     # ---- 高峰期采集 ----
-    _rule('GET', '/api/init_peak_data', 'env_write', env='query.env'),
+    _rule('GET', '/api/init_peak_data', 'op', env='query.env', op='control.edit'),
     _rule('GET', '/api/cron_peak_data', 'admin', write=True),  # CronJob 带内部 token(系统身份)调用
     # ---- 资源管控(数据库)----
     _rule('GET', '/api/db/res/envs', 'login'),
     _rule('GET', '/api/db/res/(namespaces|deployments|max_day|collection)', 'env_read', env='query.env'),
     _rule('GET', '/api/db/res/list', 'env_read_opt', env='query.env'),
     _rule('POST', '/api/db/res/(add|edit)', 'custom', check=res_upsert_check),
-    _rule('POST', '/api/db/res/pod_count', 'env_write', env='body.env'),
-    # ---- Agent 管理(管理员)----
+    _rule('POST', '/api/db/res/pod_count', 'op', env='body.env', op='workload.scale'),
+    # ---- Agent 管理(系统管理员)----
     _rule('POST', '/api/db/agent/(admission|collect|nms_not_confirm|scheduler|aliases)', 'admin'),
     _rule('GET', '/api/admis_switch', 'admin', write=True),
     _rule('GET', '/api/db/agent/show_add_label', 'env_read', env='query.env'),
@@ -305,26 +383,42 @@ RULES = (
     _rule('GET', '/api/db/silence/(list|label_values)', 'login'),
     _rule('POST', '/api/db/silence/preview', 'login'),
     _rule('POST', '/api/db/silence/(add|edit|revoke|extend|delete)', 'custom', check=silence_write_check),
-    # ---- Istio(设计见 istio_route/README.md):查看按集群读权限,由 handler 过滤;所有修改只允许管理员 ----
+    # ---- Istio(设计见 istio_route/README.md):查看按集群读权限,由 handler 过滤;修改要「Istio 修改」:
+    #      这里只粗检至少一个集群有,handler 再按组(组内每个集群)或目标集群细检 ----
     _rule('GET', '/api/istio/.*', 'login'),
-    _rule('POST|PUT|DELETE', '/api/istio/.*', 'admin'),
+    _rule('POST|PUT|DELETE', '/api/istio/.*', 'op_any', op='network.istio'),
     # 集群里的 VS 只能经 /api/istio/* 读写(下发内容由 master 按组标准生成),通用转发直接拒绝
     _rule('', '/api/agent/istio/.*', 'admin'),
     # ---- 节点均衡 ----
     _rule('GET', '/api/load-balance/(config|status|plan|logs)', 'global_read'),
-    _rule('PUT', '/api/load-balance/config', 'global_write'),
+    _rule('PUT', '/api/load-balance/config', 'custom', check=load_balance_config_check, write=True),
     _rule('POST', '/api/load-balance/check-pods', 'env_read', env='query.env'),
-    _rule('POST', '/api/load-balance/(analyze|execute|cleanup)', 'env_write', env='query.env'),
+    _rule('POST', '/api/load-balance/(analyze|execute|cleanup)', 'op', env='query.env', op='balance.run'),
     # ---- 转发给 agent 的只读接口 ----
     _rule('GET', f'/api/({_AGENT_READ_PATHS})', 'env_read', env='query.env'),
     _rule('GET', '/api/agent/res/content', 'custom', check=res_content_check),
-    # ---- 改镜像:读写直接放行,只读用户走 UPDATE_IMAGE 白名单 ----
-    _rule('POST', '/api/update-image', 'custom', check=update_image_check, write=True),
-    # ---- 其余 /api/* (转发给 agent 的写操作,如扩缩容、重启、删 Pod、exec 等)----
+    # ---- 转发给 agent 的修改:按操作权限表(不限方法,换个方法也绕不过去)----
+    _rule('', '/api/restart', 'op', env='query.env', op='workload.restart'),
+    _rule('', '/api/agent/(statefulset|daemonset)/restart', 'op', env='query.env', op='workload.restart'),
+    _rule('', '/api/scale', 'op', env='query.env', op='workload.scale'),
+    _rule('', '/api/agent/statefulset/scale', 'op', env='query.env', op='workload.scale'),
+    _rule('', '/api/cron', 'op', env='query.env', op='workload.schedule'),
+    # 改镜像:有「更新镜像」权限直接放行,没有的只读用户走 UPDATE_IMAGE 白名单
+    _rule('', '/api/update-image', 'custom', check=update_image_check, write=True),
+    _rule('', '/api/pod/(delete_pod|delete_pods)', 'op', env='query.env', op='pod.delete'),  # delete_pod 是 GET
+    _rule('', '/api/pod/modify_pod', 'op', env='query.env', op='pod.isolate'),
+    _rule('', '/api/pod/auto_(dump|jstack|jfr|jvm_mem)', 'op', env='query.env', op='pod.jvm'),
+    _rule('', '/api/agent/res/ops', 'custom', check=res_ops_check, write=True),
+    _rule('', '/api/agent/res/delete', 'custom', check=res_delete_check, write=True),
+    _rule('', '/api/nodes/(cordon|uncordon)', 'op', env='query.env', op='node.cordon'),
+    _rule('', '/api/agent/coredns/save', 'op', env='query.env', op='network.coredns'),
+    # 端口测试会从集群内向任意地址发起连接
+    _rule('', '/api/agent/net/tcp', 'op', env='query.env', op='network.tcp'),
+    # ---- 其余 /api/*:按集群读写及以上 ----
     _rule('', '/api/.*', 'env_write', env='query.env'),
 )
 
-# 没有任何规则命中(非 /api、/ws 路径):只有管理员能访问
+# 没有任何规则命中(非 /api、/ws 路径):只有系统管理员能访问
 FALLBACK = _rule('', '.*', 'admin')
 
 
@@ -335,10 +429,22 @@ def match(method, path):
     return FALLBACK
 
 
+async def _refresh_policy():
+    try:
+        await permissions.load_policy()
+    except Exception as exc:
+        logger.error(f'读取权限与审批配置失败: {exc}')
+        raise Deny(503, '读取权限配置失败,请稍后重试', 'policy_unavailable')
+
+
 async def authorize(rule, request, principal):
     """校验已登录用户能否访问;不通过抛 Deny。登录状态与改密限制由中间件先判断。"""
     kind = rule.kind
-    if kind in ('public', 'session', 'login', 'agent'):
+    if kind in ('public', 'agent'):
+        return
+    # 后面的 principal.can 和 handler 里的判断都读 permissions 的缓存,这里先刷新(没过期不查库)
+    await _refresh_policy()
+    if kind in ('session', 'login'):
         return
     if kind == 'internal':
         if principal.via not in ('internal', 'system'):
@@ -354,10 +460,14 @@ async def authorize(rule, request, principal):
         return
     if kind == 'admin':
         if not principal.is_admin:
-            raise Deny(403, '需要管理员权限', 'admin_required')
+            raise Deny(403, '需要系统管理员权限', 'admin_required')
         return
     if kind == 'custom':
         await rule.check(request, principal)
+        return
+    if kind == 'op_any':
+        if not principal.can_any(rule.op):
+            raise Deny(403, f'当前账号在所有集群都不能执行「{permissions.op_name(rule.op)}」', 'operation_forbidden')
         return
     envs = await extract_envs(rule, request)
     if kind == 'env_read':
@@ -365,6 +475,9 @@ async def authorize(rule, request, principal):
         check_read_all(principal, envs)
     elif kind == 'env_read_opt':
         check_read_all(principal, envs)
+    elif kind == 'op':
+        _require_envs(envs)
+        check_op_all(principal, rule.op, envs)
     elif kind == 'env_write':
         if not envs and principal.is_admin:
             return

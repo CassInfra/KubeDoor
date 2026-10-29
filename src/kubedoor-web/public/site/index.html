@@ -255,7 +255,7 @@ content_type: application/json-patch+json</pre>
       <li class="reveal">
         <div class="card-icon card-icon-sm"><svg class="icon" aria-hidden="true"><use href="#i-robot"/></svg></div>
         <h3>内置 AI 运维助手</h3>
-        <p>选定集群用一句话排障与运维，自动联合日志、事件、监控与历史数据定位原因；变更先冻结参数、展示差异，经人工批准才执行，会话与每次操作全程入库审计，模型自由选。同一能力也开放给企业微信机器人和标准 MCP。</p>
+        <p>选定集群用一句话排障与运维，自动联合日志、事件、监控与历史数据定位原因；变更先冻结参数、展示差异，默认经人工批准才执行，会话与每次操作全程入库审计，模型自由选。同一能力也开放给企业微信机器人和标准 MCP。</p>
       </li>
       <li class="reveal" style="--d:1">
         <div class="card-icon card-icon-sm"><svg class="icon" aria-hidden="true"><use href="#i-route"/></svg></div>
@@ -369,11 +369,11 @@ content_type: application/json-patch+json</pre>
       <div class="access-copy reveal">
         <p class="eyebrow eyebrow-sm">// 2.3 新增 · 企业微信机器人</p>
         <h3 id="wecom-title">在企业微信里，<span class="grad-text">单聊就能运维 K8S</span></h3>
-        <p>管理员在「系统管理 → 企微 AI 机器人」接入企业微信智能机器人后，成员单聊机器人即可查询、排障和发起变更，与网页 AI 助手共用同一套工具、权限、审批与审计。</p>
+        <p>系统管理员在「系统管理 → 企微 AI 机器人」接入企业微信智能机器人后，成员单聊机器人即可查询、排障和发起变更，与网页 AI 助手共用同一套工具、权限、审批与审计。</p>
         <ul class="tick-list">
           <li>长连接接入，不需要公网回调地址；机器人单独配置模型，凭证 <code class="nw">AES-256-GCM</code> 加密存储</li>
           <li>成员绑定花折账号并指定默认集群，也可让未绑定的成员统一按一个账号的权限使用；每条消息都按账号实时校验</li>
-          <li>变更推送「批准 / 拒绝」卡片，只有发起人本人能批准，过期即失效；卡片上方写明管控状态、步骤与变化</li>
+          <li>需要审批的变更推送「批准 / 拒绝」卡片，只有发起人本人能批准，过期即失效；卡片上方写明管控状态、步骤与变化</li>
           <li>发送「切换集群 2」切换集群，「新对话」「继续上次」管理对话，空闲 2 小时自动开新对话</li>
         </ul>
         <a class="link-arrow" href="https://github.com/CassInfra/KubeDoor/blob/main/src/kubedoor-ai/README.md#企业微信智能机器人" target="_blank" rel="noopener">阅读企业微信机器人说明<svg class="icon" aria-hidden="true"><use href="#i-arrow"/></svg></a>
@@ -419,12 +419,12 @@ content_type: application/json-patch+json</pre>
         <li><span class="g-num">6</span><b>结果核验</b><span>不确定就先查询，不重放</span></li>
       </ol>
       <ul class="guard-chips">
-        <li>按集群授权，只读集群无法发起变更</li>
+        <li>按集群 × 操作授权，没有权限的变更直接拒绝，要不要审批按操作配置</li>
         <li>所选集群是本轮硬边界</li>
-        <li>Pod exec / curl / openssl 一律审批</li>
+        <li>Pod 内命令按清单分查看 / 其他 / 高危，高危命令固定审批</li>
         <li>参数数组执行，不开放 shell</li>
         <li>模型 API Key 不落服务端，流式输出、checkpoint 与日志中全程脱敏</li>
-        <li>「自动批准执行」需对该集群有读写权限并手动勾选，仅当前页面有效</li>
+        <li>「自动批准执行」需手动勾选，勾选后需要审批的操作（含高危命令）自动批准，仅当前页面有效</li>
         <li>会话、动作与事件全部入库</li>
       </ul>
     </div>
@@ -439,9 +439,9 @@ content_type: application/json-patch+json</pre>
           <li><code>/sse</code><span>SSE · 兼容旧客户端</span></li>
         </ul>
         <ul class="tick-list">
-          <li>复用 Web 账号（本地或 LDAP，Basic 认证），按集群权限执行：只读集群只能调用查询类工具，「无」权限的集群不可见</li>
+          <li>复用 Web 账号（本地或 LDAP，Basic 认证），按集群权限与「权限与审批」执行，规则与网页 AI 助手一致；「无」权限的集群不可见</li>
           <li>保留 1.x 的 16 个工具名，新增统一工具 <code>kubedoor_tool</code> 与 Skill 资源 <code>skills://kubedoor-k8s</code></li>
-          <li>写操作返回待批准动作与浏览器链接，用同一账号在 Web 中批准后才执行</li>
+          <li>需要审批的操作返回待批准动作与浏览器链接，用同一账号在 Web 中批准后才执行</li>
         </ul>
         <a class="link-arrow" href="https://github.com/CassInfra/KubeDoor/blob/main/docs/ai-assistant.md" target="_blank" rel="noopener">阅读 AI 助手与 MCP 文档<svg class="icon" aria-hidden="true"><use href="#i-arrow"/></svg></a>
       </div>
@@ -545,13 +545,13 @@ content_type: application/json-patch+json</pre>
       <article class="card glow-card fcard reveal" style="--d:2">
         <div class="card-icon"><svg class="icon" aria-hidden="true"><use href="#i-lock"/></svg></div>
         <h3>账号权限与审计<em class="new-tag">2.2</em></h3>
-        <p>本地账号与 LDAP 统一登录，按用户 × 集群授权「读写 / 只读 / 无」，Web、Grafana、AI 助手与 MCP 共用一套权限；登录、权限变更与所有写操作（含越权被拒）进入操作审计，AI 操作的参数、审批与结果全部入库。</p>
+        <p>本地账号与 LDAP 统一登录，按用户 × 集群授权「管理员 / 读写 / 只读 / 无」，每级能做哪些操作、AI 变更要不要审批可按操作配置；Web、Grafana、AI 助手与 MCP 共用一套权限；登录、权限变更与所有写操作（含越权被拒）进入操作审计，AI 操作的参数、审批与结果全部入库。</p>
       </article>
       <article class="card glow-card fcard fcard-wide fcard-flow reveal">
         <div class="fcard-text">
           <div class="card-icon"><svg class="icon" aria-hidden="true"><use href="#i-route"/></svg></div>
           <h3>Istio VirtualService 管理<em class="new-tag">2.3</em></h3>
-          <p>按「Istio 组」统一维护一个项目在多个集群里的 VirtualService：规则、默认路由与 gateways 全组共用一份标准，hosts 和规则里的域名条件按集群维护；矩阵一屏看清各集群是否一致，跨组冲突标红，未建模的字段原样保留，所有修改仅限管理员。</p>
+          <p>按「Istio 组」统一维护一个项目在多个集群里的 VirtualService：规则、默认路由与 gateways 全组共用一份标准，hosts 和规则里的域名条件按集群维护；矩阵一屏看清各集群是否一致，跨组冲突标红，未建模的字段原样保留，修改需要「Istio 修改」权限（默认仅管理员）。</p>
         </div>
         <ol class="mini-flow" aria-label="Istio VirtualService 管理流程">
           <li><b>刷新现状</b><span>并行采集各集群的 VirtualService</span></li>
@@ -573,8 +573,8 @@ content_type: application/json-patch+json</pre>
         <p>登录、会话与权限改由 master 统一管理，nginx 只做反向代理：Web、Grafana、AI 助手与 MCP 共用一个入口、一套账号、一套权限。</p>
         <ul class="tick-list">
           <li>本地账号 + LDAP：Web 上配置并一键测试，本地账号优先，LDAP 用户首次登录自动开通</li>
-          <li>全局权限「管理员 / 读写 / 只读 / 无」兜底，再按用户 × 集群单独授权，单独授权优先</li>
-          <li>「无」权限的集群在页面、下拉框、告警与 AI 助手中都不可见；只读集群上 AI 只查询、不变更</li>
+          <li>全局角色「系统管理员 / 集群管理员 / 读写 / 只读 / 无」兜底，再按用户 × 集群单独授权「管理员 / 读写 / 只读 / 无」，单独授权优先</li>
+          <li>每级权限能做哪些操作、要不要审批，在「系统管理 → 权限与审批」按操作配置；「无」权限的集群在页面、下拉框、告警与 AI 助手中都不可见</li>
           <li>登录、账号与权限变更、所有写操作（含越权被拒）进入操作审计，默认保留 180 天</li>
           <li>全新水墨登录页：HttpOnly 会话、7 天内免登录、连续输错自动锁定</li>
         </ul>
@@ -584,17 +584,17 @@ content_type: application/json-patch+json</pre>
         <div class="access-shot">
           <img src="assets/img/shots/login.webp" width="1280" height="720" loading="lazy" decoding="async" alt="KubeDoor 2.2 登录页截图：水墨宣纸背景，左侧是「花折」书法与 KubeDoor 标题，毛玻璃登录框位于中右侧发光的月洞门中">
         </div>
-        <div class="perm-card" role="img" aria-label="集群授权示意：zhang.san 是 LDAP 账号、全局只读，单独授权 prod-a 读写；li.si 是 LDAP 账号、全局读写，单独授权 prod-a 无权限，看不到该集群；ci-bot 是本地账号、全局无，只单独授权 test 读写。其余集群按全局权限兜底。">
-          <div class="perm-head"><span>用户与权限 · 集群授权</span><span class="perm-legend"><i class="pm-dot pm-rw"></i>读写<i class="pm-dot pm-read"></i>只读<i class="pm-dot pm-none"></i>无</span></div>
+        <div class="perm-card" role="img" aria-label="集群授权示意：zhang.san 是 LDAP 账号、全局只读，单独授权 prod-a 读写、test 管理员；li.si 是 LDAP 账号、全局集群管理员，单独授权 prod-a 无权限，看不到该集群；ci-bot 是本地账号、全局无，只单独授权 test 读写。其余集群按全局角色兜底；每级权限能做哪些操作在「系统管理 → 权限与审批」里按操作配置。">
+          <div class="perm-head"><span>用户与权限 · 集群授权</span><span class="perm-legend"><i class="pm-dot pm-admin"></i>管理员<i class="pm-dot pm-rw"></i>读写<i class="pm-dot pm-read"></i>只读<i class="pm-dot pm-none"></i>无</span></div>
           <table class="perm-table">
             <thead><tr><th>账号</th><th>prod-a</th><th>prod-b</th><th>test</th></tr></thead>
             <tbody>
-              <tr><td>zhang.san<em>LDAP · 全局只读</em></td><td><b class="pm pm-rw">读写</b></td><td><b class="pm pm-read is-inherit">只读</b></td><td><b class="pm pm-read is-inherit">只读</b></td></tr>
-              <tr><td>li.si<em>LDAP · 全局读写</em></td><td><b class="pm pm-none">无</b></td><td><b class="pm pm-rw is-inherit">读写</b></td><td><b class="pm pm-rw is-inherit">读写</b></td></tr>
+              <tr><td>zhang.san<em>LDAP · 全局只读</em></td><td><b class="pm pm-rw">读写</b></td><td><b class="pm pm-read is-inherit">只读</b></td><td><b class="pm pm-admin">管理员</b></td></tr>
+              <tr><td>li.si<em>LDAP · 全局集群管理员</em></td><td><b class="pm pm-none">无</b></td><td><b class="pm pm-admin is-inherit">管理员</b></td><td><b class="pm pm-admin is-inherit">管理员</b></td></tr>
               <tr><td>ci-bot<em>本地 · 全局无</em></td><td><b class="pm pm-none is-inherit">无</b></td><td><b class="pm pm-none is-inherit">无</b></td><td><b class="pm pm-rw">读写</b></td></tr>
             </tbody>
           </table>
-          <p class="perm-note">实线为单独授权，虚线为全局兜底 · 示意数据</p>
+          <p class="perm-note">实线为单独授权，虚线为全局兜底；每级能做哪些操作在「权限与审批」里按操作配置 · 示意数据</p>
         </div>
       </figure>
     </div>
@@ -699,7 +699,7 @@ content_type: application/json-patch+json</pre>
         </div>
       </li>
       <li class="step reveal">
-        <div class="step-side"><span class="step-num">02</span><h3>装控制端</h3><p><code>PG_HOST</code> 要填 K8S 里的 Pod 能访问到的地址（不能是 127.0.0.1）。装完会打印 Web 控制台地址与内置管理员 <code>kubedoor / kubedoor</code>，首次登录会强制修改口令；之后在「系统管理」里添加账号、接入 LDAP、按集群授权。内置 Agent 账号的出厂口令是公开的，上线前请在「用户与权限」里重置，并同步修改各集群的 <code>MASTER_WS</code>。</p></div>
+        <div class="step-side"><span class="step-num">02</span><h3>装控制端</h3><p><code>PG_HOST</code> 要填 K8S 里的 Pod 能访问到的地址（不能是 127.0.0.1）。装完会打印 Web 控制台地址与内置超级管理员 <code>kubedoor / kubedoor</code>，首次登录会强制修改口令；之后在「系统管理」里添加账号、接入 LDAP、按集群授权。内置 Agent 账号的出厂口令是公开的，上线前请在「用户与权限」里重置，并同步修改各集群的 <code>MASTER_WS</code>。</p></div>
         <div class="terminal">
           <div class="terminal-bar"><span class="dots" aria-hidden="true"><i></i><i></i><i></i></span><span class="terminal-title">bash · 可执行 kubectl 的机器</span><button class="copy-btn" type="button" data-copy-target="cmd-2" aria-label="复制第二步命令"><svg class="icon" aria-hidden="true"><use href="#i-copy"/></svg><span>复制</span></button></div>
 <pre class="code"><code id="cmd-2"><span class="c-c"># 与数据库不在同一台机器时，先在这里 git clone 仓库</span>

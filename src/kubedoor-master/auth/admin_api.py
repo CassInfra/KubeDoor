@@ -1,9 +1,9 @@
-"""系统管理接口(/api/admin/*,仅管理员):用户、集群授权、LDAP 设置、操作审计。
+"""系统管理接口(/api/admin/*,仅系统管理员):用户、集群授权、LDAP 设置、操作审计、权限与审批。
 
 内置账号规则:
   - kubedoor(内置超级管理员):只能由它自己在「修改口令」里改密;不能删除、禁用、改权限、重置口令、强制下线;
-  - 内置 Agent 账号:不能删除,管理员可以重置口令(改完要同步更新各集群 agent 的 MASTER_WS)。
-管理员不能删除、禁用、降级自己,避免误操作把自己锁在外面。
+  - 内置 Agent 账号:不能删除,系统管理员可以重置口令(改完要同步更新各集群 agent 的 MASTER_WS)。
+系统管理员不能删除、禁用、降级自己,避免误操作把自己锁在外面。
 """
 
 import asyncio
@@ -12,7 +12,7 @@ from datetime import datetime
 
 from aiohttp import web
 
-from . import audit, ldap_auth, passwords
+from . import audit, ldap_auth, passwords, permissions
 from .authn import valid_username
 from .context import client_ip
 from .principal import CLUSTER_PERMS, HUMAN_ROLES, ROLES
@@ -232,7 +232,7 @@ async def set_user_clusters(request):
     if error:
         return error
     if user['role'] == 'admin':
-        return _fail(400, '管理员已经拥有全部权限,不能再单独指定集群权限')
+        return _fail(400, '系统管理员对所有集群都是管理员权限,不能再单独指定集群权限')
     if user['role'] == 'agent':
         return _fail(400, 'Agent 账号不访问集群数据,不能指定集群权限')
     body = await _json(request)
@@ -246,7 +246,7 @@ async def set_user_clusters(request):
         if not env or len(env) > 253:
             return _fail(400, '集群名不能为空')
         if perm not in CLUSTER_PERMS:
-            return _fail(400, f'集群 {env} 的权限取值不正确(rw / read / none)')
+            return _fail(400, f'集群 {env} 的权限取值不正确(admin / rw / read / none)')
         if env in grants:
             return _fail(400, f'集群 {env} 重复')
         grants[env] = perm
@@ -305,6 +305,29 @@ async def test_ldap(request):
 
 
 # ---------------------------------------------------------------------------
+# 权限与审批(操作权限表 + 命令清单,见 permissions.py)
+# ---------------------------------------------------------------------------
+async def get_permission_policy(request):
+    """行定义、当前值、默认值(「恢复默认」用)、命令清单、内置参数检查说明。"""
+    policy = await permissions.load_policy(force=True)
+    return web.json_response({'success': True, 'data': permissions.admin_payload(policy)})
+
+
+async def put_permission_policy(request):
+    principal = request['principal']
+    body = await _json(request)
+    before = await permissions.load_policy(force=True)
+    try:
+        saved = await permissions.save_policy(body.get('ops'), body.get('commands'), principal.username)
+    except permissions.PolicyError as exc:
+        return _fail(400, str(exc))
+    changes = permissions.policy_diff(before, saved)
+    if changes:
+        audit.record_bg(principal.username, 'permission.policy', ip=client_ip(request), detail=changes)
+    return web.json_response({'success': True, 'data': permissions.admin_payload(saved)})
+
+
+# ---------------------------------------------------------------------------
 # 审计
 # ---------------------------------------------------------------------------
 async def list_audit(request):
@@ -350,5 +373,7 @@ def register_routes(app):
     app.router.add_get('/api/admin/ldap', get_ldap)
     app.router.add_put('/api/admin/ldap', put_ldap)
     app.router.add_post('/api/admin/ldap/test', test_ldap)
+    app.router.add_get('/api/admin/permission-policy', get_permission_policy)
+    app.router.add_put('/api/admin/permission-policy', put_permission_policy)
     app.router.add_get('/api/admin/audit', list_audit)
     app.router.add_get('/api/admin/audit/actions', list_audit_actions)

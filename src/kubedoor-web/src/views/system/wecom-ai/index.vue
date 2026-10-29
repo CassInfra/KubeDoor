@@ -29,7 +29,7 @@ import {
   PERM_LABELS,
   PERM_TAG,
   ROLE_LABELS,
-  roleDefaultPermission
+  permissionOf
 } from "@/utils/permission";
 
 /** 企微对话空闲多少分钟后自动开新对话（0 表示关闭） */
@@ -55,8 +55,7 @@ const form = reactive({
   base_url: "https://api.openai.com/v1",
   api_key: "",
   model: "",
-  session_idle_minutes: DEFAULT_IDLE_MINUTES as number | undefined,
-  read_only_can_exec: false
+  session_idle_minutes: DEFAULT_IDLE_MINUTES as number | undefined
 });
 const limits = ref<AIModelLimits>(modelLimitsFor(""));
 const effort = ref<AIReasoningEffort | null>(null);
@@ -91,11 +90,7 @@ const availableClusters = computed(() => {
     item => item.username === mapping.username
   );
   if (!user) return [];
-  return clusters.value.filter(env => {
-    const permission =
-      user.role === "admin" ? "rw" : (user.clusters?.[env] ?? user.role);
-    return permission === "rw" || permission === "read";
-  });
+  return clusters.value.filter(env => permissionOf(user, env) !== "none");
 });
 /** 已保存的未绑定成员默认权限(账号 + 默认集群);unbound 是正在编辑的值 */
 const unboundSaved = ref<WeComUnbound>({
@@ -109,10 +104,14 @@ const unboundDirty = computed(
     (unbound.username ? envOrNull(unbound.default_env) : null) !==
       unboundSaved.value.unbound_default_env
 );
-/** 管理员账号不能作为默认权限(后端同样会拒绝) */
+/** 系统管理员、集群管理员账号不能作为默认权限(后端同样会拒绝) */
 const unboundCandidates = computed(() =>
   systemUsers.value.filter(
-    item => item.enabled && item.role !== "agent" && item.role !== "admin"
+    item =>
+      item.enabled &&
+      item.role !== "agent" &&
+      item.role !== "admin" &&
+      item.role !== "cluster_admin"
   )
 );
 const unboundUnavailable = computed(
@@ -132,7 +131,7 @@ const unboundAccess = computed(() => {
   return clusters.value
     .map(env => ({
       env,
-      permission: user.clusters?.[env] ?? roleDefaultPermission(user.role)
+      permission: permissionOf(user, env)
     }))
     .filter(item => item.permission !== "none");
 });
@@ -196,7 +195,6 @@ async function loadConfig() {
   effort.value = value.reasoning_effort ?? null;
   form.session_idle_minutes =
     value.session_idle_minutes ?? DEFAULT_IDLE_MINUTES;
-  form.read_only_can_exec = value.read_only_can_exec ?? false;
   form.bot_secret = "";
   form.api_key = "";
 }
@@ -310,8 +308,7 @@ async function saveConfig() {
       model: form.model.trim(),
       ...limits.value,
       reasoning_effort: effort.value,
-      session_idle_minutes: form.session_idle_minutes ?? DEFAULT_IDLE_MINUTES,
-      read_only_can_exec: form.read_only_can_exec
+      session_idle_minutes: form.session_idle_minutes ?? DEFAULT_IDLE_MINUTES
     });
     form.bot_secret = "";
     form.api_key = "";
@@ -551,14 +548,6 @@ onBeforeUnmount(() => {
             120）。成员也可以发送「新对话」「继续上次」手动切换。
           </div>
         </el-form-item>
-        <el-form-item label="只读用户执行权限">
-          <el-switch v-model="form.read_only_can_exec" />
-          <div class="form-tip">
-            允许只读权限用户在企微里执行 Pod 内查看命令（ls、cat、env、ps
-            等），高危命令（rm -rf、kill、重定向等）仍然需要写权限。关闭时只读用户执行任何
-            Pod 内命令都会被拒绝。
-          </div>
-        </el-form-item>
         <div class="form-actions">
           <el-button :loading="testing" @click="testModel">测试模型</el-button>
           <el-button type="primary" :loading="saving" @click="saveConfig"
@@ -599,7 +588,7 @@ onBeforeUnmount(() => {
             />
           </el-select>
           <div class="form-tip">
-            未绑定的成员按所选花折账号的权限使用机器人（包括按集群的单独授权），可以在「用户与权限」里新建一个专用账号；不能选管理员账号。
+            未绑定的成员按所选花折账号的权限使用机器人（包括按集群的单独授权），可以在「用户与权限」里新建一个专用账号；不能选系统管理员、集群管理员账号。
           </div>
           <div v-if="unbound.username" class="unbound-access">
             <span class="form-tip">可访问：</span>
@@ -767,7 +756,7 @@ onBeforeUnmount(() => {
                 item => item.enabled && item.role !== 'agent'
               )"
               :key="user.id"
-              :label="`${user.username} (${user.role})`"
+              :label="`${user.username} (${ROLE_LABELS[user.role] || user.role})`"
               :value="user.username"
             />
           </el-select>

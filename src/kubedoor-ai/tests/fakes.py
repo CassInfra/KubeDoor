@@ -5,9 +5,11 @@ import socket
 import uuid
 from contextlib import AsyncExitStack, asynccontextmanager
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock
 
+import kubedoor_tools
 import uvicorn
 from fastmcp import FastMCP
 from fastmcp.server.dependencies import get_http_headers
@@ -20,6 +22,7 @@ from starlette.applications import Starlette
 from starlette.responses import JSONResponse
 from kubedoor_ai.domain import redact
 from kubedoor_ai.models import KubeDoorChatDeepSeek
+from kubedoor_ai.permissions import OP_NAMES
 
 
 CONTROL_MESSAGES = {
@@ -72,6 +75,25 @@ def stub_control(gateway, control=None, live=None):
     return gateway
 
 
+# master 出厂配置里审批列默认勾选的操作（高危命令固定审批）；「—」行和其余行默认不审批
+APPROVAL_OPS = frozenset({
+    "pod.exec.danger", "workload.restart", "workload.scale", "workload.schedule", "workload.image",
+    "pod.delete", "pod.isolate", "pod.jvm", "resource.apply", "resource.delete", "ai.k8s_write",
+    "node.cordon", "balance.run", "control.edit", "network.coredns", "network.istio",
+})
+ADMIN_ONLY_OPS = frozenset({"network.coredns", "network.istio"})
+
+
+def default_policy():
+    """和 master 出厂配置一致的「权限与审批」策略（/api/ai/internal/permission-policy 的返回）：
+    只读都不允许，读写、管理员都允许（CoreDNS、Istio 只有管理员）"""
+    with open(Path(kubedoor_tools.__file__).with_name("default_commands.json"), encoding="utf-8") as f:
+        commands = json.load(f)
+    ops = {key: {"read": False, "rw": key not in ADMIN_ONLY_OPS, "admin": True, "approval": key in APPROVAL_OPS}
+           for key in OP_NAMES}
+    return {"version": 1, "ops": ops, "commands": {"view": commands["view"], "danger": commands["danger"]}}
+
+
 class FakeStore:
     def __init__(self):
         self.actions, self.events, self.messages = {}, [], []
@@ -93,7 +115,9 @@ class FakeStore:
             return next((a for a in self.actions.values() if a["state"] == "unknown" and not a["read_only"]
                          and ("source<>'mcp'" not in sql or a["source"] != "mcp")), None)
         if sql.startswith("INSERT INTO kubedoor_ai_actions"):
-            action = dict(zip(("id", "run_id", "call_id", "operation", "source", "arguments", "preview", "read_only", "connection_revision", "state"), args))
+            # 按 SQL 里的列名取参数：集群工具的动作带 ops / approval_fixed，用户接入的 MCP 不带
+            columns = sql[sql.index("(") + 1:sql.index(")")].split(",")
+            action = {"ops": None, "approval_fixed": False, **dict(zip(columns, args))}
             action.update(expires_at="2099-01-01T00:00:00+00:00", interrupt_id=None, result=None)
             self.actions[action["id"]] = copy.deepcopy(action)
             return copy.deepcopy(action)

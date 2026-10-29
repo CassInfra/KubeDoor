@@ -80,7 +80,12 @@
         </el-form-item>
 
         <el-form-item class="right-auto">
-          <el-button type="success" @click="openCreateDialog">新建</el-button>
+          <el-button
+            type="success"
+            :disabled="!can('resource.apply', searchForm.env)"
+            @click="openCreateDialog"
+            >新建</el-button
+          >
         </el-form-item>
       </el-form>
     </div>
@@ -162,6 +167,7 @@
                 type="danger"
                 size="small"
                 class="ml-2"
+                :disabled="!canChange('resource.delete', scope.row)"
                 @click="handleDelete(scope.row)"
               >
                 删除
@@ -187,6 +193,7 @@
             <el-button
               type="primary"
               :loading="saveLoading"
+              :disabled="!canChange('resource.apply', currentEditConfigMap)"
               @click="handleSave"
             >
               提交
@@ -245,6 +252,7 @@
             <el-button
               type="primary"
               :loading="createSaveLoading"
+              :disabled="!can('resource.apply', searchForm.env)"
               @click="handleCreateSave"
             >
               提交
@@ -315,6 +323,7 @@ import {
   deleteK8sResource
 } from "@/api/service";
 import { useSearchStoreHook } from "@/store/modules/search";
+import { usePermission } from "@/utils/usePermission";
 import * as monaco from "monaco-editor";
 import * as yaml from "js-yaml";
 import { YAMLException } from "js-yaml";
@@ -324,6 +333,15 @@ defineOptions({
 });
 
 const searchStore = useSearchStoreHook();
+// 没有权限的操作置灰(按「权限与审批」的配置,后端同样校验)
+const { can } = usePermission();
+/** kube-system/coredns 是 CoreDNS 的配置:改、删它还要「CoreDNS 修改」权限,不能从这里绕过 CoreDNS 页面 */
+const isCoreDNS = (row: any) =>
+  row?.namespace === "kube-system" && row?.name === "coredns";
+const canChange = (op: string, row: any) =>
+  !!row &&
+  can(op, row.env) &&
+  (!isCoreDNS(row) || can("network.coredns", row.env));
 
 const searchForm = reactive({
   env: searchStore.env || "",

@@ -1,9 +1,15 @@
 import { http } from "@/utils/http";
 
-/** 集群权限:读写 / 只读 / 无(看不到) */
-export type ClusterPermission = "rw" | "read" | "none";
-/** 全局角色:管理员 / 读写 / 只读 / 无 / Agent 账号 */
-export type UserRole = "admin" | "rw" | "read" | "none" | "agent";
+/** 集群权限:管理员 / 读写 / 只读 / 无(看不到) */
+export type ClusterPermission = "admin" | "rw" | "read" | "none";
+/** 全局角色:系统管理员 / 集群管理员 / 读写 / 只读 / 无 / Agent 账号 */
+export type UserRole =
+  | "admin"
+  | "cluster_admin"
+  | "rw"
+  | "read"
+  | "none"
+  | "agent";
 
 export interface AuthUser {
   username: string;
@@ -23,6 +29,8 @@ export interface AuthUser {
   builtin: boolean;
   must_change_password: boolean;
   can_change_password: boolean;
+  /** 用户在各操作类型下有哪些权限(read / rw / admin),前端按这个判断能否执行 */
+  operations?: Record<string, Array<"read" | "rw" | "admin">>;
 }
 
 type AuthResult = { success: boolean; data: AuthUser; message?: string };

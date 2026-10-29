@@ -39,6 +39,8 @@ export interface IstioGroupCluster {
   collected_by: string;
   /** 集群里的 VS 总数(不分组) */
   vs_count: number;
+  /** 当前账号在这个集群有「Istio 修改」权限:下发、回退、删除集群里的 VirtualService、刷新现状 */
+  can_istio?: boolean;
 }
 
 /** 组的包含 / 忽略规则:glob 通配符(* 任意多个字符,? 一个字符)或 regex 正则(全匹配);
@@ -59,12 +61,14 @@ export interface IstioGroup {
   clusters: IstioGroupCluster[];
   created_at: string;
   updated_at: string;
+  /** 组级修改权限(组、组标准、忽略 / 纳入、纳管、同步):组内每个集群都有「Istio 修改」权限,空组按全局角色 */
+  can_manage?: boolean;
 }
 
 export interface IstioGroupList {
   groups: IstioGroup[];
-  /** 只有管理员有:所有已接入的集群,以及各自已在哪些组里(一个集群可以属于多个组) */
-  clusters?: { k8s_name: string; groups: string[] }[];
+  /** 至少一个集群有「Istio 修改」权限才有:能看到的集群,以及各自已在哪些组里(一个集群可以属于多个组) */
+  clusters?: { k8s_name: string; groups: string[]; can_istio?: boolean }[];
 }
 
 export interface GroupPayload {
@@ -251,6 +255,8 @@ export interface VSDetail extends VSFields {
   /** 在本组的范围判断:被忽略时不显示在列表里,也不能下发 */
   scope: VSScopeResult;
   conflicts: VSConflict[];
+  /** 所属组的组级修改权限 */
+  can_manage?: boolean;
 }
 
 export interface VSCreatePayload extends VSFields {

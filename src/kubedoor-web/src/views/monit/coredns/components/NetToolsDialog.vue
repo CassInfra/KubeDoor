@@ -20,7 +20,7 @@ const props = defineProps<{
   modelValue: boolean;
   env: string;
   mode: "dns" | "tcp";
-  /** 端口测试会从集群内向任意地址发起连接,需要集群读写权限 */
+  /** 端口测试会从集群内向任意地址发起连接,需要「端口测试」权限 */
   canTcp: boolean;
 }>();
 const emit = defineEmits<{ (e: "update:modelValue", value: boolean): void }>();
@@ -204,7 +204,7 @@ const hostPort = (ip: string, value: number) =>
             :closable="false"
             show-icon
             class="net-alert"
-            title="端口测试会从集群内向任意地址发起连接,需要这个集群的读写权限"
+            title="端口测试会从集群内向任意地址发起连接,当前账号在这个集群没有「端口测试」权限"
           />
           <div class="net-form" data-tab="tcp">
             <el-input

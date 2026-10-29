@@ -17,6 +17,7 @@ import {
 import { useMultiTagsStoreHook } from "./multiTags";
 import { clearCache } from "@/utils/cache";
 import { type DataInfo, setToken, removeToken, userKey } from "@/utils/auth";
+import { can, canGlobal, permissionOf } from "@/utils/permission";
 
 const cached = () => storageLocal().getItem<DataInfo<number>>(userKey);
 
@@ -48,17 +49,22 @@ export const useUserStore = defineStore({
     clusters: {},
     clusterPermissions: {},
     mustChangePassword: false,
-    canChangePassword: false
+    canChangePassword: false,
+    operations: {}
   }),
   getters: {
-    /** 当前用户对某个集群的有效权限:管理员一律读写,有单独授权按授权,否则按全局权限兜底 */
+    /** 当前用户对某个集群的有效权限:系统管理员一律「管理员」,有单独授权按授权,否则按全局权限兜底 */
     permissionOf: state => {
-      return (env?: string): ClusterPermission => {
-        if (state.isAdmin) return "rw";
-        if (!env) return state.defaultPermission as ClusterPermission;
-        return (state.clusters[env] ??
-          state.defaultPermission) as ClusterPermission;
-      };
+      return (env?: string | null): ClusterPermission =>
+        permissionOf(state, env);
+    },
+    /** 能否在集群 env 上执行操作 op(按 /api/auth/me 的 operations 判断,后端仍会校验) */
+    can: state => {
+      return (op: string, env?: string | null): boolean => can(op, env, state);
+    },
+    /** 与具体集群无关的配置(没限定集群的告警屏蔽、节点均衡全局配置),按全局角色判断 */
+    canGlobal: state => {
+      return (op: string): boolean => canGlobal(op, state);
     }
   },
   actions: {
@@ -110,6 +116,7 @@ export const useUserStore = defineStore({
       this.clusterPermissions = user.cluster_permissions ?? {};
       this.mustChangePassword = user.must_change_password;
       this.canChangePassword = user.can_change_password;
+      this.operations = user.operations ?? {};
       this.loaded = true;
       setToken({
         username: this.username,
@@ -127,8 +134,10 @@ export const useUserStore = defineStore({
       this.permissions = [];
       this.role = "";
       this.isAdmin = false;
+      this.defaultPermission = "none";
       this.clusters = {};
       this.clusterPermissions = {};
+      this.operations = {};
       this.mustChangePassword = false;
       this.loaded = false;
       removeToken();

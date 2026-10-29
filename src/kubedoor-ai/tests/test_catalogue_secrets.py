@@ -106,9 +106,11 @@ async def test_resource_apply_approves_safely_but_sends_exact_original_manifest(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("manifest", [SECRET_YAML, json.dumps(SECRET), MULTI_DOCUMENT], ids=["yaml", "json", "multi-document"])
-async def test_resource_content_hides_secret_manifest_before_model_history_and_events(resource_gateway, manifest):
+async def test_resource_content_hides_secret_manifest_before_model_history_and_events(resource_gateway, manifest, permission_policy):
     gateway, calls, response = resource_gateway
     response["data"] = manifest
+    # 查看 Secret 内容进权限表：出厂配置只读不允许（见 test_permissions），这里由管理员放开给只读
+    permission_policy.policy["ops"]["resource.secret"]["read"] = True
     ctx = context("read")
     result = await gateway.invoke(ctx, "resource_content", {"resource_type": "secret", "resource_name": "diagnostic-secret"}, call_id="secret-read")
     assert result["success"] is True

@@ -31,6 +31,7 @@
             type="primary"
             :icon="Refresh"
             :loading="analyzing"
+            :disabled="!can('balance.run', searchForm.env)"
             @click="handleAnalyze"
           >
             分析负载
@@ -180,7 +181,11 @@
             <div class="action-bar">
               <el-button
                 type="primary"
-                :disabled="selectedMigrations.length === 0 || executing"
+                :disabled="
+                  selectedMigrations.length === 0 ||
+                  executing ||
+                  !can('balance.run', searchForm.env)
+                "
                 :loading="executing"
                 @click="handleExecute"
               >
@@ -191,7 +196,8 @@
                 :disabled="
                   !migrationPlan ||
                   migrationPlan.migrations.length === 0 ||
-                  executing
+                  executing ||
+                  !can('balance.run', searchForm.env)
                 "
                 :loading="executing"
                 @click="handleExecuteAll"
@@ -423,7 +429,10 @@
               <el-button
                 type="danger"
                 size="small"
-                :disabled="selectedIsolatedPods.length === 0"
+                :disabled="
+                  selectedIsolatedPods.length === 0 ||
+                  !can('balance.run', searchForm.env)
+                "
                 :loading="cleaningUp"
                 @click="handleCleanup"
               >
@@ -628,6 +637,7 @@
         <el-button
           type="primary"
           :loading="savingConfig"
+          :disabled="!canGlobal('balance.run')"
           @click="handleSaveConfig"
           >保存</el-button
         >
@@ -642,6 +652,7 @@ import { ElMessage, ElMessageBox } from "element-plus";
 import { Refresh, Setting, QuestionFilled } from "@element-plus/icons-vue";
 import { getAgentNames } from "@/api/istio";
 import { useSearchStoreHook } from "@/store/modules/search";
+import { usePermission } from "@/utils/usePermission";
 import {
   getLoadBalanceConfig,
   updateLoadBalanceConfig,
@@ -665,6 +676,8 @@ import {
 } from "@/api/loadBalance";
 
 const searchStore = useSearchStoreHook();
+// 分析、执行、清理按所选集群的「节点均衡」权限;全局配置和具体集群无关,按全局角色判断(后端同样校验)
+const { can, canGlobal } = usePermission();
 
 // 响应式数据
 const envOptions = ref<string[]>([]);

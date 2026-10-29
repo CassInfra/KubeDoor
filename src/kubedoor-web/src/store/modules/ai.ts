@@ -84,23 +84,27 @@ export const useAIStore = defineStore("kubedoor-ai", () => {
   const streamError = ref("");
   const streamState = ref("idle");
   const lastSeq = ref(0);
-  /** 当前用户对某个集群的权限(管理员一律读写;看不到的集群不在 bootstrap 里) */
+  /** 当前用户对某个集群的权限(系统管理员一律管理员;看不到的集群不在 bootstrap 里) */
   const clusterPermission = (env?: string) => {
     const global = bootstrap.value?.permission;
-    if (global === "admin") return "rw";
+    if (global === "admin") return "admin";
     const cluster = bootstrap.value?.clusters.find(item => item.env === env);
     if (!cluster) return "none";
     // 旧版 AI 服务不返回集群级权限,按全局权限处理
-    return cluster.permission ?? (global === "rw" ? "rw" : "read");
+    return (
+      cluster.permission ??
+      (global === "cluster_admin" ? "admin" : global === "rw" ? "rw" : "read")
+    );
   };
-  /** 能否批准当前会话所在集群的修改操作 */
-  const writable = computed(
+  /** 当前会话所在集群是只读权限(只用于提示;能不能执行、要不要审批都由服务端按「权限与审批」判断) */
+  const readOnly = computed(
     () =>
-      clusterPermission(activeRun.value?.scope?.env || scope.value.env) === "rw"
+      clusterPermission(activeRun.value?.scope?.env || scope.value.env) ===
+      "read"
   );
   /** 与集群无关的写操作(共享记忆)只看全局权限 */
   const globalWritable = computed(() =>
-    ["admin", "rw"].includes(bootstrap.value?.permission ?? "")
+    ["admin", "cluster_admin", "rw"].includes(bootstrap.value?.permission ?? "")
   );
   const configured = computed(
     () => !!provider.value.base_url.trim() && !!provider.value.model.trim()
@@ -166,13 +170,8 @@ export const useAIStore = defineStore("kubedoor-ai", () => {
     cancelling.value = false;
   }
 
-  watch(
-    [autoApprove, writable],
-    ([enabled, allowed]) => {
-      if (enabled && !allowed) autoApprove.value = false;
-    },
-    { flush: "sync" }
-  );
+  // 自动批准不看集群权限:进入待审批的动作已经过服务端的权限检查,批准时服务端还会再复核;
+  // 高危命令也一样自动批准(用户勾选了就是确认过)
   watch(
     () => [
       autoApprove.value,
@@ -190,7 +189,6 @@ export const useAIStore = defineStore("kubedoor-ai", () => {
   async function approveAutomatically() {
     if (
       !autoApprove.value ||
-      !writable.value ||
       !approvalReady.value ||
       !sessionReady.value ||
       autoApproving.value ||
@@ -207,7 +205,6 @@ export const useAIStore = defineStore("kubedoor-ai", () => {
     let submitted = false;
     const canContinue = () =>
       autoApprove.value &&
-      writable.value &&
       sessionReady.value &&
       !cancelling.value &&
       !deciding.value &&
@@ -1157,12 +1154,8 @@ export const useAIStore = defineStore("kubedoor-ai", () => {
     if (!sessionReady.value)
       throw new Error("正在核验会话状态，暂不能批准或拒绝缓存中的操作。");
     if (!activeRun.value || deciding.value) return;
-    // 用户自己接入的 MCP 和集群权限无关，集群只读的账号也能批准
-    const mcp = pendingTools.value.some(
-      tool => tool.action_id === actionId && tool.source === "mcp"
-    );
-    if (decision === "approve" && !writable.value && !mcp)
-      throw new Error("当前账号仅有只读权限。");
+    // 不在这里看集群权限:服务端批准时按动作涉及的操作复核(审批期间被降权会被拒绝),
+    // 用户自己接入的 MCP 和集群权限无关
     const runId = activeRun.value.id;
     const generation = approvalGeneration;
     const revision = runStatusRevision;
@@ -1266,7 +1259,7 @@ export const useAIStore = defineStore("kubedoor-ai", () => {
     streamError,
     streamState,
     lastSeq,
-    writable,
+    readOnly,
     globalWritable,
     clusterPermission,
     autoApprove,

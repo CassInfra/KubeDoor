@@ -32,8 +32,8 @@ export interface AICluster {
   env: string;
   online: boolean;
   configured: boolean;
-  /** 当前用户对该集群的有效权限:rw 读写 / read 只读(看不到的集群不会返回) */
-  permission?: "rw" | "read";
+  /** 当前用户对该集群的有效权限:admin 管理员 / rw 读写 / read 只读(看不到的集群不会返回) */
+  permission?: "admin" | "rw" | "read";
   context?: string;
   test_status?: string;
 }
@@ -47,7 +47,7 @@ export interface AISkill {
 export interface AIBootstrap {
   enabled: boolean;
   username: string;
-  /** 全局角色:admin / rw / read / none */
+  /** 全局角色:admin / cluster_admin / rw / read / none */
   permission: string;
   clusters: AICluster[];
   skills: AISkill[];
@@ -178,8 +178,6 @@ export interface WeComConfig {
   reasoning_effort?: AIReasoningEffort | null;
   /** 对话空闲多少分钟后，新消息自动进入新对话；0 表示关闭 */
   session_idle_minutes?: number;
-  /** 只读权限用户是否可以在企微里执行 Pod 内查看命令 */
-  read_only_can_exec?: boolean;
   has_bot_secret: boolean;
   has_api_key: boolean;
   updated_by?: string;
@@ -519,7 +517,6 @@ export const aiApi = {
     compression_ratio: number | null;
     reasoning_effort: AIReasoningEffort | null;
     session_idle_minutes: number;
-    read_only_can_exec: boolean;
   }) => request<WeComConfig>("/wecom", "PUT", data),
   testWecomProvider: (provider: AIProvider) =>
     request<Record<string, any>>("/wecom/test", "POST", { provider }),

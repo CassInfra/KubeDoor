@@ -227,9 +227,22 @@
 
     <template #footer>
       <el-button @click="visible = false">取消</el-button>
-      <el-button type="primary" :loading="saving" @click="handleSubmit">
-        {{ isEdit ? "保存" : "确定屏蔽" }}
-      </el-button>
+      <el-tooltip
+        :disabled="allowed"
+        content="当前账号不能保存这条规则:限定了集群(env=xxx)的规则要求这些集群都有「告警屏蔽」权限,没限定集群的规则按全局角色判断"
+        placement="top"
+      >
+        <span class="ml-3">
+          <el-button
+            type="primary"
+            :loading="saving"
+            :disabled="!allowed"
+            @click="handleSubmit"
+          >
+            {{ isEdit ? "保存" : "确定屏蔽" }}
+          </el-button>
+        </span>
+      </el-tooltip>
     </template>
   </el-dialog>
 </template>
@@ -252,6 +265,7 @@ import {
   type SilencePreviewResult
 } from "@/api/silence";
 import { useUserStoreHook } from "@/store/modules/user";
+import { usePermission } from "@/utils/usePermission";
 
 const props = defineProps<{
   modelValue: boolean;
@@ -299,6 +313,12 @@ const form = reactive({
   comment: "",
   created_by: ""
 });
+
+const { canSilence } = usePermission();
+/** 按填好的条件判断能不能保存(限定了集群的按集群,全局规则按全局角色;后端同样校验) */
+const allowed = computed(() =>
+  canSilence(form.matchers.filter(item => item.key.trim()))
+);
 
 const isRegexOp = (op: SilenceOp) => op === "=~" || op === "!~";
 

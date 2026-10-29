@@ -47,7 +47,7 @@ pods = await executor.execute("api", {
 | --- | --- |
 | `api` | `method` 默认为 GET；`path` 为绝对 Kubernetes API 路径；可选 `query`、`body`、`content_type` |
 | `kubectl`、`istioctl` | `argv` 为字符串参数数组；可选 `files`、`stdin`、`output_limit` |
-| `diagnostic` | `program` 选择 `jq`、`yq`、`curl`、`dig`、`openssl` 或 `rg`；其余参数与命令工具相同 |
+| `diagnostic` | `program` 选择 `jq`、`yq`、`curl`、`dig`、`openssl`、`rg`，网络诊断 `nc`、`nmap`、`tcpdump`、`iperf3`、`traceroute`、`mtr`，进程与系统 `ps`、`top`、`pgrep`、`pmap`、`pwdx`、`lsof`、`free`、`vmstat`、`uptime`、`w`、`slabtop`、`iostat`、`mpstat`、`pidstat`，数据查看 `xxd`、`hexdump`、`base64`；其余参数与命令工具相同 |
 | `pod_exec` | 必填 `namespace`、`pod`、`argv`；可选 `container`、`output_limit` |
 
 `files` 是“文件名 → 文本内容”的字典，文件名必须是临时工作目录内的简单名称，不能包含目录路径。`stdin` 为标准输入文本。`execute()` 和 `prepare()` 均支持以秒为单位的 `timeout`，默认 120 秒。
@@ -58,7 +58,7 @@ API 结果在 64 MiB 内保留完整资源列表，超出后要求通过 Kuberne
 
 ## 操作准备、完整参数与预览
 
-`prepare()` 返回复制并固定后的完整 `arguments`、脱敏的 `preview`、`read_only`、`reason`，以及可选的 `preconditions` 或 `error`。准备成功只表示可以进入上层审批流程。
+`prepare()` 返回复制并固定后的完整 `arguments`、脱敏的 `preview`、分类结果（`read_only`、`reason`、`ops`、`category`、`dangerous`，见下文“操作分类”），以及可选的 `preconditions` 或 `error`；可选参数 `commands` 是 master 下发的查看 / 高危命令清单。准备成功只表示可以进入上层的权限检查和审批流程。
 
 ```python
 prepared = await executor.prepare("api", {
@@ -73,17 +73,28 @@ prepared = await executor.prepare("api", {
 
 批准后必须原样执行保存的完整参数，不能让模型重新生成或修改参数。API 写操作在支持时使用服务端 `dryRun=All`，并固定资源版本及 UID；执行前再次检查前置条件。`kubectl apply -f` 支持提供的 YAML/JSON、多文档和 Kubernetes `List` 清单，并实际调用服务端 dry-run。
 
-不支持 dry-run 的操作会明确标记 `dry_run_supported=False`，不能视为已经通过服务端验证。其他命令提供实际命令预览；修改、未知命令和 Pod exec 由网关审批。CLI 前置检查无法提供任意命令或多个资源之间的原子事务。
+不支持 dry-run 的操作会明确标记 `dry_run_supported=False`，不能视为已经通过服务端验证。其他命令提供实际命令预览；要不要审批由网关按“权限与审批”配置决定（高危命令固定审批）。CLI 前置检查无法提供任意命令或多个资源之间的原子事务。
+
+## 操作分类
+
+`classify_operation(operation, arguments, commands=None)` 是网关、agent 二次校验和 `prepare()` 共用的保守分类：
+
+- `ops`：涉及“权限与审批”表的哪些操作类型（全部类型见 `OP_KEYS`）。kubectl / istioctl / API 修改都带 `ai.k8s_write`，再按动作加：delete → `pod.delete`（Pod）或 `resource.delete`，scale → `workload.scale`，rollout restart → `workload.restart`，set image → `workload.image`，cordon / uncordon → `node.cordon`，drain → `node.cordon` + `pod.delete`，apply / create / patch / label 等 → `resource.apply`；API 按方法和路径对应（DELETE、`/scale`、驱逐、其余写入），istioctl 的修改加 `network.istio`；`kubectl attach`、API 的 exec / attach 子资源和节点 proxy 判断不了执行什么，加 `pod.exec.danger`（`category` 为 danger）。`kubectl exec` 按下面的 Pod 内命令分类，`kubectl cp` 是 `pod.exec.other`，这两个不带 `ai.k8s_write`。`diagnostic` 里会发请求或写文件的（`curl`、`openssl`、`nc`、`nmap`、`tcpdump`、`iperf3`，以及 `yq -i`）是 `ai.diagnostic`，其余只读。修改 kube-system 的 ConfigMap `coredns` 或 Istio 资源时追加 `network.coredns` / `network.istio`（`identify_targets`，能判断出不涉及的不加，YAML 解析失败、kustomize、拿不到清单等判断不了的两个都加）。只读查询的 `ops` 为空。
+- Pod 内命令（`pod_exec`、`kubectl exec` 的 `--` 之后，没有 `--` 分不清命令的按高危）由 `classify_pod_command` 分为查看 / 其他 / 高危，对应 `pod.exec.view|other|danger`，只有查看命令算 `read_only`。查看命令是严格白名单：每个命令都在查看清单里，`sh -c` 里只能用 `|`、`&&`、`||`、`;` 组合，不能有变量、命令替换、子 shell、后台和 heredoc，输出重定向只能到 `/dev/null` 或 fd 复制（`2>&1`），参数不能指向 secrets 目录，curl、wget、nc、find、sort、date、ip、mount、env、hostname 等还有内置参数检查（不满足时只是不算查看，继续判断）。高危命令宽匹配：按 shell 规则递归拆词，任一词命中高危清单、命令位置是变量或通配符、引号没闭合拆不开，都算高危。清单由 master 下发，没下发时用包内的 `default_commands.json`（这个文件缺失或损坏时没有查看命令、所有命令按高危）。
 
 ## 令牌轮换与工具依赖
 
 集群内凭据通过 SDK 的公开访问方法读取，兼容 `BearerToken` 和 `authorization` 两种存储键。API、Pod exec 和每次生成 kubectl/istioctl 临时 kubeconfig 前都会触发 SDK 令牌刷新，支持 ServiceAccount 投射令牌轮换；最新令牌及其带前缀形式同时加入输出脱敏。
 
-镜像需要提供 `kubectl`、`istioctl`、`jq`、mikefarah 版本的 `yq`、`curl`、`dig`、`openssl` 和 `rg`。CLI 安装版本由 [安装脚本](../../deploy/tools/install-ai-tools.sh) 和各镜像构建参数管理。`yq` 必须支持 `--security-disable-file-ops` 和 `--security-disable-env-ops`，不能用不兼容的同名 Python 包替代。
+镜像需要提供 `kubectl`、`istioctl`、`jq`、mikefarah 版本的 `yq`、`curl`、`dig`、`openssl` 和 `rg`，以及上表列出的其余诊断程序（agent 镜像装 Alpine 包、kubedoor-ai 镜像装 Debian 包，见两个 Dockerfile；没装的程序返回 `PROGRAM_UNAVAILABLE`）。CLI 安装版本由 [安装脚本](../../deploy/tools/install-ai-tools.sh) 和各镜像构建参数管理。`yq` 必须支持 `--security-disable-file-ops` 和 `--security-disable-env-ops`，不能用不兼容的同名 Python 包替代。
 
 kubectl 使用 [GitHub 社区镜像](https://github.com/ChampiYann/kubectl-binaries/releases) 的官方二进制压缩包，istioctl 和 yq 从各自的 GitHub Releases 下载，都是直连 GitHub；构建机访问 GitHub 不稳定时，可在 `docker build` 时加 `--build-arg HTTPS_PROXY=http://<代理地址>`。默认 kubectl 版本 `1.37.1` 的 amd64/arm64 使用脚本内固定的官方 SHA256 校验，无需访问 `dl.k8s.io`。自定义 `KUBECTL_VERSION` 时必须同时传入对应架构的 `KUBECTL_SHA256` build arg；未提供时安装会失败，不会尝试下载官方校验文件。
 
 诊断执行会固定 jq 的模块搜索目录，禁用 yq 文件及环境操作，并让 curl 禁用默认配置、仅使用 HTTP(S) 协议。涉及文件的参数必须引用提供的工作区文件；jq/yq/rg 的文件选项应分别书写，避免组合短参数产生歧义。
+
+其余诊断程序按程序开放参数白名单（`executor._DIAGNOSTIC_OPTIONS`），按真实工具的 getopt 规则解析，白名单外的选项、缩写的长选项和以 `-` 开头的操作数一律拒绝：`nc` 只能 `-z` 探测端口且不读 stdin；`nmap` 只做 TCP connect 扫描（自动加 `--unprivileged`），拒绝 NSE 脚本、输出与目标文件和版本探测；`tcpdump` 必须用 `-c` 限定包数，不能读写 pcap 或用 `-z` 执行命令；`iperf3` 只做 60 秒内的客户端测试；`traceroute`、`mtr` 不能做 TCP/UDP 端口探测。`top`、`mtr`、`slabtop` 自动改成非交互模式，`vmstat`、`iostat` 等给了间隔就必须给次数。`ps` 的短选项和取值里不能出现字母 e（BSD 风格的 e 会打印进程环境变量，突破下面“诊断子进程不继承上层服务凭据”的边界），选全部进程用 `-A`，带 e 的取值用 `--format=` 这类写法。`strace`、`watch`、`time`、`stdbuf`、`awk`、`sed`、`tar`/`zip`、`pkill`、`htop`、`file`、`crictl` 不开放，原因见代码注释。
+
+进程类工具（`ps`、`top`、`lsof` 等）只看得到执行端（agent 或 kubedoor-ai）自己 Pod 里的进程，两者都没有 hostPID，排查业务进程用 Pod exec；`vmstat`、`iostat`、`free` 等读的是所在节点的统计。`tcpdump`、`mtr`、`traceroute -I` 需要 CAP_NET_RAW：agent 以 root 运行，但 CRI-O 或受限的 Pod 安全策略会去掉 NET_RAW，需要给 agent 容器加 `securityContext.capabilities.add: [NET_RAW]`；kubedoor-ai 以非 root 运行，不能抓包。权限不足导致失败时，结果的错误信息会带上这些提示。
 
 ## 安全边界与取消限制
 

@@ -41,14 +41,18 @@
         <el-form-item>
           <el-button
             type="warning"
-            :disabled="!searchForm.env || selectedNodes.length === 0"
+            :disabled="
+              selectedNodes.length === 0 || !can('node.cordon', searchForm.env)
+            "
             @click="handleBatchCordon"
           >
             批量禁止调度
           </el-button>
           <el-button
             type="success"
-            :disabled="!searchForm.env || selectedNodes.length === 0"
+            :disabled="
+              selectedNodes.length === 0 || !can('node.cordon', searchForm.env)
+            "
             @click="handleBatchUncordon"
           >
             批量允许调度
@@ -328,17 +332,19 @@
                 <template #dropdown>
                   <el-dropdown-menu>
                     <el-dropdown-item
-                      :disabled="!canWrite(searchForm.env)"
+                      :disabled="!can('node.shell', searchForm.env)"
                       @click="handleNodeShell(scope.row)"
                       >终端</el-dropdown-item
                     >
                     <el-dropdown-item
                       v-if="scope.row.schedulable"
+                      :disabled="!can('node.cordon', searchForm.env)"
                       @click="handleCordonNode(scope.row)"
                       >禁止调度</el-dropdown-item
                     >
                     <el-dropdown-item
                       v-else
+                      :disabled="!can('node.cordon', searchForm.env)"
                       @click="handleUncordonNode(scope.row)"
                       >允许调度</el-dropdown-item
                     >
@@ -369,6 +375,7 @@
             <el-button
               type="primary"
               :loading="saveLoading"
+              :disabled="!can('resource.apply', searchForm.env)"
               @click="handleSave"
             >
               提交
@@ -423,7 +430,7 @@ import { RefreshRight, ArrowDown } from "@element-plus/icons-vue";
 import { getNodesList, cordonNodes, uncordonNodes } from "@/api/node";
 import { getAgentNames } from "@/api/istio";
 import { useSearchStoreHook } from "@/store/modules/search";
-import { useClusterPermission } from "@/utils/permission";
+import { usePermission } from "@/utils/usePermission";
 import { openNodeShell } from "@/utils/podShell";
 import { getServiceContent, updateServiceContent } from "@/api/service";
 import * as monaco from "monaco-editor";
@@ -437,8 +444,8 @@ const nodeList = ref<any[]>([]);
 const selectedNodes = ref<any[]>([]);
 const nodeTableRef = ref();
 const searchStore = useSearchStoreHook();
-// 节点终端在宿主机以 root 执行命令,只读用户置灰(后端同样校验)
-const { canWrite } = useClusterPermission();
+// 没有权限的操作置灰(按「权限与审批」的配置,后端同样校验)
+const { can } = usePermission();
 const editDialogVisible = ref(false);
 const updateMethodDialogVisible = ref(false);
 const selectedUpdateMethod = ref<"apply" | "replace">("apply");

@@ -78,7 +78,12 @@
           </el-button>
         </el-form-item>
         <el-form-item class="right-auto">
-          <el-button type="success" @click="openCreateDialog">新建</el-button>
+          <el-button
+            type="success"
+            :disabled="!can('resource.apply', searchForm.env)"
+            @click="openCreateDialog"
+            >新建</el-button
+          >
         </el-form-item>
       </el-form>
     </div>
@@ -308,6 +313,7 @@
                 type="danger"
                 size="small"
                 class="ml-2"
+                :disabled="!can('resource.delete', scope.row.env)"
                 @click="handleDelete(scope.row)"
               >
                 删除
@@ -333,6 +339,7 @@
             <el-button
               type="primary"
               :loading="saveLoading"
+              :disabled="!can('resource.apply', currentEditIngress?.env)"
               @click="handleSave"
             >
               提交
@@ -391,6 +398,7 @@
             <el-button
               type="primary"
               :loading="createSaveLoading"
+              :disabled="!can('resource.apply', searchForm.env)"
               @click="handleCreateSave"
             >
               提交
@@ -461,6 +469,7 @@ import {
   deleteK8sResource
 } from "@/api/service";
 import { useSearchStoreHook } from "@/store/modules/search";
+import { usePermission } from "@/utils/usePermission";
 import * as monaco from "monaco-editor";
 import * as yaml from "js-yaml";
 import { YAMLException } from "js-yaml";
@@ -472,6 +481,8 @@ defineOptions({
 const RESOURCE_TYPE = "ingress";
 
 const searchStore = useSearchStoreHook();
+// 没有权限的操作置灰(按「权限与审批」的配置,后端同样校验)
+const { can } = usePermission();
 
 const searchForm = reactive({
   env: searchStore.env || "",

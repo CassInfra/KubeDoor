@@ -395,6 +395,7 @@
                 "
                 active-text="✔"
                 inactive-text="X"
+                :disabled="!can('alert.operate', scope.row.env)"
                 @change="val => changeOperateSwitch(val as string, scope.row)"
               />
             </template>
@@ -413,27 +414,40 @@
                     <el-dropdown-item @click="askAI(alertQuestion(scope.row))"
                       >问 AI</el-dropdown-item
                     >
-                    <el-dropdown-item @click="handleSilence(scope.row)"
+                    <el-dropdown-item
+                      :disabled="!can('alert.silence', scope.row.env)"
+                      @click="handleSilence(scope.row)"
                       >屏蔽</el-dropdown-item
                     >
                     <el-dropdown-item
                       divided
+                      :disabled="!can('pod.isolate', scope.row.env)"
                       @click="handleModifyPod(scope.row)"
                       >隔离</el-dropdown-item
                     >
-                    <el-dropdown-item @click="handleDeletePod(scope.row)"
+                    <el-dropdown-item
+                      :disabled="!can('pod.delete', scope.row.env)"
+                      @click="handleDeletePod(scope.row)"
                       >删除</el-dropdown-item
                     >
-                    <el-dropdown-item @click="handleAutoDump(scope.row)"
+                    <el-dropdown-item
+                      :disabled="!can('pod.jvm', scope.row.env)"
+                      @click="handleAutoDump(scope.row)"
                       >Dump</el-dropdown-item
                     >
-                    <el-dropdown-item @click="handleAutoJstack(scope.row)"
+                    <el-dropdown-item
+                      :disabled="!can('pod.jvm', scope.row.env)"
+                      @click="handleAutoJstack(scope.row)"
                       >Jstack</el-dropdown-item
                     >
-                    <el-dropdown-item @click="handleAutoJfr(scope.row)"
+                    <el-dropdown-item
+                      :disabled="!can('pod.jvm', scope.row.env)"
+                      @click="handleAutoJfr(scope.row)"
                       >JFR</el-dropdown-item
                     >
-                    <el-dropdown-item @click="handleAutoJvmMem(scope.row)"
+                    <el-dropdown-item
+                      :disabled="!can('pod.jvm', scope.row.env)"
+                      @click="handleAutoJvmMem(scope.row)"
                       >JVM</el-dropdown-item
                     >
                   </el-dropdown-menu>
@@ -532,11 +546,14 @@ import {
 import { useSearchStoreHook } from "@/store/modules/search";
 import { alertQuestion } from "@/utils/ai";
 import { useAskAI } from "@/utils/useAskAI";
+import { usePermission } from "@/utils/usePermission";
 
 const route = useRoute();
 const router = useRouter();
 const searchStore = useSearchStoreHook();
 const askAI = useAskAI();
+// 没有权限的操作置灰(按「权限与审批」的配置,后端同样校验)
+const { can } = usePermission();
 
 const getArrayFromQuery = (
   value: LocationQueryValue | LocationQueryValue[] | undefined

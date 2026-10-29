@@ -16,7 +16,8 @@ from types import MappingProxyType
 import asyncpg
 from aibot import WSClient, WSClientOptions, generate_req_id
 
-from .domain import BEIJING_TZ, AIError, Identity, Provider, parse_model_limits, parse_reasoning_effort, redact
+from .domain import (BEIJING_TZ, CLUSTER_PERMISSIONS, ROLES, AIError, Identity, Provider, parse_model_limits,
+                     parse_reasoning_effort, redact)
 
 LOGGER = logging.getLogger(__name__)
 CHANNEL = "wecom"
@@ -71,7 +72,7 @@ DEAD_WECOM_SESSION = (
 # 解除绑定:账号、集群、对话和被拦下的提问一起清掉,下次发消息按默认权限(或要求绑定)重新开始
 UNBIND_COLUMNS = ("username=NULL,default_env=NULL,current_env=NULL,session_id=NULL,previous_session_id=NULL,"
                   "bound_by=NULL,bound_at=NULL,pending_text=NULL,pending_at=NULL")
-PERMISSION_LABELS = {"rw": "读写", "read": "只读"}
+PERMISSION_LABELS = {"admin": "管理员", "rw": "读写", "read": "只读"}
 
 
 def _brief(message):
@@ -306,8 +307,10 @@ class WeComIntegration:
             raise
         permission = raw.get("permission")
         clusters = raw.get("clusters")
-        if raw.get("username") != username or permission not in ("admin", "rw", "read", "none") or not isinstance(clusters, dict):
+        if (raw.get("username") != username or permission not in ROLES or not isinstance(clusters, dict)
+                or any(not isinstance(k, str) or v not in CLUSTER_PERMISSIONS for k, v in clusters.items())):
             raise AIError("花折用户身份无效", 403, "identity_invalid")
+        # 系统管理员所有集群都是管理员权限,不能单独授权;集群管理员可以按集群单独授权降低
         return Identity(username, permission, MappingProxyType({} if permission == "admin" else clusters))
 
     async def unbound_setting(self):
@@ -332,8 +335,8 @@ class WeComIntegration:
             identity = await self._identity(setting["unbound_username"])
         except AIError:
             identity = None
-        # 保存时已经不让选管理员账号;这里兜底账号之后被改成管理员的情况
-        if identity is None or identity.is_admin:
+        # 保存时已经不让选系统管理员或集群管理员账号;这里兜底账号之后被改的情况
+        if identity is None or identity.permission in ("admin", "cluster_admin"):
             return None, None, "未绑定成员的默认权限当前不可用，请联系管理员绑定花折账号。"
         return identity, setting["unbound_default_env"], None
 
@@ -344,9 +347,9 @@ class WeComIntegration:
         return (await self.unbound_setting())["unbound_default_env"]
 
     async def _member_clusters(self, identity):
-        """成员能提问的集群(读写或只读),带管理员在 Agent 管理里设的别名"""
+        """成员能提问的集群(管理员、读写或只读),带管理员在 Agent 管理里设的别名"""
         return [item for item in (await self.service.bootstrap(identity))["clusters"]
-                if item.get("permission") in ("rw", "read")]
+                if item.get("permission") in ("admin", "rw", "read")]
 
     async def _quick_clusters(self, mapped):
         """进入会话、点卡片按钮后要在 5 秒内回复:取成员可访问的集群,取不到(master 慢或不可用)返回 None"""
@@ -1120,16 +1123,15 @@ class WeComIntegration:
         return f"已记下你的名字「{name}」，管理员在花折里能看到，方便为你绑定账号（只用来辨认，不影响权限）。"
 
     async def admin_config(self):
-        row = await self.service.store.one("SELECT enabled,encrypted_config,session_idle_minutes,read_only_can_exec,updated_by,updated_at FROM kubedoor_ai_wecom_config WHERE singleton=true")
+        row = await self.service.store.one("SELECT enabled,encrypted_config,session_idle_minutes,updated_by,updated_at FROM kubedoor_ai_wecom_config WHERE singleton=true")
         if not row:
-            return {**self.status, "has_bot_secret": False, "has_api_key": False, "session_idle_minutes": DEFAULT_IDLE_MINUTES, "read_only_can_exec": False}
+            return {**self.status, "has_bot_secret": False, "has_api_key": False, "session_idle_minutes": DEFAULT_IDLE_MINUTES}
         config = self.service.gateway.cipher.decrypt("wecom", bytes(row["encrypted_config"]))
         return {**self.status, "enabled": row["enabled"], "bot_id": config.get("bot_id", ""),
                 "base_url": config.get("base_url", ""), "model": config.get("model", ""),
                 "max_input_tokens": config.get("max_input_tokens"), "max_output_tokens": config.get("max_output_tokens"),
                 "compression_ratio": config.get("compression_ratio"), "reasoning_effort": config.get("reasoning_effort"),
                 "session_idle_minutes": row.get("session_idle_minutes", DEFAULT_IDLE_MINUTES),
-                "read_only_can_exec": row.get("read_only_can_exec", False),
                 "has_bot_secret": bool(config.get("bot_secret")), "has_api_key": bool(config.get("api_key")),
                 "updated_by": row["updated_by"], "updated_at": row["updated_at"]}
 
@@ -1151,9 +1153,6 @@ class WeComIntegration:
         idle = raw.get("session_idle_minutes")
         if idle is not None and (type(idle) is not int or not 0 <= idle <= 10080):
             raise AIError("对话空闲超时必须为 0–10080 之间的整数（分钟），0 表示关闭")
-        read_only_can_exec = raw.get("read_only_can_exec")
-        if read_only_can_exec is not None and type(read_only_can_exec) is not bool:
-            raise AIError("只读用户执行权限必须为布尔值")
         enabled = config["enabled"]
         if enabled:
             if not config["bot_id"] or not config["bot_secret"]:
@@ -1161,12 +1160,11 @@ class WeComIntegration:
             Provider.parse({key: config[key] for key in PROVIDER_KEYS})
         encrypted = self.service.gateway.cipher.encrypt("wecom", config)
         row = await self.service.store.one(
-            "INSERT INTO kubedoor_ai_wecom_config(singleton,enabled,encrypted_config,updated_by,session_idle_minutes,read_only_can_exec) "
-            "VALUES(true,$1,$2,$3,COALESCE($4::int,$5::int),COALESCE($6::boolean,false)) "
+            "INSERT INTO kubedoor_ai_wecom_config(singleton,enabled,encrypted_config,updated_by,session_idle_minutes) "
+            "VALUES(true,$1,$2,$3,COALESCE($4::int,$5::int)) "
             "ON CONFLICT(singleton) DO UPDATE SET enabled=EXCLUDED.enabled,encrypted_config=EXCLUDED.encrypted_config,updated_by=EXCLUDED.updated_by,"
-            "session_idle_minutes=COALESCE($4::int,kubedoor_ai_wecom_config.session_idle_minutes),"
-            "read_only_can_exec=COALESCE($6::boolean,kubedoor_ai_wecom_config.read_only_can_exec),updated_at=now() "
-            "RETURNING enabled,encrypted_config", enabled, encrypted, identity.username, idle, DEFAULT_IDLE_MINUTES, read_only_can_exec,
+            "session_idle_minutes=COALESCE($4::int,kubedoor_ai_wecom_config.session_idle_minutes),updated_at=now() "
+            "RETURNING enabled,encrypted_config", enabled, encrypted, identity.username, idle, DEFAULT_IDLE_MINUTES,
         )
         saved = self.service.gateway.cipher.decrypt("wecom", bytes(row["encrypted_config"]))
         saved["enabled"] = row["enabled"]
@@ -1222,8 +1220,8 @@ class WeComIntegration:
         env = ((env or "").strip() or None) if username else None
         if username:
             live = await self._identity(username)
-            if live.is_admin:
-                raise AIError("不能用管理员账号作为未绑定成员的默认权限")
+            if live.permission in ("admin", "cluster_admin"):
+                raise AIError("不能用系统管理员或集群管理员账号作为未绑定成员的默认权限")
             visible = {item["env"] for item in (await self.service.bootstrap(live))["clusters"]}
             if not visible:
                 raise AIError("该花折账号没有任何 K8S 集群访问权限", 403, "permission_denied")

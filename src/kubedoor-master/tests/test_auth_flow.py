@@ -86,7 +86,8 @@ async def test_builtin_admin_must_change_factory_password_first(fake):
         assert ok.status == 200
         assert (await client.get('/api/agent/pods', params={'env': 'prod'})).status == 200
         me = await (await client.get('/api/auth/me')).json()
-        assert me['data']['role'] == 'admin' and me['data']['cluster_permissions'] == {'prod': 'rw', 'staging': 'rw'}
+        # 系统管理员对所有集群都是「管理员」权限
+        assert me['data']['role'] == 'admin' and me['data']['cluster_permissions'] == {'prod': 'admin', 'staging': 'admin'}
     finally:
         await client.close()
 
@@ -141,10 +142,19 @@ async def test_cluster_permissions_enforced_on_requests(fake):
         assert (await client.post('/api/scale', params={'env': 'staging'})).status == 403
         me = await (await client.get('/api/auth/me')).json()
         assert me['data']['cluster_permissions'] == {'prod': 'rw', 'staging': 'none'}
+        # 操作权限表:{操作: 允许的集群权限级别}(默认 CoreDNS / Istio 修改只有管理员)
+        operations = me['data']['operations']
+        assert operations['workload.scale'] == ['rw', 'admin'] and operations['network.coredns'] == ['admin']
         # 改授权立即生效
         await fake.set_clusters(carol['id'], {'prod': 'read'}, 'test')
         denied = await client.post('/api/scale', params={'env': 'prod'})
-        assert denied.status == 403 and (await denied.json())['code'] == 'cluster_read_only'
+        body = await denied.json()
+        assert denied.status == 403 and body['code'] == 'operation_forbidden'
+        assert body['message'] == '当前账号在集群 prod 是「只读」权限,不能执行「扩缩容」'
+        # 集群「管理员」权限能改 CoreDNS,读写不能
+        await fake.set_clusters(carol['id'], {'prod': 'admin', 'staging': 'rw'}, 'test')
+        assert (await client.post('/api/agent/coredns/save', params={'env': 'prod'})).status == 200
+        assert (await client.post('/api/agent/coredns/save', params={'env': 'staging'})).status == 403
     finally:
         await client.close()
 
@@ -312,8 +322,15 @@ async def test_admin_user_management_rules(fake):
         grant = await client.put(f"/api/admin/users/{bob['id']}/clusters",
                                  json={'clusters': [{'env': 'prod', 'permission': 'rw'}, {'env': 'staging', 'permission': 'none'}]})
         assert grant.status == 200
-        bad = await client.put(f"/api/admin/users/{bob['id']}/clusters", json={'clusters': [{'env': 'prod', 'permission': 'admin'}]})
+        bad = await client.put(f"/api/admin/users/{bob['id']}/clusters", json={'clusters': [{'env': 'prod', 'permission': 'owner'}]})
         assert bad.status == 400
+        # 集群权限可以是「管理员」;全局角色可以是「集群管理员」(集群授权保留)
+        admin_grant = await client.put(f"/api/admin/users/{bob['id']}/clusters",
+                                       json={'clusters': [{'env': 'prod', 'permission': 'admin'}]})
+        assert admin_grant.status == 200 and fake.grants[bob['id']] == {'prod': 'admin'}
+        assert (await client.put(f"/api/admin/users/{bob['id']}", json={'role': 'cluster_admin'})).status == 200
+        assert fake.grants[bob['id']] == {'prod': 'admin'} and fake.users[bob['id']]['role'] == 'cluster_admin'
+        assert (await client.put(f"/api/admin/users/{bob['id']}", json={'role': 'owner'})).status == 400
         # 设为管理员后集群授权清空,且不能再指定
         assert (await client.put(f"/api/admin/users/{bob['id']}", json={'role': 'admin'})).status == 200
         assert fake.grants.get(bob['id']) is None
@@ -414,4 +431,57 @@ async def test_grafana_only_for_users_who_can_see_every_cluster(fake):
         assert (await client.get('/api/auth/verify?for=grafana')).status == 204
         assert (await (await client.get('/api/auth/me')).json())['data']['all_clusters'] is True
     finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_permission_policy_admin_api(fake, monkeypatch):
+    from auth import admin_api
+
+    audits = []
+    monkeypatch.setattr(admin_api.audit, 'record_bg', lambda username, action, **kw: audits.append((username, action, kw)))
+    client, _ = await admin_client(fake)
+    user_client = TestClient(client.server)
+    await user_client.start_server()
+    try:
+        await add_user(fake, 'bob', 'rw', 'Bob-pass-12')
+        assert (await login(user_client, 'bob', 'Bob-pass-12')).status == 200
+        assert (await user_client.get('/api/admin/permission-policy')).status == 403  # 只有系统管理员
+        assert (await user_client.post('/api/scale', params={'env': 'prod'})).status == 200
+
+        data = (await (await client.get('/api/admin/permission-policy')).json())['data']
+        assert [d['key'] for d in data['definitions']][:3] == ['pod.shell', 'node.shell', 'pod.exec.view']
+        assert data['policy'] == data['defaults'] and data['updated_at'] is None and data['version'] == 0
+        assert 'find -delete' in data['policy']['commands']['danger'] and 'curl' in data['builtin_checks']
+
+        ops, commands = data['policy']['ops'], data['policy']['commands']
+        bad = await client.put('/api/admin/permission-policy', json={
+            'ops': {**ops, 'workload.scale': {'read': True, 'rw': False, 'admin': True, 'approval': True}},
+            'commands': commands})
+        assert bad.status == 400 and '只读 ⊆ 读写 ⊆ 管理员' in (await bad.json())['message']
+        bad = await client.put('/api/admin/permission-policy', json={'ops': ops, 'commands': {
+            'view': commands['view'], 'danger': [*commands['danger'], 'rm -rf; reboot']}})
+        assert bad.status == 400 and 'shell 元字符' in (await bad.json())['message']
+
+        # 去掉读写列的扩缩容、加一个查看命令:立即生效,审计记差异
+        ops['workload.scale']['rw'] = False
+        saved = await client.put('/api/admin/permission-policy', json={
+            'ops': ops, 'commands': {'view': [*commands['view'], 'jcmd'], 'danger': commands['danger']}})
+        assert saved.status == 200
+        saved_data = (await saved.json())['data']
+        assert saved_data['policy']['ops']['workload.scale']['rw'] is False and saved_data['updated_at']
+        assert saved_data['version'] > 0
+        denied = await user_client.post('/api/scale', params={'env': 'prod'})
+        assert denied.status == 403 and (await denied.json())['code'] == 'operation_forbidden'
+        me = (await (await user_client.get('/api/auth/me')).json())['data']
+        assert me['operations']['workload.scale'] == ['admin']
+        policy_audits = [kw for _, action, kw in audits if action == 'permission.policy']
+        assert len(policy_audits) == 1  # 校验失败的不记
+        assert policy_audits[0]['detail'] == {
+            'ops': {'workload.scale': {'name': '扩缩容', 'rw': {'from': True, 'to': False}}},
+            'commands': {'view': ['+jcmd']}}
+        again = (await (await client.get('/api/admin/permission-policy')).json())['data']
+        assert again['policy']['commands']['view'][-1] == 'jcmd' and again['updated_by'] == 'kubedoor'
+    finally:
+        await user_client.close()
         await client.close()

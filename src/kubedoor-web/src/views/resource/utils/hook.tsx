@@ -36,8 +36,11 @@ import { getAgentNames } from "@/api/istio";
 // import { ElMessageBox } from "element-plus";
 import { type Ref, h, ref, reactive, onMounted, watch } from "vue";
 import { transformI18n } from "@/plugins/i18n";
+import { usePermission } from "@/utils/usePermission";
 
 export function useResource(tableRef: Ref, searchStore: any) {
+  // 没有权限的操作置灰(按「权限与审批」的配置,后端同样校验)
+  const { can } = usePermission();
   const queryForm = reactive({
     namespace: "",
     deployment: "",
@@ -513,10 +516,16 @@ export function useResource(tableRef: Ref, searchStore: any) {
   };
 
   function openDialog(title = "新增", row?: FormItemProps) {
+    // 修改时可以打开查看,没有「资源管控」权限的保存按钮置灰;扩缩容、重启立即或定时有一个有权限即可
+    const env = row?.env || queryForm.env;
+    const canSave = can("control.edit", env);
     let footerButtons = [
       {
         label: transformI18n("resource.operation.saveAndScale"),
         type: "primary",
+        disabled:
+          !canSave ||
+          (!can("workload.scale", env) && !can("workload.schedule", env)),
         btnClick: async ({ dialog: { options, index } }) => {
           if (!(await editDialogSubmit(options, row, false))) return;
           const curData = options.props.formInline as FormItemProps;
@@ -527,6 +536,9 @@ export function useResource(tableRef: Ref, searchStore: any) {
       {
         label: transformI18n("resource.operation.saveAndReboot"),
         type: "primary",
+        disabled:
+          !canSave ||
+          (!can("workload.restart", env) && !can("workload.schedule", env)),
         btnClick: async ({ dialog: { options, index } }) => {
           if (!(await editDialogSubmit(options, row, false))) return;
           await onReboot(row);
@@ -536,6 +548,7 @@ export function useResource(tableRef: Ref, searchStore: any) {
       {
         label: transformI18n("buttons.pureSave"),
         type: "primary",
+        disabled: !canSave,
         btnClick: async ({ dialog: { options, index } }) => {
           if (!(await editDialogSubmit(options, row, true))) return;
           onSearch();

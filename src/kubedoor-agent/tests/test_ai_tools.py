@@ -62,7 +62,7 @@ async def test_agent_deduplicates_a_dispatched_operation_and_separates_owners(mo
     monkeypatch.setattr(module, "KubernetesExecutor", Executor)
     handler, ws = module.AiToolHandler(), Socket()
     packet = {"request_id": "r1", "call_id": "call", "operation": "pod_exec",
-              "arguments": {"namespace": "app", "pod": "a", "argv": ["date"]},
+              "arguments": {"namespace": "app", "pod": "a", "argv": ["touch", "/tmp/x"]},
               "username": "alice", "permission": "rw", "approved": True}
     await handler.handle(ws, packet)
     await handler.handle(ws, {**packet, "request_id": "r2"})
@@ -90,7 +90,7 @@ async def test_prepare_does_not_keep_unbounded_owner_records(monkeypatch):
     monkeypatch.setattr(module, "KubernetesExecutor", Executor)
     handler, ws = module.AiToolHandler(), Socket()
     await handler.handle(ws, {"request_id": "r", "call_id": "prepare", "phase": "prepare",
-                             "operation": "pod_exec", "arguments": {"namespace": "app", "pod": "a", "argv": ["date"]},
+                             "operation": "pod_exec", "arguments": {"namespace": "app", "pod": "a", "argv": ["touch", "/tmp/x"]},
                              "username": "alice", "permission": "rw"})
     assert ws.responses[-1]["success"]
     assert not handler.owners and not handler.tasks
@@ -106,7 +106,7 @@ async def test_cancelled_execution_is_not_replayed(monkeypatch):
     monkeypatch.setattr(module, "KubernetesExecutor", WaitingExecutor)
     handler, ws = module.AiToolHandler(), Socket()
     packet = {"request_id": "r", "call_id": "cancelled-call", "operation": "pod_exec",
-              "arguments": {"namespace": "app", "pod": "a", "argv": ["date"]},
+              "arguments": {"namespace": "app", "pod": "a", "argv": ["touch", "/tmp/x"]},
               "username": "alice", "permission": "rw", "approved": True}
     running = asyncio.create_task(handler.handle(ws, packet))
     while not handler.executor.calls:
@@ -134,7 +134,7 @@ async def test_execute_never_mistakes_an_inflight_prepare_for_execution(monkeypa
     monkeypatch.setattr(module, "KubernetesExecutor", PreparingExecutor)
     handler, ws = module.AiToolHandler(), Socket()
     packet = {"request_id": "r", "call_id": "same-call", "operation": "pod_exec",
-              "arguments": {"namespace": "app", "pod": "a", "argv": ["date"]},
+              "arguments": {"namespace": "app", "pod": "a", "argv": ["touch", "/tmp/x"]},
               "username": "alice", "permission": "rw", "approved": True, "timeout": 7}
     preparing = asyncio.create_task(handler.handle(ws, {**packet, "phase": "prepare"}))
     await started.wait()
@@ -157,10 +157,76 @@ async def test_large_write_results_keep_success_and_bounded_dedup_cache(monkeypa
     monkeypatch.setattr(module, "KubernetesExecutor", LargeExecutor)
     handler, ws = module.AiToolHandler(), Socket()
     packet = {"request_id": "r", "call_id": "large-write", "operation": "pod_exec",
-              "arguments": {"namespace": "app", "pod": "a", "argv": ["date"]},
+              "arguments": {"namespace": "app", "pod": "a", "argv": ["touch", "/tmp/x"]},
               "username": "alice", "permission": "rw", "approved": True}
     await handler.handle(ws, packet)
     assert ws.responses[-1]["success"] and ws.responses[-1]["truncated"]
     assert handler.completed_bytes < 1024
     await handler.handle(ws, packet)
     assert ws.responses[-1]["success"] and len(handler.executor.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_allowed_ops_permits_reader_to_execute_view_commands(monkeypatch):
+    monkeypatch.setattr(module, "KubernetesExecutor", Executor)
+    handler, ws = module.AiToolHandler(), Socket()
+    # 只读用户执行查看命令(带 allowed_ops)
+    packet = {"request_id": "r", "call_id": "view", "operation": "pod_exec",
+              "arguments": {"namespace": "app", "pod": "a", "argv": ["ls", "-l"]},
+              "username": "reader", "permission": "read",
+              "allowed_ops": ["pod.exec.view"], "ops": ["pod.exec.view"],
+              "commands": {"view": ["ls", "cat"], "danger": ["rm", "kill"]}, "env": "test-cluster"}
+    await handler.handle(ws, packet)
+    assert ws.responses[-1]["success"]
+    assert len(handler.executor.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_allowed_ops_denies_reader_other_commands(monkeypatch):
+    monkeypatch.setattr(module, "KubernetesExecutor", Executor)
+    handler, ws = module.AiToolHandler(), Socket()
+    # 只读用户执行其他命令被拒
+    packet = {"request_id": "r", "call_id": "other", "operation": "pod_exec",
+              "arguments": {"namespace": "app", "pod": "a", "argv": ["touch", "/tmp/x"]},
+              "username": "reader", "permission": "read",
+              "allowed_ops": ["pod.exec.view"], "ops": ["pod.exec.other"],
+              "commands": {"view": ["ls", "cat"], "danger": ["rm", "kill"]}, "env": "test-cluster", "approved": True}
+    await handler.handle(ws, packet)
+    assert not ws.responses[-1]["success"]
+    assert ws.responses[-1]["error"]["code"] == "FORBIDDEN"
+    assert ws.responses[-1]["error"]["message"] == "当前账号在集群 test-cluster 没有「AI 在 Pod 内执行其他命令」权限"
+    assert handler.executor.calls == []
+
+
+@pytest.mark.asyncio
+async def test_allowed_ops_requires_approved_for_writes(monkeypatch):
+    monkeypatch.setattr(module, "KubernetesExecutor", Executor)
+    handler, ws = module.AiToolHandler(), Socket()
+    # approved 缺失被拒
+    packet = {"request_id": "r", "call_id": "noapproved", "operation": "pod_exec",
+              "arguments": {"namespace": "app", "pod": "a", "argv": ["touch", "/tmp/x"]},
+              "username": "alice", "permission": "rw",
+              "allowed_ops": ["pod.exec.other"], "ops": ["pod.exec.other"],
+              "commands": {"view": ["ls"], "danger": ["rm"]}, "env": "test-cluster"}
+    await handler.handle(ws, packet)
+    assert not ws.responses[-1]["success"]
+    assert ws.responses[-1]["error"]["code"] == "APPROVAL_REQUIRED"
+    assert handler.executor.calls == []
+
+
+@pytest.mark.asyncio
+async def test_allowed_ops_denies_ops_not_in_list(monkeypatch):
+    monkeypatch.setattr(module, "KubernetesExecutor", Executor)
+    handler, ws = module.AiToolHandler(), Socket()
+    # ops 不在 allowed_ops 被拒
+    packet = {"request_id": "r", "call_id": "notallowed", "operation": "api",
+              "arguments": {"method": "DELETE", "path": "/api/v1/namespaces/default/pods/a"},
+              "username": "alice", "permission": "rw",
+              "allowed_ops": ["workload.restart"], "ops": ["pod.delete"],
+              "env": "test-cluster", "approved": True}
+    await handler.handle(ws, packet)
+    assert not ws.responses[-1]["success"]
+    assert ws.responses[-1]["error"]["code"] == "FORBIDDEN"
+    assert ws.responses[-1]["error"]["message"] == "当前账号在集群 test-cluster 没有「删除 Pod」权限"
+    assert handler.executor.calls == []
+

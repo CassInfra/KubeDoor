@@ -26,6 +26,8 @@ USERS = {
     "reader": Principal("reader", "read", user_id=2, via="internal"),
     "limited": Principal("limited", "none", user_id=3, via="internal",
                          clusters=MappingProxyType({"prod": "rw", "staging": "read"})),
+    "boss": Principal("boss", "cluster_admin", user_id=4, via="internal",
+                      clusters=MappingProxyType({"staging": "read"})),
 }
 
 
@@ -248,3 +250,89 @@ async def test_metrics_bridge_preserves_tenant_path_decodes_auth_and_injects_clu
     assert path == "/select/7/prometheus/api/v1/query"
     assert params == {"query": "sum(up)", "extra_label": "k8s=prod"}
     assert base64.b64decode(authorization.split()[1]).decode() == "metrics-user:password@with:encoding"
+
+
+def agent_clients(sent, *envs):
+    """假 agent:记下 master 发来的包,立即回成功。"""
+    clients = {}
+
+    def socket_for(env):
+        class Socket:
+            async def send_json(self, packet):
+                sent.append(packet)
+                connection = clients[env]
+                connection["response_queue"][packet["request_id"]] = {"success": True}
+                connection["response_events"][packet["request_id"]].set()
+        return Socket()
+
+    for env in envs:
+        clients[env] = {"online": True, "ai_tools": True, "ws": socket_for(env)}
+    return clients
+
+
+@pytest.mark.asyncio
+async def test_execute_checks_declared_operations(monkeypatch, set_policy):
+    monkeypatch.setenv("AI_INTERNAL_TOKEN", "secret-test-token")
+    utils = SimpleNamespace(get_k8s_aliases=AsyncMock(return_value={}), PROM_TYPE="", PROM_K8S_TAG_KEY="origin_prometheus")
+    sent = []
+    app = internal_app(monkeypatch, agent_clients(sent, "prod", "staging"), utils)
+    headers = {"X-Kubedoor-Token": "secret-test-token", "X-User-Name": "limited"}
+
+    async def execute(env, status, **body):
+        response = await client.post(f"/api/ai/internal/agent-execute?env={env}", headers=headers,
+                                     json={"phase": "execute", **body})
+        assert response.status == status, await response.text()
+        return response
+
+    async with TestClient(TestServer(app)) as client:
+        # 只读集群:声明的操作没有权限,批准执行时 403,不发给 agent
+        denied = await execute("staging", 403, operation="pod_exec", approved=True, ops=["pod.exec.view"])
+        assert "「只读」权限" in await denied.text() and "AI 在 Pod 内执行查看命令" in await denied.text()
+        assert sent == []
+        # 读写集群:下发 ops、该集群允许的全部操作、命令清单,旧 agent 用的 permission 是 rw
+        await execute("prod", 200, operation="kubectl", approved=True, ops=["ai.k8s_write", "resource.delete"])
+        packet = sent[-1]
+        assert packet["ops"] == ["ai.k8s_write", "resource.delete"] and packet["permission"] == "rw"
+        assert "pod.delete" in packet["allowed_ops"] and "network.coredns" not in packet["allowed_ops"]
+        assert "find -delete" in packet["commands"]["danger"] and packet["approved"] is True and packet["env"] == "prod"
+        # CoreDNS 默认只有管理员;批准执行必须声明操作;ops 格式不对 400
+        await execute("prod", 403, operation="kubectl", approved=True, ops=["ai.k8s_write", "network.coredns"])
+        await execute("prod", 403, operation="kubectl", approved=True, ops=[])
+        await execute("prod", 400, operation="kubectl", approved=True, ops="resource.delete")
+        assert len(sent) == 1
+        # prepare 阶段(没批准)不检查,agent 自己按 allowed_ops 判断
+        await execute("staging", 200, operation="pod_exec", phase="prepare", ops=["pod.exec.other"])
+        assert sent[-1]["permission"] == "read" and sent[-1]["allowed_ops"] == []
+        # 勾上只读列后,只读集群也能让 AI 执行查看命令
+        set_policy({"pod.exec.view": {"read": True}})
+        await execute("staging", 200, operation="pod_exec", approved=True, ops=["pod.exec.view"])
+        assert sent[-1]["permission"] == "rw" and sent[-1]["allowed_ops"] == ["pod.exec.view"]
+        # 升级前建的动作(没有 ops):按集群读写;master 判断不了 Pod 内命令,只读用户不能执行
+        await execute("staging", 403, operation="pod_exec")
+        await execute("prod", 200, operation="api", approved=True)
+        assert sent[-1]["permission"] == "rw" and "allowed_ops" not in sent[-1] and "ops" not in sent[-1]
+
+        response = await client.get("/api/ai/internal/permission-policy", headers=headers)
+        policy = await response.json()
+        assert response.status == 200 and policy["version"] == 0
+        assert policy["ops"]["pod.exec.view"] == {"read": True, "rw": True, "admin": True, "approval": False}
+        assert "rm" in policy["commands"]["danger"] and "ls" in policy["commands"]["view"]
+        # 没有用户身份的内部调用不行
+        assert (await client.get("/api/ai/internal/permission-policy",
+                                 headers={"X-Kubedoor-Token": "secret-test-token"})).status == 403
+
+
+@pytest.mark.asyncio
+async def test_cluster_admin_identity_and_bootstrap(monkeypatch):
+    monkeypatch.setenv("AI_INTERNAL_TOKEN", "secret-test-token")
+    utils = SimpleNamespace(get_k8s_aliases=AsyncMock(return_value={"prod": [], "staging": []}),
+                            PROM_TYPE="", PROM_K8S_TAG_KEY="origin_prometheus")
+    app = internal_app(monkeypatch, {}, utils)
+    headers = {"X-Kubedoor-Token": "secret-test-token", "X-User-Name": "boss"}
+    async with TestClient(TestServer(app)) as client:
+        identity = await (await client.get("/api/ai/internal/identity", headers=headers)).json()
+        # 集群管理员:没单独授权的集群按「管理员」,clusters 只放单独授权的
+        assert identity == {"username": "boss", "permission": "cluster_admin", "clusters": {"staging": "read"},
+                            "default_permission": "admin"}
+        body = await (await client.get("/api/ai/internal/bootstrap", headers=headers)).json()
+        assert [(c["env"], c["permission"]) for c in body["clusters"]] == [("prod", "admin"), ("staging", "read")]

@@ -5,6 +5,7 @@ import { useResource } from "./utils/hook";
 import { PureTableBar } from "@/components/RePureTableBar";
 import { useRenderIcon } from "@/components/ReIcon/src/hooks";
 import { useSearchStoreHook } from "@/store/modules/search";
+import { usePermission } from "@/utils/usePermission";
 
 import Upload from "@iconify-icons/ri/upload-line";
 import Role from "@iconify-icons/ri/admin-line";
@@ -24,6 +25,8 @@ defineOptions({
 
 const tableRef = ref();
 const searchStore = useSearchStoreHook();
+// 没有权限的操作置灰(按「权限与审批」的配置,后端同样校验)
+const { can } = usePermission();
 
 const {
   maxDay,
@@ -259,6 +262,7 @@ watch(
           <el-button
             type="primary"
             :icon="useRenderIcon(AddFill)"
+            :disabled="!can('control.edit', queryForm.env)"
             @click="openDialog()"
           >
             {{ transformI18n("resource.add") }}
@@ -285,6 +289,10 @@ watch(
               type="primary"
               link
               class="mr-1"
+              :disabled="
+                !can('workload.scale', queryForm.env) &&
+                !can('workload.schedule', queryForm.env)
+              "
               @click="onChangeCapacity(undefined)"
             >
               {{ transformI18n("resource.operation.scale") }}
@@ -301,6 +309,10 @@ watch(
               type="danger"
               link
               class="mr-1"
+              :disabled="
+                !can('workload.restart', queryForm.env) &&
+                !can('workload.schedule', queryForm.env)
+              "
               @click="onReboot(undefined)"
             >
               {{ transformI18n("resource.operation.reboot") }}

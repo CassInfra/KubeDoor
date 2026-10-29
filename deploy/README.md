@@ -82,7 +82,7 @@ vi kubedoor.conf        # 改 PG_HOST / PG_PASSWORD / MSG_TOKEN 等
 
 `PG_HOST` 要填 **K8S 里的 Pod 能访问到的地址**,通常是数据库宿主机的内网 IP。填 `127.0.0.1` 脚本会直接拒绝,因为那是 Pod 自己的回环地址。
 
-装完会打印 Web 控制台地址和内置管理员账号(`kubedoor` / `kubedoor`),首次登录会强制修改口令。之后在 Web 的「系统管理」里添加账号、配置 LDAP、按集群分配权限,见[账号与权限](#账号与权限)。
+装完会打印 Web 控制台地址和内置超级管理员账号(`kubedoor` / `kubedoor`),首次登录会强制修改口令。之后在 Web 的「系统管理」里添加账号、配置 LDAP、按集群分配权限,见[账号与权限](#账号与权限)。
 
 ### 第三步:装集群端
 
@@ -151,7 +151,7 @@ ENABLE_MCP="true"      # 外部 MCP 协议接口,默认开启
 
 `ENABLE_MCP` 只控制 Web 是否对外开放 `/mcp`、`/sse`、`/messages` 代理;设为 `false` 时网页里的 AI 助手不受影响。
 
-外部 MCP 客户端连 `http://<节点IP>:<Web的NodePort>/mcp`(Streamable HTTP,`/sse` 仍兼容),请求头带 Web 账号的 Basic 认证(`Authorization: Basic base64(账号:口令)`,本地账号和 LDAP 账号都可以),工具按该账号的集群权限执行,详见 [AI 助手说明](../docs/ai-assistant.md)。
+外部 MCP 客户端连 `http://<节点IP>:<Web的NodePort>/mcp`(Streamable HTTP,`/sse` 仍兼容),请求头带 Web 账号的 Basic 认证(`Authorization: Basic base64(账号:口令)`,本地账号和 LDAP 账号都可以),工具按该账号的集群权限和「权限与审批」执行(规则和网页 AI 一样),详见 [AI 助手说明](../docs/ai-assistant.md)。
 
 `src/kubedoor-tools` 是共享 Python 库,不是独立服务。构建 `kubedoor-agent` 和 `kubedoor-ai` 镜像时会把它安装进镜像,并通过 `tools/install-ai-tools.sh` 安装 kubectl、istioctl 和 yq;jq、curl、dig、openssl、rg 等诊断工具由镜像的系统包管理器安装。
 
@@ -179,19 +179,21 @@ ENABLE_MCP="false"
 登录、账号和权限都由 KubeDoor 自己管理(nginx 不再做认证),在 Web 的「系统管理」里配置,改完立即生效,不用重启:
 
 - **账号来源**:本地账号和 LDAP 账号。登录时先匹配本地账号,本地没有再走 LDAP;LDAP 用户首次登录自动开通(默认全局权限「只读」,可在「LDAP 设置」里改成「无」或关闭自动开通)。
-- **全局权限**(没有单独授权的集群按它兜底):
-  | 全局权限 | 能做什么 |
+- **全局角色**(没有单独授权的集群按它兜底):
+  | 全局角色 | 能做什么 |
   |---|---|
-  | 管理员 | 所有集群读写,并且能管理用户、LDAP、Agent;不能再单独指定集群权限 |
-  | 读写 | 所有集群读写(K8S 操作、数据库写入、AI 助手执行修改),不能管理用户和 Agent |
+  | 系统管理员 | 所有集群都是管理员,并且能做系统管理:用户、LDAP、企微 AI 机器人、Agent 管理、权限与审批;不能再单独指定集群权限 |
+  | 集群管理员 | 没单独授权的集群都是管理员(CoreDNS、Istio 的修改默认只有管理员能做),可以按集群单独授权降低;不能做系统管理 |
+  | 读写 | 所有集群读写(K8S 操作、数据库写入、AI 助手执行修改),不能做系统管理 |
   | 只读(默认) | 所有集群只读,不能修改 K8S 和数据库,AI 助手也只能查询 |
   | 无 | 默认看不到任何集群,只能访问单独授权的集群;新接入的集群也不会自动可见 |
-- **集群授权**:给某个用户指定某个集群「读写 / 只读 / 无」,**优先于全局权限**。例如全局只读 + A 集群读写 = A 集群读写、其它集群只读;设成「无」的集群在所有页面、下拉框、告警和 AI 助手里都看不到。
-- **内置账号**:`kubedoor` 是内置超级管理员,只有它自己登录后能改口令,不能被删除、禁用、改权限或重置口令;`Up4biLko1dNh` 是内置 Agent 账号,只能用于 agent 连接 master,管理员可以重置它的口令(要同步改各集群 agent 的 `MASTER_WS`)。
+- **集群授权**:给某个用户指定某个集群「管理员 / 读写 / 只读 / 无」,**优先于全局角色**。例如全局只读 + A 集群读写 = A 集群读写、其它集群只读;设成「无」的集群在所有页面、下拉框、告警和 AI 助手里都看不到。
+- **权限与审批**:每一级集群权限具体能做哪些操作,在「系统管理 → 权限与审批」里按操作类型配置(重启、扩缩容、删除 Pod、编辑 YAML、网页终端、CoreDNS 修改、Istio 修改、AI 在 Pod 内执行命令等),同一页面配置 AI 做这类操作前要不要提问人批准,以及 AI 在 Pod 内执行命令用的查看命令、高危命令清单。只有系统管理员能改,配置和具体集群无关,保存立即生效并记入操作审计。默认值和以往一样(读写及以上能做、只读不能做),只有 CoreDNS 修改、Istio 修改默认只有管理员能做;「管理员」列也可以取消,取消后谁都不能做(相当于全站关闭)。网页、AI 助手、企微机器人和外部 MCP 共用这张表。
+- **内置账号**:`kubedoor` 是内置超级管理员(系统管理员),只有它自己登录后能改口令,不能被删除、禁用、改权限或重置口令;`Up4biLko1dNh` 是内置 Agent 账号,只能用于 agent 连接 master,系统管理员可以重置它的口令(要同步改各集群 agent 的 `MASTER_WS`)。
 - 首次安装想直接用自己的口令,在 `kubedoor.conf` 里填 `KUBEDOOR_INIT_ADMIN_PASSWORD` / `KUBEDOOR_INIT_AGENT_PASSWORD`(只在首次建账号时生效)。
-- 改镜像有个例外:只读用户在 `UPDATE_IMAGE_JSON` 配置的集群、时段和账号白名单内也可以改镜像,见[镜像更新配置说明](../help/K8S微服务镜像更新配置说明.md)。
-- 查看 Secret 内容需要该集群的读写权限(和 K8S 内置的 view 角色一样,只读不含 Secret)。
-- Grafana 看板做不到按集群隔离,所以**只对能看到全部集群的账号开放**(对任何集群设了「无」的账号看不到看板菜单,直接访问 `/grafana/` 返回 403;「AI 用量看板📊」在系统管理下,只有管理员能看到);KubeDoor 管理员在 Grafana 里是 Admin,其他人是 Viewer。Grafana 的 PostgreSQL 数据源用的是 `PG_USER`,Viewer 也能借数据源查询库里的数据;对此敏感时可以给 Grafana 单独建一个只读 PG 账号(只授权看板用到的 `k8s_*` 表,AI 用量看板另外要 `kubedoor_ai_runs`、`kubedoor_ai_sessions`),改 `deploy/manifests/master/35-grafana.yaml` 里的数据源账号。
+- 改镜像有个例外:没有「更新镜像」权限的只读用户,在 `UPDATE_IMAGE_JSON` 配置的集群、时段和账号白名单内也可以在网页上改镜像(AI 不走白名单),见[镜像更新配置说明](../help/K8S微服务镜像更新配置说明.md)。
+- 查看 Secret 内容需要该集群的「查看 Secret 内容」权限(默认读写及以上;和 K8S 内置的 view 角色一样,只读不含 Secret)。
+- Grafana 看板做不到按集群隔离,所以**只对能看到全部集群的账号开放**(对任何集群设了「无」的账号看不到看板菜单,直接访问 `/grafana/` 返回 403;「AI 用量看板📊」在系统管理下,只有系统管理员能看到);KubeDoor 系统管理员在 Grafana 里是 Admin,其他人(包括集群管理员)是 Viewer。Grafana 的 PostgreSQL 数据源用的是 `PG_USER`,Viewer 也能借数据源查询库里的数据;对此敏感时可以给 Grafana 单独建一个只读 PG 账号(只授权看板用到的 `k8s_*` 表,AI 用量看板另外要 `kubedoor_ai_runs`、`kubedoor_ai_sessions`),改 `deploy/manifests/master/35-grafana.yaml` 里的数据源账号。
 - 本地账号的口令用 scrypt 哈希并加了 pepper(由 `AI_ENCRYPTION_KEY` 派生,不在数据库里),LDAP 绑定口令也用这个密钥加密存储:数据库泄露也无法离线破解口令。**`AI_ENCRYPTION_KEY` 要和数据库一起备份**,丢了本地账号的口令就对不上了,只能用下面的命令重置。
 - 登录、账号与权限变更、所有写操作(含越权被拒)都记在「系统管理 → 操作审计」里,默认保留 180 天(`RETENTION_AUDIT_DAYS`)。
 - 登录有效期:不勾「7 天内免登录」时 12 小时、空闲 4 小时自动退出;勾选时 7 天。同一账号 + 来源 IP 连续 5 次口令错误锁定 15 分钟。这些参数都在 `kubedoor-config` 里(`AUTH_*`)。
@@ -205,7 +207,7 @@ ENABLE_MCP="false"
 1. `kubedoor.conf` 里的 `WEB_AUTH_USERS` / `WEB_RW_USERS` 不再生效(安装时会提示),原来的读写账号请到「用户与权限」里重新建,或接入 LDAP 后按需授权。内置的 `kubedoor` 和 `Up4biLko1dNh` 会自动创建,口令沿用旧版的出厂值,已经部署的跨集群 agent 不用改。
 2. agent 现在**一律要带账号口令**(同集群也一样)。同集群 agent 原来写的 `ws://kubedoor-master.kubedoor` 要改成 `ws://Up4biLko1dNh:<口令>@kubedoor-master.kubedoor`,重跑 `./install.sh agent` 并重启 agent。来不及一起改时,可以先在 `kubedoor.conf` 里设 `AGENT_AUTH_REQUIRED="false"` 过渡,全部改完再改回 `true` 并重跑 `./install.sh master`(配置变了 master 会自动重启)。
 3. nginx 配置随 `./install.sh master` 一起更新,不用手动改:集群里的 `nginx-config` 会被模板 `deploy/manifests/master/40-web.yaml` 覆盖(以前手工改过的也一样),web 自动滚动更新用上新配置。新配置里没有 `auth_basic` / `auth_ldap` 和读写映射,`/api/`、`/ws` 直接转给 master;AI 助手、MCP、Grafana、自定义告警用 `auth_request` 问 master 的 `/api/auth/verify`。web 镜像的底包从自编译的 nginx-ldap 换成了官方 `nginx:alpine`(自带 `ngx_http_auth_request_module`),**web 镜像要重新构建**。自己另外维护 nginx 的,照这个文件里的 `server` 段改。
-4. Grafana 改成了 auth proxy:KubeDoor 管理员在 Grafana 里是 Admin,其他人是 Viewer,不再是匿名 Admin;并且只对能看到全部集群的账号开放。
+4. Grafana 改成了 auth proxy:KubeDoor 系统管理员在 Grafana 里是 Admin,其他人是 Viewer,不再是匿名 Admin;并且只对能看到全部集群的账号开放。
 
 ---
 
@@ -265,7 +267,7 @@ kubectl -n kubedoor rollout restart deploy/vmalert
 ```bash
 kubectl -n kubedoor logs -l app=kubedoor-agent --tail=50
 ```
-重点看 `MASTER_WS` 地址通不通、里面的 Agent 账号口令对不对。口令错误或没带账号时 master 日志里会有 `[鉴权] 拒绝 agent 连接` 的提示;连续输错 5 次会锁 15 分钟,改对后等锁定过期即可。只有 Agent 账号(或管理员账号)能注册 agent,普通 Web 账号会被拒绝。
+重点看 `MASTER_WS` 地址通不通、里面的 Agent 账号口令对不对。口令错误或没带账号时 master 日志里会有 `[鉴权] 拒绝 agent 连接` 的提示;连续输错 5 次会锁 15 分钟,改对后等锁定过期即可。只有 Agent 账号(或系统管理员账号)能注册 agent,普通 Web 账号(包括集群管理员)会被拒绝。
 
 **master 起不来**
 

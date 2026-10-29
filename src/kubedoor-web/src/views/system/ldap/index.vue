@@ -120,7 +120,7 @@
         <el-form-item label="首次登录自动开通">
           <el-switch v-model="form.auto_create" />
           <span class="hint">
-            关闭后只有管理员在「用户与权限」里添加过的 LDAP 账号才能登录
+            关闭后只有系统管理员在「用户与权限」里添加过的 LDAP 账号才能登录
           </span>
         </el-form-item>
         <el-form-item label="默认全局权限">
