@@ -1,4 +1,4 @@
-"""敏感配置(LDAP 绑定密码)入库前加密。
+"""敏感配置(LDAP 绑定密码、获取代码接口的请求头)入库前加密。
 
 密钥复用安装脚本生成并持久化的 AI_ENCRYPTION_KEY(64 位十六进制,Secret kubedoor-ai-security),
 AES-256-GCM。没配密钥(本地开发)时退化为明文存储并打警告,方便调试。
@@ -26,7 +26,7 @@ def encrypt_secret(plain):
         return ''
     key = _key()
     if key is None:
-        logger.warning('未配置 AI_ENCRYPTION_KEY,LDAP 绑定密码将以明文存储')
+        logger.warning('未配置 AI_ENCRYPTION_KEY,敏感配置(LDAP 绑定密码、获取代码接口的请求头)将以明文存储')
         return 'plain:' + plain
     from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 

@@ -123,6 +123,8 @@ const ACTION_LABELS: Record<string, string> = {
   "user.clusters": "修改集群授权",
   "user.auto_create": "LDAP 自动开通",
   "ldap.update": "修改 LDAP 设置",
+  "code_info.update": "修改获取代码接口",
+  "code_info.get": "获取代码",
   "api.write": "写操作",
   "api.denied": "越权被拒",
   "ai.agent_execute": "AI 执行修改"

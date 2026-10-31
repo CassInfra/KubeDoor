@@ -82,7 +82,7 @@ export const STATUS_META: Record<
   unbound: {
     label: "未纳入",
     type: "info",
-    desc: "集群里有同名 VirtualService,但组标准没有纳入该集群"
+    desc: "集群里有同名 VirtualService,但组标准还没部署到该集群,不能下发:勾选后「纳入所选」,或在格子菜单里「纳入此集群」"
   },
   unmanaged: {
     label: "未纳管",

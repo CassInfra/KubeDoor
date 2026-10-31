@@ -29,6 +29,7 @@ import {
 import GroupDialog from "./components/GroupDialog.vue";
 import CompareDialog from "./components/CompareDialog.vue";
 import ImportDialog from "./components/ImportDialog.vue";
+import BindDialog from "./components/BindDialog.vue";
 import ApplyDialog from "./components/ApplyDialog.vue";
 import HostsDialog from "./components/HostsDialog.vue";
 import VSDialog from "./components/VSDialog.vue";
@@ -325,6 +326,19 @@ function openImport(rowsToImport: MatrixRow[], base = "") {
   importState.value = { visible: true, rows: rowsToImport, base };
 }
 
+/** 已有组标准、在显示的集群里有「未纳入」的格子(集群里有同名 VS,组标准还没部署到该集群) */
+function hasUnbound(row: MatrixRow) {
+  return (
+    row.vs_id !== null &&
+    visibleClusters.value.some(c => row.cells[c.k8s_name]?.status === "unbound")
+  );
+}
+
+const bindState = ref({ visible: false, rows: [] as MatrixRow[] });
+function openBind(rowsToBind: MatrixRow[]) {
+  bindState.value = { visible: true, rows: rowsToBind.filter(hasUnbound) };
+}
+
 const applyState = ref({ visible: false, items: [] as ApplyItem[] });
 function openApply(items: ApplyItem[]) {
   if (!items.length) {
@@ -336,25 +350,33 @@ function openApply(items: ApplyItem[]) {
   applyState.value = { visible: true, items };
 }
 
-/** 所选行里纳入了、且不一致的集群 */
+/** 所选行里纳入了、且不一致的集群;「未纳入」的格子不下发,提示先纳入 */
 function applySelected() {
   const items: ApplyItem[] = [];
   const skipped = new Set<string>();
+  let unbound = 0;
   for (const row of selectedRows.value) {
     if (row.vs_id === null) continue;
     for (const c of visibleClusters.value) {
       const cell = row.cells[c.k8s_name];
+      if (cell?.status === "unbound") unbound += 1;
       if (!cell?.bound || cell.status === "synced") continue;
       if (clusterCan(c)) items.push({ vs_id: row.vs_id, k8s_name: c.k8s_name });
       else skipped.add(c.k8s_name);
     }
   }
+  if (unbound) {
+    message(
+      `${unbound} 处「未纳入」不下发:组标准还没部署到这些集群,先纳入(「纳入所选」或格子菜单「纳入此集群」)`,
+      { type: "warning", duration: 6000 }
+    );
+  }
   if (skipped.size) {
     message(`没有「Istio 修改」权限的集群不下发:${[...skipped].join("、")}`, {
       type: "warning"
     });
-    if (!items.length) return;
   }
+  if ((unbound || skipped.size) && !items.length) return;
   openApply(items);
 }
 
@@ -606,6 +628,13 @@ onMounted(async () => {
             @click="openImport(selectedRows.filter(r => r.vs_id === null))"
           >
             纳管所选
+          </el-button>
+          <el-button
+            :disabled="!selectedRows.some(hasUnbound)"
+            title="已有组标准、在显示的集群里「未纳入」的,组标准部署到这些集群,hosts 和规则里的域名取各自的现状"
+            @click="openBind(selectedRows)"
+          >
+            纳入所选
           </el-button>
         </template>
         <el-button
@@ -954,9 +983,11 @@ onMounted(async () => {
                       >
                         编辑 hosts 和域名
                       </el-dropdown-item>
-                      <el-dropdown-item v-else command="hosts"
-                        >部署到此集群</el-dropdown-item
-                      >
+                      <el-dropdown-item v-else command="hosts">{{
+                        row.cells[c.k8s_name].in_cluster
+                          ? "纳入此集群"
+                          : "部署到此集群"
+                      }}</el-dropdown-item>
                     </template>
                     <el-dropdown-item
                       v-if="canIstio(c.k8s_name) && row.cells[c.k8s_name].bound"
@@ -1022,6 +1053,13 @@ onMounted(async () => {
               type="success"
               @click="openImport([row])"
               >纳管</el-button
+            >
+            <el-button
+              v-if="canManage && hasUnbound(row)"
+              link
+              type="success"
+              @click="openBind([row])"
+              >纳入</el-button
             >
             <el-button
               v-if="canManage"
@@ -1090,6 +1128,13 @@ onMounted(async () => {
         :rows="importState.rows"
         :clusters="clusters"
         :preset-base="importState.base"
+        @done="loadMatrix"
+      />
+      <BindDialog
+        v-model="bindState.visible"
+        :group-id="group.id"
+        :rows="bindState.rows"
+        :clusters="visibleClusters"
         @done="loadMatrix"
       />
       <ApplyDialog

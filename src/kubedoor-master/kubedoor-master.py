@@ -23,6 +23,7 @@ from func_manager import db_api
 from func_manager import silence_api
 from func_manager import data_retention
 from func_manager import ai_api
+from func_manager import code_info
 from func_manager.workload_relay import WorkloadRelay
 from func_manager.pod_exec_relay import PodExecRelay
 from func_manager.pod_log_relay import PodLogRelay
@@ -1100,6 +1101,9 @@ app.router.add_get("/api/cron_peak_data", cron_peak_data)
 
 # ==================== Istio VirtualService 管理(/api/istio/*,设计见 istio_route/README.md) ====================
 istio_handlers.register_routes(app, call_agent_api)
+
+# ==================== 获取代码(Deployment 页;配置在 /api/admin/code-info,见 func_manager/code_info.py) ====================
+code_info.register_routes(app, call_agent_api)
 
 
 # ==================== 负载均衡路由注册 ====================

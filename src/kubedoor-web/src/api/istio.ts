@@ -413,6 +413,16 @@ export interface ApplyItem {
   k8s_name: string;
 }
 
+/** 纳入一项(组标准 + 集群)的结果 */
+export interface BindResult extends ApplyItem {
+  namespace: string;
+  name: string;
+  success: boolean;
+  /** 纳入后的状态:一致;待下发(规则和组标准不同);缺少域名(现状里有规则对不上组标准) */
+  status?: CellStatus;
+  error?: string;
+}
+
 /** 下发后的域名冲突;new:集群里原来没有、是这次下发带来的,这样的项不能下发(后端也会拒绝) */
 export interface DomainIssue {
   text: string;
@@ -611,6 +621,13 @@ export const compareIstio = (
 
 export const importIstio = (groupId: number, items: ImportItem[]) =>
   http.request<Result<ItemResult[]>>("post", "/api/istio/import", {
+    data: { group_id: groupId, items }
+  });
+
+/** 纳入:集群里已有同名 VS、组标准还没部署到的(「未纳入」)部署到该集群,hosts 和规则里的域名取该集群的现状;
+ *  集群当时的内容记为「上次下发」,只改花折里的数据 */
+export const bindIstio = (groupId: number, items: ApplyItem[]) =>
+  http.request<Result<BindResult[]>>("post", "/api/istio/bind", {
     data: { group_id: groupId, items }
   });
 

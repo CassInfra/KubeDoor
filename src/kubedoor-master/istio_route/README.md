@@ -86,6 +86,20 @@ http 规则从规则里的字段写起(`match.uri.prefix: /api/`、`route.destin
 - 审计 `istio.rollback`:`detail` 里有回退到的那份备份(`backup_id`、`backup_at`、`backup_by`、`backup_action`)
   和回退前集群里的内容 `spec`。
 
+### 纳入集群里已有的 VirtualService
+
+组标准已经有了,集群里也有同名的 VirtualService,但组标准还没部署到这个集群:状态「未纳入」。常见于新集群加入组、
+集群里的 VirtualService 是手工配好的。纳入就是给这个集群加上部署关系,hosts 和规则里的域名取该集群的现状:
+
+- 批量:矩阵勾选后「纳入所选」,或行尾的「纳入」。列出所选 VirtualService 在当前显示的集群里所有「未纳入」的格子,
+  标出规则(不算 hosts 和域名)和组标准是否一样,默认全选;和其他组冲突的不能纳入。接口 `POST /api/istio/bind`。
+- 单个:格子菜单、详情页集群列表的「纳入此集群」(集群里没有这个 VirtualService 时叫「部署到此集群」),
+  hosts 和规则里的域名默认取自集群现状,可以先改再保存。
+- 规则里的域名按纳管的方式对齐,取现状里对应规则的;对不上的留空,状态「缺少域名」,补上才能下发。
+- 集群当时的内容记为「上次下发」(同纳管):规则和组标准一样的纳入后「一致」;不一样的「待下发」,看过差异再下发
+  (下发会用组标准覆盖集群里的内容),或者把现状里的规则同步到组标准。
+- 纳入只改花折里的数据,不动集群。「下发所选」跳过「未纳入」的格子,并提示先纳入。
+
 ### 从集群现状同步到组标准
 
 对比时一边是组标准(`standard` 或 `standard@集群`)、一边是集群现状(`cluster@集群`),能做组级修改的账号(组内每个集群都有
@@ -178,11 +192,11 @@ http 规则从规则里的字段写起(`match.uri.prefix: /api/`、`route.destin
 | 集群中没有 `missing` | 有部署关系,但集群里没有这个 VS |
 | 缺少域名 `incomplete` | 有规则的域名条件还没设置该集群的域名(或一个都没选),补上前不能下发 |
 | 未采集 `unknown` | 该集群还没采集过现状 |
-| 未纳入 `unbound` | 集群里有同名 VS,但组标准没有部署到该集群 |
+| 未纳入 `unbound` | 集群里有同名 VS,但组标准没有部署到该集群;纳入后才能下发,见「纳入集群里已有的 VirtualService」 |
 | 未纳管 `unmanaged` | 还没有组标准,只是集群现状 |
 
 比较用 `spec_hash`(归一化后整份 spec);各集群规则是否一致用 `rule_digest`(去掉 hosts,规则里域名的值也不算),
-未纳管的 VS 按它把各集群分成版本 A / B / C(集群多的版本在前)。纳管时把各集群当时的现状哈希记为「上次下发」,
+未纳管的 VS 按它把各集群分成版本 A / B / C(集群多的版本在前)。纳管、纳入时把集群当时的现状哈希记为「上次下发」,
 所以和组标准不同但集群没被动过的,显示「待下发」。
 
 ## 典型流程
@@ -199,6 +213,9 @@ http 规则从规则里的字段写起(`match.uri.prefix: /api/`、`route.destin
 5. **多个项目共用测试集群**:每个项目一个组,都加入共用的测试集群,用包含 / 忽略规则划分 VS(如 b2c 组包含 `b2c*`,
    另一个组忽略 `b2c*`)→ 刷新现状,红色的冲突行在不该管它的组里忽略 → 各组分别纳管、下发。
 
+6. **新集群加入组,集群里的 VirtualService 已经手工配好**:组管理里加入集群 → 刷新现状 → 组标准已有的显示「未纳入」,
+   勾选后「纳入所选」(hosts 和域名取现状)→「待下发」的对比后下发或同步到组标准;组标准还没有的(「未纳管」)用「纳管」。
+
 删除组标准、不再部署到某集群、忽略,都只动花折里的数据,集群里的 VirtualService 不受影响;
 要删集群里的 VS 用格子菜单的「删除」。
 
@@ -209,7 +226,7 @@ http 规则从规则里的字段写起(`match.uri.prefix: /api/`、`route.destin
 `auth/policy.py` 只粗检至少一个集群有,`handlers.py` 的 `_require_istio` 再按下面的口径细检。
 
 - **组级修改**要求组内每个集群都有:组的新建 / 修改 / 删除(改组成员时新旧成员都算)、组标准的新建 / 修改 / 删除、
-  规则的新增 / 修改 / 删除 / 重排、各集群的 hosts 和域名(部署到某集群 / 不再部署)、忽略 / 取消忽略、纳管、
+  规则的新增 / 修改 / 删除 / 重排、各集群的 hosts 和域名(部署到某集群 / 不再部署)、忽略 / 取消忽略、纳管、纳入、
   按现状重置组标准、同步到组标准(含预览)。没有集群的组按全局角色对应的那一列判断。
 - **集群级修改**只看目标集群:下发(含预览)、回退、删除集群里的 VirtualService、刷新现状。
 - 组列表、矩阵、详情返回组的 `can_manage`(能否做组级修改)和每个集群的 `can_istio`,前端据此置灰按钮。
@@ -231,13 +248,14 @@ http 规则从规则里的字段写起(`match.uri.prefix: /api/`、`route.destin
 | POST | `/api/istio/live/rollback` | `{group_id, k8s_name, namespace, name, backup_id}`:把集群里的 VirtualService 回退到这份备份(见上文),只改集群;审计 `istio.rollback` |
 | GET | `/api/istio/compare?group_id=&namespace=&name=&left=&right=` | 对比。一方是 `standard`(组标准,不含 hosts,域名显示 `<按集群>`)、`standard@集群`、`cluster@集群`(现状);`diff.rules_same` = 只差 hosts 和域名,规则行 `op=domains` = 只是域名不同、`target` = 转发目标;两边的 `version` 是内容哈希,同步到组标准时用 |
 | POST | `/api/istio/import` | 纳管:`{group_id, items:[{namespace, name, base, clusters}]}`,以 base 集群现状生成组标准,各集群 hosts 和域名取自己的现状 |
+| POST | `/api/istio/bind` | 纳入:`{group_id, items:[{vs_id, k8s_name}]}`,组标准部署到集群里已有同名 VirtualService 的集群(「未纳入」),hosts 和域名取该集群的现状,现状哈希记为「上次下发」;逐项返回 `{vs_id, k8s_name, namespace, name, success, status, error}`,`status` 是纳入后的状态。集群里没有、已经部署、被忽略、和其他组冲突的项失败,不影响其他项 |
 | POST | `/api/istio/vs/sync/preview`、`/api/istio/vs/sync` | 从集群现状同步到组标准(见上文):`{group_id, namespace, name, standard: standard\|standard@集群, k8s_name, rules:[{standard_index, live_index}], gateways, default, extra, standard_version, live_version}`。`rules` 是对比里要同步的规则行(两边的序号,从 0 开始),`*_version` 是对比接口两边的 `version`;preview 不保存,返回保存后的组标准(和对比里组标准一侧一样显示)、改动统计、会缺少域名的集群 |
 | POST | `/api/istio/vs/reset` | 以某集群现状更新组标准的共用部分:`{vs_id, k8s_name}`,hosts 不变;域名见上文 |
 | GET | `/api/istio/vs?vs_id=` | 组标准详情:共用部分、规则(`domains`:各集群的域名)、各集群的 hosts 和状态(`missing_domains` 缺哪些规则的域名,`live_domains` 现状里对应规则的域名,`backup_count` 回退用的备份份数,`rolled_back` 下发之后又回退过时是谁、什么时候)、规范检查、`domain_issues` 部署到的集群里的域名冲突(按要下发的内容查) |
 | GET | `/api/istio/vs/check?group_id=&namespace=&name=` | 新建前检查:本组是否已有组标准、集群里是否已有同名的、其他组里是否已有、名称是否被本组排除 |
 | POST | `/api/istio/vs` | 新建:`{group_id, namespace, name, gateways, df_*, clusters:[{k8s_name, hosts}], force_include?}`;集群里已有同名 VS 时要求用纳管,其他组里已有的拒绝;名称被本组排除的要 `force_include`(单独纳入) |
 | PUT / DELETE | `/api/istio/vs?vs_id=` | 修改 gateways 和默认路由 / 删除组标准(名称、命名空间不可改) |
-| PUT / DELETE | `/api/istio/vs/cluster` | 部署到某集群并设置 hosts:`{vs_id, k8s_name, hosts, domains?: {规则 id: [[域名]]}}` / 不再部署(`?vs_id=&k8s_name=`,该集群的域名一并删除) |
+| PUT / DELETE | `/api/istio/vs/cluster` | 部署到某集群并设置 hosts:`{vs_id, k8s_name, hosts, domains?: {规则 id: [[域名]]}}`,新部署且集群里已有同名 VirtualService 时(纳入)把它当时的现状哈希记为「上次下发」/ 不再部署(`?vs_id=&k8s_name=`,该集群的域名一并删除) |
 | POST | `/api/istio/httproute?vs_id=` | 新增规则;`priority` 不传追加到最后,传了检查是否占用;有域名块时带 `domains: {集群: [[域名]]}`,已纳入的集群都要给 |
 | PUT / DELETE | `/api/istio/httproute?route_id=` | 修改(`priority` 不传保持原位置,未建模字段保留,各集群域名整体替换)/ 删除(删除后重排优先级) |
 | POST | `/api/istio/httproute/reorder?vs_id=` | 优先级重排为 10、20、30…… |

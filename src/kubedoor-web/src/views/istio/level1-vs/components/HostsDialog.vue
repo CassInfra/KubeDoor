@@ -48,6 +48,8 @@ const cluster = computed(() =>
   detail.value?.clusters.find(c => c.k8s_name === props.k8sName)
 );
 const bound = computed(() => !!cluster.value?.bound);
+/** 没纳入、集群里已有同名 VS:保存就是纳入,hosts 和域名默认取自现状 */
+const inCluster = computed(() => !!cluster.value?.in_cluster);
 const parsedHosts = computed(() => parseHostsText(text.value));
 const domainRoutes = computed(() =>
   (detail.value?.routes ?? [])
@@ -209,7 +211,7 @@ async function save() {
 <template>
   <el-dialog
     v-model="visible"
-    :title="`${bound ? '编辑 hosts 和域名' : '部署到集群'} · ${k8sName}`"
+    :title="`${bound ? '编辑 hosts 和域名' : inCluster ? '纳入集群' : '部署到集群'} · ${k8sName}`"
     width="900px"
     top="6vh"
     :close-on-click-modal="false"
@@ -223,7 +225,11 @@ async function save() {
           :closable="false"
           show-icon
           class="mb-3"
-          title="保存后这个 VirtualService 会纳入该集群:规则、默认路由、gateways 用组标准,hosts 和规则里的域名用下面填的。下发后才会在集群里生效。"
+          :title="
+            inCluster
+              ? '集群里已有同名的 VirtualService,保存后纳入:规则、默认路由、gateways 用组标准,hosts 和规则里的域名用下面填的(默认取自集群现状),集群当前的内容记为「上次下发」。和组标准不同的显示「待下发」,下发后才会改集群。'
+              : '保存后这个 VirtualService 会纳入该集群:规则、默认路由、gateways 用组标准,hosts 和规则里的域名用下面填的。下发后才会在集群里生效。'
+          "
         />
         <div class="copy-row">
           <span class="label">从</span>

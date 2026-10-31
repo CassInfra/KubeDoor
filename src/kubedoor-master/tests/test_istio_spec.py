@@ -397,6 +397,26 @@ def test_missing_domains_make_cluster_incomplete():
     assert S.missing_domains(standard, 'k') == ['第 1 条规则(域名按集群 → svc.ns)']
 
 
+def test_bind_live_takes_hosts_and_domains_from_the_cluster():
+    """纳入集群里已有的同名 VS:hosts 和规则里的域名取现状,现状记为「上次下发」;规则一样的一致,
+    不一样的待下发,按域名转发的规则对不上的缺少域名。"""
+    standard = make_domain_standard(clusters=('p',), bound=('p',))
+    k = site_spec('k')
+    binding, domains, status = S.bind_live(standard, 'k', k)
+    assert binding == {'hosts': k['hosts'], 'applied_hash': S.spec_hash(k)} and status == S.SYNCED
+    assert {i: [[d['value'] for d in block] for block in lists] for i, lists in domains.items()} == {
+        1: [['svc-k.intra.example.com', 'svc.intra.example.com']]}
+    assert S.live_domains(standard, 'k', k) == domains
+    assert 'k' not in standard['bindings'] and 'k' not in standard['routes'][0]['domains']  # 不改传进来的组标准
+    # 规则不一样(端口不同):纳入后待下发,下发时用组标准覆盖
+    _, _, status = S.bind_live(standard, 'k', site_spec('k', routes=[host_rule('k'), route('/api/', 2)]))
+    assert status == S.PENDING
+    # 按域名转发的规则转发目标不同:对不上,域名留空,缺少域名
+    other = site_spec('k', routes=[host_rule('k', service='other'), route('/api/', 1)])
+    _, domains, status = S.bind_live(standard, 'k', other)
+    assert domains == {} and status == S.INCOMPLETE
+
+
 def test_diff_marks_rules_that_only_differ_in_domains():
     diff = S.diff_specs(site_spec('p'), site_spec('k'))
     assert not diff['shared_same'] and diff['rules_same']

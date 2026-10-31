@@ -1,5 +1,6 @@
 import { http } from "@/utils/http";
 import { getCached, setCache } from "@/utils/cache";
+import type { CodeInfoInvalid, CodeInfoLinks, CodeInfoRequest } from "./system";
 
 type ResultTable = {
   success: boolean;
@@ -279,5 +280,33 @@ export const getCciScheduleProfile = (
     {
       params: { env, namespace, deployment }
     }
+  );
+};
+
+/**
+ * 获取代码:master 读 Deployment 第一个容器的镜像,POST 到「系统管理 → 获取代码接口」配置的接口
+ * 出错不弹全局提示,由弹窗显示原因
+ * @param env K8S环境
+ * @param namespace 命名空间
+ * @param deployment 微服务名称
+ */
+export const getCodeInfo = (
+  env: string,
+  namespace: string,
+  deployment: string
+) => {
+  return http.request<{
+    success: boolean;
+    data: {
+      request: CodeInfoRequest;
+      links: CodeInfoLinks;
+      invalid: CodeInfoInvalid;
+    };
+  }>(
+    "get",
+    "/api/code-info",
+    { params: { env, namespace, deployment } },
+    // master 读 Deployment 最长 30 秒 + 调接口最长 60 秒
+    { silent: true, timeout: 100000 }
   );
 };

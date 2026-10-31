@@ -119,6 +119,9 @@ def test_env_condition_sql():
     ('GET', '/api/istio/groups', 'login'),
     ('GET', '/api/admin/permission-policy', 'admin'),
     ('PUT', '/api/admin/permission-policy', 'admin'),
+    ('GET', '/api/code-info', 'env_read'),  # 获取代码:对该集群可读即可
+    ('PUT', '/api/admin/code-info', 'admin'),
+    ('POST', '/api/admin/code-info/test', 'admin'),
     ('GET', '/api/ai/internal/permission-policy', 'internal'),
     ('POST', '/api/admis', 'env_write'),  # 准入 webhook 由 K8S 直接调 agent,不经过 master
     ('GET', '/api/something/new', 'env_write'),  # 没登记的接口默认按集群写

@@ -1049,6 +1049,27 @@ def aligned_domains(entries: List[dict], live: Optional[dict]) -> Dict[int, List
     return result
 
 
+def live_domains(standard: dict, k8s_name: str, live: Optional[dict]) -> Dict[int, List[List[dict]]]:
+    """组标准各规则在集群现状里对应那条的域名:{规则 id: 各域名块的域名}。对齐方式同纳管,对不上的规则不给。
+    部署到 / 纳入该集群、补设置域名时用作该集群的域名。"""
+    routes = sort_routes(standard.get('routes') or [])
+    found = aligned_domains([render_route(route, k8s_name) for route in routes], live)
+    return {routes[index]['id']: lists for index, lists in found.items()
+            if domain_block_count(routes[index]['match_rules'])}
+
+
+def bind_live(standard: dict, k8s_name: str, live: dict) -> Tuple[dict, Dict[int, List[List[dict]]], str]:
+    """纳入集群里已有的同名 VS(组标准部署到该集群):hosts 取现状,规则里的域名取现状里对应规则的(对不上的不给,
+    状态「缺少域名」);集群当时的内容记为「上次下发」(同纳管),和组标准不同、集群没被动过的显示「待下发」。
+    返回 (部署关系 {hosts, applied_hash}, {规则 id: 各域名块的域名}, 纳入后的状态)。"""
+    domains = live_domains(standard, k8s_name, live)
+    binding = {'hosts': list(live.get('hosts') or []), 'applied_hash': spec_hash(live)}
+    routes = [{**route, 'domains': {**(route.get('domains') or {}), k8s_name: domains[route['id']]}}
+              if route.get('id') in domains else route for route in standard.get('routes') or []]
+    status, _ = cluster_status({**standard, 'routes': routes}, binding, k8s_name, live, True)
+    return binding, domains, status
+
+
 _ROUTE_FIELDS = ('name', 'match_rules', 'rewrite_rules', 'forward_type', 'forward_detail', 'timeout', 'extra')
 _DEFAULT_FIELDS = ('df_forward_type', 'df_forward_detail', 'df_forward_timeout', 'df_extra')
 

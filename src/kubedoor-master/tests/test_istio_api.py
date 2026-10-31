@@ -1025,6 +1025,62 @@ async def test_import_takes_domains_from_rule_with_same_target(env):
 
 
 @pytest.mark.asyncio
+async def test_bind_clusters_that_already_have_the_vs(env):
+    """新集群加入组后,集群里已有、组标准还没部署到的 VS 显示「未纳入」:批量纳入后 hosts 和规则里的域名取各自的现状,
+    现状记为「上次下发」,规则一样的一致、不一样的待下发;集群里没有的、已经纳入的、被忽略的不能纳入。只改花折里的数据。"""
+    client, agent, audits = env
+    group_id = await setup_group(client, agent)
+    for k8s_name in ('beta-k', 'prod-a'):  # 只按域名转发,各集群只差域名
+        agent.put(k8s_name, 'd', vs([f'd-{k8s_name}.x.com'], [
+            {'match': [{'authority': {'exact': f'd-{k8s_name}.x.com'}}], 'route': [{'destination': {'host': 'd'}}]}]))
+    await call(client, 'POST', '/api/istio/collect', {'group_id': group_id})
+    imported = await call(client, 'POST', '/api/istio/import', {'group_id': group_id, 'items': [
+        {'namespace': NS, 'name': name, 'base': 'beta-k', 'clusters': ['beta-k']} for name in ('a', 'b', 'd')]})
+    a_id, b_id, d_id = (r['vs_id'] for r in imported['data'])
+    rows = await matrix(client, group_id)
+    assert cells(rows['a']) == {'beta-k': S.SYNCED, 'beta-p': S.UNBOUND, 'prod-a': S.UNBOUND}
+    assert cells(rows['b']) == {'beta-k': S.SYNCED, 'beta-p': S.UNBOUND, 'prod-a': S.NONE}
+
+    bound = await call(client, 'POST', '/api/istio/bind', {'group_id': group_id, 'items': [
+        {'vs_id': a_id, 'k8s_name': 'beta-p'}, {'vs_id': a_id, 'k8s_name': 'prod-a'},
+        {'vs_id': b_id, 'k8s_name': 'beta-p'}, {'vs_id': b_id, 'k8s_name': 'prod-a'},
+        {'vs_id': d_id, 'k8s_name': 'prod-a'}, {'vs_id': a_id, 'k8s_name': 'beta-k'},
+        {'vs_id': a_id, 'k8s_name': 'prod-a'}, {'vs_id': a_id, 'k8s_name': 'prod-x'}]})
+    assert [(r['name'], r['k8s_name'], r['success'], r.get('status') or r['error']) for r in bound['data']] == [
+        ('a', 'beta-p', True, S.SYNCED), ('a', 'prod-a', True, S.SYNCED), ('b', 'beta-p', True, S.PENDING),
+        ('b', 'prod-a', False, '集群 prod-a 的现状里没有这个 VirtualService,请先刷新现状'),
+        ('d', 'prod-a', True, S.SYNCED), ('a', 'beta-k', False, '已经部署到集群 beta-k'),
+        ('a', 'prod-a', False, '已经部署到集群 prod-a'), ('a', 'prod-x', False, '集群 prod-x 不在组 cassmall 里')]
+    rows = await matrix(client, group_id)
+    assert cells(rows['a']) == {'beta-k': S.SYNCED, 'beta-p': S.SYNCED, 'prod-a': S.SYNCED}
+    assert cells(rows['b']) == {'beta-k': S.SYNCED, 'beta-p': S.PENDING, 'prod-a': S.NONE}
+    assert rows['a']['cells']['prod-a']['hosts'] == ['a.x.com']  # hosts 取各自的现状
+    d_rule = (await call(client, 'GET', '/api/istio/vs', vs_id=d_id))['data']['routes'][0]
+    assert {k: domain_values(v) for k, v in d_rule['domains'].items()} == {
+        'beta-k': [['d-beta-k.x.com']], 'prod-a': [['d-prod-a.x.com']]}
+    assert agent.applied == [] and audits == []
+    # 待下发的看过差异再下发:下发前取的现状就是纳入时记下的,备份后用组标准覆盖
+    assert (await apply_to(client, b_id, 'beta-p'))['success']
+    assert len(agent.clusters['beta-p'][(NS, 'b')]['http']) == 2
+
+    # 「部署到此集群」纳入集群里已有的(规则不一样):同样记下现状,显示待下发而不是不一致
+    agent.put('beta-p', 'c', vs(['c-p.x.com'], [route('/c1/', 1)]))
+    agent.put('beta-k', 'c', vs(['c-k.x.com'], [route('/c1/', 1), route('/c2/', 2)]))
+    agent.put('prod-a', 'c', vs(['c.x.com'], [route('/c1/', 1)]))
+    await call(client, 'POST', '/api/istio/collect', {'group_id': group_id})
+    c_id = (await call(client, 'POST', '/api/istio/import', {'group_id': group_id, 'items': [
+        {'namespace': NS, 'name': 'c', 'base': 'beta-k', 'clusters': ['beta-k']}]}))['data'][0]['vs_id']
+    await call(client, 'PUT', '/api/istio/vs/cluster', {'vs_id': c_id, 'k8s_name': 'beta-p', 'hosts': ['c-p.x.com']})
+    assert cells((await matrix(client, group_id))['c'])['beta-p'] == S.PENDING
+    # 被忽略的不能纳入(列表里也不显示)
+    await call(client, 'POST', '/api/istio/ignore', {'group_id': group_id, 'items': [{'namespace': NS, 'name': 'c'}]})
+    ignored = await call(client, 'POST', '/api/istio/bind', {'group_id': group_id, 'items': [
+        {'vs_id': c_id, 'k8s_name': 'prod-a'}]})
+    assert ignored['data'][0]['error'] == '已在本组手动忽略,不能纳入;如需由本组管理,先在「查看忽略」里取消忽略'
+    await call(client, 'POST', '/api/istio/bind', {'group_id': group_id, 'items': []}, status=400)
+
+
+@pytest.mark.asyncio
 async def test_sync_rules_from_cluster_to_standard(env):
     """对比里从集群现状整条同步规则到组标准:预览不保存;保存后其他集群保持原来的域名,新加的规则缺少域名;
     打开对比之后组标准变了就拒绝;也能按现状删掉组标准里的规则。"""
@@ -1152,6 +1208,7 @@ async def test_istio_permissions_by_cluster(env, monkeypatch):
     for method, path, body, params in (
             ('POST', '/api/istio/import', {'group_id': group_id, 'items': [
                 {'namespace': NS, 'name': 'b', 'base': 'beta-k', 'clusters': ['beta-k']}]}, {}),
+            ('POST', '/api/istio/bind', {'group_id': group_id, 'items': [{'vs_id': a_id, 'k8s_name': 'beta-k'}]}, {}),
             ('POST', '/api/istio/ignore', {'group_id': group_id, 'items': [{'namespace': NS, 'name': 'b'}]}, {}),
             ('POST', '/api/istio/vs/reset', {'vs_id': a_id, 'k8s_name': 'beta-k'}, {}),
             ('PUT', '/api/istio/vs', {'gateways': ['istio-system/x']}, {'vs_id': a_id}),

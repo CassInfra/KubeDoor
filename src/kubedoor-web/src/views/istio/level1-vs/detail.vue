@@ -423,7 +423,11 @@ onMounted(load);
                 type="primary"
                 @click="openHosts(row)"
                 >{{
-                  row.bound ? "编辑 hosts 和域名" : "部署到此集群"
+                  row.bound
+                    ? "编辑 hosts 和域名"
+                    : row.in_cluster
+                      ? "纳入此集群"
+                      : "部署到此集群"
                 }}</el-button
               >
               <template v-if="clusterCan(row)">

@@ -187,3 +187,76 @@ export const savePermissionPolicy = (data: PolicyValue) =>
     "/api/admin/permission-policy",
     { data }
   );
+
+/** 获取代码接口的请求头:值只写不读 */
+export interface CodeInfoHeader {
+  name: string;
+  /** 只写:留空表示保持已保存的值 */
+  value?: string | null;
+  has_value?: boolean;
+}
+
+/** 获取代码接口的配置(Deployment 页「获取代码」由 master 调这个接口) */
+export interface CodeInfoConfig {
+  enabled: boolean;
+  url: string;
+  headers: CodeInfoHeader[];
+  timeout: number;
+  tls_verify: boolean;
+  updated_by?: string | null;
+  updated_at?: string | null;
+}
+
+/** master POST 给接口的请求体,固定这 4 个字段 */
+export interface CodeInfoRequest {
+  k8s: string;
+  namespace: string;
+  deployment: string;
+  image: string;
+}
+
+/** 接口返回的 3 个链接;没返回或者不是 http(s) 地址的是空字符串 */
+export interface CodeInfoLinks {
+  /** 代码页面:GitLab 上这个仓库或这个 commit 的代码页面 */
+  web_url: string;
+  /** 下载链接:这个 commit 的代码压缩包 */
+  download_url: string;
+  /** Commit 说明:这个仓库最近一些 commit 的提交说明 */
+  commits_url: string;
+}
+
+/** 格式不对(不是 http(s) 地址)的字段和原值 */
+export type CodeInfoInvalid = Partial<Record<keyof CodeInfoLinks, string>>;
+
+export interface CodeInfoTestResult {
+  ok: boolean;
+  status: number | null;
+  elapsed_ms: number;
+  /** 原始响应(最多 4KB) */
+  body: string;
+  links: CodeInfoLinks;
+  invalid: CodeInfoInvalid;
+  error: string;
+  request: CodeInfoRequest;
+}
+
+export const getCodeInfoConfig = () =>
+  http.request<Result<CodeInfoConfig>>("get", "/api/admin/code-info");
+
+export const saveCodeInfoConfig = (data: CodeInfoConfig) =>
+  http.request<Result<CodeInfoConfig>>("put", "/api/admin/code-info", {
+    data
+  });
+
+/** 用页面上的配置(不用先保存)和手填的入参调一次接口 */
+export const testCodeInfoConfig = (data: {
+  config: CodeInfoConfig;
+  request: CodeInfoRequest;
+}) =>
+  http.request<Result<CodeInfoTestResult>>(
+    "post",
+    "/api/admin/code-info/test",
+    { data },
+    // 接口超时最长 60 秒
+    { timeout: 70000 }
+  );

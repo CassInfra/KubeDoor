@@ -175,6 +175,9 @@
     <!-- Pod / Deployment 日志查看：统一组件 -->
     <PodLogViewer ref="logViewerRef" />
 
+    <!-- 获取代码:master 调「系统管理 → 获取代码接口」配置的接口 -->
+    <CodeInfoDialog ref="codeInfoRef" />
+
     <!-- 新建资源全屏YAML编辑弹窗（效果同 Service 编辑弹窗） -->
     <!-- 编辑Deployment -->
     <el-dialog
@@ -851,6 +854,9 @@
                     <el-dropdown-item @click="handleViewDeployLogs(scope.row)"
                       >日志</el-dropdown-item
                     >
+                    <el-dropdown-item @click="handleCodeInfo(scope.row)"
+                      >获取代码</el-dropdown-item
+                    >
                   </el-dropdown-menu>
                 </template>
               </el-dropdown>
@@ -948,6 +954,7 @@ import { openPodShell } from "@/utils/podShell";
 import { deploymentQuestion, podQuestion } from "@/utils/ai";
 import { useAskAI } from "@/utils/useAskAI";
 import PodLogViewer from "@/views/monit/components/PodLogViewer.vue";
+import CodeInfoDialog from "@/views/monit/components/CodeInfoDialog.vue";
 import * as monaco from "monaco-editor";
 import * as yaml from "js-yaml";
 import {
@@ -1796,6 +1803,12 @@ const currentOperation = ref(""); // 当前操作类型
 
 // 日志查看：统一使用 PodLogViewer 组件
 const logViewerRef = ref<InstanceType<typeof PodLogViewer> | null>(null);
+
+// 获取代码弹窗
+const codeInfoRef = ref<InstanceType<typeof CodeInfoDialog> | null>(null);
+const handleCodeInfo = (row: any) => {
+  codeInfoRef.value?.open(row);
+};
 
 // Pod 操作（扩缩容/节点均衡等）共享的当前 Pod 信息
 const currentPodInfo = ref({

@@ -492,21 +492,44 @@ async def delete_standard(vs_id: int) -> None:
 # ---------------------------------------------------------------------------
 # VS 部署到哪些集群(hosts 各集群独立)
 # ---------------------------------------------------------------------------
+async def _upsert_cluster_domains(conn, vs_id: int, k8s_name: str, domains: Dict[int, list]) -> None:
+    """保存一个集群在这些规则里的域名({规则 id: 各域名块的域名}),已有的替换。"""
+    for route_id, lists in domains.items():
+        await conn.execute(
+            'INSERT INTO istio_vs_route_domain (route_id, vs_id, k8s_name, domains) '
+            'SELECT id, vs_id, $2, $3::jsonb FROM istio_vs_route WHERE id = $1 AND vs_id = $4 '
+            'ON CONFLICT (route_id, k8s_name) DO UPDATE SET domains = EXCLUDED.domains',
+            route_id, k8s_name, _dump(lists), vs_id)
+
+
 async def upsert_binding(vs_id: int, k8s_name: str, hosts: List[str],
-                         domains: Optional[Dict[int, list]] = None) -> None:
-    """部署到某集群 / 修改它的 hosts;domains({规则 id: 各域名块的域名})给了就一起保存该集群在这些规则里的域名。"""
+                         domains: Optional[Dict[int, list]] = None, applied_hash: Optional[str] = None) -> None:
+    """部署到某集群 / 修改它的 hosts;domains({规则 id: 各域名块的域名})给了就一起保存该集群在这些规则里的域名。
+    applied_hash 只在新部署时写入(集群里已有同名 VS 时是它当时的内容,同纳管),已部署的不变。"""
     async with db.get_pool().acquire() as conn:
         async with conn.transaction():
             await conn.execute(
-                'INSERT INTO istio_vs_cluster (vs_id, k8s_name, hosts) VALUES ($1, $2, $3::jsonb) '
+                'INSERT INTO istio_vs_cluster (vs_id, k8s_name, hosts, applied_hash) VALUES ($1, $2, $3::jsonb, $4) '
                 'ON CONFLICT (vs_id, k8s_name) DO UPDATE SET hosts = EXCLUDED.hosts',
-                vs_id, k8s_name, _dump(hosts))
-            for route_id, lists in (domains or {}).items():
-                await conn.execute(
-                    'INSERT INTO istio_vs_route_domain (route_id, vs_id, k8s_name, domains) '
-                    'SELECT id, vs_id, $2, $3::jsonb FROM istio_vs_route WHERE id = $1 AND vs_id = $4 '
-                    'ON CONFLICT (route_id, k8s_name) DO UPDATE SET domains = EXCLUDED.domains',
-                    route_id, k8s_name, _dump(lists), vs_id)
+                vs_id, k8s_name, _dump(hosts), applied_hash)
+            await _upsert_cluster_domains(conn, vs_id, k8s_name, domains or {})
+
+
+async def bind_cluster(vs_id: int, k8s_name: str, hosts: List[str], applied_hash: Optional[str],
+                       domains: Dict[int, list]) -> None:
+    """纳入:新建部署关系,已经部署到该集群的报错、不覆盖;applied_hash、domains 同 upsert_binding。"""
+    try:
+        async with db.get_pool().acquire() as conn:
+            async with conn.transaction():
+                status = await conn.execute(
+                    'INSERT INTO istio_vs_cluster (vs_id, k8s_name, hosts, applied_hash) '
+                    'VALUES ($1, $2, $3::jsonb, $4) ON CONFLICT (vs_id, k8s_name) DO NOTHING',
+                    vs_id, k8s_name, _dump(hosts), applied_hash)
+                if status == 'INSERT 0 0':
+                    raise IstioError(f'已经部署到集群 {k8s_name}')
+                await _upsert_cluster_domains(conn, vs_id, k8s_name, domains)
+    except asyncpg.ForeignKeyViolationError:
+        raise IstioError('组标准不存在(可能刚被删除),请刷新后重试')
 
 
 async def delete_binding(vs_id: int, k8s_name: str) -> None:

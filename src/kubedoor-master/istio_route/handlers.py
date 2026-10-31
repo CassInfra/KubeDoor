@@ -2,7 +2,7 @@
 
 权限:查看按集群读权限,看不到的集群不返回。修改要操作权限表里的「Istio 修改」(network.istio):
 auth/policy.py 只粗检至少一个集群有,这里再按口径细检(_require_istio)——
-  组级修改(组的增删改、组标准 VS、规则、各集群 hosts、忽略 / 取消忽略、纳管、按现状重置 / 同步):组内每个集群都要有,
+  组级修改(组的增删改、组标准 VS、规则、各集群 hosts、忽略 / 取消忽略、纳管、纳入、按现状重置 / 同步):组内每个集群都要有,
   改组成员时新旧成员都算;没有集群的组按全局角色;
   集群级修改(下发及预览、回退、删除集群里的 VS、刷新现状):只看目标集群。
 列表 / 矩阵 / 详情返回 can_manage(组级)和每个集群的 can_istio,前端据此置灰。
@@ -677,6 +677,13 @@ class ApplyRequest(BaseModel):
     items: List[ApplyItem] = Field(min_length=1, max_length=1000)
 
 
+class BindRequest(BaseModel):
+    """纳入:组标准部署到这些集群,集群里都已有同名 VS(矩阵里「未纳入」的格子)。"""
+
+    group_id: int
+    items: List[ApplyItem] = Field(min_length=1, max_length=2000)
+
+
 # ---------------------------------------------------------------------------
 # agent
 # ---------------------------------------------------------------------------
@@ -1032,6 +1039,71 @@ async def import_standards(request):
     return _ok(results)
 
 
+def _bind_plan(group: dict, view: GroupView, standard: Optional[dict], k8s_name: str,
+               snapshots: Dict[tuple, dict]) -> Tuple[dict, dict, str]:
+    """纳入前检查一项,返回 S.bind_live 的结果(部署关系、各规则的域名、纳入后的状态);不能纳入的抛 IstioError。"""
+    if standard is None:
+        raise IstioError('组标准不存在(可能刚被删除),请刷新后重试')
+    _members(group, [k8s_name])
+    key = (standard['namespace'], standard['name'])
+    scope = view.classify(key)
+    if not scope['visible']:
+        raise IstioError(f'{_scope_text(scope)},不能纳入;如需由本组管理,先在「查看忽略」里取消忽略')
+    conflicts = view.conflicts([key]).get(key)
+    if conflicts:
+        raise IstioError(_conflict_error(key, conflicts))
+    if k8s_name in standard['bindings']:
+        raise IstioError(f'已经部署到集群 {k8s_name}')
+    live = snapshots.get((k8s_name, *key))
+    if live is None:
+        raise IstioError(f'集群 {k8s_name} 的现状里没有这个 VirtualService,请先刷新现状')
+    binding, domains, status = S.bind_live(standard, k8s_name, live)
+    standard['bindings'][k8s_name] = binding  # 同一项提交了两次:第二次报「已经部署」
+    return binding, domains, status
+
+
+@handler
+async def bind_clusters(request):
+    """纳入:集群里已有同名 VS、组标准还没部署到该集群的(矩阵里「未纳入」),部署到该集群。hosts 和规则里的域名
+    取该集群的现状(同纳管,对不上的规则留空,显示「缺少域名」);集群当时的内容记为「上次下发」,和组标准不同的
+    显示「待下发」。只改花折里的数据,不动集群;逐项返回结果和纳入后的状态。"""
+    req = BindRequest(**await _body(request))
+    group = await _group(req.group_id)
+    await _require_group(request, group)
+    standards = {s['id']: s for s in await store.list_standards(group['id'])}
+    snapshots = await store.load_snapshots({item.k8s_name for item in req.items})
+    view = await _view_of(group)
+
+    def prepare() -> List[dict]:
+        # 对齐规则、渲染、算哈希:纳入的项多时要算上一会儿,放到线程里免得卡住 event loop
+        prepared = []
+        for item in req.items:
+            standard = standards.get(item.vs_id)
+            result = {'vs_id': item.vs_id, 'k8s_name': item.k8s_name,
+                      'namespace': standard['namespace'] if standard else '',
+                      'name': standard['name'] if standard else ''}
+            try:
+                result['plan'] = _bind_plan(group, view, standard, item.k8s_name, snapshots)
+            except IstioError as exc:
+                result.update(success=False, error=exc.message)
+            prepared.append(result)
+        return prepared
+
+    results = await asyncio.to_thread(prepare)
+    for result in results:
+        plan = result.pop('plan', None)
+        if plan is None:
+            continue
+        binding, domains, status = plan
+        try:
+            await store.bind_cluster(result['vs_id'], result['k8s_name'], binding['hosts'],
+                                     binding['applied_hash'], domains)
+            result.update(success=True, status=status)
+        except IstioError as exc:
+            result.update(success=False, error=exc.message)
+    return _ok(results)
+
+
 @handler
 async def reset_standard(request):
     """以某个集群的现状更新组标准的共用部分(规则、默认路由、gateways),各集群 hosts 不变。
@@ -1125,7 +1197,6 @@ async def sync_to_standard(request):
 # ---------------------------------------------------------------------------
 def _cluster_rows(clusters: List[dict], standard: dict, snapshots: Dict[tuple, dict],
                   backups: Dict[str, dict], hosts: S.HostsIndex) -> List[dict]:
-    routes = S.sort_routes(standard['routes'])
     key = (standard['namespace'], standard['name'])
     rows = []
     for cluster in clusters:
@@ -1148,9 +1219,7 @@ def _cluster_rows(clusters: List[dict], standard: dict, snapshots: Dict[tuple, d
             row.update(hosts=list((live or {}).get('hosts') or []), status=S.UNBOUND if live else S.NONE,
                        applied_at=None, applied_by='', missing_domains=[], lint=[], domain_issues=[])
         # 集群现状里对应规则的域名:部署到该集群、补设置域名时用作默认值
-        found = S.aligned_domains([S.render_route(route, k8s_name) for route in routes], live)
-        row['live_domains'] = {routes[index]['id']: lists for index, lists in found.items()
-                               if S.domain_block_count(routes[index]['match_rules'])}
+        row['live_domains'] = S.live_domains(standard, k8s_name, live)
         # 回退用的备份有几份;最近一次下发之后又回退过、集群里也不是下发的内容了,就说明是谁、什么时候回退的
         last = backups.get(k8s_name)
         row['backup_count'] = last['count'] if last else 0
@@ -1284,7 +1353,8 @@ async def delete_vs(request):
 @handler
 async def save_vs_cluster(request):
     """VS 部署到某个集群 / 修改该集群的 hosts,可以同时设置该集群在各规则里的域名。
-    hosts 是组标准里按集群存的内容,按组级修改检查权限。"""
+    hosts 是组标准里按集群存的内容,按组级修改检查权限。集群里已有同名 VS 的(纳入),把它当时的内容记为
+    「上次下发」(同纳管),和组标准不同、集群没被动过的显示「待下发」。"""
     req = BindingRequest(**await _body(request))
     standard, group = await _vs_group(req.vs_id)
     await _require_group(request, group)
@@ -1307,7 +1377,12 @@ async def save_vs_cluster(request):
             if not S.render_match(route['match_rules'], lists):
                 raise IstioError(f'第 {position} 条规则一个域名都没选:这条规则在该集群会匹配所有请求')
             domains[route_id] = lists
-    await store.upsert_binding(req.vs_id, req.k8s_name, req.hosts, domains)
+    applied_hash = None
+    if req.k8s_name not in standard['bindings']:
+        key = (req.k8s_name, standard['namespace'], standard['name'])
+        live = (await store.load_snapshots([req.k8s_name], *key[1:])).get(key)
+        applied_hash = S.spec_hash(live) if live is not None else None
+    await store.upsert_binding(req.vs_id, req.k8s_name, req.hosts, domains, applied_hash)
     return _ok(msg='已保存,下发后生效')
 
 
@@ -1763,6 +1838,7 @@ def register_routes(app, call_agent_api):
     router.add_post('/api/istio/collect', collect)
     router.add_get('/api/istio/compare', compare)
     router.add_post('/api/istio/import', import_standards)
+    router.add_post('/api/istio/bind', bind_clusters)
     router.add_post('/api/istio/ignore', ignore_vs)
     router.add_post('/api/istio/unignore', unignore_vs)
     router.add_get('/api/istio/live', live_detail)

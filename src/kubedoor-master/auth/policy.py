@@ -342,7 +342,7 @@ RULES = (
     _rule('', '/api/auth/verify', 'public'),
     _rule('POST', '/api/auth/logout', 'public'),  # 会话失效时也要能清 Cookie
     _rule('GET|POST', '/api/auth/(me|password)', 'session'),
-    # ---- 系统管理:用户、集群授权、LDAP、审计、权限与审批 ----
+    # ---- 系统管理:用户、集群授权、LDAP、审计、权限与审批、获取代码接口 ----
     _rule('', '/api/admin/.+', 'admin'),
     # ---- AI 服务内部桥 ----
     _rule('', '/api/ai/internal/.+', 'internal'),
@@ -359,6 +359,8 @@ RULES = (
     _rule('GET', '/api/prom_overview', 'env_read_opt', env='query.env'),
     _rule('GET', '/api/stats/(top10_events|top10_pod_alerts|alert_daily)', 'env_read_opt', env='query.env'),
     _rule('POST', '/api/image/tags', 'login'),
+    # 获取代码:master 读 Deployment 的镜像,POST 到管理员配置的接口(handler 记 code_info.get 审计)
+    _rule('GET', '/api/code-info', 'env_read', env='query.env'),
     _rule('POST', '/api/events/query', 'env_read', env='body.k8s'),
     _rule('GET', '/api/events/menu', 'env_read', env='query.k8s'),
     # ---- 高峰期采集 ----
