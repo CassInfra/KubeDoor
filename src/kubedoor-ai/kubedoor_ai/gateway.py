@@ -4,6 +4,7 @@ import asyncio
 import copy
 import hashlib
 import json
+import logging
 import os
 import re
 import uuid
@@ -15,12 +16,14 @@ import httpx
 from langgraph.types import interrupt
 
 from .domain import AIError, CredentialCipher, Identity, beijing_now, redact, utc_now
-from .catalogue import EXTRA_CATALOG, EXTRA_SCHEMAS, build_request, validate_arguments
+from .catalogue import CODE_LOCAL, CODE_TARGET, EXTRA_CATALOG, EXTRA_SCHEMAS, build_request, validate_arguments
+from .code import CodeCache, CodeError
 from .control import (OUTSIDE_ADMISSION, PLANNED, STEP_NAMES, build_plan, changed_fields, check_target, control_drift,
                       deployment_edits, deployment_path, main_step, rejection, snapshot, verify)
 from .user_mcp import McpServers, frozen_fingerprint, needs_approval
 from . import permissions
 
+LOGGER = logging.getLogger(__name__)
 
 # Logical operations are a closed catalogue: the model cannot choose URLs or
 # forward credentials. The shared Istio template/import routes are excluded.
@@ -66,6 +69,8 @@ DEPLOYMENT_SCHEDULES = {
 DEPLOYMENT_CHANGES = {"restart_deployment", "scale_deployment", *DEPLOYMENT_SCHEDULES}
 # 取「权限与审批」配置的超时（秒）：master 卡住时不能一直挂着工具调用
 POLICY_FETCH_TIMEOUT = 10
+# 源码缓存的定时清理间隔（秒）；每次下载完也会清理一次
+CODE_CLEANUP_INTERVAL = 3600
 
 
 def validate_deployment_change(operation: str, args: dict):
@@ -263,12 +268,14 @@ class PendingAction(Exception):
 
 
 class Gateway:
-    def __init__(self, store, cipher: CredentialCipher, master_url: str, token: str, http=None, mcp=None):
+    def __init__(self, store, cipher: CredentialCipher, master_url: str, token: str, http=None, mcp=None, code=None):
         self.store, self.cipher = store, cipher
         self.master_url, self.token = master_url.rstrip("/"), token
         self.http = http or httpx.AsyncClient(timeout=httpx.Timeout(330, connect=10), follow_redirects=False)
         # 用户自己接入的外部 MCP（网页 AI 助手的「MCP 管理」）
         self.mcp = mcp or McpServers(store, cipher)
+        # 源码分析下载的代码（code_fetch / code_search / code_read）
+        self.code = code or CodeCache()
         # master「权限与审批」的配置（操作权限表 + 命令清单），5 秒缓存
         self.policy_cache = permissions.PolicyCache()
 
@@ -425,6 +432,12 @@ class Gateway:
             if selected_pod and operation in ("logs", "previous_logs", "delete_pod", "isolate_pod", "jvm_mem", "jvm_dump", "jvm_jstack", "jvm_jfr"):
                 args.setdefault("pod", selected_pod["name"])
                 args.setdefault("namespace", selected_pod["namespace"])
+            if operation in CODE_TARGET and not args.get("deployment") and not args.get("pod"):
+                # 没指定服务时用页面选中的，Pod 优先（按它实际运行的镜像）
+                if selected_pod:
+                    args.update(pod=selected_pod["name"], namespace=selected_pod["namespace"])
+                elif selected_dep:
+                    args.update(deployment=selected_dep["name"], namespace=selected_dep["namespace"])
             if operation in ("pods", "update_deployment_image") and (not args.get("namespace") or not args.get("deployment")):
                 raise AIError("该工具需要 namespace 和 deployment")
             if operation in ("logs", "previous_logs", "delete_pod", "isolate_pod", "jvm_mem", "jvm_dump", "jvm_jstack", "jvm_jfr") and (not args.get("namespace") or not args.get("pod")):
@@ -627,6 +640,8 @@ class Gateway:
             return await self.mcp.execute(ctx.identity, action)
         if source == "kubedoor" and (action.get("preview") or {}).get("plan"):
             return await self.execute_plan(ctx, action)
+        if source == "kubedoor" and operation in CODE_LOCAL:
+            return await self.execute_code(ctx, operation, args)
         if source == "kubedoor" and not CATALOG[operation][1]:
             raise AIError("该操作要先按管控状态生成执行计划，请重新提出", 409, "plan_missing")
         if source == "direct":
@@ -659,6 +674,65 @@ class Gateway:
                                   "time_zone": "Asia/Shanghai", "registered": True, "executed": False}
         result = table_rows(result)
         return {**result, "success": result.get("success", True), "freshness": freshness, "observed_at": utc_now(), "source": "kubedoor", "truncated": False}
+
+    # ---- 源码分析：下载、搜索、读取在 kubedoor-ai 本地执行（code.py）----
+
+    @staticmethod
+    def code_failure(result):
+        """master 拒绝或出错（没开启 AI 下载、没有集群权限、接口出错等）：原因和代码原样交给模型"""
+        error = result.get("error")
+        message = error.get("message") if isinstance(error, dict) else error
+        code = result.get("code") if isinstance(result.get("code"), str) else "API_ERROR"
+        return {"success": False, "error": {"code": code, "message": str(message or result.get("message") or "获取代码接口暂不可用")}}
+
+    async def execute_code(self, ctx, operation, args):
+        """下载地址由 master 按管理员配置的获取代码接口取，模型拿不到也传不进 URL；master 同时校验集群读权限和
+        「允许 AI 下载并分析源码」。搜索、读取前同样问 master：关掉开关后已下载的源码也不能再用"""
+        env = ctx.run["scope"]["env"]
+        try:
+            if operation == "code_fetch":
+                query = {"env": env, "namespace": args.get("namespace"), "purpose": "fetch",
+                         **{key: args[key] for key in ("deployment", "pod") if args.get(key)}}
+                info = await self.master(ctx.identity, "GET", "/api/ai/internal/code-info", query, allow_failure=True)
+                data = info.get("data") if info.get("success") is True else None
+                url = ((data or {}).get("links") or {}).get("download_url")
+                if not isinstance(data, dict) or not url:
+                    return self.code_failure(info) if data is None else {"success": False, "error": {"code": "no_download_url", "message": "获取代码接口没有返回下载链接，不能下载源码"}}
+                service = {key: data["request"][key] for key in ("namespace", "deployment", "image")}
+                summary = await self.code.fetch(env=env, **service, download_url=url, tls_verify=data.get("tls_verify") is not False)
+                links = {key: data["links"][key] for key in ("web_url", "commits_url") if data["links"].get(key)}
+                result = {**summary, "service": service, **({"pod": data["pod"]} if data.get("pod") else {}), "links": links}
+            else:
+                meta = self.code.meta(args["code_id"])
+                if meta is None:
+                    return {"success": False, "error": {"code": "code_not_found", "message": "没有这份源码（code_id 不对，或者太久没用已经清理），请先用 code_fetch 下载"}}
+                if meta["env"] != env:
+                    return {"success": False, "error": {"code": "scope_violation", "message": f"这份源码属于集群 {meta['env']}，不能在当前集群 {env} 使用"}}
+                access = await self.master(ctx.identity, "GET", "/api/ai/internal/code-access", {"env": env}, allow_failure=True)
+                if access.get("success") is not True:
+                    return self.code_failure(access)
+                if operation == "code_search":
+                    options = {key: args[key] for key in ("pattern", "glob", "fixed_strings", "ignore_case", "context", "max_results") if key in args}
+                    result = await self.code.search(args["code_id"], **options)
+                elif operation == "code_symbols":
+                    options = {key: args[key] for key in ("name", "path", "kind", "max_results") if key in args}
+                    result = await self.code.symbols(args["code_id"], **options)
+                else:
+                    options = {key: args[key] for key in ("start_line", "lines") if key in args}
+                    result = await self.code.read(args["code_id"], args["path"], **options)
+        except CodeError as exc:
+            return {"success": False, "error": {"code": exc.code, "message": str(exc)}}
+        return {"success": True, "data": result, "freshness": CATALOG[operation][2], "observed_at": utc_now(),
+                "source": "kubedoor", "truncated": bool(result.get("truncated"))}
+
+    async def code_cleanup_loop(self):
+        """定时清理源码缓存：太久没用的、超出总量的（Service.open 启动）"""
+        while True:
+            await asyncio.sleep(CODE_CLEANUP_INTERVAL)
+            try:
+                await self.code.cleanup()
+            except Exception as exc:
+                LOGGER.warning("清理源码缓存失败: %s", type(exc).__name__)
 
     # ---- 花折资源管控：按管控状态生成计划、拦截直接修改、执行后回读（规则在 control.py）----
 

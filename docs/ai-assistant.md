@@ -18,10 +18,11 @@ KubeDoor AI 助手将自然语言问题与已有管理接口、Kubernetes API、
 | Kubernetes 通用能力 | SDK API、已发现的资源类型及 CRD、受控 kubectl/istioctl、Pod 内诊断命令和辅助诊断工具 |
 | 复用平台能力 | 已有日志、事件、资源/JVM、节点、工作负载、重启、扩缩容、定时和周期任务等接口优先 |
 | 监控与历史数据 | 查询 Prometheus/VictoriaMetrics 指标及 PostgreSQL 入库资源、JVM、事件、告警数据 |
+| 服务源码 | 按 Deployment 或 Pod 查当前镜像和代码链接；管理员允许后，排障时下载源码，按异常搜索、阅读代码定位原因 |
 | 工具与回复展示 | 工具区默认折叠，逐项显示运行状态，手动展开查看参数、差异和结果；回复支持 Markdown、表格和代码块 |
 | 权限与审批 | 先权限后审批：按「系统管理 → 权限与审批」的操作权限表判断账号能不能做、要不要人工批准（默认业务变更和 kubectl / K8S API 修改要批准）；可勾选自动批准执行 |
 | 全局记忆 | 总结本人会话为可编辑草稿，或手动新增；共享查看、搜索、分页、多选，所选记忆仅随下一轮发送 |
-| Skills 与 Agent | DeepAgents 加载 KubeDoor 运维 Skill，支持子 Agent、上下文压缩及持久 checkpoint |
+| Skills 与 Agent | DeepAgents 加载 KubeDoor 运维、服务源码分析两个 Skill，支持子 Agent、上下文压缩及持久 checkpoint |
 | 接入自己的 MCP | 对话框的“MCP 管理”接入自己的 SSE / Streamable HTTP MCP 服务（URL + 可选请求头），按账号隔离、加密保存；启用后对话中按需调用，按工具是否只读决定要不要批准 |
 | 外部 MCP | 提供 Streamable HTTP 和兼容 SSE 入口，保留原工具并提供统一工具与 Skill 资源 |
 
@@ -289,7 +290,8 @@ Markdown 原始 HTML 禁用，链接按安全规则处理，图片只显示替�
 
 ## 工具与 Skills
 
-DeepAgents 加载仓库内 `kubedoor-k8s` Skill，每轮还会把实际工具目录注入模型上下文，
+DeepAgents 加载仓库内的 `kubedoor-k8s`（K8S 运维）和 `kubedoor-code`（服务源码分析）两个 Skill，
+企微对话按问题自动匹配，网页对话也可以手动启用；每轮还会把实际工具目录注入模型上下文，
 外部调用方可通过 `GET /api/ai/tools` 查询。已有且适用、可用的 KubeDoor API 优先，
 包括查询和重启、扩缩容、定时、周期执行等业务操作；接口没有覆盖需求、目标资源
 不适用或来源不可用时，再使用直连 SDK/CLI 或 Agent 通用执行器。实时核验也先用
@@ -400,6 +402,26 @@ VictoriaMetrics 的自由 MetricsQL 查询经 master 网关使用现有 `PROM_UR
 当前不提供 Istio 共享数据库模板专用流程；实际集群的 Istio CRD 和 istioctl
 仍可通过通用工具使用。
 
+### 服务源码查询与分析
+
+前提是系统管理员在「系统管理 → 获取代码接口」配置并启用了获取代码接口（Deployment 页「获取代码」用的同一个接口）。
+
+| 工具 | 作用 |
+| --- | --- |
+| `code_info` | 按 Deployment 或 Pod 查当前镜像和代码页面、源码下载、最近 Commit 三个链接，回答里以链接形式给出。按 Pod 查用这个 Pod 实际运行的镜像（发布中新旧 Pod 的镜像可能不同） |
+| `code_fetch` | 下载服务当前版本的源码压缩包，在 kubedoor-ai 里解压，返回 `code_id` 和目录概要；同一镜像只下载一次 |
+| `code_search` | 在下载的源码里用 ripgrep 搜索（正则或普通文本、按文件过滤、带上下文），也可以只列文件 |
+| `code_read` | 按行读取源码文件，每行带行号 |
+| `code_symbols` | 用 ctags 找定义：按名字（可写 `Class.method`）找类、方法、函数定义在哪个文件哪一行，不含调用处；或者列出一个文件全部定义的行号 |
+
+- 五个工具都是查询，集群只读及以上的账号可用，不需要批准；搜索、读取、找定义在 kubedoor-ai 本地执行，不需要在线 Agent。
+- `code_fetch`、`code_search`、`code_read`、`code_symbols` 还要管理员在同一页面打开「允许 AI 下载并分析源码」（默认关闭）：源码片段会作为对话内容发给模型服务商。关闭后已下载的源码也不能再用，AI 只能把代码链接给用户。
+- 下载地址由 master 调获取代码接口得到（`download_url`），模型拿不到也传不进下载地址；由 kubedoor-ai 在服务端 GET 下载，不带接口请求头、跟随重定向，地址要能从 kubedoor-ai 的 Pod 访问到。支持 .tar.gz、.tgz、.zip、.tar.bz2、.tar.xz，压缩包最大 300MB，解压后最多 1.5GB、10 万个文件；解压时跳过符号链接和越界路径。
+- 源码按「集群 + 命名空间 + Deployment + 镜像」缓存在 kubedoor-ai 的 `/data/code-cache`（emptyDir），24 小时没用自动删除，总量超过约 5GB 时先删最久没用的；`code_id` 只能在所属集群使用。
+- 每次查询和下载在 master 记审计（「获取代码」`code_info.get`、「AI 下载源码」`code_info.fetch`），搜索和读取记在 AI 的工具调用记录里。
+
+典型排障流程：日志里有异常堆栈 → `code_fetch` 下载出问题的 Pod 的源码 → 按堆栈里的文件名或报错消息 `code_search` → `code_read` 读出错位置前后的代码，需要看被调用方法的实现时用 `code_symbols` 找定义 → 结合日志给出原因和修复建议。
+
 ### 提问示例
 
 | 问题 | 应使用的能力 |
@@ -410,6 +432,8 @@ VictoriaMetrics 的自由 MetricsQL 查询经 master 网关使用现有 `PROM_UR
 | “在指定日期时间把这个 Deployment 扩到 3 个副本” | Deployment 定时扩缩容接口；提交后回读任务，执行时间语义见前文 |
 | “把 order-api 扩到 5 个副本” | 先查是否受资源管控：受管控时写「指定Pod」再扩缩容，不受管控时直接改；执行后回读核验 |
 | “检查 Istio 代理状态与当前 VirtualService 配置” | 受控 istioctl 或 Kubernetes CRD API；不修改平台共享数据库模板 |
+| “order-api-7d9f8b6c5-x2x9k 现在跑的是哪个版本的代码” | `code_info` 按 Pod 查镜像和代码链接 |
+| “这个 Pod 一直报 NullPointerException，看看代码哪里有问题” | 先取日志里的堆栈，再 `code_fetch` → `code_search` → `code_read` 定位到具体代码行（需要管理员允许 AI 下载源码） |
 
 ## 权限与执行边界
 

@@ -539,6 +539,14 @@ kubedoor-ai 启动时要连接 PostgreSQL，并读取 Secret `kubedoor-ai-securi
 - 连接失败时列表里会写原因：HTTP 401/403 查请求头里的鉴权信息；HTTP 404、400、405 多半是 URL 路径或连接方式选错了（Streamable HTTP 地址通常以 `/mcp` 结尾，SSE 通常以 `/sse` 结尾）；「无法连接」「无法解析域名」说明 kubedoor-ai 所在的 Pod 访问不到这个地址。
 - 不支持本地 stdio 的 MCP 和 OAuth 登录；目前只在网页 AI 助手里可用，企微机器人不会调用。详见 [AI 助手文档](../docs/ai-assistant.md#接入自己的-mcp)。
 
+### Q：AI 能看服务的源码排障吗？提示「没有开启允许 AI 下载并分析源码」？
+
+先由系统管理员在「系统管理 → 获取代码接口」配置并启用接口（Deployment 页「获取代码」用的就是它）。之后网页和企微的 AI 都能按 Deployment 或 Pod 查当前镜像和代码链接。
+
+- 要让 AI 下载源码、按异常搜索和阅读代码，还要在同一页面「AI 助手」卡片里打开「允许 AI 下载并分析源码」（默认关闭）。打开前请确认：AI 读到的源码片段会作为对话内容发给模型服务商。
+- 源码由 kubedoor-ai 在服务端下载接口返回的 `download_url`：不带接口请求头，会跟随重定向，地址要能从 kubedoor-ai 的 Pod 访问到。报「下载失败」「无法连接」时先从这个 Pod 访问一下下载地址；报压缩包格式不对时，确认下载链接返回的是 .tar.gz、.zip 等压缩包而不是登录页。
+- 下载的源码缓存在 kubedoor-ai 的临时目录，24 小时没用自动删除；关掉开关后已下载的源码也不能再用。详见 [AI 助手文档](../docs/ai-assistant.md#服务源码查询与分析)。
+
 ### Q：外部 MCP 客户端怎么接入？
 
 外部 MCP 由 kubedoor-ai 提供，经 Web 的 nginx 对外开放，`ENABLE_MCP` 默认为 `true`。

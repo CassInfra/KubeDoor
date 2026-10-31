@@ -56,7 +56,17 @@ EXTRA_CATALOG = {
     "alert_detail": ("POST", "/api/db/alert/detail", "historical", True),
     "alert_detail_total": ("POST", "/api/db/alert/detail_total", "historical", True),
     "event_history": ("POST", "/api/events/query", "historical", True),
+    # 获取代码（master func_manager/code_info.py）；源码下载、搜索、读取在 kubedoor-ai 本地执行（code.py），路径留空
+    "code_info": ("GET", "/api/ai/internal/code-info", "live", True),
+    "code_fetch": ("GET", "", "live", True),
+    "code_search": ("GET", "", "local", True),
+    "code_read": ("GET", "", "local", True),
+    "code_symbols": ("GET", "", "local", True),
 }
+# 源码分析：在网关本地执行的操作（Gateway.execute_code）
+CODE_LOCAL = frozenset({"code_fetch", "code_search", "code_read", "code_symbols"})
+# 按 Deployment 或 Pod 指定服务（二选一）的源码操作
+CODE_TARGET = frozenset({"code_info", "code_fetch"})
 
 _NS = {"namespace": "string；Kubernetes 命名空间"}
 _DEP = {**_NS, "deployment": "string；Deployment 名称"}
@@ -67,6 +77,8 @@ _ALERT = {
     "operate": "string；处理状态", "startTime": "ISO 日期时间；起始时间，不带时区按 Asia/Shanghai",
     "silenced": "string 0/1；未屏蔽/已屏蔽；省略不过滤",
 }
+_CODE_TARGET = {**_NS, "deployment": "string；Deployment 名称，和 pod 二选一", "pod": "string；Pod 名称，和 deployment 二选一"}
+_CODE_ID = {"code_id": "string；code_fetch 返回的 code_id"}
 EXTRA_SCHEMAS = {
     "pod_list": ([], {**_NS, "namespaces": "string[]；多个命名空间；空数组表示全部，优先于 namespace", "node_name": "string；筛选节点"}, "集群 Pod 列表与容器状态、CPU/内存，支持多个命名空间和指定节点；无需自己拼 K8S API"),
     "delete_pods": (["pods"], {"pods": "非空 object[]；每项 {namespace:string,pod:string}，批量删除目标 Pod"}, "批量删除指定 Pod；控制器可能创建替代 Pod"),
@@ -106,6 +118,11 @@ EXTRA_SCHEMAS = {
     "alert_detail": ([], {**_ALERT, "page": "integer >=1；默认 1", "pageSize": "integer 1..500；默认 20"}, "分页查询当前集群已入库告警详情，可过滤 Pod、命名空间、名称、级别、状态与起始时间"),
     "alert_detail_total": ([], _ALERT, "当前集群告警过滤结果总数，与 alert_detail 使用相同过滤条件"),
     "event_history": (["start_time", "end_time"], {**_NS, "start_time": "YYYY-MM-DD；开始日期（包含）", "end_time": "YYYY-MM-DD；结束日期（包含）", "limit": "integer 1..5000；默认 100", "count": "nonnegative integer；最小事件次数", "level": "Normal/Warning", "kind": "string；资源 Kind", "name": "string；资源名称", "reason": "string；原因", "reporting_component": "string；上报组件", "reporting_instance": "string；上报实例", "message": "string；消息过滤"}, "查询当前集群已入库 K8S 历史事件，日期按 Asia/Shanghai，支持资源、原因与消息过滤；无需在线 Agent"),
+    "code_info": (["namespace"], _CODE_TARGET, "查服务当前运行的镜像和代码信息：代码页面 web_url、源码下载 download_url、最近 Commit 说明 commits_url（来自管理员配置的获取代码接口），回答时用 Markdown 链接给用户。按 Pod 查用该 Pod 实际运行的镜像（发布中新旧 Pod 可能不同），排障时用出问题的 Pod"),
+    "code_fetch": (["namespace"], _CODE_TARGET, "下载服务当前运行版本的源码到 kubedoor-ai 本地并解压，返回 code_id、目录概要和语言统计，之后用 code_search / code_read 分析；同一镜像只下载一次。排障时用出问题的 Pod。管理员没有开启「允许 AI 下载并分析源码」时返回 ai_download_disabled，这时只能用 code_info 把链接给用户"),
+    "code_search": (["code_id"], {**_CODE_ID, "pattern": "string；ripgrep 正则，省略时按 glob 列出文件", "glob": "string；文件过滤，例如 **/*.java、!**/test/**", "fixed_strings": "boolean；pattern 按普通文本匹配（异常消息、带括号的代码片段）", "ignore_case": "boolean", "context": "integer 0..5；匹配行前后带的行数", "max_results": "integer 1..200；默认 50"}, "在 code_fetch 下载的源码里搜索（ripgrep），返回文件路径、行号和匹配行；在 kubedoor-ai 本地执行，不需要在线 Agent"),
+    "code_read": (["code_id", "path"], {**_CODE_ID, "path": "string；相对源码根目录的文件路径（code_search 返回的 path）", "start_line": "integer >=1；默认 1", "lines": "integer 1..500；默认 200"}, "按行读取已下载源码里的文本文件，每行前面带行号；在 kubedoor-ai 本地执行，不需要在线 Agent"),
+    "code_symbols": (["code_id"], {**_CODE_ID, "name": "string；类、方法、函数等的名字，精确匹配，可写成 Class.method 限定所属类型", "path": "string；相对源码根目录的文件路径；只传 path 返回这个文件的大纲", "kind": "string；按种类过滤，例如 class、interface、method、function、field", "max_results": "integer 1..200；默认 100"}, "用 ctags 找已下载源码里的定义：按名字找类、方法、函数定义在哪个文件哪一行（不含调用处），或者列出一个文件里全部定义的行号；name 和 path 至少传一个；在 kubedoor-ai 本地执行"),
 }
 
 _CONTENT_TYPES = {"service", "deployment", "node", "pod", "configmap", "secret", "ingress", "persistentvolumeclaim", "daemonset", "statefulset", "job", "cronjob"}
@@ -120,7 +137,11 @@ _APPLY_KINDS = {
 }
 _LIST_FIELDS = {"namespaces", "node_names", "exclude_namespaces", "alertName", "status", "severity"}
 _STRUCTURED_FIELDS = {"pods", "migrations"}
-_INTEGER_FIELDS = {"replicas", "page", "pageSize", "limit", "count", "limit_mem_mb", "limit_cpu_m", "pod_count_manual", "request_cpu_m", "request_mem_mb"}
+_INTEGER_FIELDS = {"replicas", "page", "pageSize", "limit", "count", "limit_mem_mb", "limit_cpu_m", "pod_count_manual", "request_cpu_m", "request_mem_mb", "context", "max_results", "start_line", "lines"}
+# 整数字段的下限默认 0，这些是 1；上限没列的不限
+_MIN_ONE = {"page", "pageSize", "limit", "max_results", "start_line", "lines"}
+_MAXIMUM = {"pageSize": 500, "limit": 5000, "context": 5, "max_results": 200, "lines": 500}
+_BOOLEAN_FIELDS = {"simple", "apply_now", "fixed_strings", "ignore_case"}
 _JVM_FIELDS = {"jvm_xms_bytes", "jvm_xmx_bytes", "jvm_xss_bytes", "jvm_max_metaspace_bytes"}
 _RESOURCE_FIELDS = {"request_cpu_m", "request_mem_mb", "limit_cpu_m", "limit_mem_mb"}
 # 这些操作的 requests/limits 会原样写进 K8S 或管控表，0 没有意义
@@ -163,11 +184,11 @@ def validate_arguments(operation: str, args: dict) -> None:
                 if field in ("namespaces", "exclude_namespaces") and "," in item:
                     raise AIError(f"{field} 每项只能指定一个命名空间")
         elif field in _INTEGER_FIELDS:
-            minimum = 1 if field in ("page", "pageSize", "limit") or (field in _RESOURCE_FIELDS and operation in _POSITIVE_RESOURCES) else 0
-            maximum = {"pageSize": 500, "limit": 5000}.get(field)
+            minimum = 1 if field in _MIN_ONE or (field in _RESOURCE_FIELDS and operation in _POSITIVE_RESOURCES) else 0
+            maximum = _MAXIMUM.get(field)
             if type(value) is not int or value < minimum or (maximum is not None and value > maximum):
                 raise AIError(f"{field} 必须为 {minimum}..{maximum if maximum else '∞'} 的整数")
-        elif field in ("simple", "apply_now"):
+        elif field in _BOOLEAN_FIELDS:
             if type(value) is not bool:
                 raise AIError(f"{field} 必须为 boolean")
         elif field in _JVM_FIELDS:
@@ -191,6 +212,10 @@ def validate_arguments(operation: str, args: dict) -> None:
             _string(value, field, allow_empty=field not in required)
     if operation == "node_resource_rank" and args.get("type", "cpu") not in ("cpu", "mem", "pod", "peak_cpu", "peak_mem"):
         raise AIError("type 必须为 cpu/mem/pod/peak_cpu/peak_mem")
+    if operation in CODE_TARGET and bool(args.get("deployment")) == bool(args.get("pod")):
+        raise AIError(f"{operation} 需要 deployment 或 pod（二选一）")
+    if operation == "code_symbols" and not args.get("name") and not args.get("path"):
+        raise AIError("code_symbols 需要 name 或 path")
     if operation in ("resource_config_update", "resource_control_add", "update_deployment_jvm"):
         xms, xmx = args.get("jvm_xms_bytes"), args.get("jvm_xmx_bytes")
         if xms is not None and xmx is not None and xmx > 0 and xms > xmx:

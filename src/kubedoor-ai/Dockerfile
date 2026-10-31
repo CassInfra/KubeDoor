@@ -13,7 +13,8 @@ ENV PIP_INDEX_URL=${PIP_INDEX_URL} \
     PIP_CONFIG_FILE=/dev/null \
     PIP_DISABLE_PIP_VERSION_CHECK=1
 WORKDIR /app
-# apt 包列表的后两行是 AI 诊断工具(参数白名单见 kubedoor_tools/executor.py),和 agent 镜像保持同一套。
+# apt 包列表的后两行是 AI 诊断工具(参数白名单见 kubedoor_tools/executor.py),和 agent 镜像保持同一套;
+# 第一行的 ripgrep、universal-ctags 也给源码分析用(kubedoor_ai/code.py 的搜索和找定义)。
 # iperf3 安装时有 high 优先级的 debconf 提问,所以非交互安装;libcap2-bin 让 mtr-tiny 给 mtr-packet
 # 设 cap_net_raw 文件能力而不是 setuid root;strace、htop 只给终端里人工用
 RUN set -eu; \
@@ -26,7 +27,7 @@ RUN set -eu; \
             "$source_file"; \
     done; \
     apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-    ca-certificates curl jq dnsutils openssl ripgrep \
+    ca-certificates curl jq dnsutils openssl ripgrep universal-ctags \
     netcat-openbsd nmap tcpdump iperf3 traceroute mtr-tiny libcap2-bin \
     procps sysstat lsof strace htop xxd bsdextrautils \
     && rm -rf /var/lib/apt/lists/*

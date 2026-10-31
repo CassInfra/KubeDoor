@@ -147,6 +147,7 @@ def search_snippet(content, text, radius=40):
 class Service:
     def __init__(self, store, gateway, runtime, stack=None):
         self.store, self.gateway, self.runtime, self.stack = store, gateway, runtime, stack
+        self.tasks = []   # 后台任务（源码缓存的定时清理），close 时取消
         self.memory_library = MemoryLibrary(store, model_factory=lambda provider: self.runtime.model_factory(provider))
 
     @classmethod
@@ -162,6 +163,7 @@ class Service:
             gateway = Gateway(store, cipher, master_url, internal_token)
             service = cls(store, gateway, Runtime(store, gateway, saver), stack)
             await store.recover()
+            service.tasks.append(asyncio.create_task(gateway.code_cleanup_loop(), name="code-cleanup"))
             return service
         except BaseException:
             await stack.aclose()
@@ -595,6 +597,9 @@ class Service:
             await self.gateway.close_context(ctx)
 
     async def close(self):
+        for task in self.tasks:
+            task.cancel()
+        await asyncio.gather(*self.tasks, return_exceptions=True)
         await self.runtime.close()
         await self.gateway.close()
         if self.stack:

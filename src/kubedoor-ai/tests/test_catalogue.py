@@ -55,6 +55,7 @@ CONTRACTS = [
     ("alert_detail", {"namespace": "ops", "alertName": ["PodCrash"], "status": ["firing"], "page": 2, "pageSize": 30}, "POST", "/api/db/alert/detail", {}, {"namespace": "ops", "alertName": ["PodCrash"], "status": ["firing"], "page": 2, "pageSize": 30, "env": [ENV]}),
     ("alert_detail_total", {"namespace": "ops", "silenced": "0"}, "POST", "/api/db/alert/detail_total", {}, {"namespace": "ops", "silenced": "0", "env": [ENV]}),
     ("event_history", {"start_time": "2026-10-01", "end_time": "2026-10-05", "reporting_component": "kubelet", "reporting_instance": "n1", "limit": 50}, "POST", "/api/events/query", {}, {"start_time": "2026-10-01", "end_time": "2026-10-05", "reportingComponent": "kubelet", "reportingInstance": "n1", "limit": 50, "k8s": ENV}),
+    ("code_info", {"namespace": "ops", "pod": "app-7d9f8b6c5-x2x9k"}, "GET", "/api/ai/internal/code-info", {"namespace": "ops", "pod": "app-7d9f8b6c5-x2x9k"}, None),
 ]
 
 
@@ -177,6 +178,19 @@ INVALID = [
     ("event_history", {"start_time": "2026-10-05", "end_time": "2026-10-01"}),
     ("event_history", {"start_time": "20261001", "end_time": "2026-10-05"}),
     ("event_history", {"start_time": "2026-10-01", "end_time": "2026-10-05", "limit": 0}),
+    # 源码：deployment 和 pod 二选一，参数范围同工具目录
+    ("code_info", {"namespace": "ops"}),
+    ("code_info", {"namespace": "ops", "deployment": "app", "pod": "app-1"}),
+    ("code_fetch", {"deployment": "app"}),
+    ("code_search", {}),
+    ("code_search", {"code_id": "0123456789abcdef", "context": 6}),
+    ("code_search", {"code_id": "0123456789abcdef", "max_results": 0}),
+    ("code_search", {"code_id": "0123456789abcdef", "fixed_strings": "true"}),
+    ("code_read", {"code_id": "0123456789abcdef"}),
+    ("code_read", {"code_id": "0123456789abcdef", "path": "a.py", "lines": 501}),
+    ("code_read", {"code_id": "0123456789abcdef", "path": "a.py", "start_line": 0}),
+    ("code_symbols", {"code_id": "0123456789abcdef"}),
+    ("code_symbols", {"code_id": "0123456789abcdef", "name": "create", "max_results": 201}),
 ]
 
 

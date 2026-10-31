@@ -203,6 +203,8 @@ export interface CodeInfoConfig {
   headers: CodeInfoHeader[];
   timeout: number;
   tls_verify: boolean;
+  /** 允许 AI 助手下载源码分析(源码会发给模型服务商),默认关闭 */
+  ai_download: boolean;
   updated_by?: string | null;
   updated_at?: string | null;
 }
@@ -237,21 +239,23 @@ export interface CodeInfoTestResult {
   links: CodeInfoLinks;
   invalid: CodeInfoInvalid;
   error: string;
-  request: CodeInfoRequest;
+  /** 发出的请求体:测试时只有填了的字段 */
+  request: Partial<CodeInfoRequest>;
 }
 
 export const getCodeInfoConfig = () =>
   http.request<Result<CodeInfoConfig>>("get", "/api/admin/code-info");
 
-export const saveCodeInfoConfig = (data: CodeInfoConfig) =>
+/** 保存配置;没传的字段沿用原值(右上角开关只传 enabled) */
+export const saveCodeInfoConfig = (data: Partial<CodeInfoConfig>) =>
   http.request<Result<CodeInfoConfig>>("put", "/api/admin/code-info", {
     data
   });
 
-/** 用页面上的配置(不用先保存)和手填的入参调一次接口 */
+/** 用页面上的配置(不用先保存)和手填的入参调一次接口;入参都可以不填,没填的不放进请求体 */
 export const testCodeInfoConfig = (data: {
-  config: CodeInfoConfig;
-  request: CodeInfoRequest;
+  config: Partial<CodeInfoConfig>;
+  request: Partial<CodeInfoRequest>;
 }) =>
   http.request<Result<CodeInfoTestResult>>(
     "post",

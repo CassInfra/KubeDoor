@@ -59,6 +59,10 @@ spec:
             requests:
               cpu: 10m
               memory: 256Mi
+          volumeMounts:
+            # AI 分析源码时下载的代码:按镜像缓存,24 小时没用清理,总量最多约 5GB;Pod 重建即清空
+            - name: code-cache
+              mountPath: /data/code-cache
           livenessProbe:
             httpGet:
               path: /health
@@ -75,6 +79,10 @@ spec:
             timeoutSeconds: 2
             periodSeconds: 10
             failureThreshold: 3
+      volumes:
+        - name: code-cache
+          emptyDir:
+            sizeLimit: 10Gi
       restartPolicy: Always
 
 ---

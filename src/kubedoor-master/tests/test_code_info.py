@@ -3,6 +3,7 @@ import asyncio
 import json
 import re
 from datetime import datetime
+from types import MappingProxyType
 
 import pytest
 from aiohttp import web
@@ -106,7 +107,11 @@ def test_normalize_config_validates_url_timeout_and_enabled():
     cfg = code_info.normalize_config(
         {'enabled': True, 'url': ' https://code.example.com/api?team=ops ', 'timeout': '15', 'tls_verify': False})
     assert cfg == {'enabled': True, 'url': 'https://code.example.com/api?team=ops', 'tls_verify': False,
-                   'timeout': 15, 'headers': []}
+                   'ai_download': False, 'timeout': 15, 'headers': []}
+    # AI 下载源码默认关闭,没传沿用原值
+    allowed = code_info.normalize_config({'ai_download': True}, cfg)
+    assert allowed == {**cfg, 'ai_download': True}
+    assert code_info.normalize_config({'timeout': 20}, allowed)['ai_download'] is True
     # 停用时可以不填地址
     assert code_info.normalize_config({'enabled': False, 'url': ''})['url'] == ''
 
@@ -173,7 +178,7 @@ def test_public_config_only_shows_header_names():
     text = json.dumps(public)
     assert 'secret-token' not in text and cfg['headers'][0]['value'] not in text
     assert code_info.public_config(None) == {'enabled': False, 'url': '', 'headers': [], 'timeout': 10,
-                                             'tls_verify': True}
+                                             'tls_verify': True, 'ai_download': False}
 
 
 # ---------------------------------------------------------------------------
@@ -326,6 +331,69 @@ async def test_read_deployment_image_errors(behavior, status, message):
     assert info.value.status == status and message in info.value.message
 
 
+POD = 'user-service-7d9f8b6c5-x2x9k'
+POD_YAML = f'''
+apiVersion: v1
+kind: Pod
+metadata:
+  name: {POD}
+  namespace: vip
+  labels:
+    app: user-service
+    pod-template-hash: 7d9f8b6c5
+  ownerReferences:
+  - apiVersion: apps/v1
+    kind: ReplicaSet
+    name: user-service-7d9f8b6c5
+    controller: true
+spec:
+  containers:
+  - name: user-service
+    image: registry.example.com/team/user-service:release-E14-1-b9342-9f9a76c5
+  - name: istio-proxy
+    image: registry.example.com/istio/proxyv2:1.20
+'''
+
+
+@pytest.mark.parametrize('metadata, expected', [
+    # Deployment 建的 ReplicaSet:名称去掉 -<pod-template-hash>
+    ({'labels': {'pod-template-hash': '7d9f8b6c5'},
+      'ownerReferences': [{'kind': 'ReplicaSet', 'name': 'user-service-7d9f8b6c5', 'controller': True}]}, 'user-service'),
+    # 多个 owner 时取 controller
+    ({'labels': {'pod-template-hash': 'abc'},
+      'ownerReferences': [{'kind': 'Other', 'name': 'x'}, {'kind': 'ReplicaSet', 'name': 'app-abc', 'controller': True}]},
+     'app'),
+    # 不是 Deployment 建的 ReplicaSet(没有 hash 或对不上):原样
+    ({'ownerReferences': [{'kind': 'ReplicaSet', 'name': 'manual-rs', 'controller': True}]}, 'manual-rs'),
+    ({'labels': {'pod-template-hash': 'zzz'},
+      'ownerReferences': [{'kind': 'ReplicaSet', 'name': 'app-abc', 'controller': True}]}, 'app-abc'),
+    # StatefulSet 等其他控制器取控制器名称,没有控制器取 Pod 名
+    ({'ownerReferences': [{'kind': 'StatefulSet', 'name': 'redis', 'controller': True}]}, 'redis'),
+    ({}, 'bare-pod'),
+    (None, 'bare-pod'),
+])
+def test_pod_deployment_from_owner_references(metadata, expected):
+    assert code_info.pod_deployment({'metadata': metadata}, 'bare-pod') == expected
+
+
+@pytest.mark.asyncio
+async def test_read_pod_image_uses_pod_spec():
+    calls = []
+
+    async def call_agent(env, path, query=None, timeout=30):
+        calls.append(query)
+        return {'success': True, 'data': POD_YAML}
+
+    assert await code_info.read_pod_image(call_agent, 'prod', 'vip', POD) == ('user-service', PAYLOAD['image'])
+    assert calls == [{'namespace': 'vip', 'resource_type': 'pod', 'resource_name': POD}]
+
+    async def no_image(env, path, query=None, timeout=30):
+        return {'success': True, 'data': 'spec: {containers: []}'}
+
+    with pytest.raises(code_info.CodeInfoError, match='Pod vip/p 里没有找到容器镜像'):
+        await code_info.read_pod_image(no_image, 'prod', 'vip', 'p')
+
+
 # ---------------------------------------------------------------------------
 # handler
 # ---------------------------------------------------------------------------
@@ -418,18 +486,22 @@ async def test_admin_config_round_trip_hides_header_values(monkeypatch, audits):
         bad = await client.put('/api/admin/code-info', json={'enabled': True, 'url': 'ftp://c.example.com'})
         bad_data = await bad.json()
         again = await (await client.get('/api/admin/code-info')).json()
+        # 右上角开关:只传 enabled,地址、请求头(连同值)都沿用
+        toggled = await (await client.put('/api/admin/code-info', json={'enabled': False})).json()
     assert empty['data'] == {**code_info.public_config(None), 'updated_by': None, 'updated_at': None}
     assert saved['data'] == {'enabled': True, 'url': 'https://c.example.com/api', 'timeout': 20, 'tls_verify': False,
-                             'headers': [{'name': 'Authorization', 'has_value': True}],
+                             'ai_download': False, 'headers': [{'name': 'Authorization', 'has_value': True}],
                              'updated_by': 'root', 'updated_at': '2026-10-31T11:00:00'}
     assert bad.status == 400 and 'http:// 或 https://' in bad_data['message']
     assert again['data'] == saved['data']
+    assert toggled['data'] == {**saved['data'], 'enabled': False}
     assert decrypt_secret(store.row['value']['headers'][0]['value']) == 'Bearer secret'
     assert 'secret' not in json.dumps(again) and 'secret' not in json.dumps(audits)
-    [record] = audits
-    assert record['action'] == 'code_info.update' and record['username'] == 'root'
-    assert record['detail'] == {'enabled': True, 'url': 'https://c.example.com/api', 'headers': ['Authorization'],
-                                'timeout': 20, 'tls_verify': False}
+    first, second = audits
+    assert first['action'] == second['action'] == 'code_info.update' and first['username'] == 'root'
+    assert first['detail'] == {'enabled': True, 'url': 'https://c.example.com/api', 'headers': ['Authorization'],
+                               'timeout': 20, 'tls_verify': False, 'ai_download': False}
+    assert second['detail'] == {**first['detail'], 'enabled': False}
 
 
 @pytest.mark.asyncio
@@ -448,12 +520,134 @@ async def test_admin_test_uses_form_config_and_saved_header_values(monkeypatch):
         async with TestClient(TestServer(make_app(monkeypatch, store, agent_unused))) as client:
             resp = await client.post('/api/admin/code-info/test', json={'config': form, 'request': PAYLOAD})
             data = (await resp.json())['data']
-            missing = await client.post('/api/admin/code-info/test',
-                                        json={'config': form, 'request': {'k8s': 'prod'}})
-            missing_data = await missing.json()
+            # 入参都可以不填:没填的(空白、null)不放进请求体
+            partial = await client.post('/api/admin/code-info/test', json={'config': form, 'request': {
+                'k8s': ' ', 'namespace': 'vip', 'deployment': None, 'image': PAYLOAD['image']}})
+            partial_data = (await partial.json())['data']
+            too_long = await client.post('/api/admin/code-info/test',
+                                         json={'config': form, 'request': {'image': 'x' * 1025}})
+            too_long_data = await too_long.json()
     assert data['ok'] is True and data['status'] == 200 and data['request'] == PAYLOAD
     assert data['links'] == {'web_url': LINKS['web_url'], 'download_url': '', 'commits_url': ''}
     assert json.loads(data['body']) == {'web_url': LINKS['web_url']}
-    assert received == [(PAYLOAD, 'Bearer saved')]
+    short = {'namespace': 'vip', 'image': PAYLOAD['image']}
+    assert partial_data['ok'] is True and partial_data['request'] == short
+    assert received == [(PAYLOAD, 'Bearer saved'), (short, 'Bearer saved')]
     assert store.row['value'] == saved  # 测试不保存
-    assert missing.status == 400 and missing_data['message'] == '请填写测试入参 namespace'
+    assert too_long.status == 400 and too_long_data['message'] == '测试入参 image 太长'
+
+
+# ---------------------------------------------------------------------------
+# AI 助手(kubedoor-ai 网关回调)
+# ---------------------------------------------------------------------------
+AI_ON = {'enabled': True, 'ai_download': True}
+
+
+def internal(role='read', **kwargs):
+    """内部 token + X-User-Name 解析出的用户"""
+    return Principal('alice', role, user_id=7, via='internal', **kwargs)
+
+
+async def agent_pod(env, path, query=None, timeout=30):
+    assert query['resource_type'] == 'pod'
+    return {'success': True, 'data': POD_YAML}
+
+
+@pytest.mark.asyncio
+async def test_ai_code_info_by_pod_uses_pod_image_and_audits(monkeypatch, audits):
+    received = []
+
+    async def handler(request):
+        received.append(await request.json())
+        return web.json_response(LINKS)
+
+    async with TestServer(upstream_app(handler)) as server:
+        store = FakeStore({'enabled': True, 'url': str(server.make_url('/code'))})
+        async with TestClient(TestServer(make_app(monkeypatch, store, agent_pod, internal()))) as client:
+            resp = await client.get('/api/ai/internal/code-info', params={'env': 'prod', 'namespace': 'vip', 'pod': POD})
+            data = await resp.json()
+    assert resp.status == 200 and data['success'] is True
+    # Pod 所属的 Deployment 由 ReplicaSet 名推出来,镜像是 Pod 第一个容器的
+    assert data['data'] == {'request': PAYLOAD, 'links': LINKS, 'invalid': {}, 'pod': POD}
+    assert received == [PAYLOAD]
+    [record] = audits
+    assert record['action'] == 'code_info.get' and record['target'] == 'vip/user-service' and record['success']
+    assert record['detail']['source'] == 'ai' and record['detail']['pod'] == POD
+
+
+@pytest.mark.asyncio
+async def test_ai_code_fetch_requires_ai_download(monkeypatch, audits):
+    async def handler(request):
+        return web.json_response(LINKS)
+
+    query = {**QUERY, 'purpose': 'fetch'}
+    async with TestServer(upstream_app(handler)) as server:
+        url = str(server.make_url('/code'))
+        off = FakeStore({'enabled': True, 'url': url})
+        async with TestClient(TestServer(make_app(monkeypatch, off, agent_unused, internal()))) as client:
+            denied = await client.get('/api/ai/internal/code-info', params=query)
+            denied_data = await denied.json()
+        on = FakeStore({**AI_ON, 'url': url, 'tls_verify': False})
+        async with TestClient(TestServer(make_app(monkeypatch, on, agent_ok, internal()))) as client:
+            resp = await client.get('/api/ai/internal/code-info', params=query)
+            data = await resp.json()
+    assert denied.status == 403 and denied_data['code'] == 'ai_download_disabled'
+    assert '允许 AI 下载并分析源码' in denied_data['message']
+    assert resp.status == 200
+    assert data['data'] == {'request': PAYLOAD, 'links': LINKS, 'invalid': {}, 'tls_verify': False}
+    [record] = audits  # 被开关拦下的不记
+    assert record['action'] == 'code_info.fetch' and record['success'] is True
+    assert record['detail']['source'] == 'ai' and 'pod' not in record['detail']
+
+
+@pytest.mark.asyncio
+async def test_ai_code_fetch_without_download_url_fails(monkeypatch, audits):
+    async def handler(request):
+        return web.json_response({'web_url': LINKS['web_url']})
+
+    async with TestServer(upstream_app(handler)) as server:
+        store = FakeStore({**AI_ON, 'url': str(server.make_url('/code'))})
+        async with TestClient(TestServer(make_app(monkeypatch, store, agent_ok, internal()))) as client:
+            fetch = await client.get('/api/ai/internal/code-info', params={**QUERY, 'purpose': 'fetch'})
+            fetch_data = await fetch.json()
+            info = await client.get('/api/ai/internal/code-info', params=QUERY)
+    assert fetch.status == 502 and fetch_data['code'] == 'upstream_error'
+    assert 'download_url' in fetch_data['message'] and fetch_data['data']['request'] == PAYLOAD
+    assert info.status == 200  # 只查链接时有一个就行
+    assert [(record['action'], record['success']) for record in audits] == [
+        ('code_info.fetch', False), ('code_info.get', True)]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('principal, query, status, code', [
+    # 不是内部 token 带来的(浏览器会话)
+    (Principal('alice', 'admin', user_id=7), QUERY, 403, 'forbidden'),
+    (internal(role='none'), QUERY, 403, 'permission_denied'),
+    (internal(role='read', clusters=MappingProxyType({'prod': 'none'})), QUERY, 403, 'permission_denied'),
+    (internal(), {**QUERY, 'pod': POD}, 400, 'bad_request'),
+    (internal(), {'env': 'prod', 'namespace': 'vip'}, 400, 'bad_request'),
+    (internal(), {'env': 'prod', 'namespace': 'vip', 'pod': 'Bad/Pod'}, 400, 'bad_request'),
+    (internal(), {**QUERY, 'purpose': 'download'}, 400, 'bad_request'),
+])
+async def test_ai_code_info_rejects_bad_requests(monkeypatch, audits, principal, query, status, code):
+    store = FakeStore({**AI_ON, 'url': 'https://c.example.com'})
+    async with TestClient(TestServer(make_app(monkeypatch, store, agent_unused, principal))) as client:
+        resp = await client.get('/api/ai/internal/code-info', params=query)
+        data = await resp.json()
+    assert resp.status == status and data['code'] == code and audits == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('value, principal, status, code', [
+    ({**AI_ON, 'url': 'https://c.example.com'}, internal(), 200, None),
+    ({'enabled': True, 'url': 'https://c.example.com'}, internal(), 403, 'ai_download_disabled'),
+    ({'enabled': False, 'ai_download': True, 'url': 'https://c.example.com'}, internal(), 400, 'not_configured'),
+    ({**AI_ON, 'url': 'https://c.example.com'}, internal(role='none'), 403, 'permission_denied'),
+    ({**AI_ON, 'url': 'https://c.example.com'}, Principal('alice', 'admin', user_id=7), 403, 'forbidden'),
+])
+async def test_ai_code_access(monkeypatch, audits, value, principal, status, code):
+    async with TestClient(TestServer(make_app(monkeypatch, FakeStore(value), agent_unused, principal))) as client:
+        resp = await client.get('/api/ai/internal/code-access', params={'env': 'prod'})
+        data = await resp.json()
+    assert resp.status == status and data.get('code') == code
+    assert data['success'] is (status == 200) and audits == []

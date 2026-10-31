@@ -125,6 +125,7 @@ const ACTION_LABELS: Record<string, string> = {
   "ldap.update": "修改 LDAP 设置",
   "code_info.update": "修改获取代码接口",
   "code_info.get": "获取代码",
+  "code_info.fetch": "AI 下载源码",
   "api.write": "写操作",
   "api.denied": "越权被拒",
   "ai.agent_execute": "AI 执行修改"

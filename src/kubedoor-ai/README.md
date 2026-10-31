@@ -195,6 +195,23 @@ Xms、Xmx、Xss、MaxMetaspace 等已入库 JVM 参数；它表示采集或管�
 使用现有 `PROM_URL`，保留 tenant 路径并强制限定当前 K8S 标签。普通 Prometheus
 继续使用已有指标接口。工具结果标注来源、观测时间、数据类型和截断情况。
 
+### 服务源码分析（`kubedoor-code` Skill）
+
+基于「系统管理 → 获取代码接口」（master `func_manager/code_info.py`），五个目录操作都是查询（集群只读及以上，不进「权限与审批」表）：
+
+| operation | 执行位置 | 作用 |
+| --- | --- | --- |
+| `code_info` | master `/api/ai/internal/code-info` | 按 Deployment 或 Pod（二选一）查镜像和 `web_url` / `download_url` / `commits_url`；按 Pod 查用 Pod 实际运行的镜像 |
+| `code_fetch` | 网关（`code.py`） | 向 master 取下载地址（`purpose=fetch`），下载、解压，返回 `code_id` 和目录概要 |
+| `code_search` | 网关（`code.py`） | ripgrep 搜索或列文件，输出有条数和总字符上限 |
+| `code_read` | 网关（`code.py`） | 按行读取文本文件，带行号 |
+| `code_symbols` | 网关（`code.py`） | universal-ctags 找定义：按名字先用 rg 找出候选文件，只对这些文件跑 ctags（不建全量索引）；或者列出一个文件的大纲。ctags 带 `--options=NONE`，不读代码目录里的选项文件 |
+
+- 没指定 deployment / pod 时用页面选中的，Pod 优先（`Gateway.invoke`）。
+- 下载要管理员打开 `ai_download`（默认关闭）。下载地址只从 master 取，模型拿不到也传不进 URL；`code_search` / `code_read` / `code_symbols` 每次先调 master `/api/ai/internal/code-access`，确认用户仍能读这个集群、开关仍然打开；`code_id` 由「集群 + 命名空间 + Deployment + 镜像」算出，只能在所属集群使用。
+- `code.py`：httpx 流式下载（不带接口请求头，跟随重定向，沿用配置的「校验 HTTPS 证书」），按魔数识别 tar.gz / zip / tar.bz2 / tar.xz；逐个成员解压（不用 `extractall`），跳过符号链接、硬链接、设备文件和越界路径，按实际写出的字节数限制总量（防压缩炸弹）；先解压到 `.tmp-*` 再改名。上限、缓存目录（`/data/code-cache`，部署清单里挂 emptyDir；不可写时用系统临时目录，`AI_CODE_CACHE_DIR` 可覆盖）、保留时间见模块常量；网关每小时清理一次（`Gateway.code_cleanup_loop`），每次下载完也会清理。
+- 结果的键名避开 `files`、`token`、`password` 等：`domain.redact` 会把这些键的值替换成 `[redacted]`。
+
 ### 花折资源管控（准入控制）
 
 集群开启准入控制、命名空间在管控列表里、服务已登记到管控表时，Deployment「受管控」：准入 webhook
@@ -494,3 +511,7 @@ python -m pytest -q src/kubedoor-ai/tests/test_postgres_integration.py
 集成测试只接受 localhost 与 `kubedoor_ai_test` 前缀数据库，使用模拟模型、master
 和本地 Kubernetes HTTP 服务验证会话持久化、SSE 恢复、精确批准、取消/重启不重放、
 加密 kubeconfig 和 MCP HTTP/SSE。Docker 构建及真实模型效果需在部署环境验证。
+
+源码分析的搜索和找定义用例（`tests/test_code.py`）要 ripgrep 和 universal-ctags：用
+`KUBEDOOR_TEST_RG`、`KUBEDOOR_TEST_CTAGS` 指定可执行文件，或者放在 PATH 里（ctags 要是 Universal Ctags），
+都没有时这些用例跳过。
