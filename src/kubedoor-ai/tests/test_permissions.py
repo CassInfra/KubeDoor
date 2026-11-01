@@ -97,10 +97,29 @@ def test_every_catalogue_mutation_has_operation_types():
     for name, ops in permissions.TOOL_OPS.items():
         assert ops and set(ops) <= set(OP_KEYS), name
     for name, item in CATALOG.items():
-        if item[3]:
+        if item[3] and name != "runtime_config":
             assert permissions.catalog_ops(name, {"resource_type": "configmap"}) == ([], True), name
     # 读 Secret 内容例外：仍是查询，但要查表
     assert permissions.catalog_ops("resource_content", {"resource_type": "Secret"}) == (["resource.secret"], True)
+    # 获取运行配置同理：里面有明文密码（给模型的是占位符）
+    assert permissions.catalog_ops("runtime_config", {"namespace": "demo", "deployment": "app"}) == (["config.view"], True)
+
+
+def test_config_and_data_query_operation_types():
+    names = list(permissions.OP_NAMES)
+    start = names.index("ai.diagnostic") + 1
+    assert names[start:start + 2] == ["config.view", "data.query"]   # 和 master 权限表一样放在「AI 诊断工具」后面
+    # 数据查询是通用工具，由 kubedoor-tools 分类；分类没给出 ops 时按 data.query 处理，不能因此绕过权限表
+    assert permissions.DATA_OPERATIONS == {"mysql", "redis", "elasticsearch"} <= permissions.GENERIC_OPERATIONS
+    assert {permissions.FALLBACK_OPS[op] for op in permissions.DATA_OPERATIONS} == {"data.query"}
+    policy = permissions.normalize_policy(default_policy())
+    # 出厂：只读不行；读写、管理员可以，「查看运行配置」不审批，「AI 查询数据库 / Redis / ES」要批准
+    view = permissions.evaluate(identity(), ENV, "runtime_config", {"namespace": "demo", "deployment": "app"}, policy)
+    assert view == {"ops": ["config.view"], "read_only": True, "approval": False, "approval_fixed": False, "denied": False, "message": None}
+    denied = permissions.evaluate(identity("read"), ENV, "runtime_config", {"namespace": "demo", "pod": "web-1"}, policy)
+    assert denied["denied"] and "「查看运行配置」" in denied["message"]
+    policy["ops"]["config.view"]["approval"] = True   # 审批列可以改
+    assert permissions.evaluate(identity("admin"), ENV, "runtime_config", {"namespace": "demo", "deployment": "app"}, policy)["approval"]
 
 
 def test_kubectl_delete_needs_resource_delete_and_pods_need_pod_delete():

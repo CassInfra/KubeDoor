@@ -1,7 +1,8 @@
 """权限与审批：按 master「权限与审批」页面的操作权限表判定 AI 工具调用（网页 AI、企微 AI、外部 MCP 一致）。
 
 - 先算出调用涉及的操作类型（ops）：目录工具查 TOOL_OPS，通用工具（api/kubectl/istioctl/diagnostic/pod_exec）
-  由 kubedoor-tools 按命令清单分类、识别 CoreDNS / Istio 目标。
+  由 kubedoor-tools 按命令清单分类、识别 CoreDNS / Istio 目标；数据查询（mysql/redis/elasticsearch）同样由 kubedoor-tools
+  分类，通过只读检查的是查询，操作类型 data.query。
 - 纯查询（ops 为空）不进表、永不审批；有 ops 时按账号在该集群的有效权限查表，任一不允许就拒绝（403，不建动作）。
 - 都允许时，任一 op 的审批列为真、或是高危命令（固定审批），就要提问人批准，否则直接执行。
 - 策略从 master 的 /api/ai/internal/permission-policy 获取，缓存 5 秒；取不到时有 ops 的调用一律拒绝，查询不受影响。
@@ -15,7 +16,9 @@ import time
 LOGGER = logging.getLogger(__name__)
 
 POLICY_TTL = 5.0
-GENERIC_OPERATIONS = frozenset({"api", "kubectl", "istioctl", "diagnostic", "pod_exec"})
+# 只读查询业务的 MySQL / Redis / Elasticsearch（kubedoor-tools 的 run_data_query），经 agent 或从 kubedoor-ai 发起
+DATA_OPERATIONS = frozenset({"mysql", "redis", "elasticsearch"})
+GENERIC_OPERATIONS = frozenset({"api", "kubectl", "istioctl", "diagnostic", "pod_exec", *DATA_OPERATIONS})
 PERMISSIONS = ("read", "rw", "admin")
 PERMISSION_LABELS = {"none": "无", "read": "只读", "rw": "读写", "admin": "管理员"}
 
@@ -43,6 +46,8 @@ OP_NAMES = {
     "resource.secret": "查看 Secret 内容",
     "ai.k8s_write": "AI 通用修改",
     "ai.diagnostic": "AI 诊断工具",
+    "config.view": "查看运行配置",
+    "data.query": "AI 查询数据库 / Redis / ES",
     "node.cordon": "禁止 / 允许调度",
     "balance.run": "节点均衡",
     "control.edit": "资源管控",
@@ -90,7 +95,8 @@ TOOL_OPS = {
 TARGETED_TOOLS = frozenset({"resource_apply", "resource_delete"})
 # 通用工具的分类没给出 ops（参数异常等）时，修改按这一类处理，不能因此绕过权限表
 FALLBACK_OPS = {"api": "ai.k8s_write", "kubectl": "ai.k8s_write", "istioctl": "ai.k8s_write",
-                "diagnostic": "ai.diagnostic", "pod_exec": "pod.exec.danger"}
+                "diagnostic": "ai.diagnostic", "pod_exec": "pod.exec.danger",
+                **dict.fromkeys(DATA_OPERATIONS, "data.query")}
 TARGET_OPS = (("coredns", "network.coredns"), ("istio", "network.istio"))
 UNREGISTERED = "unregistered"
 
@@ -176,6 +182,8 @@ def catalog_ops(operation: str, args: dict) -> tuple[list[str], bool]:
         return _unique(ops), False
     if operation == "resource_content" and str(args.get("resource_type") or "").lower() in ("secret", "secrets"):
         return ["resource.secret"], True
+    if operation == "runtime_config":   # 运行配置里有明文密码（给模型的是占位符），同读 Secret：查询，但要查表
+        return ["config.view"], True
     from .gateway import CATALOG   # 目录定义在 gateway 里，运行时再取，避免循环导入
     entry = CATALOG.get(operation)
     if entry is not None and entry[3]:

@@ -146,9 +146,9 @@ Grafana 的「KubeDoor-AI助手用量与缓存命中看板」（`deploy/dashboar
 | 来源 | 用途 |
 | --- | --- |
 | `kubedoor` | 优先复用已有 master、Agent 和数据库目录接口，包括资源、日志、事件、指标，以及立即、定时、周期重启和扩缩容等现有运维操作 |
-| `direct` | 通过服务端保存的 kubeconfig，在 AI 服务内执行 Kubernetes SDK、CLI 或 Pod exec |
+| `direct` | 通过服务端保存的 kubeconfig，在 AI 服务内执行 Kubernetes SDK、CLI 或 Pod exec；数据查询（mysql / redis / elasticsearch）从 AI 服务直接发起，不需要 kubeconfig |
 | `agent` | 通过在线 Agent 的集群内身份执行同一共享工具库，无需上传 kubeconfig |
-| `auto` | 已有目录 operation 走 `kubedoor`；通用 operation 按连接能力选择，仍需先选对操作名 |
+| `auto` | 已有目录 operation 走 `kubedoor`；通用 operation 按连接能力选择（数据查询看 Agent 是否在线且 `data_tools=true`），仍需先选对操作名 |
 
 每轮动态注入实际工具目录，`GET /api/ai/tools` 返回同一目录。已有接口符合需求且
 可用时，查询和修改都优先使用相应目录操作；没有适合的可用接口再选择通用 K8S
@@ -185,7 +185,8 @@ StatefulSet/DaemonSet 立即重启、镜像标签、CCI、负载均衡、历史�
 通用能力包括 Kubernetes API 和 CRD、`kubectl`、`istioctl`、Pod exec，以及
 `jq`、`yq`、`curl`、`dig`、`openssl`、`rg` 辅助命令和网络、进程、系统诊断命令
 （`nc -z`、`nmap`、`tcpdump`、`traceroute`、`mtr`、`ps`、`lsof`、`vmstat`、`iostat` 等，
-完整列表与参数限制见 [kubedoor-tools](../kubedoor-tools/README.md)）。CLI 使用参数数组执行，
+完整列表与参数限制见 [kubedoor-tools](../kubedoor-tools/README.md)），以及只读查询业务的 MySQL、Redis、
+Elasticsearch（见下文「运行配置与数据查询」）。CLI 使用参数数组执行，
 不提供后端通用 shell。实际集群的 Istio CRD 与路由可通过通用工具查询或修改；
 本版本没有 Istio 共享数据库模板的专用流程。
 
@@ -211,6 +212,22 @@ Xms、Xmx、Xss、MaxMetaspace 等已入库 JVM 参数；它表示采集或管�
 - 下载要管理员打开 `ai_download`（默认关闭）。下载地址只从 master 取，模型拿不到也传不进 URL；`code_search` / `code_read` / `code_symbols` 每次先调 master `/api/ai/internal/code-access`，确认用户仍能读这个集群、开关仍然打开；`code_id` 由「集群 + 命名空间 + Deployment + 镜像」算出，只能在所属集群使用。
 - `code.py`：httpx 流式下载（不带接口请求头，跟随重定向，沿用配置的「校验 HTTPS 证书」），按魔数识别 tar.gz / zip / tar.bz2 / tar.xz；逐个成员解压（不用 `extractall`），跳过符号链接、硬链接、设备文件和越界路径，按实际写出的字节数限制总量（防压缩炸弹）；先解压到 `.tmp-*` 再改名。上限、缓存目录（`/data/code-cache`，部署清单里挂 emptyDir；不可写时用系统临时目录，`AI_CODE_CACHE_DIR` 可覆盖）、保留时间见模块常量；网关每小时清理一次（`Gateway.code_cleanup_loop`），每次下载完也会清理。
 - 结果的键名避开 `files`、`token`、`password` 等：`domain.redact` 会把这些键的值替换成 `[redacted]`。
+
+### 运行配置与数据查询（`kubedoor-config` Skill）
+
+基于「系统管理 → 获取运行配置接口」（master `func_manager/runtime_config.py`，外部接口返回明文密码）：
+
+| operation | 执行位置 | 作用与权限 |
+| --- | --- | --- |
+| `runtime_config` | master `/api/ai/internal/runtime-config`（`purpose=view`）取原样配置，网关打码（`runtime_config.py`） | 按 Deployment 或 Pod（二选一，没指定时用页面选中的，Pod 优先）取实际运行的配置；参数还有 `container`、`keys`、`detail`、`refresh`。要「查看运行配置」（`config.view`，出厂读写及以上、不审批），管理员还要打开「允许 AI 获取运行配置」 |
+| `mysql` / `redis` / `elasticsearch` | `agent`：经 master 交给业务集群里的 Agent（要 `data_tools`）；`direct`：在 kubedoor-ai 本地执行，不需要 kubeconfig | 只读查询业务库（kubedoor-tools 的 `check_data_query` / `run_data_query`）。要「AI 查询数据库 / Redis / ES」（`data.query`，出厂读写及以上、每次审批） |
+
+- **打码**：密码、密钥换成占位符 `<secret:{namespace}/{kind}/{name}[/{container}]:{ref}>`，`kind` / `name` / `container` 就是这次 `runtime_config` 的参数；ref 是 `config:<key>`（Node.js 嵌套配置拍平成 `a.b.c` / `a.b[0].c`）、`other_config:<key>`、`env:<NAME>`、`files:<序号>:L<行号>`，值里 URL 的密码加 `#password`、URL 参数加 `#q:<参数名>`，同一个 ref 重复时加 `#2`…。同一份配置每次打码得到同样的占位符。
+- **经得住 `domain.redact`**（`dispatch` 会对结果再跑一遍）：`config` / `other_config` / `env` 用 `[key, value]` 列表，`files` 改名 `config_files`；占位符里的名称、key 把 `:`、`=`、引号、空白等百分号编码，名称以 token / password 这类词结尾时把最后一个字母编码；值里嵌着的 `password=<占位符>` 会被打掉，所以 `secret_refs` 把全部占位符再列一遍。结果约 60_000 字符上限，超过时配置项按 key 排序取前面的、文件内容各自截断，`truncated=true`。
+- **数据查询**：建动作前用 `check_data_query` 校验，不合格直接报错、不进审批；占位符只能填在 `password`（Elasticsearch 还有 `api_key`，Redis 还有哨兵自己的 `sentinel_password`）里，写进 SQL、命令、path、body 的拒绝（结果会带出密码的长度、逐个字符）。占位符在执行时（`Gateway.execute_data_query` → `resolve_secrets`）才换成原文：按服务分组，每个服务向 master 取一次全部配置（`purpose=resolve`，不按 keys 过滤），核对连接地址后重新打码得到 {占位符: 原文}。冻结的参数、审批卡片、检查点里只有占位符，管理员关掉「允许 AI 获取运行配置」后已有的占位符也解析不了。
+- **连接地址核对**（只在用了占位符时）：配置里的密码只能连这个服务自己配置的地址，防止模型或提示注入把密码发到别处。连接的主机（`runtime_config.connection_host`：mysql / redis 的 `host`，elasticsearch 的 `url` 主机名；小写，IPv6 去掉方括号）要作为完整的主机名出现在每个相关服务的配置原文里（`host_in_config`：config / other_config / env 的值和配置文件内容；不区分大小写、不比较端口；`example.com` 不算 `a.example.com`，`10.0.0.1` 不算 `10.0.0.12`，IP 和域名不能互换），否则不执行，返回 `secret_host_mismatch`。agent、direct 两种来源都在网关执行前核对。Redis 集群的 MOVED / ASK 由 kubedoor-tools 自动跳转；哨兵模式下 `host` / `port` 是配置里的哨兵地址、`sentinel_master` 是主节点名，工具向哨兵查到主节点再连。
+- **结果打码**：换出来的原文至少 6 个字符（`MIN_RESULT_SECRET_LENGTH`）的追加进 `ctx.secrets`，结果里出现的由 `dispatch` 打码；更短的不追加（全文替换会把结果里同样的短字符串都打掉，例如密码是 root 时所有的 root），结果里名字像密码的列和字段照样由 kubedoor-tools 打码。
+- **来源**：`auto` 时本轮来源能力里 Agent 在线且 `data_tools=true`（master bootstrap 返回、新版 Agent 声明）用 `agent`，否则 `direct`；指定 `agent` 而它不支持时建动作前就拒绝。`direct` 连不上或超时时结果带 `hint`，提示业务库通常只在业务集群里连得通、请升级 Agent。
 
 ### 花折资源管控（准入控制）
 
@@ -254,8 +271,8 @@ Deployment，结果里的 `verification` 写明是否和期望一致，不一致
 完全一样；规则和默认值见 [AI 助手说明](../../docs/ai-assistant.md#权限与审批)，操作类型的定义见 master `auth/permissions.py`。
 
 - **先算操作类型**：目录工具查 `TOOL_OPS`（`resource_apply` / `resource_delete` 再按目标识别追加 `network.coredns` / `network.istio`，
-  `resource_content` 读 Secret 是 `resource.secret`）；通用工具（api / kubectl / istioctl / diagnostic / pod_exec）由 kubedoor-tools 的
-  `classify_operation` 按命令清单分类。查询没有操作类型，不查表、不审批。测试保证目录里每个修改工具都登记在 `TOOL_OPS`，新增目录工具时一起加。
+  `resource_content` 读 Secret 是 `resource.secret`，`runtime_config` 是 `config.view`）；通用工具（api / kubectl / istioctl / diagnostic / pod_exec）由 kubedoor-tools 的
+  `classify_operation` 按命令清单分类，数据查询（mysql / redis / elasticsearch）分类为 `data.query`。查询没有操作类型，不查表、不审批。测试保证目录里每个修改工具都登记在 `TOOL_OPS`，新增目录工具时一起加。
 - **先权限后审批**（`permissions.evaluate`，只在建动作前判定一次）：账号在该集群的有效权限那一列不允许就抛 403 `permission_denied`，
   不建动作、不准备；允许时任一操作勾了审批或是高危命令（`approval_fixed`，固定审批）就记 `pending`，否则记 `ready` 直接执行。
   动作上记下 `ops`、`approval_fixed`（`kubedoor_ai_actions` 的列）。`read_only` 的含义不变（操作本身不改东西，决定去重、结果未知、
@@ -345,7 +362,7 @@ DeepAgents 加载仓库内 `skills/kubedoor-k8s`，Skills 文件只读；会话�
 
 外部 MCP 使用 `/mcp`（Streamable HTTP），并保留 `/sse`、`/messages` 兼容入口。
 原有 **16 个工具的名称和参数保留**，另提供统一 `kubedoor_tool` 和
-`skills://kubedoor-k8s` 资源。外部调用与 Web 共用权限、审批和审计，规则和网页 AI 完全一样；需要批准的调用
+`skills://kubedoor-k8s`、`skills://kubedoor-code`、`skills://kubedoor-config` 资源。外部调用与 Web 共用权限、审批和审计，规则和网页 AI 完全一样；需要批准的调用
 返回 `pending` 及浏览器会话链接，在批准前不会执行，不需要批准的直接执行并返回结果。
 
 ## 配置、启动与部署

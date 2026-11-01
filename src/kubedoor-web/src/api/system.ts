@@ -264,3 +264,80 @@ export const testCodeInfoConfig = (data: {
     // 接口超时最长 60 秒
     { timeout: 70000 }
   );
+
+/** 获取运行配置接口的配置(Deployment / Pod 页「获取运行配置」由 master 调这个接口) */
+export interface RuntimeConfigSettings {
+  enabled: boolean;
+  url: string;
+  /** 请求头:同获取代码接口,值只写不读 */
+  headers: CodeInfoHeader[];
+  /** 一次获取的总时长(秒),包括接口返回 202 后的等待和重试;5~120,默认 60 */
+  timeout: number;
+  tls_verify: boolean;
+  /** 允许 AI 助手获取运行配置(密码、密钥换成占位符),默认关闭 */
+  ai_enabled: boolean;
+  updated_by?: string | null;
+  updated_at?: string | null;
+}
+
+/**
+ * master POST 给接口的请求体(不含 master 每次都带的 wait):deployment 和 pod 二选一,
+ * 可选字段只在有值时带;测试时只有填了的字段
+ */
+export interface RuntimeConfigRequest {
+  k8s?: string;
+  namespace?: string;
+  deployment?: string;
+  pod?: string;
+  container?: string;
+  /** 按配置名过滤的正则,不区分大小写 */
+  keys?: string;
+  /** 附带配置来源 */
+  detail?: boolean;
+  /** 不用缓存,重新采集 */
+  refresh?: boolean;
+}
+
+export interface RuntimeConfigTestResult {
+  ok: boolean;
+  status: number | null;
+  elapsed_ms: number;
+  /** 请求了几次(接口返回 202 时会重试) */
+  attempts: number;
+  error: string;
+  /** 发出的请求体 */
+  request: RuntimeConfigRequest;
+  /** 接口返回的 JSON 对象;不是 JSON 对象时为 null */
+  config: Record<string, any> | null;
+  /** 返回的不是 JSON 对象时的原始响应(最多 64KB) */
+  body: string;
+}
+
+export const getRuntimeConfigSettings = () =>
+  http.request<Result<RuntimeConfigSettings>>(
+    "get",
+    "/api/admin/runtime-config"
+  );
+
+/** 保存配置;没传的字段沿用原值(右上角的开关只传 enabled / ai_enabled) */
+export const saveRuntimeConfigSettings = (
+  data: Partial<RuntimeConfigSettings>
+) =>
+  http.request<Result<RuntimeConfigSettings>>(
+    "put",
+    "/api/admin/runtime-config",
+    { data }
+  );
+
+/** 用页面上的配置(不用先保存)和手填的入参调一次接口;入参都可以不填,没填的不放进请求体 */
+export const testRuntimeConfigSettings = (data: {
+  config: Partial<RuntimeConfigSettings>;
+  request: RuntimeConfigRequest;
+}) =>
+  http.request<Result<RuntimeConfigTestResult>>(
+    "post",
+    "/api/admin/runtime-config/test",
+    { data },
+    // 一次获取最长 120 秒(含 202 重试),再留些网络余量
+    { timeout: 130000 }
+  );

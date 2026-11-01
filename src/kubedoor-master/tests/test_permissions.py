@@ -35,7 +35,7 @@ def commands_with(view=None, danger=None):
 def test_defaults_keep_existing_behaviour():
     """默认值 = 改造前的行为(读写及以上能做),只有 CoreDNS / Istio 修改改成只有管理员。"""
     ops = DEFAULT['ops']
-    assert set(ops) == set(permissions.OP_KEYS) and len(permissions.OP_KEYS) == 25
+    assert set(ops) == set(permissions.OP_KEYS) and len(permissions.OP_KEYS) == 27
     for key, row in ops.items():
         assert row['read'] is False and row['admin'] is True
         assert row['rw'] is (key not in ('network.coredns', 'network.istio')), key
@@ -53,10 +53,31 @@ def test_approval_columns():
     danger = by_key['pod.exec.danger']
     assert danger['approval'] is True and danger['approval_fixed'] is True and not danger['approval_na']
     no_approval = {key for key, item in by_key.items() if not item['approval'] and not item['approval_na']}
-    assert no_approval == {'pod.exec.view', 'pod.exec.other', 'ai.diagnostic'}
+    assert no_approval == {'pod.exec.view', 'pod.exec.other', 'ai.diagnostic', 'config.view'}
     assert [key for key, item in by_key.items() if item['highlight']] == ['ai.k8s_write']
     for item in permissions.definitions():
         assert item['group'] and item['name'] and item['desc'] and item['applies'] in ('网页', 'AI', '网页+AI')
+
+
+def test_config_and_data_rows():
+    """查看运行配置 / AI 查询数据库:新分组「配置与数据」,紧跟在 AI 诊断工具后面;默认读写及以上,只读不行"""
+    keys = list(permissions.OP_KEYS)
+    assert keys[keys.index('ai.diagnostic') + 1:keys.index('ai.diagnostic') + 3] == ['config.view', 'data.query']
+    view, query = permissions.OPS_BY_KEY['config.view'], permissions.OPS_BY_KEY['data.query']
+    assert (view['group'], view['name'], view['applies']) == ('配置与数据', '查看运行配置', '网页+AI')
+    assert (query['group'], query['name'], query['applies']) == ('配置与数据', 'AI 查询数据库 / Redis / ES', 'AI')
+    assert '明文密码' in view['desc'] and '占位符' in view['desc'] and '模型看不到明文' in query['desc']
+    # 审批都可以改:查看默认不审批,查询默认审批
+    assert view['approval'] is False and not view['approval_fixed'] and not view['approval_na']
+    assert query['approval'] is True and not query['approval_fixed'] and not query['approval_na']
+    for op in ('config.view', 'data.query'):
+        assert permissions.operations_levels(DEFAULT)[op] == ['rw', 'admin']
+        assert not user('read').can(op, 'prod') and user('rw').can(op, 'prod') and user('cluster_admin').can(op, 'prod')
+    assert permissions.needs_approval('data.query', DEFAULT) and not permissions.needs_approval('config.view', DEFAULT)
+    changed = validate_policy(ops_with(**{'config.view': {'read': True, 'approval': True},
+                                          'data.query': {'approval': False}}), DEFAULT['commands'])['ops']
+    assert changed['config.view'] == {'read': True, 'rw': True, 'admin': True, 'approval': True}
+    assert changed['data.query']['approval'] is False
 
 
 def test_default_commands_match_kubedoor_tools():

@@ -106,4 +106,10 @@ def create_mcp(service, token):
         identity()
         return (SKILLS_ROOT / "kubedoor-code" / "SKILL.md").read_text(encoding="utf-8")
 
+    @server.resource("skills://kubedoor-config", description="KubeDoor 运行配置与数据查询 Skill")
+    async def kubedoor_config_skill() -> str:
+        from .runtime import SKILLS_ROOT
+        identity()
+        return (SKILLS_ROOT / "kubedoor-config" / "SKILL.md").read_text(encoding="utf-8")
+
     return server

@@ -1338,6 +1338,7 @@ OPERATION_NAMES = {
     "delete_pod": "删除 Pod", "delete_pods": "批量删除 Pod", "isolate_pod": "隔离 Pod",
     "resource_apply": "应用 YAML", "resource_delete": "删除资源",
     "kubectl": "kubectl 命令", "api": "K8S API 请求", "istioctl": "istioctl 命令", "pod_exec": "Pod 内执行命令",
+    "runtime_config": "获取运行配置", "mysql": "MySQL 查询", "redis": "Redis 查询", "elasticsearch": "Elasticsearch 查询",
 }
 # 审批说明里命令 / 差异最多展示的字数，完整内容在网页的审批记录里
 APPROVAL_DETAIL_LIMIT = 1500

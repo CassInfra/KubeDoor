@@ -96,6 +96,12 @@ def net_probe_module():
 
 
 @pytest.fixture
+def ai_tools_module():
+    """func_manager/ai_tools.py(要能 import kubedoor_tools:PYTHONPATH=../kubedoor-tools)"""
+    return load_module("agent_test_ai_tools", AGENT_ROOT / "func_manager" / "ai_tools.py")
+
+
+@pytest.fixture
 def event_monitor_module(monkeypatch):
     fake_utils = ModuleType("utils")
     fake_utils.PROM_K8S_TAG_VALUE = "test-cluster"

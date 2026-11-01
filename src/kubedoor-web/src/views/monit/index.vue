@@ -178,6 +178,9 @@
     <!-- 获取代码:master 调「系统管理 → 获取代码接口」配置的接口 -->
     <CodeInfoDialog ref="codeInfoRef" />
 
+    <!-- 获取运行配置:master 调「系统管理 → 获取运行配置接口」配置的接口 -->
+    <RuntimeConfigDialog ref="runtimeConfigRef" />
+
     <!-- 新建资源全屏YAML编辑弹窗（效果同 Service 编辑弹窗） -->
     <!-- 编辑Deployment -->
     <el-dialog
@@ -685,6 +688,18 @@
                               "
                               >JVM</el-dropdown-item
                             >
+                            <el-dropdown-item
+                              :disabled="!can('config.view', scope.row.env)"
+                              @click="
+                                openRuntimeConfig({
+                                  env: scope.row.env,
+                                  namespace: scope.row.namespace,
+                                  pod: podScope.row.name,
+                                  containers: podScope.row.containers
+                                })
+                              "
+                              >获取运行配置</el-dropdown-item
+                            >
                           </el-dropdown-menu>
                         </template>
                       </el-dropdown>
@@ -857,6 +872,17 @@
                     <el-dropdown-item @click="handleCodeInfo(scope.row)"
                       >获取代码</el-dropdown-item
                     >
+                    <el-dropdown-item
+                      :disabled="!can('config.view', scope.row.env)"
+                      @click="
+                        openRuntimeConfig({
+                          env: scope.row.env,
+                          namespace: scope.row.namespace,
+                          deployment: scope.row.deployment
+                        })
+                      "
+                      >获取运行配置</el-dropdown-item
+                    >
                   </el-dropdown-menu>
                 </template>
               </el-dropdown>
@@ -955,6 +981,7 @@ import { deploymentQuestion, podQuestion } from "@/utils/ai";
 import { useAskAI } from "@/utils/useAskAI";
 import PodLogViewer from "@/views/monit/components/PodLogViewer.vue";
 import CodeInfoDialog from "@/views/monit/components/CodeInfoDialog.vue";
+import RuntimeConfigDialog from "@/views/monit/components/RuntimeConfigDialog.vue";
 import * as monaco from "monaco-editor";
 import * as yaml from "js-yaml";
 import {
@@ -1808,6 +1835,17 @@ const logViewerRef = ref<InstanceType<typeof PodLogViewer> | null>(null);
 const codeInfoRef = ref<InstanceType<typeof CodeInfoDialog> | null>(null);
 const handleCodeInfo = (row: any) => {
   codeInfoRef.value?.open(row);
+};
+
+// 获取运行配置弹窗:Deployment 行按 Deployment 取,明细里的 Pod 按 Pod 取
+type RuntimeConfigTarget = Parameters<
+  InstanceType<typeof RuntimeConfigDialog>["open"]
+>[0];
+const runtimeConfigRef = ref<InstanceType<typeof RuntimeConfigDialog> | null>(
+  null
+);
+const openRuntimeConfig = (target: RuntimeConfigTarget) => {
+  runtimeConfigRef.value?.open(target);
 };
 
 // Pod 操作（扩缩容/节点均衡等）共享的当前 Pod 信息

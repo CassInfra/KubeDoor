@@ -1,6 +1,11 @@
 import { http } from "@/utils/http";
 import { getCached, setCache } from "@/utils/cache";
-import type { CodeInfoInvalid, CodeInfoLinks, CodeInfoRequest } from "./system";
+import type {
+  CodeInfoInvalid,
+  CodeInfoLinks,
+  CodeInfoRequest,
+  RuntimeConfigRequest
+} from "./system";
 
 type ResultTable = {
   success: boolean;
@@ -308,5 +313,58 @@ export const getCodeInfo = (
     { params: { env, namespace, deployment } },
     // master 读 Deployment 最长 30 秒 + 调接口最长 60 秒
     { silent: true, timeout: 100000 }
+  );
+};
+
+/** 获取运行配置的参数:deployment 和 pod 二选一,其他可选 */
+export interface RuntimeConfigQuery {
+  env: string;
+  namespace: string;
+  deployment?: string;
+  pod?: string;
+  container?: string;
+  /** 按配置名过滤的正则,不区分大小写 */
+  keys?: string;
+  /** 附带配置来源 */
+  detail?: boolean;
+  /** 不用缓存,重新采集 */
+  refresh?: boolean;
+}
+
+export interface RuntimeConfigResult {
+  /** 发给接口的请求体(不含 wait) */
+  request: RuntimeConfigRequest;
+  /** 接口返回的 JSON 对象,原样(含明文密码) */
+  config: Record<string, any>;
+  elapsed_ms: number;
+  /** 请求了几次(接口返回 202 时会重试) */
+  attempts: number;
+}
+
+/**
+ * 获取运行配置:master 把集群、命名空间、Deployment / Pod POST 到「系统管理 → 获取运行配置接口」配置的接口,
+ * 返回的 JSON 原样给回来。出错不弹全局提示,由弹窗显示原因
+ */
+export const getRuntimeConfig = (query: RuntimeConfigQuery) => {
+  const params: Record<string, string> = {
+    env: query.env,
+    namespace: query.namespace
+  };
+  if (query.deployment) params.deployment = query.deployment;
+  if (query.pod) params.pod = query.pod;
+  if (query.container) params.container = query.container;
+  if (query.keys) params.keys = query.keys;
+  if (query.detail) params.detail = "1";
+  if (query.refresh) params.refresh = "1";
+  return http.request<{
+    success: boolean;
+    data: RuntimeConfigResult;
+    message?: string;
+  }>(
+    "get",
+    "/api/runtime-config",
+    { params },
+    // 一次获取最长 120 秒(含 202 重试),再留些网络余量
+    { silent: true, timeout: 130000 }
   );
 };

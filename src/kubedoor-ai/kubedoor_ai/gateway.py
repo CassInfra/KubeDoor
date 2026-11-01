@@ -16,12 +16,12 @@ import httpx
 from langgraph.types import interrupt
 
 from .domain import AIError, CredentialCipher, Identity, beijing_now, redact, utc_now
-from .catalogue import CODE_LOCAL, CODE_TARGET, EXTRA_CATALOG, EXTRA_SCHEMAS, build_request, validate_arguments
+from .catalogue import CODE_LOCAL, EXTRA_CATALOG, EXTRA_SCHEMAS, SERVICE_TARGET, build_request, validate_arguments
 from .code import CodeCache, CodeError
 from .control import (OUTSIDE_ADMISSION, PLANNED, STEP_NAMES, build_plan, changed_fields, check_target, control_drift,
                       deployment_edits, deployment_path, main_step, rejection, snapshot, verify)
 from .user_mcp import McpServers, frozen_fingerprint, needs_approval
-from . import permissions
+from . import permissions, runtime_config
 
 LOGGER = logging.getLogger(__name__)
 
@@ -71,6 +71,19 @@ DEPLOYMENT_CHANGES = {"restart_deployment", "scale_deployment", *DEPLOYMENT_SCHE
 POLICY_FETCH_TIMEOUT = 10
 # 源码缓存的定时清理间隔（秒）；每次下载完也会清理一次
 CODE_CLEANUP_INTERVAL = 3600
+# 数据查询从 kubedoor-ai 本地发起（source=direct）时的整体超时（秒）；参数里的 timeout 是连接、读写各自的
+DATA_QUERY_TIMEOUT = 120
+DIRECT_DATA_HINT = ("这次查询从 KubeDoor 控制端发起（source=direct）。业务库通常只有业务集群里能连上；连不上时请升级该集群的 "
+                    "agent，再用 source=agent 查询。")
+# direct 查询连不上、超时（kubedoor-tools 的错误码）时加上面的提示；参数、语法错误不加，免得误导
+DIRECT_NETWORK_ERRORS = frozenset({"connect_failed", "timeout"})
+# 占位符换出来的原文至少这么长才追加进 ctx.secrets。dispatch 按子串把结果里出现的原文全部打码，太短的（密码是 root
+# 时结果里所有的 root）会把结果打得没法看；取舍是：短密码出现在结果里普通的列、字段里不打码，名字像密码的列和
+# 字段 kubedoor-tools 照样打码
+MIN_RESULT_SECRET_LENGTH = 6
+SECRET_HOST_MISMATCH = ("连接地址 {host} 没有出现在服务 {service} 的运行配置里，配置里的密码只能用来连接这个服务自己配置的"
+                        "地址。请把 host / url 按运行配置里写的原样填（IP 和域名不能互换）；Redis 集群的其他节点、哨兵模式的"
+                        "主节点由工具自动跳转，不用手动换地址。")
 
 
 def validate_deployment_change(operation: str, args: dict):
@@ -334,14 +347,43 @@ class Gateway:
         if source == "auto":
             if operation in CATALOG:
                 return "kubedoor"
+            if operation in permissions.DATA_OPERATIONS:
+                # 数据查询：agent 在线且支持时从业务集群里发起，否则从 kubedoor-ai 发起（不需要 kubeconfig）
+                return "agent" if self.agent_data_tools(ctx) else "direct"
             return "direct" if await self.store.connection(ctx.run["scope"]["env"]) else "agent"
         if source not in ("kubedoor", "direct", "agent"):
             raise AIError("source 必须为 auto/kubedoor/direct/agent")
         if source == "kubedoor" and operation not in CATALOG:
             raise AIError("没有这个 KubeDoor 目录工具；请选择 direct 或 agent")
-        if source != "kubedoor" and operation not in ("api", "kubectl", "istioctl", "diagnostic", "pod_exec"):
-            raise AIError("通用执行器 operation 为 api/kubectl/istioctl/diagnostic/pod_exec")
+        if source != "kubedoor" and operation not in permissions.GENERIC_OPERATIONS:
+            raise AIError("通用执行器 operation 为 api/kubectl/istioctl/diagnostic/pod_exec/mysql/redis/elasticsearch")
         return source
+
+    @staticmethod
+    def agent_data_tools(ctx):
+        """提问时的来源能力：agent 在线，而且是支持数据库 / Redis / ES 查询的新版本"""
+        agent = (ctx.run.get("capabilities") or {}).get("agent") or {}
+        return bool(agent.get("online") and agent.get("data_tools"))
+
+    def validate_data_query(self, ctx, source, operation, args):
+        """数据查询建动作之前的检查，不合格直接报错、不进审批：占位符只能填在凭证参数里（填进 SQL、命令、path 等
+        地方，结果会带出真实值或它的变形）；kubedoor-tools 的参数和只读检查；指定 agent 时要在线且支持"""
+        misplaced = runtime_config.misplaced_placeholders(operation, args)
+        if misplaced:
+            fields = "、".join(runtime_config.SECRET_FIELDS[operation])
+            raise AIError(f"<secret:…> 占位符只能原样填在 {fields} 参数里，不能出现在 {'、'.join(misplaced)} 里", 400, "invalid_query")
+        try:
+            from kubedoor_tools import check_data_query   # kubedoor-tools 的数据查询，延迟导入
+            reason = check_data_query(operation, args)
+        except ImportError:
+            raise AIError("当前 kubedoor-tools 版本不支持数据库 / Redis / ES 查询，请升级 kubedoor-ai", 501, "unsupported") from None
+        except Exception as exc:
+            raise AIError(f"查询参数无效（{type(exc).__name__}）", 400, "invalid_query") from None
+        if reason:
+            raise AIError(str(reason), 400, "invalid_query")
+        if source == "agent" and not self.agent_data_tools(ctx):
+            raise AIError("当前集群的 agent 不在线或版本不支持数据库 / Redis / ES 查询：可以用 source=direct 从 KubeDoor 发起"
+                          "（业务库不一定连得通），或者升级 agent", 409, "agent_unsupported")
 
     def read_only(self, operation, arguments):
         if operation in CATALOG:
@@ -432,8 +474,8 @@ class Gateway:
             if selected_pod and operation in ("logs", "previous_logs", "delete_pod", "isolate_pod", "jvm_mem", "jvm_dump", "jvm_jstack", "jvm_jfr"):
                 args.setdefault("pod", selected_pod["name"])
                 args.setdefault("namespace", selected_pod["namespace"])
-            if operation in CODE_TARGET and not args.get("deployment") and not args.get("pod"):
-                # 没指定服务时用页面选中的，Pod 优先（按它实际运行的镜像）
+            if operation in SERVICE_TARGET and not args.get("deployment") and not args.get("pod"):
+                # 没指定服务时用页面选中的，Pod 优先（按它实际运行的镜像 / 配置）
                 if selected_pod:
                     args.update(pod=selected_pod["name"], namespace=selected_pod["namespace"])
                 elif selected_dep:
@@ -453,9 +495,14 @@ class Gateway:
         if action:
             read_only = action["read_only"]
         else:
+            if operation in permissions.DATA_OPERATIONS:
+                self.validate_data_query(ctx, source, operation, args)
             # 权限先于审批：只在建动作前按「权限与审批」判定一次，结果记在动作上；批准和执行前按记下的 ops 复核
             decision = await self.authorize(ctx, operation, args)
             read_only = decision["read_only"]
+            if operation in permissions.DATA_OPERATIONS and not read_only:
+                # 和上面的只读检查是同一套规则，不会走到这里；万一不一致也不当成修改去准备
+                raise AIError("查询没有通过只读检查，不能执行", 400, "invalid_query")
         if not read_only:
             # 用户自己的 MCP 结果未知和集群无关，不拦集群上的修改
             unknown = await self.store.one("SELECT id FROM kubedoor_ai_actions WHERE run_id=$1::uuid AND state='unknown' AND read_only=false AND source<>'mcp' LIMIT 1", ctx.run["id"])
@@ -471,7 +518,7 @@ class Gateway:
             args = prepared.get("arguments", args)
             guard_scope(scope, operation, args, read_only)
             binding = None
-            if source == "direct":
+            if source == "direct" and operation not in permissions.DATA_OPERATIONS:   # 数据查询从这里发起，不用 kubeconfig
                 binding = await self.executor_binding(ctx, source, prepared.get("credential_fingerprint"), prepared.get("connection_revision"))
             preview = redact(prepared.get("preview", {}), ctx.secrets)
             if binding:
@@ -558,7 +605,7 @@ class Gateway:
             valid = await self.store.one("SELECT id FROM kubedoor_ai_actions WHERE id=$1::uuid AND expires_at>now()", action["id"])
             if not valid:
                 raise AIError("批准已过期，请重新生成操作", 409, "approval_expired")
-        if action["source"] == "direct":
+        if action["source"] == "direct" and action["operation"] not in permissions.DATA_OPERATIONS:
             await self.executor_binding(ctx, "direct", action["preview"].get("credential_fingerprint"), action["connection_revision"])
         # The compare-and-set is the durable dispatch ledger, including MCP.
         dispatched = await self.store.one("UPDATE kubedoor_ai_actions SET state='dispatching',updated_at=now() WHERE id=$1::uuid AND state IN ('ready','pending','approved') RETURNING id", action["id"])
@@ -642,19 +689,16 @@ class Gateway:
             return await self.execute_plan(ctx, action)
         if source == "kubedoor" and operation in CODE_LOCAL:
             return await self.execute_code(ctx, operation, args)
+        if source == "kubedoor" and operation == "runtime_config":
+            return await self.execute_runtime_config(ctx, args)
         if source == "kubedoor" and not CATALOG[operation][1]:
             raise AIError("该操作要先按管控状态生成执行计划，请重新提出", 409, "plan_missing")
+        if operation in permissions.DATA_OPERATIONS:
+            return await self.execute_data_query(ctx, action)
         if source == "direct":
             return await (await self.executor(ctx, source, action.get("preview", {}).get("credential_fingerprint"), action.get("connection_revision"))).execute(operation, args, call_id=action["call_id"], timeout=120)
         if source == "agent":
-            # 通过了网关检查的 Pod 内命令和所有修改都是 approved（master 据此记 ai.agent_execute 审计），纯查询不是；
-            # ops 给 master / agent 复核。纯查询和升级前建的动作不带 ops，master 按原来的读写权限处理
-            ops = action.get("ops")
-            body = {"operation": operation, "arguments": args, "call_id": action["call_id"], "phase": "execute",
-                    "approved": not action["read_only"] or bool(ops), "timeout": 120}
-            if ops:
-                body["ops"] = list(ops)
-            return await self.master(ctx.identity, "POST", "/api/ai/internal/agent-execute", {"env": env}, body, allow_failure=True)
+            return await self.agent_execute(ctx, action, args)
         method, path, freshness, _ = CATALOG[operation]
         query, body = self.catalog_request(operation, args, env)
         result = await self.master(ctx.identity, method, path, query, body, allow_failure=True)
@@ -675,15 +719,112 @@ class Gateway:
         result = table_rows(result)
         return {**result, "success": result.get("success", True), "freshness": freshness, "observed_at": utc_now(), "source": "kubedoor", "truncated": False}
 
+    async def agent_execute(self, ctx, action, arguments):
+        """经 master 交给 agent 执行。通过了网关检查的 Pod 内命令、数据查询和所有修改都是 approved（master 据此记
+        ai.agent_execute 审计），纯查询不是；ops 给 master / agent 复核。纯查询和升级前建的动作不带 ops，master 按原来的
+        读写权限处理"""
+        ops = action.get("ops")
+        body = {"operation": action["operation"], "arguments": arguments, "call_id": action["call_id"], "phase": "execute",
+                "approved": not action["read_only"] or bool(ops), "timeout": 120}
+        if ops:
+            body["ops"] = list(ops)
+        return await self.master(ctx.identity, "POST", "/api/ai/internal/agent-execute", {"env": ctx.run["scope"]["env"]}, body, allow_failure=True)
+
+    # ---- 获取运行配置与数据查询：配置在这里打码，查询前把占位符换回原文（runtime_config.py）----
+
+    async def runtime_config_of(self, ctx, target, purpose, keys=None, detail=False, refresh=False):
+        """向 master 取服务的运行配置（原样，含明文；只在内部网络里传）。master 校验「查看运行配置」权限和「允许 AI
+        获取运行配置」开关。返回 (配置对象, None) 或 (None, 给模型的失败结果，原因和代码原样)"""
+        query = {"env": ctx.run["scope"]["env"], **runtime_config.target_query(target), "purpose": purpose}
+        if keys:
+            query["keys"] = keys
+        if detail:
+            query["detail"] = "1"
+        if refresh:
+            query["refresh"] = "1"
+        result = await self.master(ctx.identity, "GET", "/api/ai/internal/runtime-config", query, allow_failure=True)
+        if not isinstance(result, dict):
+            return None, {"success": False, "error": {"code": "invalid_response", "message": "获取运行配置接口的返回格式不对"}}
+        data = result.get("data") if result.get("success") is True else None
+        if data is None:
+            return None, self.master_failure(result, "获取运行配置接口暂不可用")
+        if not isinstance(data, dict) or not isinstance(data.get("config"), dict):
+            return None, {"success": False, "error": {"code": "invalid_config", "message": "获取运行配置接口返回的不是 JSON 对象"}}
+        return data["config"], None
+
+    async def execute_runtime_config(self, ctx, args):
+        """获取运行配置：明文只到这里为止，密码、密钥换成占位符再交给模型"""
+        target = runtime_config.make_target(args)
+        config, failure = await self.runtime_config_of(ctx, target, "view", args.get("keys"), args.get("detail") is True,
+                                                       args.get("refresh") is True)
+        if failure:
+            return failure
+        # 几 MB 的配置逐行找密码：放线程里，不阻塞 event loop
+        view = await asyncio.to_thread(runtime_config.redact_config, config, target)
+        return {"success": True, "data": view, "freshness": CATALOG["runtime_config"][2], "observed_at": utc_now(),
+                "source": "kubedoor", "truncated": view["truncated"]}
+
+    async def resolve_secrets(self, ctx, operation, arguments):
+        """把参数里的 <secret:…> 换成原文：按服务分组，每个服务向 master 重新取一次全部配置（purpose=resolve，不按 keys
+        过滤：核对连接地址要用全部配置），先核对连接的主机出现在这份配置里（agent、direct 两种来源都在这里核对），再重新
+        打码得到 {占位符: 原文}。只在执行时做：冻结的动作参数、审批卡片、检查点里永远只有占位符。替换出来的原文（够长的，
+        见 MIN_RESULT_SECRET_LENGTH）追加进 ctx.secrets，dispatch 会把结果里出现的打码。
+        返回 (替换后的参数, None) 或 (None, 给模型的失败结果)"""
+        found = runtime_config.find_placeholders(arguments)
+        if not found:
+            return arguments, None
+        groups = {}
+        for text in found:
+            parsed = runtime_config.parse_placeholder(text)
+            if parsed is None:
+                return None, {"success": False, "error": {"code": "secret_invalid", "message": f"占位符格式不对：{text}，请从 runtime_config 的结果里原样复制"}}
+            target, ref = parsed
+            groups.setdefault(json.dumps(target, sort_keys=True), (target, []))[1].append(text)
+        host = runtime_config.connection_host(operation, arguments)
+        mapping = {}
+        for target, texts in groups.values():
+            config, failure = await self.runtime_config_of(ctx, target, "resolve")
+            if failure:
+                return None, failure
+            # 几 MB 的配置逐个字符串找主机、逐行找密码：放线程里，不阻塞 event loop
+            if not await asyncio.to_thread(runtime_config.host_in_config, host, config):
+                service = "/".join(str(target[key]) for key in ("namespace", "kind", "name", "container") if target.get(key))
+                return None, {"success": False, "error": {"code": "secret_host_mismatch",
+                                                          "message": SECRET_HOST_MISMATCH.format(host=host or "（空）", service=service)}}
+            values = await asyncio.to_thread(runtime_config.secret_values, config, target)
+            missing = [text for text in texts if text not in values]
+            if missing:
+                return None, {"success": False, "error": {"code": "secret_not_found", "message": "占位符对应的配置找不到（配置可能已变化），"
+                                                          "请重新用 runtime_config 获取：" + "、".join(missing)}}
+            mapping.update((text, values[text]) for text in texts)
+        longer = (value for value in mapping.values() if len(value) >= MIN_RESULT_SECRET_LENGTH)
+        ctx.secrets = tuple(dict.fromkeys((*ctx.secrets, *longer)))
+        return runtime_config.substitute(arguments, mapping), None
+
+    async def execute_data_query(self, ctx, action):
+        """只读查询 MySQL / Redis / ES：先把占位符换成原文；agent 来源经 master 交给业务集群里的 agent，direct 在
+        kubedoor-ai 本地执行（kubedoor_tools.run_data_query，不需要 kubeconfig）"""
+        arguments, failure = await self.resolve_secrets(ctx, action["operation"], action["arguments"])
+        if failure:
+            return failure
+        if action["source"] == "agent":
+            return await self.agent_execute(ctx, action, arguments)
+        from kubedoor_tools import run_data_query   # kubedoor-tools 的数据查询，延迟导入
+        result = await run_data_query(action["operation"], arguments, timeout=DATA_QUERY_TIMEOUT)
+        error = result.get("error") if isinstance(result, dict) and result.get("success") is False else None
+        if isinstance(error, dict) and str(error.get("code", "")).lower() in DIRECT_NETWORK_ERRORS:
+            result = {**result, "hint": DIRECT_DATA_HINT}
+        return result
+
     # ---- 源码分析：下载、搜索、读取在 kubedoor-ai 本地执行（code.py）----
 
     @staticmethod
-    def code_failure(result):
-        """master 拒绝或出错（没开启 AI 下载、没有集群权限、接口出错等）：原因和代码原样交给模型"""
+    def master_failure(result, fallback="获取代码接口暂不可用"):
+        """master 拒绝或出错（没开启 AI 下载 / 获取配置、没有权限、接口出错等）：原因和代码原样交给模型"""
         error = result.get("error")
         message = error.get("message") if isinstance(error, dict) else error
         code = result.get("code") if isinstance(result.get("code"), str) else "API_ERROR"
-        return {"success": False, "error": {"code": code, "message": str(message or result.get("message") or "获取代码接口暂不可用")}}
+        return {"success": False, "error": {"code": code, "message": str(message or result.get("message") or fallback)}}
 
     async def execute_code(self, ctx, operation, args):
         """下载地址由 master 按管理员配置的获取代码接口取，模型拿不到也传不进 URL；master 同时校验集群读权限和
@@ -697,7 +838,7 @@ class Gateway:
                 data = info.get("data") if info.get("success") is True else None
                 url = ((data or {}).get("links") or {}).get("download_url")
                 if not isinstance(data, dict) or not url:
-                    return self.code_failure(info) if data is None else {"success": False, "error": {"code": "no_download_url", "message": "获取代码接口没有返回下载链接，不能下载源码"}}
+                    return self.master_failure(info) if data is None else {"success": False, "error": {"code": "no_download_url", "message": "获取代码接口没有返回下载链接，不能下载源码"}}
                 service = {key: data["request"][key] for key in ("namespace", "deployment", "image")}
                 summary = await self.code.fetch(env=env, **service, download_url=url, tls_verify=data.get("tls_verify") is not False)
                 links = {key: data["links"][key] for key in ("web_url", "commits_url") if data["links"].get(key)}
@@ -710,7 +851,7 @@ class Gateway:
                     return {"success": False, "error": {"code": "scope_violation", "message": f"这份源码属于集群 {meta['env']}，不能在当前集群 {env} 使用"}}
                 access = await self.master(ctx.identity, "GET", "/api/ai/internal/code-access", {"env": env}, allow_failure=True)
                 if access.get("success") is not True:
-                    return self.code_failure(access)
+                    return self.master_failure(access)
                 if operation == "code_search":
                     options = {key: args[key] for key in ("pattern", "glob", "fixed_strings", "ignore_case", "context", "max_results") if key in args}
                     result = await self.code.search(args["code_id"], **options)

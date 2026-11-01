@@ -342,9 +342,9 @@ RULES = (
     _rule('', '/api/auth/verify', 'public'),
     _rule('POST', '/api/auth/logout', 'public'),  # 会话失效时也要能清 Cookie
     _rule('GET|POST', '/api/auth/(me|password)', 'session'),
-    # ---- 系统管理:用户、集群授权、LDAP、审计、权限与审批、获取代码接口 ----
+    # ---- 系统管理:用户、集群授权、LDAP、审计、权限与审批、获取代码接口、获取运行配置接口 ----
     _rule('', '/api/admin/.+', 'admin'),
-    # ---- AI 服务内部桥 ----
+    # ---- AI 服务内部桥(获取代码、获取运行配置等由 handler 再按集群和操作权限校验)----
     _rule('', '/api/ai/internal/.+', 'internal'),
     # ---- WebSocket ----
     _rule('GET', '/ws', 'agent'),
@@ -361,6 +361,9 @@ RULES = (
     _rule('POST', '/api/image/tags', 'login'),
     # 获取代码:master 读 Deployment 的镜像,POST 到管理员配置的接口(handler 记 code_info.get 审计)
     _rule('GET', '/api/code-info', 'env_read', env='query.env'),
+    # 获取运行配置:返回 Pod 实际运行的配置(含明文密码),要「查看运行配置」。是查看不是修改:
+    # handler 每次都记 runtime_config.get 审计,这里不再另记 api.write(同查看 Secret 内容)
+    _rule('GET', '/api/runtime-config', 'op', env='query.env', op='config.view', write=False),
     _rule('POST', '/api/events/query', 'env_read', env='body.k8s'),
     _rule('GET', '/api/events/menu', 'env_read', env='query.k8s'),
     # ---- 高峰期采集 ----

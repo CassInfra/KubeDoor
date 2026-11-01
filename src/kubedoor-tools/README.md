@@ -49,6 +49,7 @@ pods = await executor.execute("api", {
 | `kubectl`、`istioctl` | `argv` 为字符串参数数组；可选 `files`、`stdin`、`output_limit` |
 | `diagnostic` | `program` 选择 `jq`、`yq`、`curl`、`dig`、`openssl`、`rg`，网络诊断 `nc`、`nmap`、`tcpdump`、`iperf3`、`traceroute`、`mtr`，进程与系统 `ps`、`top`、`pgrep`、`pmap`、`pwdx`、`lsof`、`free`、`vmstat`、`uptime`、`w`、`slabtop`、`iostat`、`mpstat`、`pidstat`，数据查看 `xxd`、`hexdump`、`base64`；其余参数与命令工具相同 |
 | `pod_exec` | 必填 `namespace`、`pod`、`argv`；可选 `container`、`output_limit` |
+| `mysql`、`redis`、`elasticsearch` | 只读查询数据库 / Redis / ES，参数和规则见下文“数据查询”；不需要 Kubernetes 凭据 |
 
 `files` 是“文件名 → 文本内容”的字典，文件名必须是临时工作目录内的简单名称，不能包含目录路径。`stdin` 为标准输入文本。`execute()` 和 `prepare()` 均支持以秒为单位的 `timeout`，默认 120 秒。
 
@@ -81,6 +82,19 @@ prepared = await executor.prepare("api", {
 
 - `ops`：涉及“权限与审批”表的哪些操作类型（全部类型见 `OP_KEYS`）。kubectl / istioctl / API 修改都带 `ai.k8s_write`，再按动作加：delete → `pod.delete`（Pod）或 `resource.delete`，scale → `workload.scale`，rollout restart → `workload.restart`，set image → `workload.image`，cordon / uncordon → `node.cordon`，drain → `node.cordon` + `pod.delete`，apply / create / patch / label 等 → `resource.apply`；API 按方法和路径对应（DELETE、`/scale`、驱逐、其余写入），istioctl 的修改加 `network.istio`；`kubectl attach`、API 的 exec / attach 子资源和节点 proxy 判断不了执行什么，加 `pod.exec.danger`（`category` 为 danger）。`kubectl exec` 按下面的 Pod 内命令分类，`kubectl cp` 是 `pod.exec.other`，这两个不带 `ai.k8s_write`。`diagnostic` 里会发请求或写文件的（`curl`、`openssl`、`nc`、`nmap`、`tcpdump`、`iperf3`，以及 `yq -i`）是 `ai.diagnostic`，其余只读。修改 kube-system 的 ConfigMap `coredns` 或 Istio 资源时追加 `network.coredns` / `network.istio`（`identify_targets`，能判断出不涉及的不加，YAML 解析失败、kustomize、拿不到清单等判断不了的两个都加）。只读查询的 `ops` 为空。
 - Pod 内命令（`pod_exec`、`kubectl exec` 的 `--` 之后，没有 `--` 分不清命令的按高危）由 `classify_pod_command` 分为查看 / 其他 / 高危，对应 `pod.exec.view|other|danger`，只有查看命令算 `read_only`。查看命令是严格白名单：每个命令都在查看清单里，`sh -c` 里只能用 `|`、`&&`、`||`、`;` 组合，不能有变量、命令替换、子 shell、后台和 heredoc，输出重定向只能到 `/dev/null` 或 fd 复制（`2>&1`），参数不能指向 secrets 目录，curl、wget、nc、find、sort、date、ip、mount、env、hostname 等还有内置参数检查（不满足时只是不算查看，继续判断）。高危命令宽匹配：按 shell 规则递归拆词，任一词命中高危清单、命令位置是变量或通配符、引号没闭合拆不开，都算高危。清单由 master 下发，没下发时用包内的 `default_commands.json`（这个文件缺失或损坏时没有查看命令、所有命令按高危）。
+- 数据查询（`mysql`、`redis`、`elasticsearch`）的 `ops` 固定是 `data.query`；`check_data_query` 的只读检查通过才算 `read_only`，不通过时 `reason` 是原因。
+
+## 数据查询（MySQL / Redis / Elasticsearch）
+
+`kubedoor_tools.data` 提供 `DATA_OPERATIONS`、`check_data_query(operation, arguments)`（不合格返回给模型看的原因，合格返回 `None`）和 `run_data_query(operation, arguments, timeout=60)`；`KubernetesExecutor.execute / prepare` 遇到这三个操作也走这里（agent 走执行器，kubedoor-ai 直连时直接调 `run_data_query`）。返回 `{"success": true, "data": {...}, "truncated": bool}` 或 `{"success": false, "error": {"code", "message"}}`，错误码有 `INVALID_ARGUMENT`、`PROGRAM_UNAVAILABLE`、`CONNECT_FAILED`、`QUERY_FAILED`、`TIMEOUT`、`TOO_LARGE`、`REDIS_MOVED`。
+
+| 操作 | 参数 | 只读规则 | `data` |
+| --- | --- | --- | --- |
+| `mysql` | `host`、`user`、`sql` 必填；`port`（3306）、`password`、`database`、`max_rows`（1～1000，默认 100）、`timeout`（1～60 秒，默认 15）、`ssl`（默认 false） | 在引号外判断（`'…'`、`"…"`、`` `…` `` 跳过，按“反斜杠转义”和“不转义”两种理解都要通过）：只能一条语句、不能有注释，以 SELECT / SHOW / DESC / DESCRIBE / EXPLAIN / WITH / TABLE 开头，不能有 INSERT / UPDATE / DELETE / REPLACE（字符串函数 `INSERT(`、`REPLACE(` 除外）、`INTO OUTFILE/DUMPFILE`、加锁读、`SLEEP(` 等会等待 / 加锁 / 读文件的函数。执行时 `SET SESSION TRANSACTION READ ONLY` + `MAX_EXECUTION_TIME`（MariaDB 用 `max_statement_time`）+ `START TRANSACTION READ ONLY`，无缓冲游标只读 `max_rows + 1` 行，读完回滚，没读完直接断开（回滚会先读完剩下的行） | `columns`、`rows`、`row_count`、`truncated`、`elapsed_ms` |
+| `redis` | `host`、`command`（字符串数组）必填；`port`（6379，用哨兵时默认 26379）、`username`、`password`、`db`、`tls`、`max_items`（1～1000，默认 100）、`timeout`（1～60 秒，默认 10）；哨兵：`sentinel_master`（主节点名，对应 `spring.redis.sentinel.master`，非空、最多 200 字符、不能有控制字符）、`sentinel_username`、`sentinel_password`（哨兵自己的认证，只能和 `sentinel_master` 一起给） | 只读命令白名单（两段的命令检查子命令），KEYS 提示改用 SCAN，SCAN 类的 COUNT 最大 1000，CONFIG GET 不能用通配符、不能查密码 / 认证 / ACL 参数。执行时 HGETALL / HKEYS / HVALS / SMEMBERS 先查元素个数（超过 1 万拒绝），LRANGE / ZRANGE / XRANGE / SORT_RO / *RANDMEMBER 等在服务端限定为 `max_items + 1` 个。给了 `sentinel_master` 时 `host:port` 是哨兵：先发 `SENTINEL GET-MASTER-ADDR-BY-NAME`（用 `sentinel_*` 认证，没给就不认证，不选库），再用 `username` / `password` / `db` 连返回的主节点。集群的 MOVED / ASK 在内部跟随：用同样的账号、TLS 连目标节点重发同一条命令（ASK 先在同一个连接上发 ASKING），最多跳 3 次，超过报 `REDIS_MOVED` 并写明最后的目标节点；查哨兵和各次跳转共用 `timeout` 这一个总时限。`tls` 对哨兵和数据节点都生效。用 RESP2、不重试、不发 CLIENT SETINFO | `result`、`truncated`、`elapsed_ms`（SCAN 类的 `result` 是 `[游标字符串, 元素]`）；用了哨兵加 `master`，跳转过加 `redirected_to`（都是 `host:port`，IPv6 带方括号） |
+| `elasticsearch` | `url`（`http(s)://host:port`，可带路径前缀，不能带账号和查询参数）、`path` 必填；`username` / `password`（Basic）或 `api_key`、`method`（GET / POST / HEAD）、`params`、`body`（POST 的 JSON 对象或数组，`_msearch` 按 NDJSON 发送）、`tls_verify`（默认 true）、`timeout`（1～60 秒，默认 15） | GET / HEAD 和 POST 各一张查询接口白名单（`_search`、`_count`、`_cat`、`_mapping`、`_sql` 等），PUT / DELETE / PATCH、scroll、PIT 一律拒绝，SQL 接口的 query 按 MySQL 的规则检查；不跟随重定向、不走环境变量里的代理 | `status`、`body`（JSON 或文本）、`truncated`；HTTP 有响应就算成功，4xx / 5xx 看 `status` |
+
+结果里列名、字段名像密码的（同 `config._SECRET_KEY` 的规则）值换成 `[REDACTED]`，单个值最多 1000 字符（截断加 `…[截断]`），整个 `data` 序列化后约 60000 字符，超过就停止并标记 `truncated`。错误信息里去掉 `password`、`sentinel_password`、`api_key` 的值，模块不记日志。阻塞的驱动调用放线程里，整体超时取调用方的 `timeout` 和参数 `timeout + 5` 秒中小的。驱动（PyMySQL、redis-py）执行时才导入；`PyMySQL[rsa]` 带上 cryptography，MySQL 8 的 `caching_sha2_password` 在不加密的连接上首次认证要用。MySQL / Redis 的 `ssl` / `tls` 只加密、不校验证书（同 JDBC `useSSL=true`）。
 
 ## 令牌轮换与工具依赖
 

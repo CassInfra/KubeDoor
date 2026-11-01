@@ -12,6 +12,7 @@ ignored.
 
 import asyncio
 import json
+import math
 import os
 import re
 import time
@@ -25,6 +26,12 @@ from aiohttp import web
 from auth import audit, permissions
 from auth.context import client_ip
 from func_manager.deployment_control import deployment_control as control_status, valid_target
+
+# AI 只读查询 MySQL / Redis / ES(kubedoor-tools 的 data.py);参数里有服务端填入的明文密码,请求体不能写进日志
+DATA_OPERATIONS = ("mysql", "redis", "elasticsearch")
+DATA_OP = "data.query"
+GENERIC_OPERATIONS = ("api", "kubectl", "istioctl", "diagnostic", "pod_exec", *DATA_OPERATIONS)
+DATA_TOOLS_UNSUPPORTED = "此 Agent 版本不支持数据库 / Redis / ES 查询，请升级 Agent"
 
 
 def authorize(request):
@@ -146,6 +153,8 @@ def register_routes(app, clients, utils):
             # "none" clusters are invisible to this user everywhere, including the AI assistant.
             "clusters": [{"env": env, "online": bool(clients.get(env, {}).get("online")),
                           "ai_tools": bool(clients.get(env, {}).get("ai_tools")),
+                          # 新版 agent 能执行 MySQL / Redis / ES 只读查询(kubedoor-ai 据此选 agent 还是自己发起)
+                          "data_tools": bool(clients.get(env, {}).get("data_tools")),
                           "ver": clients.get(env, {}).get("ver", ""),
                           "permission": principal.permission(env),
                           "aliases": aliases.get(env, [])}
@@ -166,20 +175,36 @@ def register_routes(app, clients, utils):
         })
 
     async def execute(request):
+        # 请求体里可能有服务端填入的明文密码(数据查询的 arguments):只转给 agent,不写日志,审计只记 call_id 和 ops
         principal = authorize(request)
         env = request.query.get("env", "")
         require_cluster(principal, env)
         body = await request.json()
         if not isinstance(body, dict) or body.get("phase", "execute") not in ("prepare", "execute"):
             raise web.HTTPBadRequest(text="无效执行阶段")
-        if body.get("operation") not in ("api", "kubectl", "istioctl", "diagnostic", "pod_exec"):
+        if body.get("operation") not in GENERIC_OPERATIONS:
             raise web.HTTPBadRequest(text="未知工具类型")
         if not isinstance(body.get("arguments", {}), dict):
             raise web.HTTPBadRequest(text="arguments 必须为对象")
-        if clients.get(env, {}).get("online") and not clients[env].get("ai_tools"):
+        connection = clients.get(env, {})
+        data_query = body["operation"] in DATA_OPERATIONS
+        if data_query and connection.get("online") and not connection.get("data_tools"):
+            # JSON(kubedoor-ai 原样告诉模型);agent 不在线时照旧由 agent_rpc 返回 503
+            return web.json_response({"success": False, "code": "agent_unsupported",
+                                      "message": DATA_TOOLS_UNSUPPORTED, "error": DATA_TOOLS_UNSUPPORTED}, status=409)
+        if connection.get("online") and not connection.get("ai_tools"):
             raise web.HTTPNotImplemented(text="此 Agent 版本不支持通用 AI 工具，请升级 Agent 或上传 kubeconfig；现有数据接口仍可查询")
+        try:
+            timeout = min(max(float(body.get("timeout", 120)), 1), 300)
+        except (TypeError, ValueError):
+            timeout = math.nan
+        if not math.isfinite(timeout):
+            raise web.HTTPBadRequest(text="timeout 必须是秒数")
         approved = body.get("approved") is True
         ops = declared_ops(body)
+        if data_query:
+            # 数据查询固定归到「AI 查询数据库 / Redis / ES」:不管 AI 声明了什么都按它复核,agent 也会再查一次
+            ops = list(dict.fromkeys([*(ops or []), DATA_OP]))
         policy = await permissions.load_policy()  # 鉴权中间件已刷新过,没过期不查库
         if ops is None:
             # 升级前建的动作(没有 ops):沿用原来的集群读写检查。Pod 内执行的命令 master 判断不了类别,
@@ -194,7 +219,6 @@ def register_routes(app, clients, utils):
             if approved:
                 check_approved_ops(principal, env, ops)
             ops_ok = bool(ops) and all(principal.can(op, env, policy) for op in ops)
-        timeout = min(max(float(body.get("timeout", 120)), 1), 300)
         approved_write = approved and body.get("phase", "execute") == "execute"
         packet = {
             "phase": body.get("phase", "execute"), "operation": body["operation"],

@@ -24,6 +24,7 @@ from func_manager import silence_api
 from func_manager import data_retention
 from func_manager import ai_api
 from func_manager import code_info
+from func_manager import runtime_config
 from func_manager.workload_relay import WorkloadRelay
 from func_manager.pod_exec_relay import PodExecRelay
 from func_manager.pod_log_relay import PodLogRelay
@@ -161,6 +162,8 @@ async def websocket_handler(request):
         clients[env]["last_heartbeat"] = time.time()
         clients[env]["online"] = True
     clients[env]["ai_tools"] = request.query.get("ai_tools") == "1"
+    # 新版 agent 带 data_tools=1:AI 能经它只读查询 MySQL / Redis / ES(ai_api 的 agent-execute 据此判断)
+    clients[env]["data_tools"] = request.query.get("data_tools") == "1"
     asyncio.create_task(workload_relay.on_agent_connected(env))
 
     try:
@@ -1104,6 +1107,9 @@ istio_handlers.register_routes(app, call_agent_api)
 
 # ==================== 获取代码(Deployment 页;配置在 /api/admin/code-info,见 func_manager/code_info.py) ====================
 code_info.register_routes(app, call_agent_api)
+
+# ==================== 获取运行配置(Deployment / Pod 页;配置在 /api/admin/runtime-config,见 func_manager/runtime_config.py) ====================
+runtime_config.register_routes(app)
 
 
 # ==================== 负载均衡路由注册 ====================

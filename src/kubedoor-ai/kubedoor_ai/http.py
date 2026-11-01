@@ -281,7 +281,7 @@ def create_app(service=None, token=None):
                 result = {"id": skill_id, "content": (SKILLS_ROOT / skill_id / "SKILL.md").read_text(encoding="utf-8")}
             elif endpoint == "tools":
                 from .gateway import tool_catalog
-                result = {"tools": tool_catalog(), "generic_operations": ["api", "kubectl", "istioctl", "diagnostic", "pod_exec"]}
+                result = {"tools": tool_catalog(), "generic_operations": ["api", "kubectl", "istioctl", "diagnostic", "pod_exec", "mysql", "redis", "elasticsearch"]}
             elif endpoint == "tools-execute":
                 data = await body(request)
                 result = await svc.mcp_call(identity, data.get("operation"), data.get("arguments", {}), normalize_scope(data.get("scope")), data.get("source", "auto"))

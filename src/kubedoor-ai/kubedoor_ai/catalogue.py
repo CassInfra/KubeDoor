@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import copy
 import math
+import re
 from datetime import date, datetime
 
 import yaml
@@ -62,11 +63,15 @@ EXTRA_CATALOG = {
     "code_search": ("GET", "", "local", True),
     "code_read": ("GET", "", "local", True),
     "code_symbols": ("GET", "", "local", True),
+    # 获取运行配置（master func_manager/runtime_config.py）：网关取回后打码再交给模型（runtime_config.py），路径留空
+    "runtime_config": ("GET", "", "live", True),
 }
 # 源码分析：在网关本地执行的操作（Gateway.execute_code）
 CODE_LOCAL = frozenset({"code_fetch", "code_search", "code_read", "code_symbols"})
 # 按 Deployment 或 Pod 指定服务（二选一）的源码操作
 CODE_TARGET = frozenset({"code_info", "code_fetch"})
+# 按 Deployment 或 Pod 指定服务（二选一）的全部操作：没指定时用页面选中的，Pod 优先（Gateway.invoke）
+SERVICE_TARGET = CODE_TARGET | {"runtime_config"}
 
 _NS = {"namespace": "string；Kubernetes 命名空间"}
 _DEP = {**_NS, "deployment": "string；Deployment 名称"}
@@ -123,6 +128,7 @@ EXTRA_SCHEMAS = {
     "code_search": (["code_id"], {**_CODE_ID, "pattern": "string；ripgrep 正则，省略时按 glob 列出文件", "glob": "string；文件过滤，例如 **/*.java、!**/test/**", "fixed_strings": "boolean；pattern 按普通文本匹配（异常消息、带括号的代码片段）", "ignore_case": "boolean", "context": "integer 0..5；匹配行前后带的行数", "max_results": "integer 1..200；默认 50"}, "在 code_fetch 下载的源码里搜索（ripgrep），返回文件路径、行号和匹配行；在 kubedoor-ai 本地执行，不需要在线 Agent"),
     "code_read": (["code_id", "path"], {**_CODE_ID, "path": "string；相对源码根目录的文件路径（code_search 返回的 path）", "start_line": "integer >=1；默认 1", "lines": "integer 1..500；默认 200"}, "按行读取已下载源码里的文本文件，每行前面带行号；在 kubedoor-ai 本地执行，不需要在线 Agent"),
     "code_symbols": (["code_id"], {**_CODE_ID, "name": "string；类、方法、函数等的名字，精确匹配，可写成 Class.method 限定所属类型", "path": "string；相对源码根目录的文件路径；只传 path 返回这个文件的大纲", "kind": "string；按种类过滤，例如 class、interface、method、function、field", "max_results": "integer 1..200；默认 100"}, "用 ctags 找已下载源码里的定义：按名字找类、方法、函数定义在哪个文件哪一行（不含调用处），或者列出一个文件里全部定义的行号；name 和 path 至少传一个；在 kubedoor-ai 本地执行"),
+    "runtime_config": (["namespace"], {**_CODE_TARGET, "container": "string；容器名，多容器时指定，默认第一个容器", "keys": "string；按配置名过滤的正则，不区分大小写，最多 500 字符，例如 datasource|redis|elasticsearch；Node.js 的嵌套配置按 a.b.c 完整路径匹配，配置文件不过滤", "detail": "boolean；附带配置来源（优先级从高到低）、打码值从哪里补回、说明", "refresh": "boolean；不用缓存，重新采集"}, "获取服务实际运行的配置（配置中心、环境变量、配置文件合并后的生效值），用于核对连接地址、开关、超时、线程池和配置是否生效，以及查数据库前找连接信息；按 Pod 查用这个 Pod，排障时用出问题的 Pod。先用 keys 缩小范围，不加 keys 返回全部应用配置，太长会截断。密码、密钥是 <secret:…> 占位符，可以原样填进 mysql / redis / elasticsearch 的 password、api_key、sentinel_password（host / url 要用这份配置里写的地址）。管理员没有开启「允许 AI 获取运行配置」时返回 ai_config_disabled"),
 }
 
 _CONTENT_TYPES = {"service", "deployment", "node", "pod", "configmap", "secret", "ingress", "persistentvolumeclaim", "daemonset", "statefulset", "job", "cronjob"}
@@ -141,11 +147,13 @@ _INTEGER_FIELDS = {"replicas", "page", "pageSize", "limit", "count", "limit_mem_
 # 整数字段的下限默认 0，这些是 1；上限没列的不限
 _MIN_ONE = {"page", "pageSize", "limit", "max_results", "start_line", "lines"}
 _MAXIMUM = {"pageSize": 500, "limit": 5000, "context": 5, "max_results": 200, "lines": 500}
-_BOOLEAN_FIELDS = {"simple", "apply_now", "fixed_strings", "ignore_case"}
+_BOOLEAN_FIELDS = {"simple", "apply_now", "fixed_strings", "ignore_case", "detail", "refresh"}
 _JVM_FIELDS = {"jvm_xms_bytes", "jvm_xmx_bytes", "jvm_xss_bytes", "jvm_max_metaspace_bytes"}
 _RESOURCE_FIELDS = {"request_cpu_m", "request_mem_mb", "limit_cpu_m", "limit_mem_mb"}
 # 这些操作的 requests/limits 会原样写进 K8S 或管控表，0 没有意义
 _POSITIVE_RESOURCES = {"update_deployment_resources", "resource_control_add"}
+_DNS_LABEL = re.compile(r"[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?\Z")
+_DNS_NAME = re.compile(r"[a-z0-9]([-a-z0-9.]{0,251}[a-z0-9])?\Z")
 
 
 def _string(value, field, *, allow_empty=False):
@@ -212,8 +220,16 @@ def validate_arguments(operation: str, args: dict) -> None:
             _string(value, field, allow_empty=field not in required)
     if operation == "node_resource_rank" and args.get("type", "cpu") not in ("cpu", "mem", "pod", "peak_cpu", "peak_mem"):
         raise AIError("type 必须为 cpu/mem/pod/peak_cpu/peak_mem")
-    if operation in CODE_TARGET and bool(args.get("deployment")) == bool(args.get("pod")):
+    if operation in SERVICE_TARGET and bool(args.get("deployment")) == bool(args.get("pod")):
         raise AIError(f"{operation} 需要 deployment 或 pod（二选一）")
+    if operation == "runtime_config":
+        # 名称会进占位符和 master 的查询参数：先按 K8S 名称规则校验
+        for field, pattern in (("namespace", _DNS_LABEL), ("deployment", _DNS_NAME), ("pod", _DNS_NAME), ("container", _DNS_LABEL)):
+            if args.get(field) and not pattern.match(args[field]):
+                raise AIError(f"{field} 不是合法的 K8S 名称")
+        keys = args.get("keys")
+        if keys and (len(keys) > 500 or any(ord(c) < 32 or ord(c) == 127 for c in keys)):
+            raise AIError("keys 最多 500 个字符，不能有换行等控制字符")
     if operation == "code_symbols" and not args.get("name") and not args.get("path"):
         raise AIError("code_symbols 需要 name 或 path")
     if operation in ("resource_config_update", "resource_control_add", "update_deployment_jvm"):

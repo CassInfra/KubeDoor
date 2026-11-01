@@ -79,7 +79,7 @@ def stub_control(gateway, control=None, live=None):
 APPROVAL_OPS = frozenset({
     "pod.exec.danger", "workload.restart", "workload.scale", "workload.schedule", "workload.image",
     "pod.delete", "pod.isolate", "pod.jvm", "resource.apply", "resource.delete", "ai.k8s_write",
-    "node.cordon", "balance.run", "control.edit", "network.coredns", "network.istio",
+    "node.cordon", "balance.run", "control.edit", "network.coredns", "network.istio", "data.query",
 })
 ADMIN_ONLY_OPS = frozenset({"network.coredns", "network.istio"})
 

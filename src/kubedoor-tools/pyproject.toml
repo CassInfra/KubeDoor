@@ -7,7 +7,9 @@ name = "kubedoor-tools"
 version = "0.1.0"
 description = "Shared, cluster-bound Kubernetes tools for KubeDoor agents and MCP"
 requires-python = ">=3.11"
-dependencies = ["kubernetes>=37", "PyYAML>=6.0.2"]
+# PyMySQL / redis 是 AI 只读查询数据库用的(data.py,执行时才导入);[rsa] 带上 cryptography:
+# MySQL 8 默认的 caching_sha2_password 在不加密的连接上首次认证(服务端缓存为空)要用 RSA 加密口令
+dependencies = ["kubernetes>=37", "PyYAML>=6.0.2", "PyMySQL[rsa]>=1.1", "redis>=5"]
 
 [project.optional-dependencies]
 test = ["pytest>=8", "pytest-asyncio>=0.25"]

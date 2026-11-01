@@ -522,6 +522,18 @@
                         "
                         >JVM</el-dropdown-item
                       >
+                      <el-dropdown-item
+                        :disabled="!can('config.view', searchForm.env)"
+                        @click="
+                          runtimeConfigRef?.open({
+                            env: searchForm.env,
+                            namespace: podScope.row.namespace,
+                            pod: podScope.row.name,
+                            containers: podScope.row.containers
+                          })
+                        "
+                        >获取运行配置</el-dropdown-item
+                      >
                     </el-dropdown-menu>
                   </template>
                 </el-dropdown>
@@ -680,6 +692,9 @@
 
     <PodLogViewer ref="logViewerRef" />
 
+    <!-- 获取运行配置:master 调「系统管理 → 获取运行配置接口」配置的接口 -->
+    <RuntimeConfigDialog ref="runtimeConfigRef" />
+
     <el-dialog
       v-model="resultDialogVisible"
       class="result-dialog"
@@ -755,6 +770,7 @@ import { openPodShell } from "@/utils/podShell";
 import { podQuestion } from "@/utils/ai";
 import { useAskAI } from "@/utils/useAskAI";
 import PodLogViewer from "@/views/monit/components/PodLogViewer.vue";
+import RuntimeConfigDialog from "@/views/monit/components/RuntimeConfigDialog.vue";
 import * as monaco from "monaco-editor";
 import * as yaml from "js-yaml";
 import { YAMLException } from "js-yaml";
@@ -824,6 +840,10 @@ const currentEditPod = ref<{
 
 // 日志查看：统一使用 PodLogViewer 组件
 const logViewerRef = ref<InstanceType<typeof PodLogViewer> | null>(null);
+// 获取运行配置弹窗(按 Pod 取)
+const runtimeConfigRef = ref<InstanceType<typeof RuntimeConfigDialog> | null>(
+  null
+);
 
 const resultDialogVisible = ref(false);
 const resultMessage = ref("");

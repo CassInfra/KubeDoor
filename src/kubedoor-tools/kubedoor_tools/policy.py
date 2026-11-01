@@ -20,6 +20,8 @@ from urllib.parse import unquote
 
 import yaml
 
+from .data import DATA_OPERATIONS, check_data_query
+
 API_PATH = re.compile(r"^/(?:api(?:/v[0-9]+(?:/.*)?)?|apis(?:/[^/?#]+(?:/[^/?#]+(?:/.*)?)?)?|version|(?:livez|readyz|healthz)(?:/[^?#]*)?|openapi/(?:v2|v3)(?:/[^?#]*)?)$")
 DIAGNOSTIC_PROGRAMS = frozenset({
     "jq", "yq", "curl", "dig", "openssl", "rg",
@@ -51,6 +53,7 @@ OP_KEYS = frozenset({
     "pod.delete", "pod.isolate", "pod.jvm",
     "resource.apply", "resource.delete", "resource.secret",
     "ai.k8s_write", "ai.diagnostic",
+    "config.view", "data.query",
     "node.cordon", "balance.run", "control.edit",
     "network.coredns", "network.tcp", "network.istio",
     "alert.operate", "alert.silence",
@@ -1103,7 +1106,8 @@ def classify_operation(operation: str, arguments: dict, commands: dict | None = 
     """返回 read_only、reason、ops、category、dangerous。
 
     - read_only:操作本身不改东西;pod_exec / kubectl exec 只有查看命令算只读;
-    - ops:涉及的操作类型(权限表的行),只读的集群查询为空;
+    - ops:涉及的操作类型(权限表的行),只读的集群查询为空;mysql / redis / elasticsearch 数据查询固定是 data.query,
+      只读检查(data.check_data_query)通过才算只读,不通过时 reason 是原因;
     - category:Pod 内命令分类(pod_exec、kubectl exec;API exec 子资源、kubectl attach 按 danger),其他为 None;
     - dangerous:category 是 danger(高危命令固定审批)。
     commands 是 master 下发的命令清单,不传用自带的默认清单。
@@ -1180,6 +1184,12 @@ def classify_operation(operation: str, arguments: dict, commands: dict | None = 
     elif operation == "pod_exec":
         category = classify_pod_command(arguments.get("argv", []), commands)
         read_only, ops, reason = category == "view", [f"pod.exec.{category}"], _POD_REASONS[category]
+
+    elif operation in DATA_OPERATIONS:
+        # 只读查询 MySQL / Redis / ES:检查通过才算只读;过不过都要 data.query(要不要批准由网关按配置决定)
+        problem = check_data_query(operation, arguments)
+        read_only, ops = problem is None, ["data.query"]
+        reason = "只读查询数据库 / Redis / Elasticsearch" if read_only else problem
 
     return {"read_only": bool(read_only), "reason": reason, "ops": ops, "category": category,
             "dangerous": category == "danger"}

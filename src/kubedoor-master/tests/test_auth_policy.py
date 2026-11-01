@@ -125,6 +125,11 @@ def test_env_condition_sql():
     ('GET', '/api/ai/internal/code-info', 'internal'),  # AI 查代码 / 取下载地址,handler 再按集群校验
     ('GET', '/api/ai/internal/code-access', 'internal'),
     ('GET', '/api/ai/internal/permission-policy', 'internal'),
+    ('GET', '/api/runtime-config', 'op'),  # 获取运行配置:要「查看运行配置」
+    ('GET', '/api/admin/runtime-config', 'admin'),
+    ('PUT', '/api/admin/runtime-config', 'admin'),
+    ('POST', '/api/admin/runtime-config/test', 'admin'),
+    ('GET', '/api/ai/internal/runtime-config', 'internal'),  # handler 再按库里的权限查 config.view
     ('POST', '/api/admis', 'env_write'),  # 准入 webhook 由 K8S 直接调 agent,不经过 master
     ('GET', '/api/something/new', 'env_write'),  # 没登记的接口默认按集群写
 ])
@@ -396,6 +401,33 @@ async def test_operation_columns_and_system_admin(set_policy):
     with pytest.raises(policy.Deny) as denied:  # 不带集群参数的操作一律 400(系统管理员也是)
         await authorize(admin, 'POST', '/api/scale')
     assert denied.value.status == 400
+
+
+@pytest.mark.asyncio
+async def test_runtime_config_needs_config_view(set_policy):
+    """获取运行配置返回明文密码:按目标集群查「查看运行配置」(默认读写及以上);是查看,不另记 api.write"""
+    rule = policy.match('GET', '/api/runtime-config')
+    assert (rule.kind, rule.op, rule.write, rule.env) == ('op', 'config.view', False, (('query', 'env'),))
+    query = {'env': 'prod', 'namespace': 'vip', 'deployment': 'app'}
+    reader = user('read', {'dev': 'rw', 'hidden': 'none'})
+    with pytest.raises(policy.Deny) as denied:
+        await authorize(reader, 'GET', '/api/runtime-config', query)
+    assert denied.value.code == 'operation_forbidden'
+    assert denied.value.message == '当前账号在集群 prod 是「只读」权限,不能执行「查看运行配置」'
+    await authorize(reader, 'GET', '/api/runtime-config', {**query, 'env': 'dev'})
+    with pytest.raises(policy.Deny) as denied:
+        await authorize(reader, 'GET', '/api/runtime-config', {**query, 'env': 'hidden'})
+    assert denied.value.code == 'cluster_forbidden'
+    with pytest.raises(policy.Deny) as denied:  # 集群参数必填
+        await authorize(user('admin'), 'GET', '/api/runtime-config', {'namespace': 'vip'})
+    assert denied.value.status == 400
+    for principal in (user('rw'), user('cluster_admin'), user('admin')):
+        await authorize(principal, 'GET', '/api/runtime-config', query)
+    set_policy({'config.view': {'read': True}})  # 勾上只读列后只读用户也能看
+    await authorize(reader, 'GET', '/api/runtime-config', query)
+    set_policy({'config.view': {'read': False, 'rw': False, 'admin': False}})  # 全站关闭
+    with pytest.raises(policy.Deny):
+        await authorize(user('admin'), 'GET', '/api/runtime-config', query)
 
 
 @pytest.mark.asyncio

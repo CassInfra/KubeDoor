@@ -100,6 +100,13 @@ OPERATIONS = (
     _op('ai.diagnostic', '资源', 'AI 诊断工具',
         'AI 在 KubeDoor 自己的容器里使用 curl、openssl、yq -i、nc、nmap、tcpdump、iperf3 这类'
         '会发出请求、扫描端口、抓包或改写文件的诊断工具。', AI),
+    # ---- 配置与数据 ----
+    _op('config.view', '配置与数据', '查看运行配置',
+        '获取 Pod 实际运行的配置(配置中心、环境变量、配置文件合并后的生效值,含明文密码):网页「获取运行配置」,'
+        '以及 AI 获取运行配置(AI 看到的密码、密钥是占位符)。', WEB_AI),
+    _op('data.query', '配置与数据', 'AI 查询数据库 / Redis / ES',
+        'AI 只读查询 MySQL(SELECT / SHOW / DESC / EXPLAIN)、Redis(只读命令)、Elasticsearch(查询接口),'
+        '从 agent(业务集群里)或 KubeDoor 发起;运行配置里的密码由服务端填入,模型看不到明文。', AI, approval=True),
     # ---- 节点 ----
     _op('node.cordon', '节点', '禁止 / 允许调度',
         '把节点设为禁止调度(cordon)或恢复调度(uncordon)。', WEB_AI, approval=True),

@@ -23,6 +23,7 @@ from urllib.parse import unquote
 import yaml
 
 from .config import parse_kubeconfig, redact_export
+from .data import DATA_OPERATIONS, check_data_query, run_data_query
 from .policy import API_PATH, DIAGNOSTIC_PROGRAMS, TARGET_FLAGS, classify_operation, cli_verb
 
 
@@ -592,6 +593,9 @@ class KubernetesExecutor:
             self._runs[call_id] = run
 
         async def perform():
+            if operation in DATA_OPERATIONS:
+                # 数据库 / Redis / ES 查询不碰 Kubernetes,不检查 K8s 前置条件
+                return await self._data(operation, arguments, timeout)
             await self._check_preconditions(arguments, run, timeout)
             if run.cancelled:
                 raise ToolError("CANCELLED", "Operation cancelled")
@@ -636,6 +640,12 @@ class KubernetesExecutor:
         finally:
             if call_id and self._runs.get(call_id) is run:
                 self._runs.pop(call_id, None)
+
+    async def _data(self, operation: str, arguments: dict, timeout: float) -> dict:
+        """只读查询数据库 / Redis / ES(data.run_data_query 自己有整体超时,比这里早 1 秒到,错误信息更准确)。"""
+        result = await run_data_query(operation, arguments, timeout=max(0.5, float(timeout) - 1))
+        return self._result(result.get("success") is True, result.get("data"), error=result.get("error"),
+                            source=operation, truncated=bool(result.get("truncated")))
 
     async def _cli(self, operation: str, arguments: dict, run: _Run, timeout: float) -> dict:
         program, argv, files = _validate_cli(operation, arguments)
@@ -910,6 +920,10 @@ class KubernetesExecutor:
             elif operation == "pod_exec":
                 _argv(frozen)
                 preview["command"] = frozen.get("argv", [])
+            elif operation in DATA_OPERATIONS:
+                problem = check_data_query(operation, frozen)
+                if problem:
+                    raise ToolError("INVALID_ARGUMENT", problem)
             else:
                 raise ToolError("UNSUPPORTED_OPERATION", "Unsupported operation")
             if frozen.get("_preconditions"):

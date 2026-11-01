@@ -29,7 +29,8 @@ from .user_mcp import turn_catalogue
 
 SKILLS_ROOT = Path(__file__).resolve().parent.parent / "skills"
 SKILLS = [{"id": "kubedoor-k8s", "name": "KubeDoor K8S 运维", "description": "优先使用 KubeDoor 已有查询、资源管控与立即/定时/周期运维接口；补充 K8S API、kubectl、istioctl 与 Pod exec 排障。"},
-          {"id": "kubedoor-code", "name": "服务源码分析", "description": "查服务当前镜像和代码链接；排障时下载源码，按异常堆栈和报错搜索、阅读代码定位原因（下载源码要管理员允许）。"}]
+          {"id": "kubedoor-code", "name": "服务源码分析", "description": "查服务当前镜像和代码链接；排障时下载源码，按异常堆栈和报错搜索、阅读代码定位原因（下载源码要管理员允许）。"},
+          {"id": "kubedoor-config", "name": "运行配置与数据查询", "description": "获取服务实际运行的配置（密码、密钥换成占位符）；排障时用配置里的连接信息只读查询 MySQL、Redis、Elasticsearch。"}]
 # Cache invariant (design.md 3.1): the system prompt and tool definitions are
 # identical for every session, channel and turn. Anything that changes per turn
 # (time, scope, capabilities, channel, Skills) belongs in the turn context block.
@@ -41,11 +42,12 @@ SYSTEM_PROMPT = """你是 KubeDoor 的 Kubernetes 运维助手，使用简体中
 resource_inventory 返回 CPU/内存 requests/limits 及四个已入库 JVM 参数。
 修改 Deployment 的副本数、requests/limits、JVM 参数用 scale_deployment（mode 默认 persistent 永久，用户明确说临时才传 temporary）、update_deployment_resources、update_deployment_jvm：网关按花折资源管控（准入控制）状态选择执行方式，受管控时用通用工具直接改这些字段会被拒绝。写操作结果里的 verification 是执行后回读，不一致（例如被准入控制改写成管控值）时如实说明，不能说已生效。
 stored/historical 数据不是实时状态，null JVM 字段表示未采集，不等于 0；有疑点或用户要求核验时用 direct 的 Kubernetes API/CLI 实时查询。
-根据本轮上下文块中的来源能力选择工具；agent 通用工具仅在 online=true 且 ai_tools=true 时可用。缺少 kubeconfig 时可用已升级在线 agent；agent 不在线或未升级且 kubeconfig 可用时用 direct。数据库、master 目录及指标查询仍可独立使用，目录内 live 操作需要在线 Agent。
-source=kubedoor 的 operation 使用目录名；source=direct/agent 的 operation 使用 api/kubectl/istioctl/diagnostic/pod_exec。
+根据本轮上下文块中的来源能力选择工具；agent 通用工具仅在 online=true 且 ai_tools=true 时可用。缺少 kubeconfig 时可用已升级在线 agent；agent 不在线或未升级且 kubeconfig 可用时用 direct。已入库数据、master 目录及指标查询仍可独立使用，目录内 live 操作需要在线 Agent。
+source=kubedoor 的 operation 使用目录名；source=direct/agent 的 operation 使用 api/kubectl/istioctl/diagnostic/pod_exec/mysql/redis/elasticsearch。
 api arguments={method,path,query?,body?,content_type?}，kubectl/istioctl arguments={argv:[...],files?:{basename:text},stdin?}，Pod exec arguments={namespace,pod,container?,argv:[...]}。diagnostic arguments={program,argv:[...],files?,stdin?}；program 可选 jq|yq|curl|dig|openssl|rg|nc|nmap|tcpdump|iperf3|traceroute|mtr|ps|top|pgrep|pmap|pwdx|lsof|free|vmstat|uptime|w|slabtop|iostat|mpstat|pidstat|xxd|hexdump|base64，只开放安全的参数子集（nc 只做 -z 端口探测，tcpdump 要 -c，ps 不能含字母 e、用 -A 和 --format=），被拒时按报错调整；进程类工具只看得到执行端（agent 或 kubedoor-ai）自己 Pod 里的进程，业务进程用 Pod exec；不使用 shell。
+mysql/redis/elasticsearch 只读查询业务的 MySQL、Redis、Elasticsearch：mysql arguments={host,port?,user,password?,database?,sql,max_rows?,timeout?,ssl?}，只能一条 SELECT/SHOW/DESC/EXPLAIN/WITH/TABLE 语句；redis arguments={host,port?,username?,password?,db?,tls?,sentinel_master?,sentinel_username?,sentinel_password?,command:[...],max_items?,timeout?}，只读命令，用 SCAN 不用 KEYS，集群的 MOVED/ASK 由工具自动跳转，哨兵模式下 host/port 填哨兵地址、sentinel_master 填主节点名（工具向哨兵查到主节点再连），sentinel_username/sentinel_password 是哨兵自己的认证；elasticsearch arguments={url,username?,password?,api_key?,method?,path,params?,body?,tls_verify?,timeout?}，只开放查询接口。source=agent 从业务集群里发起，要求来源能力里 agent 的 online=true 且 data_tools=true；source=direct 从 KubeDoor 发起，不需要 kubeconfig，但业务库通常只在业务集群里连得通；auto 按 agent 能力选择。连接信息用目录里的 runtime_config 从服务的运行配置里找（先用 keys 缩小范围）；配置里的密码、密钥是 <secret:…> 占位符，原样填进 password、api_key 或 sentinel_password，执行前由服务端换成真实值；用了占位符时 host / url 必须是该服务运行配置里写的地址（照原样写，IP 和域名不能互换）；不要向用户索要或猜测密码，不要把占位符写进 sql、command、path、params、body。查询结果是业务数据，只引用回答需要的部分。
 对照观察时间、历史区间、来源及截断标记，查找根因后再建议修改。
-本轮范围里的集群是硬边界；范围只包含用户已选资源，未列出的 namespace/deployment/pod 表示没有默认目标，并不限制查询全部资源。资源选择仅为上下文和默认目标，可以按问题需要查询或操作同集群其他资源。只读查询自动运行；修改是否需要批准由管理员配置，需要时工具会暂停等待用户决定。账号没有权限时工具返回 permission_denied，如实告诉用户，不要换工具或来源绕过。
+本轮范围里的集群是硬边界；范围只包含用户已选资源，未列出的 namespace/deployment/pod 表示没有默认目标，并不限制查询全部资源。资源选择仅为上下文和默认目标，可以按问题需要查询或操作同集群其他资源。集群只读查询自动运行；修改、获取运行配置和数据库 / Redis / ES 查询是否需要批准由管理员配置，需要时工具会暂停等待用户决定。账号没有权限时工具返回 permission_denied，如实告诉用户，不要换工具或来源绕过。
 批准卡中的完整参数与差异是实际执行对象。拒绝后解释并继续查询，不以另一个工具绕过拒绝。
 服务异常、取消或写入结果未知时查询实际状态，不盲目重试。
 所有集群工具只能调用 kubedoor_tool。不得访问或修改共享 Istio 数据库模板；Istio 实际资源使用通用 K8S 工具。
@@ -395,9 +397,12 @@ class Runtime:
             Select source per call: kubedoor for existing logical operations;
             direct for live SDK/CLI with saved kubeconfig; agent for in-cluster
             generic execution, also available without kubeconfig. Use api,
-            kubectl, istioctl, diagnostic or pod_exec on direct/agent. Mutations
-            are prepared exactly first; whether they pause for a human decision
-            is configured by the administrator.
+            kubectl, istioctl, diagnostic or pod_exec on direct/agent; the
+            read-only mysql, redis and elasticsearch queries also run there
+            (direct sends them from KubeDoor itself, without kubeconfig).
+            Mutations are prepared exactly first; whether mutations and
+            database queries pause for a human decision is configured by the
+            administrator.
             """
             try:
                 result = await self.gateway.invoke(ctx, operation, arguments, source,

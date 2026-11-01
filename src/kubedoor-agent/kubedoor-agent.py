@@ -204,7 +204,8 @@ async def process_request(ws: MasterConnection):
             try:
                 data = json.loads(msg.data)
             except json.JSONDecodeError:
-                logger.error(f"收到无法解析的消息：{msg.data}")
+                # 不打印原文:ai_tool 消息的参数里可能有数据库密码
+                logger.error(f"收到无法解析的消息(长度 {len(msg.data)}),已忽略")
                 continue
             if data.get("type") == "heartbeat_ack":
                 ws.on_ack()
@@ -299,7 +300,8 @@ async def monitor_health_check():
 
 async def connect_to_server():
     """连接到 WebSocket 服务端，并处理连接断开的情况"""
-    uri = f"{utils.KUBEDOOR_MASTER}/ws?env={utils.PROM_K8S_TAG_VALUE}&ver={VERSION}&ai_tools=1"
+    # ai_tools=1:支持通用 AI 工具;data_tools=1:支持 AI 只读查询数据库 / Redis / ES(master 按这两个标记判断 agent 版本)
+    uri = f"{utils.KUBEDOOR_MASTER}/ws?env={utils.PROM_K8S_TAG_VALUE}&ver={VERSION}&ai_tools=1&data_tools=1"
     while True:
         try:
             async with ClientSession() as session:

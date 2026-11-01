@@ -1,4 +1,4 @@
-// 系统管理:用户与集群授权、LDAP、企微 AI 机器人、获取代码接口、AI 用量看板、操作审计,只对管理员开放(后端 /api/admin/* 同样只认管理员)
+// 系统管理:用户与集群授权、LDAP、企微 AI 机器人、获取代码接口、获取运行配置接口、AI 用量看板、操作审计,只对管理员开放(后端 /api/admin/* 同样只认管理员)
 export default {
   path: "/system",
   redirect: "/system/users",
@@ -52,6 +52,16 @@ export default {
       component: () => import("@/views/system/code-info/index.vue"),
       meta: {
         title: "获取代码接口",
+        roles: ["admin"]
+      }
+    },
+    {
+      // Deployment / Pod 页「获取运行配置」调用的接口
+      path: "/system/runtime-config",
+      name: "SystemRuntimeConfig",
+      component: () => import("@/views/system/runtime-config/index.vue"),
+      meta: {
+        title: "获取运行配置接口",
         roles: ["admin"]
       }
     },

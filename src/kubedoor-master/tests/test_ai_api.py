@@ -11,6 +11,7 @@ from types import MappingProxyType
 import pytest
 from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer
+from loguru import logger
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -336,3 +337,68 @@ async def test_cluster_admin_identity_and_bootstrap(monkeypatch):
                             "default_permission": "admin"}
         body = await (await client.get("/api/ai/internal/bootstrap", headers=headers)).json()
         assert [(c["env"], c["permission"]) for c in body["clusters"]] == [("prod", "admin"), ("staging", "read")]
+
+
+@pytest.mark.asyncio
+async def test_data_queries_need_new_agent_and_data_query_permission(monkeypatch, set_policy):
+    """MySQL / Redis / ES 只读查询:新版 agent(data_tools)才能执行;master 固定按「AI 查询数据库 / Redis / ES」复核;
+    参数里服务端填入的明文密码只转给 agent,不进日志和审计"""
+    monkeypatch.setenv("AI_INTERNAL_TOKEN", "secret-test-token")
+    utils = SimpleNamespace(get_k8s_aliases=AsyncMock(return_value={}), PROM_TYPE="", PROM_K8S_TAG_KEY="origin_prometheus")
+    sent, audits, logs = [], [], []
+    clients = agent_clients(sent, "prod", "staging")
+    clients["prod"]["data_tools"] = True  # staging 是只认通用工具的旧 agent
+    monkeypatch.setattr(ai_api.audit, "record_bg",
+                        lambda username, action, **kwargs: audits.append({"username": username, "action": action, **kwargs}))
+    handler_id = logger.add(lambda message: logs.append(str(message)), level="DEBUG")
+    app = internal_app(monkeypatch, clients, utils)
+    headers = {"X-Kubedoor-Token": "secret-test-token", "X-User-Name": "limited"}  # prod 读写,staging 只读
+    password = "S3cret-PW-9527"
+    arguments = {"host": "db.example.com", "user": "app", "password": password, "sql": "SELECT 1"}
+
+    async def execute(env, status, **body):
+        response = await client.post(f"/api/ai/internal/agent-execute?env={env}", headers=headers,
+                                     json={"phase": "execute", "arguments": arguments, "call_id": "call-1", **body})
+        assert response.status == status, await response.text()
+        return response
+
+    try:
+        async with TestClient(TestServer(app)) as client:
+            body = await (await client.get("/api/ai/internal/bootstrap", headers=headers)).json()
+            assert [(c["env"], c["ai_tools"], c["data_tools"]) for c in body["clusters"]] == [
+                ("prod", True, True), ("staging", True, False)]
+            # 读写集群 + 新 agent:原样转给 agent,带上 ops 和该集群允许的操作
+            await execute("prod", 200, operation="mysql", approved=True, ops=["data.query"])
+            packet = sent[-1]
+            assert packet["operation"] == "mysql" and packet["arguments"] == arguments
+            assert packet["ops"] == ["data.query"] and "data.query" in packet["allowed_ops"]
+            # 旧 agent:409 JSON(kubedoor-ai 原样告诉模型),不发给 agent
+            unsupported = await execute("staging", 409, operation="redis", approved=True, ops=["data.query"])
+            assert await unsupported.json() == {
+                "success": False, "code": "agent_unsupported",
+                "message": "此 Agent 版本不支持数据库 / Redis / ES 查询，请升级 Agent",
+                "error": "此 Agent 版本不支持数据库 / Redis / ES 查询，请升级 Agent"}
+            clients["staging"]["data_tools"] = True
+            # 只读集群默认不能查
+            denied = await execute("staging", 403, operation="elasticsearch", approved=True, ops=["data.query"])
+            assert "AI 查询数据库 / Redis / ES" in await denied.text()
+            # 不管 AI 声明了什么(或者没声明),都按 data.query 复核
+            set_policy({"data.query": {"rw": False}})
+            await execute("prod", 403, operation="mysql", approved=True, ops=["pod.exec.view"])
+            await execute("prod", 403, operation="mysql", approved=True)
+            set_policy({})
+            await execute("prod", 200, operation="redis", phase="prepare")
+            assert sent[-1]["ops"] == ["data.query"] and sent[-1]["phase"] == "prepare"
+            assert len(sent) == 2
+            # 未知工具、timeout 不是数字:400
+            await execute("prod", 400, operation="mongodb", approved=True, ops=["data.query"])
+            await execute("prod", 400, operation="mysql", approved=True, ops=["data.query"], timeout="soon")
+            # agent 不在线时照旧 503(由 AI 改用 KubeDoor 自己发起)
+            clients["prod"]["online"] = False
+            await execute("prod", 503, operation="mysql", approved=True, ops=["data.query"])
+    finally:
+        logger.remove(handler_id)
+    # 审计只记 call_id 和 ops;日志里不能有参数里的密码
+    assert [(item["action"], item["target"], item["detail"]) for item in audits] == [
+        ("ai.agent_execute", "mysql", {"call_id": "call-1", "ops": ["data.query"]})]
+    assert password not in str(audits) and not any(password in line for line in logs)

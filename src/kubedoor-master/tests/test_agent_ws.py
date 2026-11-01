@@ -9,6 +9,7 @@ from unittest.mock import AsyncMock
 import pytest
 from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer
+from loguru import logger
 
 MASTER_ROOT = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(MASTER_ROOT))
@@ -138,3 +139,40 @@ async def test_pod_logs_are_relayed_without_blocking_agent_loop(master, monkeypa
         assert await agent.receive_json(timeout=2) == {"type": "heartbeat_ack"}
         assert dispatched and dispatched[0][:2] == ("prod", {"type": "pod_logs", "connection_id": "c1", "log": "x"})
         await agent.close()
+
+
+@pytest.mark.asyncio
+async def test_agent_capabilities_follow_each_connection(master):
+    """新版 agent 连接时带 ai_tools=1&data_tools=1;标记跟着这次连接走,换成旧版 agent 重连就清掉"""
+    async with TestClient(TestServer(make_app(master))) as client:
+        agent = await client.ws_connect("/ws?env=prod&ver=new&ai_tools=1&data_tools=1")
+        await until(lambda: master.clients.get("prod", {}).get("data_tools") is True)
+        assert master.clients["prod"]["ai_tools"] is True
+        await agent.close()
+        await until(lambda: master.clients["prod"]["online"] is False)
+        agent = await client.ws_connect("/ws?env=prod&ver=old&ai_tools=1")
+        await until(lambda: master.clients["prod"]["online"] is True and master.clients["prod"]["ver"] == "old")
+        assert master.clients["prod"]["ai_tools"] is True and master.clients["prod"]["data_tools"] is False
+        await agent.close()
+
+
+@pytest.mark.asyncio
+async def test_ai_responses_are_not_logged(master):
+    """AI 工具的回包(数据查询的结果)只记 request_id,不把内容写进日志"""
+    lines = []
+    handler_id = logger.add(lambda message: lines.append(str(message)), level="DEBUG")
+    try:
+        async with TestClient(TestServer(make_app(master))) as client:
+            agent = await client.ws_connect("/ws?env=prod&ai_tools=1&data_tools=1")
+            await until(lambda: master.clients.get("prod", {}).get("data_tools") is True)
+            event = asyncio.Event()
+            master.clients["prod"].setdefault("response_events", {})["ai-1"] = event
+            await agent.send_json({"type": "response", "request_id": "ai-1", "ai": True,
+                                   "response": {"success": True, "data": {"rows": [["S3cret-row-value"]]}}})
+            await asyncio.wait_for(event.wait(), 2)
+            assert master.clients["prod"]["response_queue"]["ai-1"]["data"]["rows"] == [["S3cret-row-value"]]
+            await agent.close()
+    finally:
+        logger.remove(handler_id)
+    assert any("ai-1" in line for line in lines)
+    assert not any("S3cret-row-value" in line for line in lines)

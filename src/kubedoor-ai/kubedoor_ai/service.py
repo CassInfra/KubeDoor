@@ -18,6 +18,7 @@ from .domain import AIError, CredentialCipher, Identity, Provider, normalize_sco
 from .gateway import Gateway, PendingAction, RunContext
 from .memories import MemoryLibrary
 from .models import without_thinking
+from .permissions import DATA_OPERATIONS
 from .runtime import Runtime, SKILLS, make_model
 from .storage import Store, pg_dsn
 
@@ -197,8 +198,9 @@ class Service:
     @staticmethod
     def capabilities(cluster):
         online, upgraded = bool(cluster.get("online")), bool(cluster.get("ai_tools"))
+        # data_tools：agent 能只读查询业务的 MySQL / Redis / ES（新版 agent 连 master 时声明）
         return {"kubedoor": {"stored": True, "historical": True, "master": True, "metrics": True, "live": online},
-                "agent": {"available": online and upgraded, "online": online, "ai_tools": upgraded},
+                "agent": {"available": online and upgraded, "online": online, "ai_tools": upgraded, "data_tools": bool(cluster.get("data_tools"))},
                 "direct": {"configured": bool(cluster.get("configured")), "context": cluster.get("context"), "test_status": cluster.get("test_status")}}
 
     async def test_provider(self, raw):
@@ -409,7 +411,7 @@ class Service:
         valid = await self.store.one("SELECT id FROM kubedoor_ai_actions WHERE id=$1::uuid AND expires_at>now()", action_id)
         if not valid:
             raise AIError("批准已过期，请停止本轮后重新生成操作", 409, "approval_expired")
-        if action["source"] == "direct":
+        if action["source"] == "direct" and action["operation"] not in DATA_OPERATIONS:   # 数据查询的 direct 不用 kubeconfig
             connection = await self.store.connection(run["scope"]["env"])
             if not connection or connection["revision"] != action["connection_revision"] or self.gateway.connection_fingerprint(connection) != action["preview"].get("credential_fingerprint"):
                 raise AIError("kubeconfig 已变更，请重新生成操作", 409, "connection_changed")

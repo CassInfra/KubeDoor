@@ -2,7 +2,6 @@
 import { onBeforeUnmount, onMounted, ref } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { ElMessage } from "element-plus";
-import { copyTextToClipboard } from "@pureadmin/utils";
 import { useDebounceFn, useResizeObserver } from "@vueuse/core";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
@@ -13,6 +12,7 @@ import "@xterm/xterm/css/xterm.css";
 import QuestionFilled from "@iconify-icons/ep/question-filled";
 import { createNodeExecUrl, createPodExecUrl } from "@/api/monit";
 import { usePermission } from "@/utils/usePermission";
+import { copyText } from "@/utils/clipboard";
 
 defineOptions({ name: "PodShell" });
 
@@ -293,22 +293,6 @@ const flashCopied = () => {
   copiedTip.value = true;
   window.clearTimeout(copiedTimer);
   copiedTimer = window.setTimeout(() => (copiedTip.value = false), 1200);
-};
-
-const copyText = async (text: string) => {
-  // 先用同步的 execCommand:HTTP 访问(非安全上下文)时没有 Clipboard API,它也能用
-  try {
-    if (copyTextToClipboard(text)) return true;
-  } catch {
-    // 再试 Clipboard API
-  }
-  if (!window.isSecureContext || !navigator.clipboard) return false;
-  try {
-    await navigator.clipboard.writeText(text);
-    return true;
-  } catch {
-    return false;
-  }
 };
 
 const copySelection = (clear: boolean) => {

@@ -87,6 +87,7 @@
 | 历史告警 | `alert_total`：按告警名聚合；`alert_detail`：分页详情；`alert_detail_total`：相同条件的总数。过滤字段及 `startTime` 查实际 schema，不修改告警状态 |
 | 负载均衡 | `load_balance_analyze`：读取既有配置并生成待执行计划，会保存计划，属于修改操作；`load_balance_execute`：执行经过审阅的 `migrations`；`load_balance_isolated`：查询隔离旧 Pod；`load_balance_check_pods`：核验新 Pod Ready；`load_balance_cleanup`：确认新 Pod 正常后删除指定旧 Pod；`load_balance_node_cpu`：节点 CPU、内存和 Pod 状态 |
 | 华为 CCI | `cci_schedule_profile`：查询 Deployment 的 ScheduleProfile 和 maxNum |
+| 运行配置 | `runtime_config`：按 Deployment 或 Pod 取实际运行的配置（配置中心、环境变量、配置文件合并后的生效值），密码、密钥是占位符；先用 `keys` 缩小范围，用法见 `/skills/kubedoor-config/SKILL.md` |
 
 `resource_inventory` 中 CPU 单位为 milliCPU、内存为 MB；`jvm_xms_bytes`、`jvm_xmx_bytes`、`jvm_xss_bytes`、`jvm_max_metaspace_bytes` 为字节，`update` 说明采集时间。历史样本不是实时状态。`metrics` 传 `query`，`start/end` 同时提供为区间查询，另可传 `step`；服务端强制当前集群标签过滤。
 
@@ -105,5 +106,7 @@
 {"operation":"pod_exec","arguments":{"namespace":"default","pod":"example","container":"app","argv":["cat","/etc/resolv.conf"]}}
 {"operation":"diagnostic","arguments":{"program":"dig","argv":["kubernetes.default.svc.cluster.local"]}}
 ```
+
+`mysql`、`redis`、`elasticsearch` 只读查询业务的数据库、缓存和 ES（`source=agent` 从业务集群里发起，`direct` 从 KubeDoor 发起），连接信息从 `runtime_config` 找，参数和写法见 `/skills/kubedoor-config/SKILL.md`。
 
 API 支持已发现的资源组、资源类型与 CRD，不确定时先做 discovery。CLI 参数使用数组，不传 shell 字符串；文件通过 `files={basename:text}`、标准输入通过 `stdin` 提供。只读查询自动执行；修改、未知 CLI 和 Pod 内命令由网关冻结参数，是否需要批准由管理员配置，需要时暂停等待用户决定，页面开启自动批准时仍沿用同一网关流程；账号没有权限时返回 `permission_denied`，如实告诉用户，不要换工具或来源重试。结果包含 success/data/error、source、observed_at、truncated，命令结果还可能包含 exit_code。

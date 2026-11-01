@@ -361,7 +361,7 @@ def test_op_keys_cover_every_classified_op():
         "pod.shell", "node.shell", "pod.exec.view", "pod.exec.other", "pod.exec.danger",
         "workload.restart", "workload.scale", "workload.schedule", "workload.image",
         "pod.delete", "pod.isolate", "pod.jvm", "resource.apply", "resource.delete", "resource.secret",
-        "ai.k8s_write", "ai.diagnostic", "node.cordon", "balance.run", "control.edit",
+        "ai.k8s_write", "ai.diagnostic", "config.view", "data.query", "node.cordon", "balance.run", "control.edit",
         "network.coredns", "network.tcp", "network.istio", "alert.operate", "alert.silence",
     }
     samples = [
@@ -373,6 +373,7 @@ def test_op_keys_cover_every_classified_op():
         ("api", {"method": "POST", "path": "/api/v1/namespaces/a/pods/b/exec"}),
         ("api", {"method": "PATCH", "path": "/apis/apps/v1/namespaces/a/deployments/b/scale"}),
         ("istioctl", {"argv": ["install"]}), ("diagnostic", {"program": "curl", "argv": ["https://x"]}),
+        ("mysql", {"host": "db", "user": "u", "sql": "SELECT 1"}), ("redis", {"host": "r", "command": ["SET", "k", "v"]}),
     ]
     seen = set()
     for operation, arguments in samples:
@@ -380,4 +381,4 @@ def test_op_keys_cover_every_classified_op():
     assert seen <= OP_KEYS
     assert {"pod.exec.view", "pod.exec.other", "pod.exec.danger", "pod.delete", "resource.delete", "node.cordon",
             "workload.restart", "workload.image", "workload.scale", "resource.apply", "network.coredns",
-            "network.istio", "ai.k8s_write", "ai.diagnostic"} <= seen
+            "network.istio", "ai.k8s_write", "ai.diagnostic", "data.query"} <= seen

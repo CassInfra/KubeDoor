@@ -19,10 +19,11 @@ KubeDoor AI 助手将自然语言问题与已有管理接口、Kubernetes API、
 | 复用平台能力 | 已有日志、事件、资源/JVM、节点、工作负载、重启、扩缩容、定时和周期任务等接口优先 |
 | 监控与历史数据 | 查询 Prometheus/VictoriaMetrics 指标及 PostgreSQL 入库资源、JVM、事件、告警数据 |
 | 服务源码 | 按 Deployment 或 Pod 查当前镜像和代码链接；管理员允许后，排障时下载源码，按异常搜索、阅读代码定位原因 |
+| 运行配置与数据查询 | 管理员允许后，按 Deployment 或 Pod 获取服务实际运行的配置（密码、密钥换成占位符，模型看不到明文）；排障时用配置里的连接信息只读查询 MySQL、Redis、Elasticsearch |
 | 工具与回复展示 | 工具区默认折叠，逐项显示运行状态，手动展开查看参数、差异和结果；回复支持 Markdown、表格和代码块 |
 | 权限与审批 | 先权限后审批：按「系统管理 → 权限与审批」的操作权限表判断账号能不能做、要不要人工批准（默认业务变更和 kubectl / K8S API 修改要批准）；可勾选自动批准执行 |
 | 全局记忆 | 总结本人会话为可编辑草稿，或手动新增；共享查看、搜索、分页、多选，所选记忆仅随下一轮发送 |
-| Skills 与 Agent | DeepAgents 加载 KubeDoor 运维、服务源码分析两个 Skill，支持子 Agent、上下文压缩及持久 checkpoint |
+| Skills 与 Agent | DeepAgents 加载 KubeDoor 运维、服务源码分析、运行配置与数据查询三个 Skill，支持子 Agent、上下文压缩及持久 checkpoint |
 | 接入自己的 MCP | 对话框的“MCP 管理”接入自己的 SSE / Streamable HTTP MCP 服务（URL + 可选请求头），按账号隔离、加密保存；启用后对话中按需调用，按工具是否只读决定要不要批准 |
 | 外部 MCP | 提供 Streamable HTTP 和兼容 SSE 入口，保留原工具并提供统一工具与 Skill 资源 |
 
@@ -290,7 +291,7 @@ Markdown 原始 HTML 禁用，链接按安全规则处理，图片只显示替�
 
 ## 工具与 Skills
 
-DeepAgents 加载仓库内的 `kubedoor-k8s`（K8S 运维）和 `kubedoor-code`（服务源码分析）两个 Skill，
+DeepAgents 加载仓库内的 `kubedoor-k8s`（K8S 运维）、`kubedoor-code`（服务源码分析）和 `kubedoor-config`（运行配置与数据查询）三个 Skill，
 企微对话按问题自动匹配，网页对话也可以手动启用；每轮还会把实际工具目录注入模型上下文，
 外部调用方可通过 `GET /api/ai/tools` 查询。已有且适用、可用的 KubeDoor API 优先，
 包括查询和重启、扩缩容、定时、周期执行等业务操作；接口没有覆盖需求、目标资源
@@ -304,7 +305,7 @@ DeepAgents 加载仓库内的 `kubedoor-k8s`（K8S 运维）和 `kubedoor-code`�
 | `kubedoor` | 调用现有 master、Agent、数据库和监控业务接口；满足需求且可用时优先使用 |
 | `agent` | 通过在线且声明通用工具能力的 Agent，在目标集群内执行 SDK、CLI、Pod 命令，无需 kubeconfig |
 | `direct` | AI 服务使用已保存的 kubeconfig 与选定 context，直连目标 Kubernetes API |
-| `auto` | 已有目录操作走 KubeDoor；通用操作存在 kubeconfig 时选 direct，否则选 agent |
+| `auto` | 已有目录操作走 KubeDoor；通用操作存在 kubeconfig 时选 direct，否则选 agent；数据库 / Redis / ES 查询见[运行配置与数据查询](#运行配置与数据查询) |
 
 AI 先根据用户问题选择操作，再选择来源。同一集群同时具备 Agent 与 kubeconfig
 时，可用的业务接口仍优先；`auto` 不会把通用 `api` 或 `kubectl` 自动改写成业务
@@ -320,6 +321,7 @@ AI 先根据用户问题选择操作，再选择来源。同一集群同时具�
 | 调度与节点 | 节点资源排名、禁止或恢复新调度、Pod 删除/隔离、既有负载均衡流程 |
 | 服务与配置 | Service 后端、Ingress 规则、ConfigMap 和资源 YAML 读取、应用、删除 |
 | 监控 | 工作负载指标、节点排名、VictoriaMetrics 自由 MetricsQL 查询及已有 Prometheus 指标接口 |
+| 配置与数据 | 服务实际运行的配置（配置中心、环境变量、配置文件合并后的生效值）；用配置里的连接信息只读查询 MySQL、Redis、Elasticsearch |
 | 通用排障 | 动态 K8S API/CRD、kubectl、istioctl、Pod exec，辅助 jq/yq/curl/dig/openssl/rg，以及从 agent（或 kubedoor-ai）里发起的网络与系统诊断：nc -z/nmap/tcpdump/iperf3/traceroute/mtr、ps/top/lsof/vmstat/iostat 等（参数受限；端口探测、扫描、抓包和压测和 curl、openssl 一样按修改操作处理，要「AI 诊断工具」权限） |
 
 能力是否可执行取决于所选集群、可用连接、账号权限与「权限与审批」配置、Kubernetes 凭据权限，以及
@@ -422,6 +424,29 @@ VictoriaMetrics 的自由 MetricsQL 查询经 master 网关使用现有 `PROM_UR
 
 典型排障流程：日志里有异常堆栈 → `code_fetch` 下载出问题的 Pod 的源码 → 按堆栈里的文件名或报错消息 `code_search` → `code_read` 读出错位置前后的代码，需要看被调用方法的实现时用 `code_symbols` 找定义 → 结合日志给出原因和修复建议。
 
+### 运行配置与数据查询
+
+前提是系统管理员在「系统管理 → 获取运行配置接口」配置并启用了获取运行配置接口（Deployment 页、Pod 页「获取运行配置」用的同一个接口），并在同一页面打开「允许 AI 获取运行配置」（默认关闭）。
+
+| 工具 | 作用 |
+| --- | --- |
+| `runtime_config` | 按 Deployment 或 Pod 获取服务实际运行的配置：配置中心、环境变量、配置文件合并后的生效值；可以用 `keys`（正则，不区分大小写）只取需要的配置项，例如 `datasource\|redis`。密码、密钥换成占位符，模型看不到明文 |
+| `mysql` | 只读查询 MySQL：只能是一条 SELECT / SHOW / DESC / EXPLAIN / WITH / TABLE 语句，在只读事务里执行后回滚；默认最多返回 100 行，最多 1000 行 |
+| `redis` | 只读查询 Redis：只能用只读命令（GET、HGETALL、LRANGE、SCAN、INFO、SLOWLOG GET 等），KEYS 要改用 SCAN；集群的 MOVED / ASK 自动跳转，哨兵模式给出主节点名后自动连主节点 |
+| `elasticsearch` | 只读查询 Elasticsearch：只能用查询类接口（`_search`、`_count`、`_cat`、`_mapping`、`_cluster/health`、SQL 等），PUT / DELETE / PATCH 和 scroll 一律拒绝 |
+
+- 获取运行配置要「查看运行配置」权限（默认读写及以上，不审批），网页上的「获取运行配置」按钮也按这一行；关掉「允许 AI 获取运行配置」后，AI 不能获取配置，也不能再用配置里的密码查询。
+- 运行配置里的密码、密钥（按配置名判断，例如 `spring.datasource.password`、`REDIS_PASSWORD`、`jwt.secret`，以及 URL 里 `user:密码@` 的密码部分）在 kubedoor-ai 里换成占位符 `<secret:命名空间/deployment|pod/名称:位置>` 再交给模型，明文不发给模型服务商，也不进对话记录、审批卡片和检查点。
+- 查询数据库 / Redis / ES 要「AI 查询数据库 / Redis / ES」权限（默认读写及以上），默认每次要提问人批准，可以在「权限与审批」改成免批准。模型把占位符原样填进 `password` / `api_key`，执行前由服务端重新获取运行配置、把占位符换回真实值；结果里出现的密码也会打码。
+- 用运行配置里的密码查询时，`host`（ES 是 `url` 的主机）必须是这个服务运行配置里写的地址（IP 和域名不能互换），防止密码被发到别的主机；Redis 集群的其他节点、哨兵返回的主节点由工具自动跳转，不用另填地址。
+- 查询优先从业务集群里的 agent 发起（新版 agent，业务库通常只有业务集群里能连上）；agent 不在线或版本旧时从 kubedoor-ai 发起，连不上时 AI 会提示升级 agent。
+- 只读由工具检查保证，不合格的请求直接拒绝、不进审批：MySQL 只允许一条查询语句（不能有注释、`INTO OUTFILE`、`FOR UPDATE`、`SLEEP()` 等，字符串里的单引号写成 `''`），在只读事务里执行；Redis 按只读命令白名单（`CONFIG GET` 不能查密码类参数，HGETALL、SMEMBERS 这类超过 1 万个元素的要改用 HSCAN、SSCAN）；ES 按查询接口白名单。
+- MySQL 的 `ssl`、Redis 的 `tls` 只加密、不校验证书（同 JDBC 的 `useSSL=true`）；TiDB 默认不支持只读事务（`START TRANSACTION READ ONLY`），查询会被拒绝。
+- 结果有上限：单个值最多 1000 字符，整体约 6 万字符，超过截断；列名或字段名像密码的值显示为 `[REDACTED]`，查询用到的密码在结果里出现时也会打码（6 个字符以下的短密码只按列名、字段名打码，免得把结果里同样的字符串都打掉）。
+- 每次获取运行配置在 master 记审计（「获取运行配置」`runtime_config.get`，不记配置值），数据查询记在 AI 的工具调用记录里，从 agent 发起的还记「AI 通用执行」审计。
+
+典型排障流程：服务报连接超时或数据不对 → `runtime_config` 用 `keys` 取数据源、Redis、ES 配置 → 核对地址、超时、连接池、开关是否和预期一致 → 用占位符查询（例如 MySQL `SHOW PROCESSLIST`、`EXPLAIN` 慢 SQL、查某条数据是否存在，Redis `GET` / `TTL` 某个 key）→ 结合日志给出结论。
+
 ### 提问示例
 
 | 问题 | 应使用的能力 |
@@ -434,6 +459,8 @@ VictoriaMetrics 的自由 MetricsQL 查询经 master 网关使用现有 `PROM_UR
 | “检查 Istio 代理状态与当前 VirtualService 配置” | 受控 istioctl 或 Kubernetes CRD API；不修改平台共享数据库模板 |
 | “order-api-7d9f8b6c5-x2x9k 现在跑的是哪个版本的代码” | `code_info` 按 Pod 查镜像和代码链接 |
 | “这个 Pod 一直报 NullPointerException，看看代码哪里有问题” | 先取日志里的堆栈，再 `code_fetch` → `code_search` → `code_read` 定位到具体代码行（需要管理员允许 AI 下载源码） |
+| “看下 order-api 的数据库和 Redis 配置” | `runtime_config` 带 `keys=datasource\|redis`，密码以占位符显示（需要管理员允许 AI 获取运行配置） |
+| “order-api 报找不到订单 123，去库里查下有没有这条数据” | 先 `runtime_config` 取数据源配置，再用里面的地址和占位符 `mysql` 查询（默认要提问人批准） |
 
 ## 权限与执行边界
 
@@ -445,7 +472,7 @@ VictoriaMetrics 的自由 MetricsQL 查询经 master 网关使用现有 `PROM_UR
 | --- | --- |
 | 本人会话、模型配置与模型连接测试 | 可使用 |
 | 只读 K8S、指标、历史查询 | 对所选集群只读及以上就能用，不审批 |
-| 修改资源、kubectl / istioctl / K8S API 修改、Pod 内命令、会发请求或写文件的诊断、查看 Secret 内容 | 按下文「权限与审批」：先看有没有权限，再看要不要批准 |
+| 修改资源、kubectl / istioctl / K8S API 修改、Pod 内命令、会发请求或写文件的诊断、查看 Secret 内容、获取运行配置、查询数据库 / Redis / ES | 按下文「权限与审批」：先看有没有权限，再看要不要批准 |
 | 共享记忆查看、引用、本人会话摘要草稿 | 可使用 |
 | 接入自己的 MCP，批准自己 MCP 的调用 | 可使用（与集群权限无关） |
 | 全局记忆新建、修改、删除与草稿发布 | 需要全局角色是读写、集群管理员或系统管理员（与集群无关） |
@@ -457,7 +484,7 @@ VictoriaMetrics 的自由 MetricsQL 查询经 master 网关使用现有 `PROM_UR
 和 Pod 内命令的两个清单，配置和具体集群无关。AI 的每次工具调用：
 
 1. 先算出涉及的操作类型。查询不涉及任何操作类型，能看到该集群就能执行、不审批；例外是用 `resource_content` 查看 Secret
-   内容，要「查看 Secret 内容」权限（不审批）。
+   内容，要「查看 Secret 内容」权限，用 `runtime_config` 获取运行配置，要「查看运行配置」权限（默认都不审批）。
 2. 再查权限：账号在该集群的权限那一列没勾选，直接拒绝（工具返回 `permission_denied`，如「当前账号在集群 X 是『只读』权限，
    不能执行『扩缩容』」），不建审批；模型如实告诉用户，不换工具或来源绕过。「管理员」列也被取消的操作谁都不能做。
 3. 有权限时看审批列：涉及的操作里任意一个勾了审批就要提问人批准，否则直接执行；高危命令固定要批准。
@@ -476,6 +503,8 @@ VictoriaMetrics 的自由 MetricsQL 查询经 master 网关使用现有 `PROM_UR
 | Pod 内高危命令 | 读写、管理员 | 固定要批准 |
 | 会发请求或写文件的诊断（curl、openssl、nc、nmap、tcpdump、iperf3、`yq -i`） | 读写、管理员 | 不审批 |
 | 查看 Secret 内容（`resource_content`） | 读写、管理员 | 不审批 |
+| 获取运行配置（`runtime_config`） | 读写、管理员 | 不审批 |
+| 查询数据库 / Redis / ES（`mysql`、`redis`、`elasticsearch`，只读） | 读写、管理员 | 要批准 |
 
 **Pod 内命令**（`pod_exec`、`kubectl exec`）按清单分三类，分别对应权限表的三行：
 

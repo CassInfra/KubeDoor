@@ -126,6 +126,8 @@ const ACTION_LABELS: Record<string, string> = {
   "code_info.update": "修改获取代码接口",
   "code_info.get": "获取代码",
   "code_info.fetch": "AI 下载源码",
+  "runtime_config.update": "修改获取运行配置接口",
+  "runtime_config.get": "获取运行配置",
   "api.write": "写操作",
   "api.denied": "越权被拒",
   "ai.agent_execute": "AI 执行修改"

@@ -33,11 +33,11 @@ master 统一负责认证、授权与审计,nginx 不再做认证。本目录是
 Web「系统管理 → 权限与审批」(`/system/permissions`)配置每种集群权限能做哪些操作、AI 做这些操作前要不要提问人确认。
 只有系统管理员能看和改,配置和具体集群无关。
 
-**操作权限表**:行是操作类型(`OPERATIONS`,25 行),列是集群有效权限 只读 / 读写 / 管理员,外加「审批」列。
+**操作权限表**:行是操作类型(`OPERATIONS`,27 行),列是集群有效权限 只读 / 读写 / 管理员,外加「审批」列。
 
 - 判定:`principal.can(op, env)` = 这一行在该集群有效权限那一列是否勾选。没有权限直接 403 `operation_forbidden`
   (「当前账号在集群 X 是「只读」权限,不能执行「扩缩容」」),AI 也不会建审批;看不到的集群是 `cluster_forbidden`。
-- 查询不在表里,有效权限 `read` 及以上都能做;例外是「查看 Secret 内容」。系统管理不在表里,只看是不是系统管理员。
+- 查询不在表里,有效权限 `read` 及以上都能做;例外是「查看 Secret 内容」「查看运行配置」(含明文密码)。系统管理不在表里,只看是不是系统管理员。
 - 「管理员」列也可以取消:取消后包括系统管理员在内谁都不能做(相当于全站关闭)。勾选保持 只读 ⊆ 读写 ⊆ 管理员
   (页面联动,保存时校验)。
 - 审批列只对 AI 生效(网页 AI、企微 AI、外部 MCP 规则一样):有权限时,涉及的操作里任意一个勾了审批就要提问人确认,
@@ -55,6 +55,8 @@ Web「系统管理 → 权限与审批」(`/system/permissions`)配置每种集�
 | | `resource.secret` 查看 Secret 内容 | 网页+AI | — |
 | | `ai.k8s_write` AI 通用修改(kubectl / istioctl / K8S API,页面标红) | AI | 审批 |
 | | `ai.diagnostic` AI 诊断工具里会发请求或写文件的(curl、openssl、nc、nmap、tcpdump、iperf3、`yq -i`) | AI | 不审批 |
+| 配置与数据 | `config.view` 查看运行配置(网页「获取运行配置」和 AI 获取运行配置,含明文密码;AI 看到的是占位符) | 网页+AI | 不审批 |
+| | `data.query` AI 查询数据库 / Redis / ES(MySQL、Redis、Elasticsearch 只读查询,密码由服务端按占位符填入) | AI | 审批 |
 | 节点 | `node.cordon` 禁止 / 允许调度、`balance.run` 节点均衡 | 网页+AI | 审批 |
 | 资源管控 | `control.edit` 资源管控(管控服务、requests/limits、JVM,采集高峰期数据) | 网页+AI | 审批 |
 | 网络 | `network.coredns` CoreDNS 修改、`network.istio` Istio 修改 | 网页+AI | 审批 |
