@@ -103,9 +103,18 @@ class OffloadApiClient(client.ApiClient):
 
 
 def load_incluster_config():
-    """加载集群内配置"""
+    """加载集群内配置,设成默认配置(之后不传配置的 ApiClient / WsApiClient 都从它复制)
+
+    连 apiserver 不开 OpenSSL 的 X509 严格模式:Python 3.13 起 ssl.create_default_context() 默认带 VERIFY_X509_STRICT,
+    要求证书有 Authority Key Identifier 等扩展。老集群(如 2020 年建的华为云 CCE)的 CA 没有 Subject Key Identifier,
+    签出来的 apiserver 证书也就没有 AKI,续签也一样,握手报 "Missing Authority Key Identifier",所有 K8S 调用都失败。
+    CA 和主机名照常校验,和 kubectl、Python 3.12 及以前一致。
+    """
     try:
-        config.load_incluster_config()
+        configuration = client.Configuration()
+        config.load_incluster_config(client_configuration=configuration)
+        configuration.disable_strict_ssl_verification = True
+        client.Configuration.set_default(configuration)
         logger.info("✅ 成功加载集群内配置")
     except Exception as e:
         logger.error(f"❌ 加载集群内配置失败: {e}")

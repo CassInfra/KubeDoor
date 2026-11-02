@@ -3,7 +3,7 @@ from functools import partial
 from urllib.parse import urlencode
 import aiohttp
 from aiohttp import ClientSession, WSMsgType, web
-from kubernetes_asyncio import client, config
+from kubernetes_asyncio import client
 from kubernetes_asyncio.client.rest import ApiException
 from datetime import datetime
 from loguru import logger
@@ -32,7 +32,7 @@ from func_manager.ai_tools import AiToolHandler
 from func_manager.pod_exec import PodExecManager
 from func_manager.pod_log_stream import PodLogStreamer, MAX_STREAMS as MAX_LOG_STREAMS
 from func_manager.ws_lifecycle import run_connection_tasks, MasterConnection
-from k8s_client_manager import OffloadApiClient
+from k8s_client_manager import OffloadApiClient, load_incluster_config
 from scaler.scale_service import ScaleService
 from scaler.cci_scaler import get_schedule_profile_info
 from load_balance import analyze_and_plan, execute_plan, get_isolated_pods, cleanup_pods
@@ -94,7 +94,8 @@ def init_kubernetes():
     """在程序启动时加载 Kubernetes 配置并初始化客户端"""
     global v1, batch_v1, core_v1, log_core_v1, networking_v1, admission_api, custom_api, deployment_monitor, event_monitor, scale_service, admis_service, balance_node_service, mcp_service, update_image_handler, reboot_service, workload_cache, workload_streamer, ai_tool_handler, pod_exec_manager, pod_log_streamer
     try:
-        config.load_incluster_config()
+        # 设成默认配置,下面不传配置的 OffloadApiClient()、get_default_copy() 和终端的 WsApiClient() 都从它复制
+        load_incluster_config()
         ai_tool_handler = AiToolHandler()
         # 大响应的反序列化放到线程里做,list 全集群对象时不卡事件循环(探活 / 心跳 / watch 都在这个循环上)
         v1 = client.AppsV1Api(OffloadApiClient())

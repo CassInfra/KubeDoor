@@ -11,6 +11,7 @@ import os
 import re
 import shutil
 import signal
+import ssl
 import subprocess
 import tempfile
 import time
@@ -441,6 +442,29 @@ def _validate_cli(operation: str, arguments: dict) -> tuple[str, list[str], dict
     return str(program), run_argv, files
 
 
+def _relax_x509_strict(api_client) -> None:
+    """Verify the API server like kubectl does: CA chain and hostname, without OpenSSL's X509 strict mode.
+
+    On Python 3.13+ urllib3 (2.3+) sets VERIFY_X509_STRICT, as ssl.create_default_context() does.
+    Older clusters (e.g. Huawei CCE created in 2020) have a CA without Subject Key Identifier, so
+    the API server certificate has no Authority Key Identifier, renewed or not, and every call
+    fails with "Missing Authority Key Identifier". The SDK has no switch, so the pool gets its own
+    SSLContext. One per client: urllib3 loads ca_certs into the given context on every connection,
+    a shared context would end up trusting every cluster's CA.
+    """
+    if not api_client.configuration.verify_ssl:
+        return
+    from urllib3.util.ssl_ import create_urllib3_context
+
+    context = create_urllib3_context()
+    context.verify_flags &= ~ssl.VERIFY_X509_STRICT
+    pool_kw = api_client.rest_client.pool_manager.connection_pool_kw
+    if not any(pool_kw.get(key) for key in ("ca_certs", "ca_cert_dir", "ca_cert_data")):
+        # urllib3 falls back to the system CAs only for its own default context.
+        context.load_default_certs()
+    pool_kw["ssl_context"] = context
+
+
 class KubernetesExecutor:
     """Each instance owns one selected cluster and an independent ApiClient.
 
@@ -515,6 +539,7 @@ class KubernetesExecutor:
             configuration.retries = Retry(total=0, redirect=0, raise_on_redirect=False)
             self._configuration = configuration
             self._client = client.ApiClient(configuration=configuration)
+            _relax_x509_strict(self._client)
             self._credential_token()
 
     async def _api(self, arguments: dict, run: _Run, timeout: float) -> Any:
