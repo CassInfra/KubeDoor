@@ -26,6 +26,9 @@
           <el-form-item>
             <el-button type="primary" @click="handleSearch">刷新</el-button>
             <el-button @click="handleReset">重置</el-button>
+            <el-button v-if="isAdmin" type="success" @click="openAgentInstall">
+              安装 Agent
+            </el-button>
           </el-form-item>
 
           <!-- 勾选后出现:批量更新 / 批量重启选中的 agent -->
@@ -316,6 +319,12 @@
         </el-card>
       </div>
 
+      <AgentInstallDialog
+        v-if="installDialogMounted && isAdmin"
+        v-model="installDialogVisible"
+        @changed="getAgentData"
+      />
+
       <!-- 采集历史数据对话框 -->
       <el-dialog
         v-model="collectDialogVisible"
@@ -593,6 +602,15 @@ import { aiApi, type AIConnection } from "@/api/ai";
 const KubeconfigDialog = defineAsyncComponent(
   () => import("@/components/AI/KubeconfigDialog.vue")
 );
+const AgentInstallDialog = defineAsyncComponent(
+  () => import("./AgentInstallDialog.vue")
+);
+const installDialogMounted = ref(false);
+const installDialogVisible = ref(false);
+function openAgentInstall() {
+  installDialogMounted.value = true;
+  installDialogVisible.value = true;
+}
 const aiAvailable = ref(false);
 const aiPermission = ref("");
 const connections = ref<Record<string, AIConnection>>({});

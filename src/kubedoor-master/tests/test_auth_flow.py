@@ -130,6 +130,79 @@ async def test_agent_account_cannot_use_web_but_can_register_agent(fake):
 
 
 @pytest.mark.asyncio
+async def test_installed_agent_is_bound_to_exact_cluster(fake):
+    client = await make_client(fake)
+    try:
+        agent = await add_user(fake, 'agent-prod', 'agent', 'Agent-pass-1')
+        await fake.bind_agent(agent['id'], 'prod')
+        await fake.bind_agent(agent['id'], 'prod')  # 安装任务的幂等重试
+        with pytest.raises(ValueError):
+            await fake.bind_agent(agent['id'], 'staging')
+        headers = {'Authorization': basic('agent-prod', 'Agent-pass-1')}
+        assert (await client.get('/ws?env=prod', headers=headers)).status == 200
+        for path in ('/ws?env=staging', '/ws', '/ws?env=PROD'):
+            blocked = await client.get(path, headers=headers)
+            assert blocked.status == 403
+            assert (await blocked.json())['code'] == 'agent_cluster_mismatch'
+        # 原来的共用账号仍可用于原有脚本安装。
+        legacy = {'Authorization': basic('Up4biLko1dNh', 'qCa22jDkfc9y')}
+        assert (await client.get('/ws?env=staging', headers=legacy)).status == 200
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_metrics_requires_bound_agent_basic_credentials(fake):
+    client = await make_client(fake)
+    try:
+        agent = await add_user(fake, 'agent-prod', 'agent', 'Agent-pass-1')
+        await fake.bind_agent(agent['id'], 'prod')
+        endpoint = '/api/auth/verify?for=metrics'
+        assert (await client.get(endpoint)).status == 401
+        headers = {'Authorization': basic('agent-prod', 'Agent-pass-1')}
+        result = await client.get(endpoint, headers=headers)
+        assert result.status == 204
+        assert result.headers['X-Kubedoor-Agent-Env'] == 'prod'
+        assert result.headers['X-Kubedoor-User'] == 'agent-prod'
+        assert (await client.post(endpoint, headers=headers)).status == 204
+        # 新指标入口不接受旧共用凭据、Web 管理员或其它人类账号。
+        await add_user(fake, 'reader', 'read', 'Reader-pass-1')
+        await add_user(fake, 'admin', 'admin', 'Admin-pass-1')
+        for name, password in (('Up4biLko1dNh', 'qCa22jDkfc9y'),
+                               ('reader', 'Reader-pass-1'), ('admin', 'Admin-pass-1')):
+            assert (await client.get(endpoint, headers={'Authorization': basic(name, password)})).status == 403
+        # 浏览器不能借用 Basic 或登录 Cookie 调用指标入口。
+        assert (await client.get(endpoint, headers={**headers, 'Sec-Fetch-Mode': 'cors'})).status == 401
+        assert (await login(client, 'admin', 'Admin-pass-1')).status == 200
+        assert (await client.get(endpoint)).status == 403
+        assert (await client.get('/api/auth/verify?for=unknown')).status == 403
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_bound_agent_disable_and_password_change_revoke_access(fake):
+    client = await make_client(fake)
+    try:
+        agent = await add_user(fake, 'agent-prod', 'agent', 'Agent-pass-1')
+        await fake.bind_agent(agent['id'], 'prod')
+        headers = {'Authorization': basic('agent-prod', 'Agent-pass-1')}
+        assert (await client.get('/ws?env=prod', headers=headers)).status == 200
+        assert (await client.get('/api/auth/verify?for=metrics', headers=headers)).status == 204
+        await fake.update_user(agent['id'], enabled=False)
+        assert (await client.get('/ws?env=prod', headers=headers)).status == 403
+        assert (await client.get('/api/auth/verify?for=metrics', headers=headers)).status == 401
+        await fake.update_user(agent['id'], enabled=True)
+        await fake.set_password(agent['id'], passwords.hash_password('Agent-pass-2'))
+        assert (await client.get('/ws?env=prod', headers=headers)).status == 401
+        current = {'Authorization': basic('agent-prod', 'Agent-pass-2')}
+        assert (await client.get('/ws?env=prod', headers=current)).status == 200
+        assert (await client.get('/ws?env=staging', headers=current)).status == 403
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
 async def test_cluster_permissions_enforced_on_requests(fake):
     client = await make_client(fake)
     try:

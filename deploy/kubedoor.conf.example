@@ -96,7 +96,8 @@ KUBEDOOR_INIT_AGENT_PASSWORD=""
 AGENT_AUTH_REQUIRED="true"
 
 # KubeDoor Web 的外部访问地址,形如 http://<节点IP>:<Web 的 NodePort>
-# 填了以后 IM 告警通知里的【屏蔽】按钮会直接跳到 KubeDoor 的屏蔽页并预填条件
+# 填了以后 IM 告警通知里的【屏蔽】按钮会直接跳到 KubeDoor 的屏蔽页并预填条件。
+# 同时作为网页安装 Agent 的默认连接地址，必须能从目标集群访问。
 KUBEDOOR_EXTURL=""
 
 # Alertmanager 的外部访问地址。KUBEDOOR_EXTURL 没填时,【屏蔽】按钮回退到这里
@@ -141,6 +142,13 @@ ENABLE_MCP="true"
 # =============================================================================
 
 ENABLE_VICTORIA_METRICS="true"
+
+# 使用外部时序库时，网页安装 Agent 的统一指标入口代理到此写入地址。
+# 查询地址 PROM_URL 不一定支持写入；这里需填写完整路径，例如：
+# https://vm.example.com/api/v1/write 或 VM 集群的 /insert/0/prometheus/api/v1/write。
+# 可带 URL 编码后的 Basic 认证；凭据只保存在控制端 Secret。
+# 使用内置 VictoriaMetrics 时留空自动配置；不用指标采集也可以留空。
+METRICS_WRITE_URL=""
 
 # 【ENABLE_VICTORIA_METRICS=true 时生效】内置 VictoriaMetrics 的参数
 VM_RETENTION="30d"

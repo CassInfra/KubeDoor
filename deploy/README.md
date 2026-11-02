@@ -39,7 +39,7 @@ KubeDoor 分控制端(master)和集群端(agent)两部分:
 
 | 项目 | 要求 |
 |---|---|
-| 执行机器 | 能直接跑 `kubectl` 并连上目标集群,bash 4 以上 |
+| 执行机器 | 能直接跑 `kubectl` 并连上目标集群,bash 4 以上、Python 3 和 PyYAML（`python3 -m pip install PyYAML`）。使用完整仓库，Agent 渲染模块位于 `src/kubedoor-master/agent_install/` |
 | K8S | 1.21+(用到了 `batch/v1` 的 CronJob),要有一个可用的 StorageClass(仅当启用内置 VictoriaMetrics)。每日采集和 agent 建的定时/周期任务按北京时间执行,这需要 1.25+(CronJob 的 `timeZone` 字段);更老的集群安装脚本会自动去掉该字段并提示,按 kube-controller-manager 的时区执行 |
 | metrics-server | 每个纳管集群都要装:Pod、节点管理、Deployment 明细里的实时 CPU/内存用量都靠它,"节点均衡"离不开它 |
 | CPU 架构 | KubeDoor 的镜像和 `kubedoor.conf` 里默认的第三方镜像都只有 amd64,ARM 节点需要自己构建 KubeDoor 镜像,并把第三方镜像换成官方的多架构镜像 |
@@ -84,7 +84,19 @@ vi kubedoor.conf        # 改 PG_HOST / PG_PASSWORD / MSG_TOKEN 等
 
 装完会打印 Web 控制台地址和内置超级管理员账号(`kubedoor` / `kubedoor`),首次登录会强制修改口令。之后在 Web 的「系统管理」里添加账号、配置 LDAP、按集群分配权限,见[账号与权限](#账号与权限)。
 
-### 第三步:装集群端
+### 第三步:在网页安装集群端（推荐）
+
+已有部署启用此功能时，需要更新 master 和 Web 镜像，并重新执行 `./install.sh master` 应用新增的网关 Secret 与安装配置；master 启动时自动创建安装任务表。master 镜像现在从仓库根目录构建（`build.sh` 已处理）；本地运行 master 时还需在仓库根目录执行 `pip install -e src/kubedoor-tools` 安装共享库。
+
+管理员打开「Agent 管理」→「安装 Agent」，上传 kubeconfig、选择目标 context，确认集群标识后检测并安装。默认完整接入包含 Agent 和指标采集；已有完整监控链路时可选择「仅安装 Agent」。安装进度和失败原因都显示在页面，关闭弹窗不取消后台安装。
+
+控制端需能访问 kubeconfig 中的 API Server；目标集群需能访问 KubeDoor。`KUBEDOOR_EXTURL` 可预填这个外部连接地址。完整接入的 `REMOTE_WRITE_URL` 自动生成为同一入口的 `/agent/metrics/write`，不需要将 VM 账号口令复制到业务集群；若使用外部时序库，在控制端配置一次 `METRICS_WRITE_URL`（完整写入路径），不能用查询用的 `PROM_URL` 代替。
+
+kubeconfig 仅在本次安装期间加密保存，成功后清理。只支持内嵌 token 或证书，不执行 kubeconfig 的 `exec` 插件或读取其中引用的本地文件；这种配置需要先导出可在控制端使用的版本。Agent 本身仍用集群内 ServiceAccount。
+
+### 脚本安装集群端
+
+目标 API Server 不向控制端开放时，仍可在能访问目标集群的机器上使用脚本。
 
 到每个业务集群上(或者就在同一个集群):
 

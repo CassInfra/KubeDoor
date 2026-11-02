@@ -104,7 +104,7 @@ data:
 
             # ---------- 鉴权子请求:问 master 当前用户是谁、有没有权限,只能 nginx 内部调用 ----------
             # session 浏览器登录会话;mcp 会话或 Basic 认证;grafana 能看到全部集群的登录会话;alert Agent / 全局读写账号
-            location ~ ^/_kd_auth/(session|mcp|grafana|alert)$ {
+            location ~ ^/_kd_auth/(session|mcp|grafana|alert|metrics)$ {
                 internal;
                 proxy_pass http://kubedoor_master/api/auth/verify?for=$1;
                 proxy_pass_request_body off;
@@ -116,6 +116,34 @@ data:
                 # 调大 proxy_buffer_size 必须同时设 busy_buffers,否则默认值(它的 2 倍)超出上限,nginx 起不来
                 proxy_buffer_size 16k;
                 proxy_busy_buffers_size 16k;
+            }
+
+            # 安装请求包含 kubeconfig，任何步骤都不记录请求体或查询参数。
+            location ^~ /api/admin/agent-installations {
+                client_max_body_size 2m;
+                access_log /var/log/nginx/access.log ai_safe;
+                proxy_set_header X-Kubedoor-Token "";
+                proxy_set_header X-Real-IP $remote_addr;
+                proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+                proxy_set_header X-Forwarded-Proto $scheme;
+                proxy_read_timeout 180;
+                proxy_pass http://kubedoor_master;
+            }
+
+            # 指标直接流向时序库；master 只验证 Agent 身份。
+            location = /agent/metrics/write {
+                limit_except POST { deny all; }
+                auth_request /_kd_auth/metrics;
+                access_log /var/log/nginx/access.log ai_safe;
+                proxy_http_version 1.1;
+                proxy_set_header Connection "";
+                proxy_set_header Cookie "";
+                proxy_set_header X-Kubedoor-Token "";
+                proxy_set_header X-User-Name "";
+                proxy_set_header X-User-Permission "";
+                proxy_set_header X-User-Clusters "";
+                proxy_read_timeout 120;
+                include /etc/nginx/metrics/metrics.conf;
             }
 
             # ---------- AI 助手:登录会话。AI 服务的内部接口只给集群内服务用,对外一律 404 ----------
@@ -216,6 +244,9 @@ spec:
         checksum/config: '__CONFIG_HASH_WEB__'
     spec:
       volumes:
+        - name: metrics-gateway
+          secret:
+            secretName: kubedoor-metrics-gateway
         - name: ai-security
           secret:
             secretName: kubedoor-ai-security
@@ -243,6 +274,9 @@ spec:
               cpu: 10m
               memory: 32Mi
           volumeMounts:
+            - name: metrics-gateway
+              mountPath: /etc/nginx/metrics
+              readOnly: true
             - name: ai-security
               mountPath: /etc/nginx/ai-security
               readOnly: true

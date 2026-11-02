@@ -11,6 +11,8 @@
 deploy
 # agent / ai 镜像构建时安装 kubectl、istioctl、yq 的脚本；deploy 下其余文件(含 kubedoor.conf)不进构建上下文
 !deploy/tools/install-ai-tools.sh
+!deploy/manifests/agent/
+!deploy/manifests/agent/**
 docs
 CLAUDE.md
 AGENTS.md

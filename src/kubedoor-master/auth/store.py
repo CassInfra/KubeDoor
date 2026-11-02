@@ -8,6 +8,7 @@ import asyncio
 import hashlib
 import json
 import os
+import re
 import secrets
 import time
 from datetime import datetime, timedelta, timezone
@@ -47,11 +48,13 @@ class AuthStore:
         self._users = {}  # user_id -> (过期时间, user dict, clusters dict)
         self._sessions = {}  # token_hash -> (过期时间, session dict)
         self._basic = {}  # 凭据哈希 -> (过期时间, user_id, 校验时的 password_hash)
+        self._agent_envs = {}  # user_id -> (过期时间, 安装绑定的集群名或 None)
         self._tasks = set()
 
     # ------------------------------------------------------------------ 缓存
     def invalidate_user(self, user_id):
         self._users.pop(user_id, None)
+        self._agent_envs.pop(user_id, None)
         for key in [k for k, (_, s) in self._sessions.items() if s['user_id'] == user_id]:
             self._sessions.pop(key, None)
         for key in [k for k, (_, uid, _) in self._basic.items() if uid == user_id]:
@@ -61,6 +64,7 @@ class AuthStore:
         self._users.clear()
         self._sessions.clear()
         self._basic.clear()
+        self._agent_envs.clear()
 
     def _spawn(self, coro):
         task = asyncio.create_task(coro)
@@ -89,6 +93,32 @@ class AuthStore:
     async def get_clusters(self, user_id):
         rows = await db.pg_fetch('SELECT env, permission FROM auth_user_clusters WHERE user_id=$1', user_id)
         return {row['env']: row['permission'] for row in rows}
+
+    async def agent_env(self, user_id):
+        """网页安装账号只连接绑定集群;旧 Agent 账号没有记录,保持原有行为。"""
+        if user_id is None:
+            return None
+        cached = self._agent_envs.get(user_id)
+        if cached and cached[0] > time.monotonic():
+            return cached[1]
+        row = await db.pg_fetchrow('SELECT env FROM auth_agent_bindings WHERE user_id=$1', user_id)
+        env = row['env'] if row else None
+        self._agent_envs[user_id] = (time.monotonic() + CACHE_TTL, env)
+        return env
+
+    async def bind_agent(self, user_id, env):
+        """安装任务可重试同一绑定,不能把运行中的凭据改绑到另一个集群。"""
+        if not isinstance(env, str) or len(env) > 200 or not re.fullmatch(r'[A-Za-z0-9_-]+', env):
+            raise ValueError('Agent 集群标识只能包含字母、数字、下划线和中划线,长度不超过 200')
+        row = await db.pg_fetchrow(
+            'INSERT INTO auth_agent_bindings (user_id, env) '
+            "SELECT id, $2 FROM auth_users WHERE id=$1 AND role='agent' "
+            'ON CONFLICT (user_id) DO UPDATE SET env=EXCLUDED.env '
+            'WHERE auth_agent_bindings.env=EXCLUDED.env RETURNING env', user_id, env,
+        )
+        if row is None:
+            raise ValueError('账号不是 Agent 账号,或已经绑定其它集群')
+        self.invalidate_user(user_id)
 
     async def principal_for(self, user_id, via, session_hash=None, must_change=None):
         user, clusters = await self.get_user(user_id)

@@ -15,7 +15,7 @@
 #   -o, --output DIR    render 的输出目录,默认打到标准输出
 #   -y, --yes           跳过确认
 #
-# 依赖:bash 4+、kubectl。在能直接执行 kubectl 的机器上跑。
+# 依赖:bash 4+、kubectl、Python 3 + PyYAML。在能直接执行 kubectl 的机器上跑。
 # =============================================================================
 
 set -euo pipefail
@@ -61,6 +61,9 @@ check_prereq() {
     fi
     command -v kubectl >/dev/null 2>&1 || die "找不到 kubectl,请先安装并配置好 kubeconfig"
     command -v base64  >/dev/null 2>&1 || die "找不到 base64 命令"
+    PYTHON_BIN="${PYTHON_BIN:-python3}"
+    command -v "$PYTHON_BIN" >/dev/null 2>&1 || die "找不到 Python 3，请安装 Python 3 和 PyYAML"
+    "$PYTHON_BIN" -c 'import yaml' >/dev/null 2>&1 || die "缺少 PyYAML，请执行 python3 -m pip install PyYAML"
 }
 
 # kubectl 包装:统一带上 --context
@@ -345,7 +348,7 @@ build_master_vars() {
 
     # 用内置 VM 时,时序库地址由脚本拼出来,不用用户操心
     if [[ "${ENABLE_VICTORIA_METRICS:-true}" == "true" ]]; then
-        VARS[PROM_URL]="http://${VM_USER}:${VM_PASSWORD}@victoria-metrics.${NAMESPACE}:8428"
+        VARS[PROM_URL]="http://${VM_USER:-monit}:${VM_PASSWORD:-}@victoria-metrics.${NAMESPACE}:8428"
         VARS[PROM_TYPE]="Victoria-Metrics-Single"
     else
         VARS[PROM_URL]="$PROM_URL"
@@ -402,6 +405,17 @@ build_master_vars() {
     VARS[IMAGE_ALERTMANAGER]="${IMAGE_ALERTMANAGER:-}"
     VARS[IMAGE_BUSYBOX_CURL]="${IMAGE_BUSYBOX_CURL:-}"
 
+    # 同一份 Agent 渲染器用于网页和命令行。默认值随 master 配置下发，凭据只留在 Secret。
+    VARS[TAG_AGENT]="${TAG_AGENT:-2.3.0}"
+    VARS[IMAGE_VMAGENT]="${IMAGE_VMAGENT:-}"
+    VARS[IMAGE_KUBE_STATE_METRICS]="${IMAGE_KUBE_STATE_METRICS:-}"
+    VARS[IMAGE_NODE_EXPORTER]="${IMAGE_NODE_EXPORTER:-}"
+    VARS[OSS_URL]="${OSS_URL:-}"
+    VARS[AGENT_INSTALL_DEFAULTS]="$(bundle_vars | "$PYTHON_BIN" "$SCRIPT_DIR/../src/kubedoor-master/agent_install/bundle.py" metadata --field defaults)"
+    local metrics_proxy
+    metrics_proxy="$(bundle_vars | "$PYTHON_BIN" "$SCRIPT_DIR/../src/kubedoor-master/agent_install/bundle.py" metadata --field proxy)"
+    VARS[METRICS_PROXY_BASE64]="$(printf '%s\n' "$metrics_proxy" | base64 | tr -d '\n')"
+
     # 看板 ConfigMap 的 projected sources 列表,按 dashboards/ 下的文件动态生成
     local src="" f
     if [[ "${ENABLE_GRAFANA:-true}" == "true" ]]; then
@@ -418,7 +432,7 @@ build_master_vars() {
     local d="$MANIFEST_DIR/master"
     VARS[CONFIG_HASH_ENV]="$(render_file "$d/10-config.yaml" | content_hash)"
     VARS[CONFIG_HASH_MASTER]="$({ render_file "$d/10-config.yaml"; render_file "$d/alert_rules.json"; } | content_hash)"
-    VARS[CONFIG_HASH_WEB]="$(render_file "$d/40-web.yaml" | content_hash)"
+    VARS[CONFIG_HASH_WEB]="$({ render_file "$d/40-web.yaml"; printf '%s' "${VARS[METRICS_PROXY_BASE64]}"; } | content_hash)"
     VARS[CONFIG_HASH_GRAFANA]="$(render_file "$d/35-grafana.yaml" | content_hash)"
 }
 
@@ -469,10 +483,24 @@ build_agent_vars() {
     VARS[IMAGE_NODE_EXPORTER]="${IMAGE_NODE_EXPORTER:-}"
 }
 
+# NUL 分隔，不把配置当 shell 代码或命令行参数再次解释。
+bundle_vars() {
+    local key
+    for key in "${!VARS[@]}"; do printf '%s\0%s\0' "$key" "${VARS[$key]}"; done
+    for key in ENABLE_VICTORIA_METRICS ENABLE_VMAGENT ENABLE_KUBE_STATE_METRICS ENABLE_NODE_EXPORTER; do
+        printf '%s\0%s\0' "$key" "${!key:-true}"
+    done
+    printf 'METRICS_WRITE_URL\0%s\0' "${METRICS_WRITE_URL:-}"
+}
+
 # 把模板里的 __VAR__ 换成配置值。用 bash 参数替换,不走 sed,
 # 所以密码里有 / & \ 这类字符也不会出问题。
 render_file() {
     local src="$1"
+    if [[ "$src" == "$MANIFEST_DIR/agent/"* ]]; then
+        bundle_vars | "$PYTHON_BIN" "$SCRIPT_DIR/../src/kubedoor-master/agent_install/bundle.py" agent --file "$(basename "$src")"
+        return
+    fi
     local content key
     content="$(cat "$src")"
     for key in "${!VARS[@]}"; do
@@ -504,7 +532,7 @@ render_file() {
 master_manifests() {
     local d="$MANIFEST_DIR/master"
     # kubedoor-ai(AI 助手 + MCP)是必装组件
-    printf '%s\n' "$d/00-namespace.yaml" "$d/05-ai-security.yaml" "$d/10-config.yaml" "$d/20-master.yaml" "$d/25-alarm.yaml" "$d/30-ai.yaml"
+    printf '%s\n' "$d/00-namespace.yaml" "$d/05-ai-security.yaml" "$d/06-metrics-gateway.yaml" "$d/10-config.yaml" "$d/20-master.yaml" "$d/25-alarm.yaml" "$d/30-ai.yaml"
     [[ "${ENABLE_GRAFANA:-true}" == "true" ]] && printf '%s\n' "$d/35-grafana.yaml"
     printf '%s\n' "$d/40-web.yaml"
     [[ "${ENABLE_VICTORIA_METRICS:-true}" == "true" ]] && printf '%s\n' "$d/70-victoria-metrics.yaml"
@@ -713,7 +741,8 @@ print_master_access() {
         printf '    REMOTE_WRITE_URL="http://%s:%s@%s:%s/api/v1/write"\n' \
             "${VM_USER}" "${VM_PASSWORD}" "$ip" "$vmport"
     fi
-    printf '\n  下一步:到各个业务集群上执行 ./install.sh agent(agent 用内置 Agent 账号 Up4biLko1dNh 连接)\n'
+    printf '\n  下一步:打开 Web 控制台的「Agent 管理」→「安装 Agent」，上传目标集群 kubeconfig 即可安装。\n'
+    printf '  控制端无法访问目标 API Server 时，可在目标环境使用 ./install.sh agent：\n'
     printf '    同集群   MASTER_WS="ws://Up4biLko1dNh:%s@kubedoor-master.%s"\n' "$agent_pass" "$NAMESPACE"
     printf '    跨集群   MASTER_WS="ws://Up4biLko1dNh:%s@%s:%s"\n\n' "$agent_pass" "$ip" "${port:-<NodePort>}"
 }

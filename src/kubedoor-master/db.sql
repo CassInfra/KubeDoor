@@ -543,3 +543,29 @@ CREATE TABLE IF NOT EXISTS audit_logs (
 );
 CREATE INDEX IF NOT EXISTS idx_audit_logs_ts ON audit_logs (ts DESC);
 CREATE INDEX IF NOT EXISTS idx_audit_logs_user_ts ON audit_logs (lower(username), ts DESC);
+
+-- 网页安装创建的专用 Agent 身份；没有绑定记录的旧 Agent 账号仍按原行为认证。
+CREATE TABLE IF NOT EXISTS auth_agent_bindings (
+    user_id bigint PRIMARY KEY REFERENCES auth_users(id) ON DELETE CASCADE,
+    env text NOT NULL
+);
+
+-- payload 只保存脱敏的界面状态，kubeconfig/安装凭据全部放 encrypted。
+CREATE TABLE IF NOT EXISTS agent_installations (
+    id uuid PRIMARY KEY,
+    status text NOT NULL,
+    revision integer NOT NULL DEFAULT 0,
+    env text NOT NULL DEFAULT '',
+    target_uid text NOT NULL DEFAULT '',
+    payload jsonb NOT NULL,
+    encrypted text NOT NULL DEFAULT '',
+    created_at timestamptz NOT NULL DEFAULT now(),
+    updated_at timestamptz NOT NULL DEFAULT now(),
+    expires_at timestamptz NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_agent_installations_created ON agent_installations (created_at DESC);
+-- 跨进程也不能同时往同一集群、或用同一标识安装。
+CREATE UNIQUE INDEX IF NOT EXISTS uq_agent_installations_running_env
+    ON agent_installations (env) WHERE status='running' AND env<>'';
+CREATE UNIQUE INDEX IF NOT EXISTS uq_agent_installations_running_target
+    ON agent_installations (target_uid) WHERE status='running' AND target_uid<>'';

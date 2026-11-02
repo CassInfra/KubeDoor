@@ -58,8 +58,8 @@ build_and_push() {
     fi
 
     echo "➡️ 构建 Docker 镜像: $image"
-    if [ "$component" = "agent" ] || [ "$component" = "ai" ]; then
-        # Agent 和 AI 镜像从仓库根目录安装共享工具库和 CLI。
+    if [ "$component" = "agent" ] || [ "$component" = "ai" ] || [ "$component" = "master" ]; then
+        # master / Agent / AI 镜像从仓库根目录安装共享库与安装模板。
         docker build -f "$component_dir/Dockerfile" -t "$image" .
     else
         docker build -t "$image" "$component_dir"

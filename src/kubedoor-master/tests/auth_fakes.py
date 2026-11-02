@@ -14,6 +14,7 @@ class FakeStore(AuthStore):
         super().__init__()
         self.users = {}
         self.grants = {}
+        self.agent_bindings = {}
         self.sessions = {}
         self.settings = {}
         self.setting_meta = {}
@@ -32,6 +33,16 @@ class FakeStore(AuthStore):
 
     async def get_clusters(self, user_id):
         return dict(self.grants.get(user_id, {}))
+
+    async def agent_env(self, user_id):
+        return self.agent_bindings.get(user_id)
+
+    async def bind_agent(self, user_id, env):
+        user = self.users.get(user_id)
+        if user is None or user['role'] != 'agent' or self.agent_bindings.get(user_id, env) != env:
+            raise ValueError('账号不是 Agent 账号,或已经绑定其它集群')
+        self.agent_bindings[user_id] = env
+        self.invalidate_user(user_id)
 
     async def principal_for(self, user_id, via, session_hash=None, must_change=None):
         user, clusters = await self.get_user(user_id)
@@ -72,6 +83,7 @@ class FakeStore(AuthStore):
         if not self.users[user_id]['builtin']:
             self.users.pop(user_id)
             self.grants.pop(user_id, None)
+            self.agent_bindings.pop(user_id, None)
             for key in [k for k, s in self.sessions.items() if s['user_id'] == user_id]:
                 self.sessions.pop(key)
 

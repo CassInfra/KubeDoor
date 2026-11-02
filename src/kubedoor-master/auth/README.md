@@ -13,7 +13,7 @@ master 统一负责认证、授权与审计,nginx 不再做认证。本目录是
 | `rw` 读写 | 读写 | |
 | `read` 只读(默认) | 只读 | |
 | `none` 无 | 无 | 只能访问单独授权的集群 |
-| `agent` Agent 账号 | 无 | 只能注册 agent(`/ws`),不能登录 Web,不能调用其它接口 |
+| `agent` Agent 账号 | 无 | 注册 agent(`/ws`)、投递告警;网页安装的绑定账号还可写入指标,不能登录 Web 或访问管理接口 |
 
 集群授权 `auth_user_clusters(user_id, env, permission)`,`permission` 取 `admin` / `rw` / `read` / `none`,**优先于全局角色**。
 某个集群的有效权限:系统管理员一律 `admin`;有授权用授权;否则按全局角色兜底(`Principal.permission`)。
@@ -161,6 +161,9 @@ AI 助手、MCP、Grafana、自定义告警不经过 master,nginx 用 `auth_requ
 | `mcp` | Cookie 或 Basic | 同上 | 同上 |
 | `grafana` | 会话 Cookie | 同上,且能看到全部集群(Grafana 做不到按集群隔离) | 另有 `X-Kubedoor-Grafana-Role`(系统管理员 Admin,其他 Viewer) |
 | `alert` | Basic | Agent 账号或全局角色读写及以上 | 同上 |
+| `metrics` | Basic | 具有 `auth_agent_bindings` 记录的 Agent 账号 | 另有 `X-Kubedoor-Agent-Env`(绑定集群) |
+
+网页安装为每个安装创建独立 Agent 账号,通过 `auth_agent_bindings(user_id, env)` 绑定集群。`/ws` 在认证后核对绑定与 `env`,同一绑定可重试,已绑定账号不能改绑其它集群。旧脚本使用的未绑定账号继续按原有方式连接,但不开放新增的指标代理入口。绑定校验用于控制连接身份;remote-write 数据内容的标签不由此接口验证。
 
 nginx 把这些值写进 `X-User-Name` / `X-User-Permission` / `X-User-Clusters`(AI 服务)或
 `X-WEBAUTH-USER` / `X-WEBAUTH-ROLE`(Grafana auth proxy),客户端自己带的同名头会被覆盖。

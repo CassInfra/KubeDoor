@@ -146,13 +146,23 @@ async def verify(request):
     for=mcp      外部 MCP 客户端(会话 Cookie 或 Basic 认证)
     for=grafana  Grafana 看板(会话 Cookie),返回 Grafana auth proxy 用的用户名和角色
     for=alert    自定义告警投递(Agent 账号或全局读写账号,Basic 认证)
+    for=metrics  指标写入(仅已绑定集群的 Agent 账号,Basic 认证)
     通过返回 204 并在响应头里带身份;未登录 401,权限不足 403(nginx 只认这三种)。
     """
     purpose = request.query.get('for', 'session')
+    if purpose not in ('session', 'mcp', 'grafana', 'alert', 'metrics'):
+        return web.Response(status=403)
     principal = request.get('principal')
     if principal is None or request.get('cross_site'):
         return web.Response(status=401)
-    if purpose == 'alert':
+    agent_env = None
+    if purpose == 'metrics':
+        if principal.via != 'basic' or not principal.is_agent:
+            return web.Response(status=403)
+        agent_env = await store.agent_env(principal.user_id)
+        if not agent_env:
+            return web.Response(status=403)
+    elif purpose == 'alert':
         if not (principal.is_agent or (principal.is_human and principal.global_write
                                        and not principal.must_change_password)):
             return web.Response(status=403)
@@ -172,6 +182,8 @@ async def verify(request):
     response.headers['X-Kubedoor-Role'] = principal.role
     response.headers['X-Kubedoor-Clusters'] = json.dumps(dict(principal.clusters), separators=(',', ':'))
     response.headers['X-Kubedoor-Grafana-Role'] = _GRAFANA_ROLES.get(principal.role, 'Viewer')
+    if agent_env:
+        response.headers['X-Kubedoor-Agent-Env'] = agent_env
     return response
 
 

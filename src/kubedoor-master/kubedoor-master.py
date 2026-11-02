@@ -13,6 +13,7 @@ import utils, prom_real_time_data
 import db
 import auth
 from auth import principal_of
+from agent_install import api as agent_install_api
 import jvm_config
 from multidict import MultiDict
 from istio_route import handlers as istio_handlers
@@ -162,6 +163,9 @@ async def websocket_handler(request):
         clients[env]["last_heartbeat"] = time.time()
         clients[env]["online"] = True
     clients[env]["ai_tools"] = request.query.get("ai_tools") == "1"
+    # 安装任务必须确认本次生成的专用账号真正连接成功。
+    clients[env]["agent_user_id"] = principal_of(request).user_id
+    clients[env]["heartbeat_received"] = False
     # 新版 agent 带 data_tools=1:AI 能经它只读查询 MySQL / Redis / ES(ai_api 的 agent-execute 据此判断)
     clients[env]["data_tools"] = request.query.get("data_tools") == "1"
     asyncio.create_task(workload_relay.on_agent_connected(env))
@@ -178,6 +182,7 @@ async def websocket_handler(request):
                         # 只认当前连接的心跳:已经被新连接替换掉的旧连接,不能把 env 重新标成在线
                         if clients[env]["ws"] is ws:
                             clients[env]["last_heartbeat"] = time.time()
+                            clients[env]["heartbeat_received"] = True
                             if not clients[env]["online"]:
                                 clients[env]["online"] = True
                                 logger.info(f"客户端 env={env} 心跳恢复，重新标记为在线")
@@ -1071,7 +1076,7 @@ async def lb_check_pods_handler(request):
     return web.json_response({"error": "未知错误"}, status=500)
 
 
-app = web.Application()
+app = web.Application(client_max_size=2 * 1024 * 1024)
 # 认证鉴权中间件 + /api/auth/*、/api/admin/* 接口,必须在下面的 /api/{tail} 兜底转发之前注册
 auth.setup(app, clients)
 app.router.add_get("/ws", websocket_handler)
@@ -1110,6 +1115,7 @@ code_info.register_routes(app, call_agent_api)
 
 # ==================== 获取运行配置(Deployment / Pod 页;配置在 /api/admin/runtime-config,见 func_manager/runtime_config.py) ====================
 runtime_config.register_routes(app)
+agent_install_api.register_routes(app, clients)
 
 
 # ==================== 负载均衡路由注册 ====================
@@ -1133,8 +1139,10 @@ app.router.add_route('*', "/api/{tail:.*}", http_handler)
 # 数据库初始化必须最先执行(建池 + 建表),再建内置账号、启动依赖 DB 的后台任务
 app.on_startup.append(init_db_and_schema)
 app.on_startup.append(auth.on_startup)
+app.on_startup.append(agent_install_api.on_startup)
 app.on_startup.append(start_background_tasks)
 app.on_cleanup.append(cleanup_background_tasks)
+app.on_cleanup.append(agent_install_api.on_cleanup)
 app.on_cleanup.append(close_db)
 
 if __name__ == '__main__':

@@ -144,6 +144,11 @@ def create_middleware():
             elif principal.via != 'basic' or not (principal.is_agent or principal.is_admin):
                 _warn_agent_rejected(request, ip, f'账号 {principal.username} 不是 Agent 账号')
                 return deny(403, 'agent_only', '只有 Agent 账号或管理员账号可以注册 agent')
+            elif principal.is_agent:
+                bound_env = await store.agent_env(principal.user_id)
+                if bound_env is not None and bound_env != request.query.get('env', ''):
+                    _warn_agent_rejected(request, ip, 'Agent 账号与目标集群不匹配')
+                    return deny(403, 'agent_cluster_mismatch', '此 Agent 账号不能注册该集群')
             return await handler(request)
 
         if principal is None:

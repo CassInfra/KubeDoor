@@ -4,6 +4,7 @@ import os
 from pathlib import Path
 import shutil
 import subprocess
+import sys
 
 import pytest
 import yaml
@@ -49,6 +50,7 @@ def run_bash(fake_bin, script, *args):
     result = subprocess.run(
         [str(BASH), "-c", 'export PATH="$1:$PATH"; shift; ' + script, "ai-test", bash_path(fake_bin), *map(str, args)],
         cwd=ROOT, capture_output=True, text=True, encoding="utf-8", timeout=30,
+        env={**os.environ, "PYTHON_BIN": str(Path(sys.executable)).replace("\\", "/")},
     )
     return result
 

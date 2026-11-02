@@ -23,6 +23,8 @@ data:
   PROM_TYPE: '__PROM_TYPE__'
   PROM_URL: '__PROM_URL__'
   PROM_K8S_TAG_KEY: '__PROM_K8S_TAG_KEY__'
+  # 网页安装 Agent 的默认配置，来自与脚本相同的发布配置。
+  AGENT_INSTALL_DEFAULTS: '__AGENT_INSTALL_DEFAULTS__'
 
   # --- 通知 ---
   MSG_TYPE: '__MSG_TYPE__'
