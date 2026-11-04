@@ -25,7 +25,7 @@ RUN sed -i 's/dl-cdn.alpinelinux.org/repo.huaweicloud.com/g' /etc/apk/repositori
     runit bash curl jq bind-tools openssl ripgrep ca-certificates coreutils \
     netcat-openbsd nmap tcpdump iperf3 traceroute mtr \
     procps-ng sysstat lsof strace htop
-COPY deploy/tools/install-ai-tools.sh /tmp/install-ai-tools.sh
+COPY src/kubedoor-tools/install-ai-tools.sh /tmp/install-ai-tools.sh
 RUN sh /tmp/install-ai-tools.sh && rm /tmp/install-ai-tools.sh
 COPY src/kubedoor-tools /opt/kubedoor-tools
 RUN pip install --no-cache-dir /opt/kubedoor-tools

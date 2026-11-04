@@ -30,12 +30,14 @@ def plain(row):
 def pg_options() -> dict:
     return {"host": os.getenv("PG_HOST", "localhost"), "port": int(os.getenv("PG_PORT", "5432")),
             "user": os.getenv("PG_USER", "kubedoor"), "password": os.getenv("PG_PASSWORD", ""),
-            "database": os.getenv("PG_DATABASE", "kubedoor")}
+            "database": os.getenv("PG_DATABASE", "kubedoor"),
+            "ssl": os.getenv("PG_SSLMODE", "prefer")}
 
 
 def pg_dsn() -> str:
     options = pg_options()
     options["dbname"] = options.pop("database")
+    options["sslmode"] = options.pop("ssl")
     return make_conninfo(**options)
 
 

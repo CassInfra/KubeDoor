@@ -100,7 +100,7 @@ prepared = await executor.prepare("api", {
 
 集群内凭据通过 SDK 的公开访问方法读取，兼容 `BearerToken` 和 `authorization` 两种存储键。API、Pod exec 和每次生成 kubectl/istioctl 临时 kubeconfig 前都会触发 SDK 令牌刷新，支持 ServiceAccount 投射令牌轮换；最新令牌及其带前缀形式同时加入输出脱敏。
 
-镜像需要提供 `kubectl`、`istioctl`、`jq`、mikefarah 版本的 `yq`、`curl`、`dig`、`openssl` 和 `rg`，以及上表列出的其余诊断程序（agent 镜像装 Alpine 包、kubedoor-ai 镜像装 Debian 包，见两个 Dockerfile；没装的程序返回 `PROGRAM_UNAVAILABLE`）。CLI 安装版本由 [安装脚本](../../deploy/tools/install-ai-tools.sh) 和各镜像构建参数管理。`yq` 必须支持 `--security-disable-file-ops` 和 `--security-disable-env-ops`，不能用不兼容的同名 Python 包替代。
+镜像需要提供 `kubectl`、`istioctl`、`jq`、mikefarah 版本的 `yq`、`curl`、`dig`、`openssl` 和 `rg`，以及上表列出的其余诊断程序（agent 镜像装 Alpine 包、kubedoor-ai 镜像装 Debian 包，见两个 Dockerfile；没装的程序返回 `PROGRAM_UNAVAILABLE`）。CLI 安装版本由 [安装脚本](install-ai-tools.sh) 和各镜像构建参数管理。`yq` 必须支持 `--security-disable-file-ops` 和 `--security-disable-env-ops`，不能用不兼容的同名 Python 包替代。
 
 kubectl 使用 [GitHub 社区镜像](https://github.com/ChampiYann/kubectl-binaries/releases) 的官方二进制压缩包，istioctl 和 yq 从各自的 GitHub Releases 下载，都是直连 GitHub；构建机访问 GitHub 不稳定时，可在 `docker build` 时加 `--build-arg HTTPS_PROXY=http://<代理地址>`。默认 kubectl 版本 `1.37.1` 的 amd64/arm64 使用脚本内固定的官方 SHA256 校验，无需访问 `dl.k8s.io`。自定义 `KUBECTL_VERSION` 时必须同时传入对应架构的 `KUBECTL_SHA256` build arg；未提供时安装会失败，不会尝试下载官方校验文件。
 

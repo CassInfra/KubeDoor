@@ -1,8 +1,7 @@
-# 安装脚本渲染出的临时产物
-.rendertest/
-.rt*/
-tools/__pycache__/
-# 用户自己的配置(含密码),不要提交
+# 独立数据库的本地连接凭据，不提交。
 postgres/.env
-# 从 kubedoor.conf.example 复制出来的真实配置
+victoria-metrics/.env
+# 防止旧版配置或迁移快照误提交；现有本地文件已移至 .local/kubedoor/legacy-deploy/。
 /kubedoor.conf
+*.ai-secrets
+*.image-settings-migration.json

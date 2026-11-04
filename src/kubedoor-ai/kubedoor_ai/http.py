@@ -339,6 +339,14 @@ def create_app(service=None, token=None):
     route("/skills/{skill_id}", "skill", ["GET"])
     route("/tools", "tools", ["GET"])
     route("/tools/execute", "tools-execute", ["POST"])
+    async def setup_health(request):
+        try:
+            await asyncio.wait_for(request.app.state.service.store.one('SELECT 1 AS ready'), 5)
+            return JSONResponse({'ok': True, 'installation_id': os.getenv('KUBEDOOR_SETUP_ID', '')})
+        except Exception:
+            return JSONResponse({'ok': False, 'message': '数据库连接检查失败'}, status_code=503)
+
+    routes.append(Route('/api/ai/internal/setup-health', setup_health, methods=['GET']))
     routes.append(Route("/health", lambda _: JSONResponse({"ok": True}), methods=["GET"]))
     # Retain the exact external paths without introducing mount redirects.
     routes.extend(streamable.routes)

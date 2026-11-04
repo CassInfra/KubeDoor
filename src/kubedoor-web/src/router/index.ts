@@ -7,6 +7,8 @@ import { useMultiTagsStoreHook } from "@/store/modules/multiTags";
 import { usePermissionStoreHook } from "@/store/modules/permission";
 import { useUserStoreHook } from "@/store/modules/user";
 import { isUrl, isAllEmpty } from "@pureadmin/utils";
+import { getSetupMarker } from "@/api/setup";
+import { needsSetup } from "@/views/setup/setup-utils";
 import {
   ascending,
   getTopMenu,
@@ -103,7 +105,8 @@ export function resetRouter() {
 }
 
 /** 路由白名单(不需要登录) */
-const whiteList = ["/login"];
+const whiteList = ["/login", "/setup"];
+let initialSetupCheck: Promise<boolean> | undefined;
 
 /** 当前用户能否访问该路由:meta.roles 里写了角色的(如系统管理、Grafana 看板)只对这些角色开放 */
 function routeAllowed(to: ToRouteType) {
@@ -115,6 +118,18 @@ function routeAllowed(to: ToRouteType) {
 }
 
 router.beforeEach(async (to: ToRouteType, _from, next) => {
+  // 只依据独立引导标记进入安装；master/数据库故障不能触发重新初始化。
+  // 首次导航只查一次，完成向导后可正常进入登录页。
+  if (!initialSetupCheck)
+    initialSetupCheck = getSetupMarker().then(marker => needsSetup(marker));
+  if (
+    _from.name === undefined &&
+    to.path !== "/setup" &&
+    (await initialSetupCheck)
+  ) {
+    next({ path: "/setup" });
+    return;
+  }
   if (to.meta?.keepAlive) {
     handleAliveRoute(to, "add");
     // 页面整体刷新和点击标签页刷新

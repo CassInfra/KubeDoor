@@ -6,7 +6,7 @@
 根据K8S名称和完整镜像地址获取最新的20个标签名称和推送时间
 """
 
-import os
+import asyncio
 import json
 import requests
 import base64
@@ -16,6 +16,8 @@ from typing import List, Tuple, Dict, Any
 from urllib.parse import urlparse
 from aiohttp import web
 import utils, sys
+import db
+import image_settings
 from promql import deployment_image, deployment_image_min
 from huaweicloudsdkcore.auth.credentials import BasicCredentials
 from huaweicloudsdkswr.v2.swr_client import SwrClient
@@ -37,16 +39,9 @@ logger.add(
 class ImageTagsFetcher:
     """镜像标签获取器"""
 
-    def __init__(self):
-        self.registry_secret = self._load_registry_secret()
-
-    def _load_registry_secret(self) -> Dict[str, Dict[str, Dict[str, str]]]:
-        """从环境变量加载仓库认证信息"""
-        secret_str = os.getenv('REGISTRY_SECRET', '{}')
-        try:
-            return json.loads(secret_str)
-        except json.JSONDecodeError as e:
-            raise ValueError(f"REGISTRY_SECRET环境变量格式错误: {e}")
+    def __init__(self, registry_secret):
+        # 每次查询使用数据库中的最新配置，保存凭据后无需重启。
+        self.registry_secret = registry_secret
 
     def _get_credentials(self, k8s_name: str, registry_domain: str) -> Dict[str, str]:
         """获取指定K8S名称和仓库域名的认证信息"""
@@ -402,9 +397,14 @@ class ImageTagsFetcher:
         return protocol + url_without_protocol
 
 
-def get_image_tags(k8s_name: str, image_url: str) -> Dict[str, Any]:
-    fetcher = ImageTagsFetcher()
+def get_image_tags(k8s_name: str, image_url: str, registry_secret: dict) -> Dict[str, Any]:
+    fetcher = ImageTagsFetcher(registry_secret)
     return fetcher.get_image_tags(k8s_name, image_url)
+
+
+async def get_image_tags_async(k8s_name: str, image_url: str) -> Dict[str, Any]:
+    credentials = await image_settings.registry_credentials()
+    return await utils.run_blocking(get_image_tags, k8s_name, image_url, credentials)
 
 
 # ==================== Web API 处理器 ====================
@@ -441,7 +441,7 @@ async def get_image_tags_handler(request):
             k8s_name, image_url = await utils.get_deployment_image(deployment_image_min, k8s, namespace, deployment)
 
         # 调用镜像标签获取函数(镜像仓库 SDK / HTTP 都是阻塞调用,放进线程池)
-        result = await utils.run_blocking(get_image_tags, k8s_name, image_url)
+        result = await get_image_tags_async(k8s_name, image_url)
 
         return web.json_response({"success": True, "data": result})
 
@@ -453,68 +453,19 @@ async def get_image_tags_handler(request):
         return web.json_response({"success": False, "error": str(e)}, status=500)
 
 
-if __name__ == '__main__':
-    # 测试示例
-    import sys
-
+async def _main():
     if len(sys.argv) != 3:
         print("使用方法: python image_tags_fetcher.py <k8s_name> <image_url>")
-        print("")
-        print("示例:")
-        print("  阿里云ACR: python image_tags_fetcher.py prod registry.cn-hangzhou.aliyuncs.com/namespace/repo:tag")
-        print("  华为云SWR: python image_tags_fetcher.py prod swr.cn-south-1.myhuaweicloud.com/namespace/repo:tag")
-        print("  Harbor: python image_tags_fetcher.py prod harbor.example.com/namespace/repo:latest")
-        print("")
-        print("注意: 镜像URL支持带标签格式，程序会自动提取仓库信息")
-        print("需要设置环境变量 REGISTRY_SECRET")
-        print('格式: {"镜像域名":{"k8s名称":{"ak":"xxx","sk":"xxx"}}}')
-        print("")
-        print("环境变量设置示例:")
-        print('$env:REGISTRY_SECRET={"swr.cn-south-1.myhuaweicloud.com":{"prod":{"ak":"your_ak","sk":"your_sk"}}}')
-        sys.exit(1)
-
-    k8s_name = sys.argv[1]
-    image_url = sys.argv[2]
-
-    print(f"K8S名称: {k8s_name}")
-    print(f"镜像地址: {image_url}")
-    print("-" * 60)
-
+        print("使用 PG_* 连接数据库，仓库凭据由网页「系统管理 → 镜像管理」维护。")
+        return 1
+    await db.init_pool()
     try:
-        # 检查环境变量
-        registry_secret = os.getenv('REGISTRY_SECRET')
-        if not registry_secret:
-            print("❌ 错误: 未设置环境变量 REGISTRY_SECRET")
-            print('请设置格式: {"镜像域名":{"k8s名称":{"ak":"xxx","sk":"xxx"}}}')
-            print('支持default配置: {"镜像域名":{"default":{"ak":"xxx","sk":"xxx"}}}')
-            print(
-                '示例: {"swr.cn-south-1.myhuaweicloud.com":{"prod":{"ak":"ak123","sk":"sk456"},"default":{"ak":"default_ak","sk":"default_sk"}}}'
-            )
-            sys.exit(1)
+        result = await get_image_tags_async(sys.argv[1], sys.argv[2])
+        print(json.dumps(result, ensure_ascii=False))
+        return 0
+    finally:
+        await db.close_pool()
 
-        result = get_image_tags(k8s_name, image_url)
-        tags = result['tags']
-        current_tag_info = result['current_tag_info']
 
-        print(f"✅ 成功获取到 {len(tags)} 个镜像标签:")
-        print("")
-        for i, (push_time, tag) in enumerate(tags, 1):
-            print(f"{i:2d}. {push_time} - {tag}")
-
-        print("")
-        print("当前标签信息:")
-        if current_tag_info:
-            if len(current_tag_info) == 3:
-                print(f"  镜像地址(不带标签): {current_tag_info[0]}")
-                print(f"  标签: {current_tag_info[1]}")
-                print(f"  推送时间: {current_tag_info[2]}")
-                print(f"  ✅ 标签存在于返回列表中")
-            else:
-                print(f"  镜像地址(不带标签): {current_tag_info[0]}")
-                print(f"  标签: {current_tag_info[1]}")
-                print(f"  ❌ 标签不存在于返回列表中")
-        else:
-            print("  未检测到标签信息")
-    except Exception as e:
-        print(f"❌ 错误: {e}")
-        sys.exit(1)
+if __name__ == '__main__':
+    sys.exit(asyncio.run(_main()))

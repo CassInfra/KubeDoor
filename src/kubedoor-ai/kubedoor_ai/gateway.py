@@ -179,7 +179,7 @@ def tool_catalog() -> list[dict]:
         "metrics": (["query"], {"query": "MetricsQL/PromQL string", "start": "RFC3339 or UNIX seconds", "end": "RFC3339 or UNIX seconds", "step": "positive seconds"}, "即时查询；start/end 同时传为范围查询；服务器强制集群标签过滤"),
         "scale_deployment": (["namespace", "deployment", "replicas"], {"namespace": "string", "deployment": "string", "replicas": "nonnegative integer", "mode": "persistent（默认，永久）/temporary（临时）", "scheduler": "boolean optional", "node_scheduler": "string[] optional; requires scheduler=true"}, "Deployment 立即扩缩容。网关按花折资源管控状态执行：受管控时 persistent 同时写入管控副本数（以后每次发布都按它），temporary 只临时扩缩（下次发布或重启恢复管控值）；不受管控时直接改副本数。定时一次用 schedule_deployment_scale，周期执行用 cron_deployment_scale"),
         "restart_deployment": (["namespace", "deployment"], {"namespace": "string", "deployment": "string", "scheduler": "boolean optional", "node_scheduler": "string[] optional"}, "立即滚动重启 Deployment；指定日期执行用 schedule_deployment_restart，每日等重复执行用 cron_deployment_restart"),
-        "update_deployment_image": (["namespace", "deployment", "image_tag"], {"namespace": "string", "deployment": "string", "image_tag": "string"}, "更新镜像标签，沿用 UPDATE_IMAGE 策略"),
+        "update_deployment_image": (["namespace", "deployment", "image_tag"], {"namespace": "string", "deployment": "string", "image_tag": "string"}, "更新镜像标签，按权限与审批策略执行"),
     }
     schemas.update(EXTRA_SCHEMAS)
     for name, (action_type, trigger) in DEPLOYMENT_SCHEDULES.items():

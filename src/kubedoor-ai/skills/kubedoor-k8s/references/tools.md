@@ -80,7 +80,7 @@
 | 服务与入口排障 | `service_endpoints`、`service_first_port`：指定 Service 的后端或第一个端口；`ingress_rules`：指定 Ingress 的域名、路径及后端规则 |
 | 资源 YAML 编辑 | `resource_content`：按 `namespace`、`resource_type`、`resource_name` 读取接口支持的资源，含 Job/CronJob；`resource_apply`：传 `yaml_content` 和可选 `method=apply/replace/create`；`resource_delete`：删除接口支持的资源。CRD 不由这些接口支持，使用通用 K8S API；Deployment 重启调度仍使用前节专用工具 |
 | 其他工作负载变更 | `restart_statefulset`、`scale_statefulset`：立即重启或扩缩容 StatefulSet（参数 `statefulset`，扩缩容另传 `replicas`）；`restart_daemonset`：立即重启 DaemonSet（参数 `daemonset`）。这些工具不提供 Deployment 的定时、周期模式 |
-| Deployment 镜像 | `image_tags`：按现有仓库配置查询可用及当前镜像标签；`update_deployment_image`：传 `image_tag`，沿用现有 UPDATE_IMAGE 策略，只换第一个容器镜像的 tag（仓库地址不变）；改 sidecar 镜像或换仓库用通用工具 |
+| Deployment 镜像 | `image_tags`：按现有仓库配置查询可用及当前镜像标签；`update_deployment_image`：传 `image_tag`，按「权限与审批」执行（不使用网页只读用户的额外白名单），只换第一个容器镜像的 tag（仓库地址不变）；改 sidecar 镜像或换仓库用通用工具 |
 | Pod 变更 | `delete_pod`：单个删除；`delete_pods`：批量传 `pods=[{namespace,pod}]`；`isolate_pod`：沿用现有隔离操作 |
 | 日志与 JVM 诊断 | `logs`、`previous_logs`：当前或上次退出容器日志，参数 `namespace`、`pod`、`lines`（最多 5000），指定容器时用通用 Pod/log API；`jvm_mem`、`jvm_dump`、`jvm_jstack`、`jvm_jfr`：执行现有 JVM 诊断流程（在 Pod 内执行，属于修改操作），可能生成或上传文件 |
 | 当前与历史事件 | `events`：实时事件，可按 `namespace`；`event_history`：入库历史事件，`start_time`、`end_time` 为包含边界的日期，可按 Kind、名称、原因、级别和消息过滤，无需在线 Agent |

@@ -67,7 +67,7 @@ KubeDoor focuses on microservice resources as seen during the daily peak hours: 
 - 🛰**Unified multi-cluster management**: agents connect out to the control plane, so workload clusters need no inbound ports; the resources, metrics, events and alerts of all clusters live in one platform.
 - 🔔**Closed-loop alerting**: metric alerts, K8S event alerts and alert silences, with notifications sent to WeCom, DingTalk, Feishu and Slack.
 - 🔐**Accounts and permissions**: local and LDAP sign-in, per-cluster grants (Admin / Read-write / Read-only / None), a 「权限与审批」 (Permissions & approvals) table that sets what each level may do and which AI operations need human approval, and an audit trail of logins, changes and denied attempts.
-- 🚀**Simple deployment**: one script + one config file; PostgreSQL is the only database.
+- 🚀**Simple deployment**: one command starts the Web wizard to connect external databases and deploy services automatically.
 
 <div align="center">
 
@@ -103,7 +103,7 @@ K8S Resource Overview: multi-cluster resources, at-risk nodes, and today's abnor
 
 **🧱2.0: Architecture and deployment**
 - **PostgreSQL as the only database**: ClickHouse and MySQL are removed; tables are created automatically at startup, no extensions are needed, and expired data is purged automatically.
-- **Script-based deployment**: `deploy/install.sh` + `kubedoor.conf` replace Helm, with render-only preview, per-component toggles and private image registries.
+- **Web installation wizard**: download the standalone `deploy/install.sh` and run it with `sh` or `bash`. Configure external databases in the browser, deploy the services and check each service status, with support for private image registries.
 - Also: alert silences, node balancing, Huawei Cloud CCI elastic scaling and Deployment-level aggregated logs.
 
 ---
@@ -116,10 +116,10 @@ K8S Resource Overview: multi-cluster resources, at-risk nodes, and today's abnor
 <img src="screenshot/kubedoor-arch.png" alt="KubeDoor 2.x architecture overview" />
 </div>
 
-- **Control plane** (`./install.sh master`): kubedoor-web (nginx single entry point + Vue 3 console), kubedoor-master (API gateway, agent connection hub), kubedoor-ai (AI assistant, WeCom bot and MCP Server), kubedoor-alarm (alert silencing, storage and IM notifications), kubedoor-collect (daily peak-hour collection CronJob), plus optional VictoriaMetrics, vmalert, Alertmanager and Grafana.
-- **Cluster side** (`./install.sh agent`): kubedoor-agent, plus optional vmagent, kube-state-metrics and node-exporter. The agent **initiates** the WebSocket connection to the control plane, so workload clusters need no inbound ports; in the same cluster it connects directly to the master Service, while across clusters it goes through the Web entry point; either way it authenticates with the built-in agent account.
+- **Control plane** (deployed by the Web wizard): kubedoor-web (nginx single entry point + Vue 3 console), kubedoor-master (API gateway, agent connection hub), kubedoor-ai (AI assistant, WeCom bot and MCP Server), kubedoor-alarm (alert silencing, storage and IM notifications), kubedoor-collect (daily peak-hour collection CronJob), plus optional vmalert, Alertmanager and Grafana.
+- **Cluster side** (installed from Agent Management): kubedoor-agent, plus optional vmagent, kube-state-metrics and node-exporter. The agent **initiates** the WebSocket connection to the control plane, so workload clusters need no inbound ports; in the same cluster it connects directly to the master Service, while across clusters it goes through the Web entry point; either way it authenticates with the built-in agent account.
 - **PostgreSQL 18 is the only database**: deployed standalone outside K8S with docker compose, or use an existing PostgreSQL (no extensions needed).
-- **Optional monitoring stack**: use the bundled single-node VictoriaMetrics, or connect an existing Prometheus/VictoriaMetrics; each cluster's metrics are distinguished by the label `<PROM_K8S_TAG_KEY>=<K8S_NAME>`.
+- **Independent time-series database**: deploy single-node VictoriaMetrics with Docker Compose in `deploy/victoria-metrics/`, or connect an existing Prometheus/VictoriaMetrics; each cluster's metrics are distinguished by the label `<PROM_K8S_TAG_KEY>=<K8S_NAME>`.
 - **Single entry point**: the Web UI, Grafana, the AI assistant and MCP share one kubedoor-web NodePort, and login and permissions are managed by the master; the external MCP endpoints (`/mcp`, `/sse`) can be turned off with `ENABLE_MCP="false"`, which does not affect the AI assistant in the Web UI.
 
 ---
@@ -276,7 +276,7 @@ Built for the case where the same services run in test clusters and in several p
 - 💻**Pod and node terminals [2.2]**: open a Web terminal in a new tab; the Pod terminal picks bash / ash / sh automatically, while for the node terminal the agent starts a temporary privileged Pod that uses `nsenter` to get onto the host and is cleaned up automatically on exit; the 「网页 Pod 终端」 / 「网页节点终端」 (Web Pod / node terminal) permission is required (read-write and above by default), and sessions are recorded in the audit log.
 - 📜**Log viewer**: live follow, keyword search and jumping between matches, colors by log level, and 「重启前日志」 (logs before restart); a Deployment's logs can be viewed across all of its Pods, and full logs can be downloaded gzipped.
 - 🔁**Scaling and restarts**: run immediately, at a set time or periodically, with optional 「临时扩容」 (temporary scale-out) and 「调度到指定节点」 (schedule to specified nodes).
-- 🏷**Image updates**: automatically lists the 20 most recent tags in the image registry (Alibaba Cloud ACR, Huawei Cloud SWR, Harbor); read-only accounts can be authorized by cluster, time window and account whitelist, and progress is pushed to IM.
+- 🏷**Image updates**: automatically lists the 20 most recent tags in the image registry (Alibaba Cloud ACR, Huawei Cloud SWR, Harbor); read-only accounts can be authorized by cluster, time window and account whitelist, and progress is pushed to IM. Manage rules and registry credentials under 「系统管理 → 镜像管理」 (System → Image management); database changes take effect immediately.
 - 🧪**Pod isolation**: changes the Pod's `app` label to `<original value>-ALERT`, taking it out of Service traffic while keeping it for investigation, optionally adding 1 Pod temporarily.
 
 <details close>
@@ -296,7 +296,7 @@ Built for the case where the same services run in test clusters and in several p
 **Each cluster's vmagent remote-writes its metrics to the same time-series database, and a single label tells the clusters apart, so you see every cluster in one Web UI.**
 
 - 🖥**Resource overview**: 「K8S资源总览」 (English UI: "K8s Overview") switches between all clusters and a single cluster, showing resource counts, at-risk nodes and the highest usage/allocation rates, plus today's Top 10 abnormal Pod alerts, the Top 10 abnormal K8S events and the alert trend of the last 10 days.
-- 🌊**Unified time-series database**: use the bundled single-node VictoriaMetrics, or connect an existing Prometheus/VictoriaMetrics; kube-state-metrics and node-exporter already running in the cluster can be reused.
+- 🌊**Unified time-series database**: deploy single-node VictoriaMetrics with its independent Docker Compose package, or connect an existing Prometheus/VictoriaMetrics; kube-state-metrics and node-exporter already running in the cluster can be reused.
 - 📊**Grafana dashboards**: 「K8S监控看板📊」 (K8S Monitoring Dashboard; English UI: "Resource K8S"), 「节点监控看板📊」 (Node Monitoring Dashboard; English UI: "Resource Node") and 「高峰资源看板📊」 (Peak Resource Dashboard; English UI: "Resource Statistics") are embedded in the Web UI and imported automatically at installation; system admins also get 「系统管理 → AI 用量看板📊」 (System → AI usage dashboard) with the AI assistant's token usage, cache hit rate, context size and estimated cost.
 
 <details close>
@@ -400,7 +400,7 @@ Peak resource dashboard (Grafana): global peak-hour resource statistics with a T
 - 🧹**Automatic data cleanup**: K8S events are kept for 90 days, alert records and peak snapshots for 365 days, adjustable in `kubedoor-config` (`0` means never purge).
 - 🌗**UI**: the ink-wash moon-gate sign-in page [2.2]; Simplified Chinese / English (partially translated), light/dark/auto themes, mobile-friendly.
 
-📖Details: [Deployment guide](deploy/README.md), [Accounts and permissions](deploy/README.md#账号与权限) (Chinese)
+📖Details: [Deployment guide](deploy/README.md), [Accounts and permissions](tools/legacy-install/README.md#账号与权限) (Chinese)
 
 <details close>
 <summary>🔍Click to expand screenshots ...</summary>
@@ -414,7 +414,7 @@ Peak resource dashboard (Grafana): global peak-hour resource statistics with a T
 
 ## 🚀Quick Start
 
-**One config file + one bash script, three steps: start PostgreSQL → install the control plane → install an agent in each cluster. Helm is no longer needed.** See the [deployment guide](deploy/README.md) (Chinese) for full details.
+**Prepare PostgreSQL and a metrics database, start the Web wizard with one command, then install the control plane and each cluster's Agent from the Web UI. No installation configuration file or Helm is required.** Existing databases can be reused. See the [deployment guide](deploy/README.md) (Chinese) for full details.
 
 #### Prerequisites
 
@@ -423,12 +423,14 @@ Peak resource dashboard (Grafana): global peak-hour resource statistics with a T
 | Installer machine | Can reach the target cluster with `kubectl`; bash 4 or later |
 | Kubernetes | ≥ 1.21; running daily collection and scheduled/periodic tasks in Beijing time (`timeZone: Asia/Shanghai`) requires ≥ 1.25 (older clusters run them in the time zone of kube-controller-manager) |
 | metrics-server | Required: Pod/node CPU and memory usage and node balancing all depend on it |
-| Time-series database | The bundled VictoriaMetrics (needs a working StorageClass; 100Gi PVC by default), or an existing Prometheus/VictoriaMetrics. The Deployment list, the K8S resource overview and peak-hour collection all depend on it; without monitoring data these pages are empty and nothing can be collected |
+| Time-series database | An independent VictoriaMetrics Docker Compose deployment, or an existing Prometheus/VictoriaMetrics. The Deployment list, the K8S resource overview and peak-hour collection all depend on it; without monitoring data these pages are empty and nothing can be collected |
 | Database | A machine with Docker Compose to run PostgreSQL 18 (K8S nodes must be able to reach its port 5432), or an existing PostgreSQL (14+ recommended; no extensions or superuser required) |
 | CPU architecture | Official images are amd64 only |
-| Network | Across clusters, the agent must be able to reach the control plane's Web NodePort (WebSocket), and vmagent must be able to reach the NodePort of the control plane's time-series database (remote write) |
+| Network | The control plane must reach PostgreSQL, the time-series database and the target Kubernetes API; target clusters must reach KubeDoor's Web entry point, which also forwards metrics for Web-installed Agents |
 
-#### Three-Step Install
+#### Installation Steps
+
+If PostgreSQL and a metrics database are already available, download only [install.sh](deploy/install.sh) and go directly to step ③. The installation machine only needs `sh` (or `bash`) and `kubectl`, with no Python or full source checkout. To use the optional database Compose examples below, obtain those directories separately or clone the repository:
 
 ```bash
 git clone https://github.com/CassInfra/KubeDoor.git
@@ -447,36 +449,41 @@ docker compose logs -f postgres    # ready once you see "database system is read
 
 The default image is amd64 only; outside mainland China or on ARM machines, set `PG_IMAGE=postgres:18-alpine` in `.env`. There is no need to create tables by hand: master and kubedoor-ai create them automatically at startup.
 
-**② Install the control plane** (on a machine that can reach the cluster with kubectl, starting from the repository root)
+**② Start the time-series database** (skip if using an existing Prometheus/VictoriaMetrics; start from the repository root)
 
 ```bash
-cd deploy
-cp kubedoor.conf.example kubedoor.conf   # copy the config template
-vi kubedoor.conf        # set PG_HOST / PG_PASSWORD / MSG_TOKEN, etc.
-./install.sh master
+cd deploy/victoria-metrics
+cp .env.example .env
+vi .env                 # change at least VM_PASSWORD
+docker compose up -d
 ```
 
-- Set `PG_HOST` to an address that Pods in K8S can reach (usually the private IP of the database host); `127.0.0.1` will not work.
-- If you already have Prometheus/VictoriaMetrics, set `ENABLE_VICTORIA_METRICS="false"` and fill in `PROM_URL` and `PROM_TYPE`.
-- To review the generated YAML first: `./install.sh render master -o /tmp/out`.
+The default image is `registry.cn-shenzhen.aliyuncs.com/starsl/victoria-metrics:stable`. Its port, credentials, retention and data volume are managed in this independent directory; see the [VictoriaMetrics deployment guide](deploy/victoria-metrics/README.md) (Chinese).
 
-**③ Install the cluster side** (once in each workload cluster; with a single cluster, run it once more in the same cluster)
+**③ Install the control plane from the Web wizard** (copy `deploy/install.sh` to a machine that can reach the cluster with kubectl)
 
-```bash
-vi kubedoor.conf        # set K8S_NAME and MASTER_WS (on another machine, cp kubedoor.conf.example kubedoor.conf first)
-./install.sh agent
+```sh
+sh install.sh
+# Also supported: bash install.sh
 ```
 
-- `K8S_NAME`: the unique identifier of the cluster; only letters, digits, `-` and `_` are allowed.
-- `MASTER_WS`: must carry the built-in agent account: in the same cluster use `ws://Up4biLko1dNh:<password>@kubedoor-master.kubedoor`, across clusters use `ws://Up4biLko1dNh:<password>@<control plane node IP>:<Web NodePort>` (the script prints both forms when you install the control plane); across clusters, also change `REMOTE_WRITE_URL` to the external write URL of the control plane's time-series database (printed as well).
-- With multiple clusters, keep a separate config file for each: `./install.sh agent -c ./cluster-a.conf`.
-- After a few dozen seconds, the cluster shows as 「在线」 (online) in 「Agent管理」.
+Open the printed Web URL and enter the one-time setup key. The five steps check the cluster, connect PostgreSQL and the metrics database, set the administrator password and public URL, and deploy the selected services. Each service has its own status; success is reported only after all selected services and final checks pass. Image repositories and versions are included at the top of the script; no separate configuration file is needed. Use newly built Web, setup, master, AI and alarm images containing this feature; `--tag <version>` selects a consistent custom release. See the [Web installation guide](deploy/README.md#网页向导安装推荐) (Chinese).
+
+- Supply PG and VM addresses reachable from Kubernetes Pods. The wizard checks authentication, queries and database schema permissions.
+- Single-node VM write URLs are derived automatically. The cluster label defaults to `origin_prometheus`; existing monitoring must use its actual label name.
+- Legacy configuration-based installation, upgrades and YAML preview are preserved under [tools/legacy-install](tools/legacy-install/README.md). `deploy/install.sh` only starts the Web installation entry point.
+
+**④ Install Agents from the Web UI** (once per managed cluster)
+
+As a system admin, open 「Agent管理」 at `/#/workbench/index`, click 「安装Agent」, upload a kubeconfig, select its context, confirm the cluster identifier, then check and install. The KubeDoor connection URL supplies both the control connection and metrics gateway, so target clusters do not need the time-series database credentials.
+
+If the control plane cannot reach the target Kubernetes API, use the [legacy installer](tools/legacy-install/README.md) from a machine in that network, preserving the cluster's original configuration.
 
 #### Accessing the Web UI
 
-- Open the `http://<node IP>:<NodePort>` printed by the install script in your browser; the built-in super admin account is `kubedoor` / `kubedoor`, and you must change the password on first login.
+- Open the printed Web address and sign in as `kubedoor` using the password chosen in the wizard. The legacy script uses the factory password only when no initial password is supplied and requires changing it at first login.
 - Add accounts and grant per-cluster permissions under 「系统管理 → 用户与权限」, and connect LDAP under 「LDAP 设置」; adjust what each permission level may do, and which AI operations need approval, under 「权限与审批」 if needed.
-- ⚠️ The built-in agent account `Up4biLko1dNh` (factory password `qCa22jDkfc9y`) is what agents use to connect to the master; reset its password under 「用户与权限」, then update `MASTER_WS` of every agent (same-cluster and cross-cluster agents both need the credentials), re-run `./install.sh agent` and run `kubectl -n kubedoor rollout restart deploy/kubedoor-agent`.
+- Web Agent installation creates dedicated credentials. Legacy deployments still using the built-in Agent factory password should reset it under 「用户与权限」 and update all Agents sharing that account.
 
 #### First Steps
 
@@ -498,7 +505,11 @@ vi kubedoor.conf        # set K8S_NAME and MASTER_WS (on another machine, cp kub
 
 ## ♻Upgrade Notes
 
-**2.x switches to PostgreSQL and script-based deployment, so upgrading from 1.x requires a fresh installation; between 2.x versions, just change `TAG_*` and re-run the install script (upgrading to 2.2 requires recreating accounts, and upgrading to 2.3 clears the Istio route data of the 2.2 trial version; see below).**
+Use the Web wizard for a new installation. The historical upgrade instructions below apply to legacy configuration-based deployments: run commands from `tools/legacy-install` and pass the original configuration with `-c`. `deploy/install.sh` does not upgrade those deployments. Editing image versions after installation does not update running services; a Web upgrade flow is not yet available.
+
+Release image versions are stored in the image configuration block at the top of `deploy/install.sh`. Legacy `TAG_*` overrides still take precedence; see the [legacy maintenance guide](tools/legacy-install/README.md).
+
+VictoriaMetrics now deploys independently. Updating the master does not migrate or delete an existing Kubernetes instance or its PVC. Back up and migrate its data, update the query and write URLs, verify both paths, then remove the old resources manually; see the [migration guide](deploy/victoria-metrics/README.md#数据与维护) (Chinese).
 
 #### Upgrading from 1.x (Helm)
 
@@ -506,12 +517,12 @@ vi kubedoor.conf        # set K8S_NAME and MASTER_WS (on another machine, cp kub
 - Recommended order:
   1. If admission control was ever enabled, first turn off 「准入控制」 in 「Agent管理」 of the old Web UI;
   2. Uninstall the old control plane and agents with `helm uninstall` (e.g. `helm uninstall kubedoor -n kubedoor` and `helm uninstall kubedoor-agent -n kubedoor`; use the release names of your actual installation);
-  3. Do a fresh installation following [Quick Start](#quick-start); an existing Prometheus/VictoriaMetrics can still be used (`ENABLE_VICTORIA_METRICS="false"` + `PROM_URL`, `PROM_TYPE`).
+  3. Do a fresh installation following [Quick Start](#quick-start); an existing Prometheus/VictoriaMetrics can still be used by setting `PROM_URL`, `PROM_TYPE` and `METRICS_WRITE_URL`.
 - The 1.x MCP address (`/sse` on the NodePort of the standalone `kubedoor-mcp`) is deprecated; use `/mcp` on the Web entry point instead.
 
 #### Upgrading from 2.0.x to 2.1
 
-1. Update to the latest repository code; in `kubedoor.conf`, change `TAG_MASTER`, `TAG_AGENT` and `TAG_WEB` to `2.1.0` and add `TAG_AI="2.1.0"` (if omitted, it falls back to `latest`); the old `TAG_MCP` is no longer used and can be deleted.
+1. Update to the latest repository code; in `kubedoor.conf`, append or update `TAG_MASTER`, `TAG_AGENT` and `TAG_WEB` to `2.1.0` and set `TAG_AI="2.1.0"`; the old `TAG_MCP` is no longer used and can be deleted.
 2. The meaning of `ENABLE_MCP` has changed: it now only controls whether the Web entry point exposes kubedoor-ai's `/mcp`, `/sse` and `/messages`, and it defaults to `true`.
 3. Run `./install.sh master`, then run `./install.sh agent` in each cluster (only the new agent supports the AI's generic tools).
 4. The install script only runs `apply` and does not delete the standalone MCP service left over from 2.0.x; delete it manually:
@@ -525,18 +536,18 @@ vi kubedoor.conf        # set K8S_NAME and MASTER_WS (on another machine, cp kub
 
 2.2 moves sign-in and permissions from nginx basic auth to the master (local accounts + LDAP, per-cluster grants).
 
-1. Update to the latest repository code and change `TAG_MASTER`, `TAG_AGENT`, `TAG_WEB` and `TAG_AI` in `kubedoor.conf` to `2.2.0` (the alarm service is unchanged in this release, so `TAG_ALARM` stays at `2.1.0`).
+1. Update to the latest repository code and append or update `TAG_MASTER`, `TAG_AGENT`, `TAG_WEB` and `TAG_AI` in `kubedoor.conf` to `2.2.0` (the alarm service is unchanged in this release, so `TAG_ALARM` stays at `2.1.0`).
 2. `WEB_AUTH_USERS`/`WEB_RW_USERS` no longer take effect (the install script warns about them). Run `./install.sh master`, sign in with the built-in admin `kubedoor`, then recreate accounts under 「系统管理 → 用户与权限」 (System → Users & permissions), or connect LDAP under 「LDAP 设置」 and grant clusters as needed.
 3. Every agent must now use the built-in agent account `Up4biLko1dNh`: change same-cluster agents' `MASTER_WS` to `ws://Up4biLko1dNh:<password>@kubedoor-master.kubedoor`, then run `./install.sh agent` in each cluster. Cross-cluster agents that still use the factory password need no change; if you had changed that account's password, set `KUBEDOOR_INIT_AGENT_PASSWORD` in `kubedoor.conf` to it before upgrading (it only applies when the account is first created). If you cannot update all agents at once, set `AGENT_AUTH_REQUIRED="false"` temporarily, then set it back to `true` and re-run `./install.sh master`.
 4. Grafana now uses auth proxy: KubeDoor system admins are Grafana Admins, everyone else is a Viewer, and only accounts that can see every cluster can open it.
 
-See [Deployment guide · Accounts and permissions](deploy/README.md#账号与权限) (Chinese).
+See [Deployment guide · Accounts and permissions](tools/legacy-install/README.md#账号与权限) (Chinese).
 
 #### Upgrading from 2.2.x to 2.3
 
 2.3 adds CoreDNS management and the WeCom smart bot, rebuilds Istio VirtualService management and enhances the AI assistant; no new settings are needed in `kubedoor.conf`.
 
-1. Update to the latest repository code, change `TAG_MASTER`, `TAG_AGENT`, `TAG_WEB` and `TAG_AI` in `kubedoor.conf` to `2.3.0` (the alarm service is unchanged, so `TAG_ALARM` stays at `2.1.0`), and run `./install.sh master`. The master, Web and AI must be upgraded together in this release (the new AI service relies on new master APIs), and this step does exactly that; it also adds `RETENTION_AI_CHECKPOINT_DAYS` to `kubedoor-config` (how many days to keep the checkpoints of old WeCom conversations, 7 by default) and imports the "KubeDoor-AI" usage dashboard into Grafana.
+1. Update to the latest repository code, append or update `TAG_MASTER`, `TAG_AGENT`, `TAG_WEB` and `TAG_AI` in `kubedoor.conf` to `2.3.0` (the alarm service is unchanged, so `TAG_ALARM` stays at `2.1.0`), and run `./install.sh master`. The master, Web and AI must be upgraded together in this release (the new AI service relies on new master APIs), and this step does exactly that; it also adds `RETENTION_AI_CHECKPOINT_DAYS` to `kubedoor-config` (how many days to keep the checkpoints of old WeCom conversations, 7 by default) and imports the "KubeDoor-AI" usage dashboard into Grafana.
 2. Agents only need a new image: select the clusters in 「Agent管理」 and use 「批量更新」 (bulk update) to `2.3.0`, or re-run `./install.sh agent` in each cluster. CoreDNS management and its network tests, as well as deleting VirtualServices from a cluster and viewing their complete live state, require the new agent (older agents show a prompt to upgrade first); scheduled or recurring 「临时扩容」 (temporary scale-out) and the admission rewrite of direct replica changes also need the new agent (older agents show no prompt: scheduled tasks run as a normal scale, and direct replica changes are still allowed through).
 3. Istio VirtualService management is now organized by "Istio group": at startup the master drops the old tables of the 2.2 trial version (`vs_global`, `vs_http_routes`, `k8s_cluster`), while the VirtualServices in your clusters are not affected; after upgrading, create groups on the global VirtualService page under 「ISTIO管理」 (English UI: "ISTIO Management" → "Level1 VirtualService"), then click 「刷新现状」 (Refresh live state) and adopt them again.
 4. The WeCom smart bot connects out to WeCom from kubedoor-ai, which therefore needs outbound access to WeCom; if you do not configure the bot, nothing else is affected.
@@ -553,8 +564,8 @@ See [Deployment guide · Accounts and permissions](deploy/README.md#账号与权
 
 | Document | Contents |
 | --- | --- |
-| [Deployment guide](deploy/README.md) | Installing the control plane and the per-cluster agents with one script + one config file, standalone PostgreSQL, common scenarios, changing the configuration and troubleshooting |
-| [Accounts and permissions](deploy/README.md#账号与权限) | Local and LDAP accounts, global roles and per-cluster grants, permissions and approvals, built-in accounts, the audit log and password resets |
+| [Deployment guide](deploy/README.md) | Web installation for the control plane and Agents, image versions, external databases and recovery |
+| [Accounts and permissions](tools/legacy-install/README.md#账号与权限) | Local and LDAP accounts, global roles and per-cluster grants, permissions and approvals, built-in accounts, the audit log and password resets |
 | [AI assistant](docs/ai-assistant.md) | Model configuration, resource scope, multi-turn conversations, change approval, global memory, direct kubeconfig connections and external MCP |
 | [WeCom smart bot](src/kubedoor-ai/README.md#企业微信智能机器人) | Bot and dedicated model configuration, member binding and the default permission for unbound members, switching clusters and approval cards |
 | [Istio VirtualService management](src/kubedoor-master/istio_route/README.md) | Istio groups and the group standard, per-cluster hosts and domain conditions, status rules, typical workflows and APIs |

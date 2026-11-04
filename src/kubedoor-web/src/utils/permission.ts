@@ -147,7 +147,7 @@ export function canGlobal(op: string, user: PermissionSubject): boolean {
 }
 
 /**
- * 网页上改镜像:有「更新镜像」权限直接放行;没有的只读账号还可能按 UPDATE_IMAGE 白名单
+ * 网页上改镜像:有「更新镜像」权限直接放行;没有的只读账号还可能按「镜像管理」的白名单
  * (集群、时间窗口、用户)放行,白名单由后端判断,所以只读账号不置灰;「管理员」列也取消(全站关闭)时一律不能。
  */
 export function canUpdateImage(

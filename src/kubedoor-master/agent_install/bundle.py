@@ -129,10 +129,6 @@ def _template_dir() -> Path:
     packaged = Path(__file__).resolve().parent / "manifests"
     if packaged.is_dir():
         return packaged
-    for parent in Path(__file__).resolve().parents:
-        local = parent / "deploy" / "manifests" / "agent"
-        if local.is_dir():
-            return local
     raise ValueError("未找到随发布包提供的 Agent 安装模板")
 
 
@@ -249,8 +245,6 @@ def master_metadata(variables: dict) -> tuple[dict, str]:
             d[new] = variables[old]
     d["master_url"] = variables.get("KUBEDOOR_EXTURL", "")
     target = variables.get("METRICS_WRITE_URL", "")
-    if not target and variables.get("ENABLE_VICTORIA_METRICS", "true") == "true":
-        target = f"http://{quote(variables.get('VM_USER', 'monit'), safe='')}:{quote(variables.get('VM_PASSWORD', ''), safe='')}@victoria-metrics.{d['namespace']}:8428/api/v1/write"
     d["metrics_available"] = bool(target)
     if not target:
         return d, "return 503;"

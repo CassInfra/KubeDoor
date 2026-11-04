@@ -67,7 +67,6 @@ PROM_K8S_TAG_KEY = os.environ.get('PROM_K8S_TAG_KEY')
 ALERT_DEDUP_WINDOW = int(os.environ.get('ALERT_DEDUP_WINDOW', '300'))
 PROM_TYPE = os.environ.get('PROM_TYPE')
 PROM_URL = os.environ.get('PROM_URL')
-UPDATE_IMAGE = os.environ.get('UPDATE_IMAGE')
 
 # 外部 HTTP 调用的超时(连接, 读取)秒。requests 默认不超时,对端不响应时线程会一直卡住
 PROM_TIMEOUT = (5, 120)

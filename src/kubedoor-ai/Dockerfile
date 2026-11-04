@@ -31,7 +31,7 @@ RUN set -eu; \
     netcat-openbsd nmap tcpdump iperf3 traceroute mtr-tiny libcap2-bin \
     procps sysstat lsof strace htop xxd bsdextrautils \
     && rm -rf /var/lib/apt/lists/*
-COPY deploy/tools/install-ai-tools.sh /tmp/install-ai-tools.sh
+COPY src/kubedoor-tools/install-ai-tools.sh /tmp/install-ai-tools.sh
 RUN sh /tmp/install-ai-tools.sh && rm /tmp/install-ai-tools.sh
 COPY src/kubedoor-tools /opt/kubedoor-tools
 COPY src/kubedoor-ai/requirements.txt /app/requirements.txt

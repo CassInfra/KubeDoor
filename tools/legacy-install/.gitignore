@@ -1,0 +1,6 @@
+# 本地兼容安装配置及凭据。
+/kubedoor.conf
+*.ai-secrets
+*.image-settings-migration.json
+.rendertest/
+.rt*/

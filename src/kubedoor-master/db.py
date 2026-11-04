@@ -57,6 +57,7 @@ async def init_pool() -> asyncpg.Pool:
         user=PG_USER,
         password=PG_PASSWORD,
         database=PG_DATABASE,
+        ssl=os.environ.get('PG_SSLMODE', 'prefer'),
         min_size=PG_POOL_MIN,
         max_size=PG_POOL_MAX,
         command_timeout=PG_CMD_TIMEOUT,

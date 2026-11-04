@@ -2,6 +2,8 @@
 .codegraph
 .venv*
 .cache-ai-tests
+.local
+tools/legacy-install
 **/node_modules
 **/dist
 **/__pycache__
@@ -9,10 +11,8 @@
 **/.pytest_cache
 **/*.ai-secrets
 deploy
-# agent / ai 镜像构建时安装 kubectl、istioctl、yq 的脚本；deploy 下其余文件(含 kubedoor.conf)不进构建上下文
-!deploy/tools/install-ai-tools.sh
-!deploy/manifests/agent/
-!deploy/manifests/agent/**
+# 安装脚本内置公开发行镜像版本；安装模板和工具随各自源码发布。
+!deploy/install.sh
 docs
 CLAUDE.md
 AGENTS.md

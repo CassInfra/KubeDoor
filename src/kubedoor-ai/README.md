@@ -114,7 +114,7 @@ K token 填写，1K = 1024）和压缩阈值（%）。按模型名自动预填�
 悬停显示 token 数和本轮的缓存命中率；打开历史会话时用 `GET /api/ai/sessions/{id}` 返回的
 `usage`（最近一轮）。「测试连接」同时检查响应里有没有 token 用量：少数网关不支持
 `stream_options`，没有用量时压缩只能按估算触发、用量统计会缺失，测试结果会给出警告。
-Grafana 的「KubeDoor-AI助手用量与缓存命中看板」（`deploy/dashboards/KubeDoor-AI.json`，PostgreSQL
+Grafana 的「KubeDoor-AI助手用量与缓存命中看板」（`src/kubedoor-setup/resources/dashboards/KubeDoor-AI.json`，PostgreSQL
 数据源）按渠道统计轮数、输入、缓存命中率、上下文占用分布、压缩次数和估算费用，用来观察缓存效果、
 判断压缩阈值是否合适。
 
@@ -435,7 +435,7 @@ kubeconfig 管理仅限系统管理员。调用 master 时 master 会按用户�
 内部令牌与加密密钥，存放于配置文件旁的 `*.ai-secrets`（0600）及
 `kubedoor-ai-security` Secret，升级时必须保留且不要提交到 Git。
 Deployment、Service 和镜像组件均命名为 `kubedoor-ai`，部署清单位于
-`deploy/manifests/master/30-ai.yaml`，镜像版本由 `TAG_AI` 配置。
+`src/kubedoor-setup/resources/manifests/master/30-ai.yaml`，镜像版本由 `TAG_AI` 配置。
 首次接入需使用匹配的 master、web、AI 版本；通用 Agent 工具还需集群 Agent 支持。
 「权限与审批」这一版 master、AI、web 必须一起升级（旧 AI 不认集群权限 `admin` 和角色 `cluster_admin`，会返回 401）；
 agent 可以之后升级，旧 agent 按 master 给的兼容 `permission` 执行，没有按命令清单的二次校验。

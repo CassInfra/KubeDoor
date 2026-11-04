@@ -72,7 +72,7 @@ K8S 事件告警系统是一个基于规则驱动的智能告警解决方案，�
 
 ## 告警规则配置
 
-告警规则配置文件 `deploy/manifests/master/alert_rules.json`，安装时做成 ConfigMap `kubedoor-master-file-cfg`，挂载到 master 的 `/k8s_event/rules/`（镜像内不自带规则文件），格式示例如下（集群名、服务名均为示意）:
+告警规则配置文件 `src/kubedoor-setup/resources/manifests/master/alert_rules.json`，安装时做成 ConfigMap `kubedoor-master-file-cfg`，挂载到 master 的 `/k8s_event/rules/`（镜像内不自带规则文件），格式示例如下（集群名、服务名均为示意）:
 
 ```json
 {

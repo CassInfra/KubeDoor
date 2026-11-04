@@ -267,7 +267,7 @@ const OP_HINTS: Record<string, string> = {
     "既不是查看命令、也没命中「高危命令」清单的,算这一类,例如 touch、curl -X POST。",
   "pod.exec.danger": "命中「高危命令」清单的算这一类,审批固定需要,不能取消。",
   "workload.image":
-    "网页上改镜像时,没有这一行权限的只读账号,还可以按 UPDATE_IMAGE 配置(集群、时间窗口、用户白名单)放行;AI 改镜像不走这个白名单。",
+    "网页上改镜像时,没有这一行权限的只读账号,还可以按「镜像管理」中的规则(集群、时间窗口、用户白名单)放行;AI 改镜像不走这个白名单。",
   "resource.secret":
     "查看 Secret 的内容(网页的资源查看、AI 读取 Secret)。只列出 Secret、不看内容的不受这一行限制。",
   "ai.k8s_write":

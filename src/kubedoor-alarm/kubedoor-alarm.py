@@ -8,13 +8,15 @@ import pytz
 import logging
 import hashlib
 import urllib.parse
+import os
+import hmac
+from psycopg.conninfo import make_conninfo
 
 logging.basicConfig(level=getattr(logging, utils.LOG_LEVEL), format='%(asctime)s - %(levelname)s - %(message)s')
 # PostgreSQL 连接池
-_conninfo = (
-    f"host={utils.PG_HOST} port={utils.PG_PORT} user={utils.PG_USER} "
-    f"password={utils.PG_PASSWORD} dbname={utils.PG_DATABASE}"
-)
+_conninfo = make_conninfo(host=utils.PG_HOST, port=utils.PG_PORT, user=utils.PG_USER,
+                         password=utils.PG_PASSWORD, dbname=utils.PG_DATABASE,
+                         sslmode=os.environ.get('PG_SSLMODE', 'prefer'))
 pool = ConnectionPool(conninfo=_conninfo, min_size=1, max_size=10, open=True)
 
 # 告警屏蔽引擎(内存缓存 alert_silences 规则,详见 silence.py)
@@ -322,6 +324,20 @@ def handle_resolved_alert(alert_data, send_resolved, silence_id=None):
 
 
 app = Flask(__name__)
+
+
+@app.route('/internal/setup-health', methods=['GET'])
+def setup_health():
+    expected = os.environ.get('AI_INTERNAL_TOKEN', '')
+    supplied = request.headers.get('X-Kubedoor-Token', '')
+    if not expected or not hmac.compare_digest(expected.encode(), supplied.encode()):
+        return jsonify({'ok': False}), 403
+    try:
+        with pool.connection(timeout=5) as connection:
+            connection.execute('SELECT 1').fetchone()
+        return jsonify({'ok': True, 'installation_id': os.environ.get('KUBEDOOR_SETUP_ID', '')})
+    except Exception:
+        return jsonify({'ok': False, 'message': '数据库连接检查失败'}), 503
 
 
 # Alertmanager 的入库 webhook:把 Pod 类告警写进 PostgreSQL 的 k8s_pod_alert_days

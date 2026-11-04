@@ -9,6 +9,5 @@ RUN sed -i 's/dl-cdn.alpinelinux.org/repo.huaweicloud.com/g' /etc/apk/repositori
     pip3 install -r requirements.txt /tmp/kubedoor-tools -i https://mirrors.aliyun.com/pypi/simple/ --no-cache-dir && \
     rm -rf /tmp/kubedoor-tools
 COPY src/kubedoor-master/ /
-COPY deploy/manifests/agent/ /agent_install/manifests/
 EXPOSE 80
 CMD ["python3", "/kubedoor-master.py"]

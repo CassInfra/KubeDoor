@@ -3,6 +3,16 @@ const Layout = () => import("@/layout/index.vue");
 
 export default [
   {
+    path: "/setup",
+    name: "Setup",
+    component: () => import("@/views/setup/index.vue"),
+    meta: {
+      title: "安装向导",
+      showLink: false,
+      rank: 100
+    }
+  },
+  {
     path: "/login",
     name: "Login",
     component: () => import("@/views/login/index.vue"),

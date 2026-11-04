@@ -27,6 +27,15 @@ export default ({ mode }: ConfigEnv): UserConfigExport => {
       // 指向一套已部署的 KubeDoor Web（由它的 Nginx 再转发给 master / ai），请改成自己的地址，
       // 例如先执行 kubectl -n kubedoor port-forward svc/kubedoor-web 8080:80
       proxy: {
+        "/setup-api": {
+          target: "http://127.0.0.1:8080",
+          // 安装接口核对 Origin 与 Host，同源开发代理保留浏览器 Host。
+          changeOrigin: false
+        },
+        "/setup-status.json": {
+          target: "http://127.0.0.1:8080",
+          changeOrigin: true
+        },
         "/api": {
           target: "http://127.0.0.1:8080",
           changeOrigin: true

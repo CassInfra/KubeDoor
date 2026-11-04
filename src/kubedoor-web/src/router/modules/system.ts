@@ -37,6 +37,15 @@ export default {
       }
     },
     {
+      path: "/system/image-settings",
+      name: "SystemImageSettings",
+      component: () => import("@/views/system/image-settings/index.vue"),
+      meta: {
+        title: "镜像管理",
+        roles: ["admin"]
+      }
+    },
+    {
       path: "/system/wecom-ai",
       name: "SystemWeComAI",
       component: () => import("@/views/system/wecom-ai/index.vue"),

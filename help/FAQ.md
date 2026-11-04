@@ -1,6 +1,6 @@
 # KubeDoor 常见问题（FAQ）
 
-> 适用于 KubeDoor 2.x（`deploy/install.sh` + `deploy/kubedoor.conf` 部署）。安装步骤见[部署文档](../deploy/README.md)。
+> 首次安装使用[网页向导](../deploy/README.md)。本文中涉及 `kubedoor.conf` 和 `./install.sh master/agent/render/status/uninstall` 的维护方法适用于[旧配置式部署](../tools/legacy-install/README.md)：在 `tools/legacy-install` 目录执行，并用 `-c` 指定原配置。网页入口 `deploy/install.sh` 不再提供这些命令。
 
 排查问题时，先看组件状态和日志（命名空间固定为 `kubedoor`）：
 
@@ -101,18 +101,22 @@ Jstack：先显示线程栈，下载地址在最末尾（截图未滚动到底�
 | 执行机 | 能用 `kubectl` 连上目标集群；bash 4 及以上（macOS 自带的 bash 3.2 不行） |
 | K8S | 1.21 及以上（用到 `batch/v1` 的 CronJob）。每日采集任务 `kubedoor-collect` 和 agent 创建的定时/周期任务都带 `timeZone: Asia/Shanghai`，1.25 及以上才按北京时间执行；更老的集群安装脚本会自动去掉该字段，按 kube-controller-manager 的时区执行 |
 | metrics-server | **每个纳管集群都要有**（`kubectl top nodes` 能出结果）：「Pod」「节点管理」页和 Deployment 明细里的实时 CPU/内存用量、「节点均衡」都依赖它 |
-| 时序库 | 自带的 vmagent + VictoriaMetrics，或已有的 Prometheus / VictoriaMetrics。「Deployment」页、「K8S资源总览」和高峰期采集的数据都来自时序库，集群还没有监控数据时这些页面是空的 |
+| 时序库 | 在 `deploy/victoria-metrics` 用 Docker Compose 独立部署单机 VictoriaMetrics，或使用已有的 Prometheus / VictoriaMetrics；各集群可用自带 vmagent 采集。「Deployment」页、「K8S资源总览」和高峰期采集的数据都来自时序库，集群还没有监控数据时这些页面是空的 |
 | PostgreSQL | 用 `deploy/postgres` 的 docker compose 起 PostgreSQL 18，或用现成的 PostgreSQL（建议 14 及以上）；K8S 里的 Pod 要能访问到 |
-| 存储 | 只有启用内置 VictoriaMetrics（`ENABLE_VICTORIA_METRICS="true"`）时才需要可用的 StorageClass |
+| 存储 | 独立 Compose 部署的 PostgreSQL 和 VictoriaMetrics 各自使用 Docker 数据卷；KubeDoor 安装不再要求为时序库准备 StorageClass |
 | CPU 架构 | 官方镜像只有 amd64 |
 | 命名空间 | `NAMESPACE` 保持 `kubedoor`：准入 webhook、定时任务、「Agent管理」的「更新」都写死了这个命名空间 |
+
+### Q：精简配置里找不到镜像、组件开关或其他高级参数？
+
+镜像仓库和版本放在 `deploy/install.sh` 顶部，独立执行 `sh install.sh` 或 `bash install.sh` 即可启动网页入口，无需 Python、额外配置文件或完整源码。其余运行默认值属于安装器内部，位于 `src/kubedoor-setup/resources/kubedoor.defaults.conf`；网页安装通过向导填写部署信息，启动目标用 `--context`、`--namespace` 指定。旧脚本仍允许在原 `kubedoor.conf` 中覆盖高级参数，并通过 `-c` 加载。
 
 ### Q：执行 install.sh 报错怎么处理？
 
 | 报错（节选） | 处理 |
 |---|---|
 | 「需要 bash 4 或更高版本」 | 换用 bash 4 及以上执行 |
-| 「连不上 K8S 集群」「kubeconfig 里没有设置当前 context」「kubeconfig 里没有名为 … 的 context」 | 先确认本机 `kubectl get nodes` 正常；管理多套集群时在 `kubedoor.conf` 的 `KUBE_CONTEXT` 里指定 context |
+| 「连不上 K8S 集群」「kubeconfig 里没有设置当前 context」「kubeconfig 里没有名为 … 的 context」 | 先确认本机 `kubectl get nodes` 正常；管理多套集群时在 `kubedoor.conf` 中追加 `KUBE_CONTEXT="目标context"` |
 | 「配置项 … 不能为空」 | 按提示补全 `kubedoor.conf` |
 | 「PG_HOST 不能填 127.0.0.1 —— 这是 Pod 自己的回环地址」 | 填 K8S 里的 Pod 能访问到的地址，通常是数据库宿主机的内网 IP |
 | 「从当前机器连不上 …」 | 只是警告：执行机和 K8S 节点不在同一个网络时可以忽略 |
@@ -173,7 +177,7 @@ Web 里的 nginx 启动时要解析配置中引用的 Service（`kubedoor-master
 
 | 改了什么 | 执行 `kubectl -n kubedoor rollout restart …` |
 |---|---|
-| `kubedoor-config`（数据库、时序库、通知、`UPDATE_IMAGE` 等） | `deploy/kubedoor-master deploy/kubedoor-alarm`；改了 `PG_*` 再加 `deploy/kubedoor-ai` |
+| `kubedoor-config`（数据库、时序库、通知等） | `deploy/kubedoor-master deploy/kubedoor-alarm`；改了 `PG_*` 再加 `deploy/kubedoor-ai` |
 | `kubedoor-master-file-cfg`（K8S 事件告警规则） | `deploy/kubedoor-master` |
 | `vmalert-config`（指标告警规则和阈值） | `deploy/vmalert` |
 | `alertmanager-config`（告警路由、通知地址） | `deploy/alertmanager` |
@@ -182,17 +186,17 @@ Web 里的 nginx 启动时要解析配置中引用的 Service（`kubedoor-master
 | 集群端 `kubedoor-agent-config`（`KUBEDOOR_MASTER`、`MSG_TOKEN`、`OSS_URL` 等） | `deploy/kubedoor-agent`（在该业务集群执行） |
 | 集群端 `vmagent-config`（抓取任务） | `deploy/vmagent`（在该业务集群执行） |
 
-- 重跑 `./install.sh` 会用模板覆盖手工 `kubectl edit` 过的 ConfigMap，想长期保留的修改请写进 `kubedoor.conf` 或 `deploy/manifests/` 下的模板。
+- 重跑 `./install.sh` 会用模板覆盖手工 `kubectl edit` 过的 ConfigMap，想长期保留的修改请写进 `kubedoor.conf` 或 `src/kubedoor-setup/resources/manifests/` 下的模板。
 - 只改 `kubedoor-config` 里的数据库密码或 `PROM_URL`，不会同步到 Grafana 的数据源（`PROM_URL` 也不会同步到 vmalert 的启动参数）；请改 `kubedoor.conf` 后重跑 `./install.sh master`。
 - 把某个 `ENABLE_*` 从 `true` 改成 `false` 后重跑脚本，**不会删除**已经部署的组件，需要手动删除，例如 `kubectl -n kubedoor delete ds/node-exporter`。
 
 ### Q：怎么升级？
 
-- 改 `kubedoor.conf` 里的 `TAG_*`，控制端执行 `./install.sh master`，每个业务集群执行 `./install.sh agent`。master、web、ai 请使用相互匹配的版本。
+- 更新完整发布包后，控制端执行 `./install.sh master`，每个业务集群执行 `./install.sh agent`。推荐镜像版本由 `deploy/install.sh` 顶部的镜像配置区提供；如果旧 `kubedoor.conf` 中已有 `TAG_*`，请同步更新或删除覆盖项。需要固定版本时，在自己的配置中追加 `TAG_*`，master、web、ai 请使用相互匹配的版本。
 - 所有镜像都是 `imagePullPolicy: Always`，同一个 tag 想重新拉取时执行 `kubectl -n kubedoor rollout restart deploy/<名称>`。
 - master 和 kubedoor-ai 使用 Recreate 方式更新，升级期间会短暂不可用，agent 会自动重连。**开启了「准入控制」的集群，在 master 重启期间 Deployment 的创建、发布、扩缩容会被拒绝**，请避开发布时段，或者先关闭准入控制。
-- 也可以在「Agent管理」点「更新」只升级某个集群的 agent 镜像。之后请把该集群配置里的 `TAG_AGENT` 改成同一版本，否则下次 `./install.sh agent` 会改回去；新版本改了部署模板（权限、端口等）时仍要重跑 `./install.sh agent`。
-- 从 2.0.x 升级到 2.1：外部 MCP 改由 kubedoor-ai 提供，`kubedoor.conf` 里要有 `TAG_AI`；旧的 `kubedoor-mcp` 不会被脚本删除，可手动删除 `kubectl -n kubedoor delete deploy/kubedoor-mcp svc/kubedoor-mcp --ignore-not-found`；MCP 客户端地址改为 `/mcp`（`/sse` 仍兼容）。
+- 也可以在「Agent管理」点「更新」只升级某个集群的 agent 镜像。之后请在该集群配置里追加或更新 `TAG_AGENT` 为同一版本，否则下次 `./install.sh agent` 会改回去；新版本改了部署模板（权限、端口等）时仍要重跑 `./install.sh agent`。
+- 从 2.0.x 升级到 2.1：外部 MCP 改由 kubedoor-ai 提供，固定 2.1 版本时在 `kubedoor.conf` 中追加 `TAG_AI="2.1.0"`；旧的 `kubedoor-mcp` 不会被脚本删除，可手动删除 `kubectl -n kubedoor delete deploy/kubedoor-mcp svc/kubedoor-mcp --ignore-not-found`；MCP 客户端地址改为 `/mcp`（`/sse` 仍兼容）。
 - 升级时保留 `kubedoor.conf.ai-secrets` 和 Secret `kubedoor-ai-security`。
 
 ### Q：旧版（Helm + ClickHouse / MySQL）能直接升级到 2.x 吗？
@@ -203,18 +207,18 @@ Web 里的 nginx 启动时要解析配置中引用的 Service（`kubedoor-master
 2. 用 `helm list -A` 找到旧版的 release，`helm uninstall` 卸载。
 3. 按[部署文档](../deploy/README.md)起 PostgreSQL，再安装控制端和集群端。
 
-自定义过的 K8S 事件告警规则，先合并进 `deploy/manifests/master/alert_rules.json` 再安装；`UPDATE_IMAGE`、`REGISTRY_SECRET` 的 JSON 格式没变，填到 `kubedoor.conf` 的 `UPDATE_IMAGE_JSON`、`REGISTRY_SECRET_JSON` 即可。
+自定义过的 K8S 事件告警规则，先合并进 `src/kubedoor-setup/resources/manifests/master/alert_rules.json` 再安装。镜像更新规则和仓库凭据改在「系统管理 → 镜像管理」中维护；运行 `./install.sh master` 会将旧配置一次性迁入数据库，确认成功后清理本地旧赋值，已有数据库配置不会被覆盖。详见[镜像更新配置说明](K8S微服务镜像更新配置说明.md#从旧配置升级)。
 
 ### Q：卸载要注意什么？
 
 - **先在「Agent管理」关闭各集群的「准入控制」。** 卸载不会删除集群级的 webhook 配置，残留的配置会继续拒绝该集群的 Deployment 变更；已经卸载了就执行 `kubectl delete mutatingwebhookconfiguration kubedoor-admis-configuration`。
-- `./install.sh uninstall master` 和 `./install.sh uninstall agent` 都会连同 `kubedoor` 命名空间一起删除：控制端和集群端装在同一个集群时，卸载任一端都会把另一端一起删掉；agent 创建的定时任务、内置 VictoriaMetrics 的数据卷（监控历史）也会被删除。
+- `./install.sh uninstall master` 和 `./install.sh uninstall agent` 都会连同 `kubedoor` 命名空间一起删除：控制端和集群端装在同一个集群时，卸载任一端都会把另一端一起删掉；agent 创建的定时任务、旧版遗留在该命名空间内的 VictoriaMetrics PVC 也会被删除。旧版时序库应先备份、迁移并确认查询和写入正常，再清理旧资源。
 - 卸载控制端前，先备份 `kubedoor.conf.ai-secrets` 和 Secret `kubedoor-ai-security`。
-- PostgreSQL 在 K8S 外（compose 部署时数据在 docker 卷 `kubedoor-pgdata` 里），不受卸载影响。
+- 独立 Compose 部署的 PostgreSQL 和 VictoriaMetrics 在 K8S 外，数据保存在各自的 Docker 卷里，不受 KubeDoor 卸载影响。
 
 ### Q：离线 / 内网环境怎么部署？
 
-- 把 `kubedoor.conf` 里的 `IMAGE_REPO` 和各个 `IMAGE_*` 改成内网仓库地址；PostgreSQL 镜像在 `deploy/postgres/.env` 的 `PG_IMAGE` 里改（保持 18 大版本）。
+- 在 `kubedoor.conf` 中追加需要覆盖的 `IMAGE_REPO` 和各个 `IMAGE_*`，填入内网仓库地址（名称和默认值见 `deploy/install.sh` 顶部）；PostgreSQL 镜像在 `deploy/postgres/.env` 的 `PG_IMAGE` 里改（保持 18 大版本），VictoriaMetrics 镜像在 `deploy/victoria-metrics/.env` 的 `VM_IMAGE` 里改。
 - 例外：agent 创建的定时/周期任务使用的镜像 `registry.cn-shenzhen.aliyuncs.com/starsl/busybox-curl` 写死在代码里，不受 `IMAGE_BUSYBOX_CURL` 控制，要保证各业务集群的节点能拉到这个镜像（例如在容器运行时里把该仓库映射到内网仓库）。
 - 所有组件都是 `imagePullPolicy: Always`，Pod 每次启动都会访问镜像仓库。
 
@@ -255,14 +259,16 @@ kubectl -n kubedoor logs deploy/kubedoor-agent --tail=50
 
 ### Q：跨集群部署需要开通哪些网络？
 
-都是业务集群访问控制端，控制端不需要主动连接业务集群：
+Agent 安装后主动访问控制端；网页安装期间还需要控制端访问目标集群的 API Server：
 
 | 方向 | 用途 | 对应配置 |
 |---|---|---|
 | kubedoor-agent → 控制端 Web 的 NodePort | agent 与 master 之间的 WebSocket（指令、心跳、事件、日志都走这一条） | `MASTER_WS` |
-| vmagent → 控制端时序库 | 指标远程写 | `REMOTE_WRITE_URL`：用内置 VictoriaMetrics 时，填装控制端时脚本打印的 `http://<VM_USER>:<VM_PASSWORD>@<控制端节点IP>:<VM NodePort>/api/v1/write`；用已有时序库时填它的写入地址 |
+| 网页安装的 vmagent → 控制端 Web 入口 → 时序库 | 指标远程写 | 网页自动生成 `<KubeDoor地址>/agent/metrics/write`；控制端用 `METRICS_WRITE_URL` 配置完整写入后端 |
+| 脚本安装的 vmagent → 时序库 | 指标远程写 | 显式填写目标集群可达的 `REMOTE_WRITE_URL`，例如 `http://monit:<URL编码口令>@<VM宿主机IP>:8428/api/v1/write` |
+| 控制端 → 目标集群 API Server | 网页安装 Agent 的检测和资源部署 | 上传的 kubeconfig 中的 API Server 地址 |
 
-例外：在「AI Kubeconfig」里上传了 kubeconfig 的集群，控制端的 kubedoor-ai 会直接访问该集群的 API Server。
+在「AI Kubeconfig」里上传了 kubeconfig 的集群，控制端的 kubedoor-ai 也会直接访问该集群的 API Server。
 
 ### Q：改了 `K8S_NAME` 或下线了集群，旧名字一直显示「离线」？
 
@@ -278,7 +284,7 @@ kubectl -n kubedoor logs deploy/kubedoor-agent --tail=50
 
 「Deployment」页的列表来自时序库：按 `<PROM_K8S_TAG_KEY>="<K8S_NAME>"` 查询 kube-state-metrics 的 `kube_deployment_spec_replicas` 等指标生成；而「Pod」「Service」「StatefulSet」等页面由 agent 直接查 K8S。这一页为空，说明时序库里查不到这个集群的数据：
 
-1. 采集是否正常：在该业务集群执行 `kubectl -n kubedoor get pods`，确认 vmagent、kube-state-metrics（开启了自带组件时）在运行，再看 `kubectl -n kubedoor logs deploy/vmagent --tail=50` 有没有远程写报错。跨集群时 `REMOTE_WRITE_URL` 要填控制端时序库的外部地址。
+1. 采集是否正常：在该业务集群执行 `kubectl -n kubedoor get pods`，确认 vmagent、kube-state-metrics（开启了自带组件时）在运行，再看 `kubectl -n kubedoor logs deploy/vmagent --tail=50` 有没有远程写报错。网页安装需检查 KubeDoor 入口及其 `METRICS_WRITE_URL` 后端是否可达；脚本安装需检查 `REMOTE_WRITE_URL` 是否能从业务集群访问。
 2. 集群标签是否对得上：在 `/grafana/` 的 Explore 里选数据源 KubeDoor-Prometheus（或用时序库自带的查询页面）执行下面的查询，结果里应该有一行的值等于 `<K8S_NAME>`。查不到这个标签，说明 master 与 agent 的 `PROM_K8S_TAG_KEY` 不一致，或者已有的 Prometheus 没有打集群标签；值不一样，说明 `K8S_NAME` 与时序库里的标签值不一致。
 
    ```
@@ -320,7 +326,7 @@ kubectl -n kubedoor delete job collect-now     # 用完删掉，下次才能用�
 这两个看板直接查时序库（Grafana 数据源 KubeDoor-Prometheus）：
 
 - 先在看板顶部的「K8S」下拉框里选对集群。
-- 在业务集群看 vmagent 是否在正常远程写：`kubectl -n kubedoor logs deploy/vmagent --tail=50`。跨集群时 `REMOTE_WRITE_URL` 必须是控制端时序库的外部地址；留空时脚本拼的是集群内地址 `victoria-metrics.kubedoor`，在另一个集群里访问不到。
+- 在业务集群看 vmagent 是否在正常远程写：`kubectl -n kubedoor logs deploy/vmagent --tail=50`。网页安装默认经 KubeDoor 的 `/agent/metrics/write` 转发，检查控制端配置的 `METRICS_WRITE_URL`；脚本启用 vmagent 时必须显式填写可达的 `REMOTE_WRITE_URL`，留空会在安装前报错。
 - 「节点监控看板📊」还需要 node-exporter 的指标（自带的或已有的，见下一条）。
 - `ENABLE_GRAFANA="false"` 时三个看板菜单仍然存在，但打开是 404。
 
@@ -329,7 +335,7 @@ kubectl -n kubedoor delete job collect-now     # 用完删掉，下次才能用�
 KubeDoor 自带的 vmagent 用 `role: node` 发现节点，直接按 HTTP 抓每个节点的 `<节点IP>:9100`，与 node-exporter 部署在哪个命名空间无关。
 
 1. 节点上已有 node-exporter 时，在集群端配置里关闭自带的（两者都占用宿主机 9100 端口）：`ENABLE_NODE_EXPORTER="false"`。之前已经装过自带的，要手动删除：`kubectl -n kubedoor delete ds/node-exporter`。已有的是 9100 端口的 HTTP 服务时，到这一步就够了。
-2. 已有的是 HTTPS（例如经 kube-rbac-proxy 暴露）或端口不是 9100：修改 `deploy/manifests/agent/20-vmagent.yaml` 里的 `k8s-node-exporter` 任务（保持原有缩进）。只是端口不同时，只改 `replacement` 里的端口即可。
+2. 已有的是 HTTPS（例如经 kube-rbac-proxy 暴露）或端口不是 9100：修改 `src/kubedoor-master/agent_install/manifests/20-vmagent.yaml` 里的 `k8s-node-exporter` 任务（保持原有缩进）。只是端口不同时，只改 `replacement` 里的端口即可。
 
    ```yaml
          - job_name: 'k8s-node-exporter'
@@ -383,9 +389,9 @@ KubeDoor 自带的 vmagent 用 `role: node` 发现节点，直接按 HTTP 抓每
 
 ```bash
 # 控制端
-ENABLE_VICTORIA_METRICS="false"
 PROM_URL="http://<用户>:<密码>@<时序库地址>:<端口>"   # 读地址；VM 集群版填 vmselect 的 .../select/0/prometheus
 PROM_TYPE="Prometheus"                               # 或 Victoria-Metrics-Single / Victoria-Metrics-Cluster
+METRICS_WRITE_URL="<完整写入URL>"                     # 网页完整接入使用；已有完整采集链路时可留空
 ENABLE_VMALERT="false"                               # 告警规则也用自己的时
 
 # 集群端（已有完整采集时）
@@ -395,8 +401,9 @@ ENABLE_NODE_EXPORTER="false"
 ```
 
 - master 只有一个 `PROM_URL`：所有集群的数据都要能在这一个地址查到，并且每条序列都带 `<PROM_K8S_TAG_KEY>="<K8S_NAME>"` 标签（key 所有集群相同，value 等于该集群 agent 的 `K8S_NAME`）。
+- `METRICS_WRITE_URL` 与查询地址分开配置，单机 VM 的写入路径是 `/api/v1/write`，账号和口令中的特殊字符需 URL 编码。网页安装 Agent 会自动使用统一网关，脚本安装启用 vmagent 时则需显式填写 `REMOTE_WRITE_URL`。
 - Prometheus 的 `external_labels` 只在远程写、联邦和发送告警时附加，直接查询那台 Prometheus 时看不到。`PROM_URL` 直接指向某个集群自己的 Prometheus 时，要用 relabel 把集群标签打到序列上，或者改为指向汇聚了各集群远程写数据的存储。
-- 抓取任务可以参考 `deploy/manifests/agent/20-vmagent.yaml`（node-exporter、kubelet、cAdvisor、kube-state-metrics、JVM）；cAdvisor 序列的 `instance` 需要是节点名，否则节点排行等数据为空。
+- 抓取任务可以参考 `src/kubedoor-master/agent_install/manifests/20-vmagent.yaml`（node-exporter、kubelet、cAdvisor、kube-state-metrics、JVM）；cAdvisor 序列的 `instance` 需要是节点名，否则节点排行等数据为空。
 - 内置 vmalert 规则用了 VictoriaMetrics 的专有函数，时序库是 Prometheus 时请设 `ENABLE_VMALERT="false"`，改用自己的告警规则。
 - AI 助手的自由指标查询只支持 VictoriaMetrics（按 `PROM_TYPE` 判断）。
 
@@ -603,7 +610,7 @@ kubectl -n kubedoor rollout restart deploy/kubedoor-web
 - **能做哪些操作**：在「系统管理 → 权限与审批」里按操作类型（重启、扩缩容、删除 Pod、编辑 YAML、网页终端、CoreDNS 修改、Istio 修改等）勾选只读 / 读写 / 管理员能不能做，只有系统管理员能改。默认和以往一样读写及以上能做、只读不能做，只有 CoreDNS 修改、Istio 修改默认只有管理员能做。没有权限时会提示「当前账号在集群 xxx 是「只读」权限，不能执行「扩缩容」」，页面上对应的按钮也会置灰。
 - 选中只读集群时，集群下拉框旁会显示「只读」；是「管理员」权限的集群显示「管理员」。
 - 「Agent管理」和「系统管理」只有系统管理员能看到。
-- 例外：「更新」镜像对没有「更新镜像」权限的只读账号也可能放行，由 master 按 `UPDATE_IMAGE` 判断，见 [K8S微服务镜像更新配置说明](K8S微服务镜像更新配置说明.md)。
+- 例外：「更新」镜像对没有「更新镜像」权限的只读账号也可能放行，由 master 按「镜像管理 → 镜像更新规则」判断，见 [K8S微服务镜像更新配置说明](K8S微服务镜像更新配置说明.md)。
 - 查看 Secret 的 YAML 需要该集群的「查看 Secret 内容」权限，「获取运行配置」需要「查看运行配置」权限（默认都是读写及以上）。
 - AI 助手、企微机器人和外部 MCP 也按这张表：没有权限的操作直接拒绝；有权限时按表里的「审批」列决定要不要你批准（默认业务变更和 kubectl 等修改要批准）。AI 的共享记忆属于全局资源，要全局角色是读写、集群管理员或系统管理员才能编辑。
 - 所有登录、账号与权限变更（含「权限与审批」的修改）、写操作（含越权被拒）都记在「系统管理 → 操作审计」。
@@ -633,7 +640,7 @@ kubectl -n kubedoor rollout restart deploy/kubedoor-web
 - Grafana 用 auth proxy 方式接入 KubeDoor 的登录：**KubeDoor 系统管理员在 Grafana 里是 Admin，其他账号（包括集群管理员）都是 Viewer**（只能看看板，不能改看板）。
 - Grafana 看板做不到按集群隔离，所以**只对能看到全部集群的账号开放**：对任何集群设了「无」的账号看不到这三个看板菜单，直接打开 `/grafana/` 会返回 403。
 - Grafana 的 PostgreSQL 数据源用的是 `PG_USER`，Viewer 也能借数据源查询库里的数据（本地账号口令哈希加了 pepper、LDAP 绑定口令加密存储，拿到也用不了）。对此敏感时，给 Grafana 单独建一个只读 PG 账号，只授权看板用到的 `k8s_*` 表。
-- 在 Grafana 页面上改的看板，Pod 重启后会丢失（看板由 ConfigMap 下发）；要长期修改请改 `deploy/dashboards/*.json` 后重跑 `./install.sh master`。
+- 在 Grafana 页面上改的看板，Pod 重启后会丢失（看板由 ConfigMap 下发）；要长期修改请改 `src/kubedoor-setup/resources/dashboards/*.json` 后重跑 `./install.sh master`。
 
 ### Q：生产环境需要 HTTPS 吗？
 
@@ -644,7 +651,7 @@ KubeDoor 不提供 Ingress 模板，请在 `kubedoor-web` 这个 Service 前放�
 - 要支持 WebSocket 升级：`/ws`（agent 连接）、`/ws/pod-logs`、`/ws/workload-status`、`/grafana/api/live/`。
 - AI 对话（`/api/ai/`）和 MCP（`/mcp`、`/sse`）是流式长连接：关闭响应缓冲，把读超时调长（Web 自带的 nginx 分别是 1 小时和 24 小时）。
 - 换成 HTTPS 地址后：跨集群 agent 的 `MASTER_WS` 改为 `wss://<Agent账号>:<口令>@<域名>`；`KUBEDOOR_EXTURL`（IM 告警里【屏蔽】链接的地址）也改成 HTTPS 地址。
-- 跨集群 vmagent 远程写走的是控制端 VictoriaMetrics 的 NodePort（HTTP + basic auth），同样建议只在内网开放或经 TLS 暴露。
+- 网页安装的 vmagent 通过同一个 KubeDoor HTTPS 入口的 `/agent/metrics/write` 写入指标，控制端再按 `METRICS_WRITE_URL` 转发到时序库。脚本直接写入独立时序库时，需为该写入地址单独配置可达网络与 TLS。
 
 ---
 
@@ -652,7 +659,7 @@ KubeDoor 不提供 Ingress 模板，请在 `kubedoor-web` 这个 Service 前放�
 
 ### Q：修改了 K8S 事件告警规则，没有生效？
 
-- 规则只来自 ConfigMap `kubedoor-master-file-cfg`（模板是 `deploy/manifests/master/alert_rules.json`），挂载到 master 的 `/k8s_event/rules/`。master 镜像不自带规则文件，没有挂载时事件照常入库，但不会发出任何事件告警。
+- 规则只来自 ConfigMap `kubedoor-master-file-cfg`（模板是 `src/kubedoor-setup/resources/manifests/master/alert_rules.json`），挂载到 master 的 `/k8s_event/rules/`。master 镜像不自带规则文件，没有挂载时事件照常入库，但不会发出任何事件告警。
 - **规则不支持热重载**，改完必须重启 master：
 
   ```bash
@@ -662,7 +669,7 @@ KubeDoor 不提供 Ingress 模板，请在 `kubedoor-web` 这个 Service 前放�
   ```
 
 - 日志出现「加载了 N 条告警规则」表示加载成功（重启后收到第一条事件时才打印）；出现「加载告警规则失败(…)」说明文件没有挂载或 JSON 不合法（不能写注释、不能有尾逗号）。
-- 重跑 `./install.sh master` 会用模板覆盖 ConfigMap，长期修改请改 `deploy/manifests/master/alert_rules.json`，重跑脚本后同样要重启 master。
+- 重跑 `./install.sh master` 会用模板覆盖 ConfigMap，长期修改请改 `src/kubedoor-setup/resources/manifests/master/alert_rules.json`，重跑脚本后同样要重启 master。
 - 「告警屏蔽」对 K8S 事件告警不起作用，想停掉某类事件告警请改规则。
 
 规则语法见 [K8S事件告警规则配置说明](K8S事件告警规则配置说明.md)。
@@ -715,7 +722,7 @@ kubectl -n kubedoor edit configmap vmalert-config
 kubectl -n kubedoor rollout restart deploy/vmalert
 ```
 
-重跑 `./install.sh master` 会用模板覆盖，长期修改请改 `deploy/manifests/master/71-vmalert.yaml`。
+重跑 `./install.sh master` 会用模板覆盖，长期修改请改 `src/kubedoor-setup/resources/manifests/master/71-vmalert.yaml`。
 
 ### Q：「告警面板」「K8S告警详情」里没有记录？
 

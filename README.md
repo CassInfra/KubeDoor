@@ -65,7 +65,7 @@ KubeDoor专注微服务每日高峰时段的资源视角：采集各微服务高
 - 🛰**多集群统一纳管**：agent主动外连控制端，业务集群无需开放入站端口；所有集群的资源、指标、事件和告警集中在一个平台。
 - 🔔**告警闭环**：指标告警、K8S事件告警与告警屏蔽，通知推送到企业微信、钉钉、飞书、Slack。
 - 🔐**账号与权限**：本地账号 + LDAP登录，按K8S集群授权「管理员 / 读写 / 只读 / 无」，在「权限与审批」里按操作配置每级权限能做什么、AI做哪些操作要人工批准；登录、变更与越权操作全部留痕审计。
-- 🚀**部署简单**：一个脚本 + 一份配置文件，PostgreSQL是唯一的数据库。
+- 🚀**部署简单**：一条命令启动网页向导，逐步连接外部数据库并自动部署。
 
 <div align="center">
 
@@ -101,7 +101,7 @@ K8S资源总览：多集群资源、风险节点、今日异常告警与事件�
 
 **🧱2.0：架构与部署**
 - **PostgreSQL唯一数据库**：移除ClickHouse与MySQL，启动时自动建表、无需扩展，过期数据自动清理。
-- **脚本化部署**：`deploy/install.sh` + `kubedoor.conf`取代Helm，支持渲染预览、组件按需开关、内网镜像仓库。
+- **网页向导部署**：单独下载 `deploy/install.sh`，用 `sh` 或 `bash` 启动 Web 和安装服务；在网页填写数据库信息、自动安装并逐项检查服务状态，支持内网镜像仓库。
 - 另有：告警屏蔽、节点均衡、华为云CCI弹性扩容、Deployment级聚合日志。
 
 ---
@@ -114,10 +114,10 @@ K8S资源总览：多集群资源、风险节点、今日异常告警与事件�
 <img src="screenshot/kubedoor-arch.png" alt="KubeDoor 2.x 架构总览" />
 </div>
 
-- **控制端**（`./install.sh master`）：kubedoor-web（nginx统一入口 + Vue 3控制台）、kubedoor-master（API网关、agent连接中心）、kubedoor-ai（AI助手、企微机器人与MCP Server）、kubedoor-alarm（告警屏蔽、入库与IM通知）、kubedoor-collect（每日高峰期采集CronJob），以及可选的VictoriaMetrics、vmalert、Alertmanager、Grafana。
-- **集群端**（`./install.sh agent`）：kubedoor-agent，以及可选的vmagent、kube-state-metrics、node-exporter。agent**主动**通过WebSocket连接控制端，业务集群无需开放入站端口；同集群直连master的Service，跨集群经Web入口，都使用内置Agent账号认证。
+- **控制端**（网页向导自动部署）：kubedoor-web（nginx统一入口 + Vue 3控制台）、kubedoor-master（API网关、agent连接中心）、kubedoor-ai（AI助手、企微机器人与MCP Server）、kubedoor-alarm（告警屏蔽、入库与IM通知）、kubedoor-collect（每日高峰期采集CronJob），以及可选的vmalert、Alertmanager、Grafana。
+- **集群端**（「Agent管理」网页安装）：kubedoor-agent，以及可选的vmagent、kube-state-metrics、node-exporter。agent**主动**通过WebSocket连接控制端，业务集群无需开放入站端口；同集群直连master的Service，跨集群经Web入口，都使用内置Agent账号认证。
 - **PostgreSQL 18是唯一数据库**：用docker compose独立部署在K8S外，也可用现成的PG（无需扩展）。
-- **监控栈可选**：使用内置VictoriaMetrics单机版，或接入已有的Prometheus/VictoriaMetrics；各集群指标用标签`<PROM_K8S_TAG_KEY>=<K8S_NAME>`区分。
+- **时序库独立部署**：单机VictoriaMetrics通过`deploy/victoria-metrics/`的Docker Compose部署，也可接入已有的Prometheus/VictoriaMetrics；各集群指标用标签`<PROM_K8S_TAG_KEY>=<K8S_NAME>`区分。
 - **统一入口**：Web、Grafana、AI助手和MCP共用kubedoor-web的一个NodePort，登录与权限由master统一管理；外部MCP入口（`/mcp`、`/sse`）可用`ENABLE_MCP="false"`关闭，不影响网页里的AI助手。
 
 ---
@@ -272,7 +272,7 @@ AI 助手：
 - 💻**Pod终端与节点终端【2.2】**：在新标签页打开网页终端；Pod终端自动选择bash / ash / sh，节点终端由agent起临时特权Pod，`nsenter`进宿主机，退出后自动清理；需要「网页 Pod 终端」/「网页节点终端」权限（默认读写及以上），会话记入审计。
 - 📜**日志查看器**：实时跟随、关键字搜索与定位、日志级别着色、「重启前日志」；Deployment可聚合查看全部Pod的日志，完整日志可gzip下载。
 - 🔁**扩缩容与重启**：立即、定时、按周期执行，可选「临时扩容」「调度到指定节点」。
-- 🏷**镜像更新**：自动列出镜像仓库最近20个标签（阿里云ACR、华为云SWR、Harbor），只读账号可按集群、时间段、账号白名单授权，进度推送IM。
+- 🏷**镜像更新**：自动列出镜像仓库最近20个标签（阿里云ACR、华为云SWR、Harbor），只读账号可按集群、时间段、账号白名单授权，进度推送IM。规则和仓库凭据在「系统管理 → 镜像管理」维护，保存到数据库后立即生效。
 - 🧪**Pod隔离**：把Pod的`app`标签改为`<原值>-ALERT`，脱离Service流量、保留现场排查，可同时临时扩容1个Pod。
 
 <details close>
@@ -292,7 +292,7 @@ AI 助手：
 **各集群的vmagent把指标远程写入同一个时序库，靠一个标签区分集群——在一个Web里看全部集群。**
 
 - 🖥**K8S资源总览**：在全部集群与单集群之间切换，展示资源数量、风险节点、最高使用率/分配率，以及今日Top10异常Pod告警、Top10异常K8S事件和近10日告警趋势。
-- 🌊**统一时序库**：可用内置VictoriaMetrics单机版，也可接入已有的Prometheus/VictoriaMetrics；集群里已有的kube-state-metrics、node-exporter可以直接复用。
+- 🌊**统一时序库**：可用独立Docker Compose部署的VictoriaMetrics单机版，也可接入已有的Prometheus/VictoriaMetrics；集群里已有的kube-state-metrics、node-exporter可以直接复用。
 - 📊**Grafana看板**：「K8S监控看板📊」「节点监控看板📊」「高峰资源看板📊」内嵌在Web中，随安装自动导入；系统管理员另有「系统管理 → AI 用量看板📊」，统计AI助手的用量、缓存命中率、上下文占用和估算费用。
 
 <details close>
@@ -396,7 +396,7 @@ AI 助手：
 - 🧹**数据自动清理**：K8S事件保留90天，告警记录与高峰快照保留365天，可在`kubedoor-config`中调整（`0`表示不清理）。
 - 🌗**界面**：水墨月洞门登录页【2.2】，简体中文/English（部分页面翻译）、浅色/深色/自动主题，适配移动端。
 
-📖详见：[部署指南](deploy/README.md)、[账号与权限](deploy/README.md#账号与权限)
+📖详见：[部署指南](deploy/README.md)、[账号与权限](tools/legacy-install/README.md#账号与权限)
 
 <details close>
 <summary>🔍点击展开截图 ...</summary>
@@ -410,7 +410,7 @@ AI 助手：
 
 ## 🚀快速部署
 
-**一份配置文件 + 一个bash脚本，三步完成：起PostgreSQL → 装控制端 → 每个集群装agent，不再需要Helm。** 完整说明见[部署指南](deploy/README.md)。
+**准备 PostgreSQL 和时序库后，用一条命令启动网页向导，自动安装控制端；各集群 Agent 也可直接在网页安装，无需编辑安装配置或使用 Helm。** 已有数据库和时序库可直接复用，完整说明见[部署指南](deploy/README.md)。
 
 #### 前置条件
 
@@ -419,12 +419,14 @@ AI 助手：
 | 执行机器 | 能用`kubectl`连上目标集群，bash 4以上 |
 | Kubernetes | ≥ 1.21；每日采集与定时/周期任务按北京时间执行（`timeZone: Asia/Shanghai`），需要≥ 1.25，更老的集群按kube-controller-manager的时区执行 |
 | metrics-server | 需要：Pod/节点的CPU与内存用量、节点均衡都依赖它 |
-| 时序库 | 内置VictoriaMetrics（需要可用的StorageClass，默认100Gi PVC），或已有Prometheus/VictoriaMetrics。Deployment列表、K8S资源总览和高峰期采集都依赖时序库，没有监控数据时页面为空、也采集不到数据 |
+| 时序库 | 独立Docker Compose部署的VictoriaMetrics，或已有Prometheus/VictoriaMetrics。Deployment列表、K8S资源总览和高峰期采集都依赖时序库，没有监控数据时页面为空、也采集不到数据 |
 | 数据库 | 一台装有Docker Compose的机器运行PostgreSQL 18（K8S节点能访问它的5432端口），或现成的PostgreSQL（建议14+，无需扩展和超级用户） |
 | CPU架构 | 官方镜像仅提供amd64 |
-| 网络 | 跨集群时，agent要能访问控制端Web的NodePort（WebSocket），vmagent要能访问控制端时序库的NodePort（远程写） |
+| 网络 | 控制端能访问数据库、时序库及目标K8S API；目标集群能访问KubeDoor的Web入口，网页安装的指标通过该入口转发到时序库 |
 
-#### 三步安装
+#### 安装步骤
+
+已有 PostgreSQL 和时序库时，只需下载 [install.sh](deploy/install.sh)，直接执行第③步。安装机器只需 `sh`（或 `bash`）和 `kubectl`，不需要 Python 或完整源码。需要下面的独立数据库 Compose 示例时，再按需获取对应目录，或克隆仓库：
 
 ```bash
 git clone https://github.com/CassInfra/KubeDoor.git
@@ -443,36 +445,41 @@ docker compose logs -f postgres    # 看到 database system is ready 就行
 
 默认镜像只有amd64，海外或ARM机器可在`.env`里设置`PG_IMAGE=postgres:18-alpine`。不用手动建表，master与kubedoor-ai启动时会自动建好。
 
-**② 装控制端**（在能用kubectl连上集群的机器上，从仓库根目录开始）
+**② 起时序库**（已有Prometheus/VictoriaMetrics时可跳过，从仓库根目录开始）
 
 ```bash
-cd deploy
-cp kubedoor.conf.example kubedoor.conf   # 从模板复制一份配置
-vi kubedoor.conf        # 改 PG_HOST / PG_PASSWORD / MSG_TOKEN 等
-./install.sh master
+cd deploy/victoria-metrics
+cp .env.example .env
+vi .env                 # 至少改掉 VM_PASSWORD
+docker compose up -d
 ```
 
-- `PG_HOST`填K8S里的Pod能访问到的地址（通常是数据库宿主机的内网IP），不能填`127.0.0.1`。
-- 已有Prometheus/VictoriaMetrics时，设置`ENABLE_VICTORIA_METRICS="false"`并填写`PROM_URL`、`PROM_TYPE`。
-- 想先检查生成的YAML：`./install.sh render master -o /tmp/out`。
+默认镜像为`registry.cn-shenzhen.aliyuncs.com/starsl/victoria-metrics:stable`，独立目录管理端口、账号、保留时间与数据卷，详见[VictoriaMetrics部署说明](deploy/victoria-metrics/README.md)。
 
-**③ 装集群端**（每个业务集群执行一次；单集群就在同一个集群再执行一次）
+**③ 在网页安装控制端**（把 `deploy/install.sh` 单独复制到能用 kubectl 连上集群的机器）
 
-```bash
-vi kubedoor.conf        # 改 K8S_NAME 和 MASTER_WS（换机器执行时先 cp kubedoor.conf.example kubedoor.conf）
-./install.sh agent
+```sh
+sh install.sh
+# 也支持：bash install.sh
 ```
 
-- `K8S_NAME`：集群的唯一标识，只能用字母、数字、`-`、`_`。
-- `MASTER_WS`：必须带内置Agent账号口令，同集群填`ws://Up4biLko1dNh:<口令>@kubedoor-master.kubedoor`，跨集群填`ws://Up4biLko1dNh:<口令>@<控制端节点IP>:<Web NodePort>`（装控制端时脚本会把两种写法打印出来）；跨集群还要把`REMOTE_WRITE_URL`改成控制端时序库的外部写入地址（同样会打印）。
-- 多个集群建议各用一份配置：`./install.sh agent -c ./cluster-a.conf`。
-- 几十秒后即可在「Agent管理」看到该集群「在线」。
+打开命令打印的 Web 地址，使用一次性安装密钥进入五步向导：环境检查 → PostgreSQL → 时序库 → 管理员和访问地址 → 自动安装。每个服务独立展示部署及健康状态，全部所选服务和最终检查通过后才通知成功。镜像仓库和版本已包含在脚本顶部，无需额外配置文件。需要包含此功能的新版 Web、setup、master、AI、alarm 镜像；使用自己构建的统一版本时可加 `--tag <版本>`，详见[网页安装说明](deploy/README.md#网页向导安装推荐)。
+
+- PG 和 VM 地址须能从 K8S Pod 访问；向导会真实验证认证、查询和数据库建表权限。
+- 单机 VM 写入地址自动生成，集群指标标签默认 `origin_prometheus`；已有监控要填实际标签名。
+- 旧部署的配置式安装、升级和 YAML 预览已移至 [tools/legacy-install](tools/legacy-install/README.md)。`deploy/install.sh` 只负责启动网页入口。
+
+**④ 在网页安装Agent**（每个要纳管的集群安装一次）
+
+管理员打开`/#/workbench/index`的「Agent管理」→「安装Agent」，上传kubeconfig、选择context、确认集群标识后检测并安装。填写一次KubeDoor连接地址即可自动生成控制连接和指标写入入口，目标集群无需保存时序库账号。
+
+控制端无法访问目标 K8S API 时，可在目标网络内使用[旧脚本安装入口](tools/legacy-install/README.md)，并沿用该集群的配置。
 
 #### 访问Web
 
-- 浏览器打开安装脚本打印的`http://<节点IP>:<NodePort>`，内置超级管理员账号`kubedoor` / `kubedoor`，首次登录会强制修改口令。
+- 浏览器打开安装命令打印的地址，以 `kubedoor` 和向导中设置的密码登录。旧脚本未指定初始密码时使用出厂密码，首次登录需修改。
 - 在「系统管理 → 用户与权限」添加账号、按集群授权，在「LDAP 设置」接入LDAP；需要时在「权限与审批」调整各级权限能做的操作和AI审批。
-- ⚠️ 内置Agent账号`Up4biLko1dNh`（出厂口令`qCa22jDkfc9y`）供agent连接master，请在「用户与权限」里重置口令，并同步修改各集群agent的`MASTER_WS`（同集群、跨集群都要带账号口令），重新执行`./install.sh agent`后执行`kubectl -n kubedoor rollout restart deploy/kubedoor-agent`。
+- 网页安装 Agent 会生成独立凭据。旧脚本部署若仍使用内置 Agent 出厂口令，应在「用户与权限」重置，并同步更新所有使用该账号的 Agent。
 
 #### 首次使用
 
@@ -487,14 +494,18 @@ vi kubedoor.conf        # 改 K8S_NAME 和 MASTER_WS（换机器执行时先 cp 
 
 - 🔒Web与MCP默认是HTTP，生产环境建议在Web前加HTTPS（Ingress/LB需支持WebSocket）；TLS在nginx前面终结时把`kubedoor-config`的`AUTH_COOKIE_SECURE`设为`"true"`。
 - 🚧准入控制为fail-closed，agent或master不可用时Deployment变更会被拒绝；应急执行`kubectl delete mutatingwebhookconfiguration kubedoor-admis-configuration`。卸载或重装agent前，先在「Agent管理」关闭「准入控制」。
-- 💾请把PostgreSQL数据、`kubedoor.conf`和`kubedoor.conf.ai-secrets`（与Secret `kubedoor-ai-security`一致）一起备份；更换AI加密密钥会使已保存的kubeconfig和企微机器人凭证无法解密。
+- 💾请备份 PostgreSQL 数据及集群内的连接、认证和 `kubedoor-ai-security` 等 Secret；旧脚本部署还需备份原配置与 `.ai-secrets`。更换 AI 加密密钥会使已保存的 kubeconfig 和企微机器人凭证无法解密。
 - 📌`NAMESPACE`请保持默认的`kubedoor`，准入控制、定时任务等功能依赖这个命名空间。
 
 ---
 
 ## ♻升级说明
 
-**2.x改用PostgreSQL和脚本化部署，从1.x升级需要全新安装；2.x版本之间修改`TAG_*`后重新执行安装脚本即可（升级到2.2要重建账号，升级到2.3会清掉2.2试用版的Istio路由数据，见下文）。**
+首次安装使用网页向导。以下历史升级说明适用于旧配置式部署，命令均在 `tools/legacy-install` 目录执行，并用 `-c` 指定原配置；`deploy/install.sh` 不执行旧部署升级。网页安装完成后，仅修改启动脚本中的镜像版本不会更新已运行的服务，目前还没有网页升级入口。
+
+发行镜像版本位于 `deploy/install.sh` 顶部的镜像配置区；旧脚本仍允许原配置中的 `TAG_*` 覆盖默认值，详见[旧部署维护说明](tools/legacy-install/README.md)。
+
+VictoriaMetrics现已独立部署。旧版K8S实例与PVC不会随master更新自动迁移或删除；先备份并迁移数据，更新查询和写入地址，确认正常后再手动清理旧资源，详见[迁移说明](deploy/victoria-metrics/README.md#数据与维护)。
 
 #### 从1.x（Helm）升级
 
@@ -502,12 +513,12 @@ vi kubedoor.conf        # 改 K8S_NAME 和 MASTER_WS（换机器执行时先 cp 
 - 建议顺序：
   1. 如果开启过准入控制，先在旧版Web的「Agent管理」里关闭「准入控制」；
   2. 用`helm uninstall`卸载旧的控制端与agent（如`helm uninstall kubedoor -n kubedoor`、`helm uninstall kubedoor-agent -n kubedoor`，release名以实际安装为准）；
-  3. 按[快速部署](#快速部署)全新安装；已有的Prometheus/VictoriaMetrics可继续使用（`ENABLE_VICTORIA_METRICS="false"` + `PROM_URL`、`PROM_TYPE`）。
+  3. 按[快速部署](#快速部署)全新安装；已有的Prometheus/VictoriaMetrics可继续使用，填写`PROM_URL`、`PROM_TYPE`与`METRICS_WRITE_URL`。
 - 1.x的MCP地址（独立`kubedoor-mcp`的NodePort `/sse`）已废弃，改用Web入口的`/mcp`。
 
 #### 从2.0.x升级到2.1
 
-1. 更新到最新仓库代码；在`kubedoor.conf`中把`TAG_MASTER`、`TAG_AGENT`、`TAG_WEB`改为`2.1.0`，并新增`TAG_AI="2.1.0"`（不写会回退到`latest`）；旧的`TAG_MCP`不再使用，可以删除。
+1. 更新到最新仓库代码；在`kubedoor.conf`中追加或更新`TAG_MASTER`、`TAG_AGENT`、`TAG_WEB`为`2.1.0`，并设置`TAG_AI="2.1.0"`；旧的`TAG_MCP`不再使用，可以删除。
 2. `ENABLE_MCP`的含义变了：现在只控制Web是否开放kubedoor-ai的`/mcp`、`/sse`、`/messages`，默认`true`。
 3. 执行`./install.sh master`，再到各集群执行`./install.sh agent`（新版agent才支持AI的通用工具）。
 4. 安装脚本只做`apply`，不会删除2.0.x遗留的独立MCP服务，请手动删除：
@@ -521,18 +532,18 @@ vi kubedoor.conf        # 改 K8S_NAME 和 MASTER_WS（换机器执行时先 cp 
 
 2.2把登录与权限从nginx basic auth改为由master统一管理（本地账号 + LDAP，按K8S集群授权）。
 
-1. 更新到最新仓库代码，在`kubedoor.conf`中把`TAG_MASTER`、`TAG_AGENT`、`TAG_WEB`、`TAG_AI`改为`2.2.0`（告警服务本版没有变化，`TAG_ALARM`保持`2.1.0`）。
+1. 更新到最新仓库代码，在`kubedoor.conf`中追加或更新`TAG_MASTER`、`TAG_AGENT`、`TAG_WEB`、`TAG_AI`为`2.2.0`（告警服务本版没有变化，`TAG_ALARM`保持`2.1.0`）。
 2. 原`WEB_AUTH_USERS`/`WEB_RW_USERS`不再生效（安装时会提示）。执行`./install.sh master`后用内置管理员`kubedoor`登录，在「系统管理 → 用户与权限」重新建账号，或在「LDAP 设置」接入LDAP后按集群授权。
 3. agent一律要带内置Agent账号`Up4biLko1dNh`：同集群agent的`MASTER_WS`改成`ws://Up4biLko1dNh:<口令>@kubedoor-master.kubedoor`，再到各集群执行`./install.sh agent`。跨集群agent如果沿用出厂口令，`MASTER_WS`不用改；以前改过这个账号口令的，升级前在`kubedoor.conf`里把`KUBEDOOR_INIT_AGENT_PASSWORD`设为原口令（只在首次创建账号时生效）。来不及一起改时，可先设`AGENT_AUTH_REQUIRED="false"`过渡，改完再改回`true`并重跑`./install.sh master`。
 4. Grafana改为auth proxy接入：KubeDoor系统管理员是Admin、其他人是Viewer，并且只对能看到全部集群的账号开放。
 
-详见[部署说明 · 账号与权限](deploy/README.md#账号与权限)。
+详见[部署说明 · 账号与权限](tools/legacy-install/README.md#账号与权限)。
 
 #### 从2.2.x升级到2.3
 
 2.3新增CoreDNS管理和企微智能机器人，重构了Istio VirtualService管理，并增强了AI助手；`kubedoor.conf`不需要新增配置。
 
-1. 更新到最新仓库代码，在`kubedoor.conf`中把`TAG_MASTER`、`TAG_AGENT`、`TAG_WEB`、`TAG_AI`改为`2.3.0`（告警服务没有变化，`TAG_ALARM`保持`2.1.0`），执行`./install.sh master`。master、web和AI这一版要一起升级（新的AI依赖master的新接口），这一步会一起完成；同时会在`kubedoor-config`里加上`RETENTION_AI_CHECKPOINT_DAYS`（企微旧对话的检查点保留天数，默认7），并给Grafana导入「KubeDoor-AI」用量看板。
+1. 更新到最新仓库代码，在`kubedoor.conf`中追加或更新`TAG_MASTER`、`TAG_AGENT`、`TAG_WEB`、`TAG_AI`为`2.3.0`（告警服务没有变化，`TAG_ALARM`保持`2.1.0`），执行`./install.sh master`。master、web和AI这一版要一起升级（新的AI依赖master的新接口），这一步会一起完成；同时会在`kubedoor-config`里加上`RETENTION_AI_CHECKPOINT_DAYS`（企微旧对话的检查点保留天数，默认7），并给Grafana导入「KubeDoor-AI」用量看板。
 2. agent只需更换镜像：在「Agent管理」勾选集群「批量更新」到`2.3.0`，或到各集群重跑`./install.sh agent`。CoreDNS管理与网络测试、Istio的从集群删除VirtualService和查看完整现状都需要新版agent（旧版会提示先升级）；定时/周期执行的「临时扩容」、准入控制对直接改副本数的改写也需要新版agent（旧版不会提示：定时任务到点按普通扩缩容处理，直接改副本数仍会放行）。
 3. Istio VirtualService管理改为按「Istio组」管理：master启动时会删除2.2试用版的旧表（`vs_global`、`vs_http_routes`、`k8s_cluster`），集群里的VirtualService不受影响；升级后在「ISTIO管理」菜单的全局VirtualService管理页建组，「刷新现状」后重新纳管即可。
 4. 企微智能机器人由kubedoor-ai主动连接企业微信，需要能出站访问企业微信；不配置不影响其他功能。
@@ -549,8 +560,8 @@ vi kubedoor.conf        # 改 K8S_NAME 和 MASTER_WS（换机器执行时先 cp 
 
 | 文档 | 内容 |
 | --- | --- |
-| [部署指南](deploy/README.md) | 一个脚本 + 一份配置安装控制端与各集群agent，PostgreSQL独立部署，含常见场景、改配置与排查 |
-| [账号与权限](deploy/README.md#账号与权限) | 本地账号与LDAP、全局角色与集群授权、权限与审批、内置账号、操作审计与忘记口令 |
+| [部署指南](deploy/README.md) | 脚本安装控制端、网页安装各集群Agent，PostgreSQL和VictoriaMetrics独立部署，含常见场景、改配置与排查 |
+| [账号与权限](tools/legacy-install/README.md#账号与权限) | 本地账号与LDAP、全局角色与集群授权、权限与审批、内置账号、操作审计与忘记口令 |
 | [AI助手](docs/ai-assistant.md) | 模型配置、资源范围、多轮对话、变更审批、全局记忆、kubeconfig直连与外部MCP |
 | [企业微信智能机器人](src/kubedoor-ai/README.md#企业微信智能机器人) | 机器人与专用模型配置、成员绑定与默认权限、集群切换与审批卡片 |
 | [Istio VirtualService管理](src/kubedoor-master/istio_route/README.md) | Istio组与组标准、按集群的hosts与域名条件、状态判断、典型流程与接口 |

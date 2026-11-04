@@ -160,7 +160,7 @@ def check_op_all(principal, op, envs, code='operation_forbidden'):
 # 自定义校验
 # ---------------------------------------------------------------------------
 async def update_image_check(request, principal):
-    """改镜像:有「更新镜像」权限直接放行;没有的只读用户继续走 UPDATE_IMAGE 白名单(集群、时间段、用户名,
+    """改镜像:有「更新镜像」权限直接放行;没有的只读用户继续走数据库中的镜像更新白名单(集群、时间段、用户名,
     由 kubedoor-master.py 判断)。「管理员」列也取消(全站关闭)时白名单也不放行。"""
     env = _query_env(request)
     if principal.can('workload.image', env):
@@ -337,6 +337,7 @@ _AGENT_READ_PATHS = '|'.join([
 ])
 
 RULES = (
+    _rule('GET', '/api/internal/setup-health', 'internal'),
     # ---- 登录 / 账号自助 ----
     _rule('POST', '/api/auth/login', 'public'),
     _rule('', '/api/auth/verify', 'public'),
@@ -408,7 +409,7 @@ RULES = (
     _rule('', '/api/scale', 'op', env='query.env', op='workload.scale'),
     _rule('', '/api/agent/statefulset/scale', 'op', env='query.env', op='workload.scale'),
     _rule('', '/api/cron', 'op', env='query.env', op='workload.schedule'),
-    # 改镜像:有「更新镜像」权限直接放行,没有的只读用户走 UPDATE_IMAGE 白名单
+    # 改镜像:有「更新镜像」权限直接放行,没有的只读用户走数据库中的镜像更新白名单
     _rule('', '/api/update-image', 'custom', check=update_image_check, write=True),
     _rule('', '/api/pod/(delete_pod|delete_pods)', 'op', env='query.env', op='pod.delete'),  # delete_pod 是 GET
     _rule('', '/api/pod/modify_pod', 'op', env='query.env', op='pod.isolate'),

@@ -12,6 +12,7 @@ CLAUDE.md
 .pytest_cache/
 .cache-ai-tests/
 deploy/kubedoor.conf
+.local/
 .codegraph/
 wechat-article/
 docs/

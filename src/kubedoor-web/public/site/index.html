@@ -489,7 +489,7 @@ content_type: application/json-patch+json</pre>
         <div class="fcard-text">
           <div class="card-icon"><svg class="icon" aria-hidden="true"><use href="#i-monitor"/></svg></div>
           <h3><span class="nw">多集群统一监控 ·</span> <span class="nw">总览大屏 · Grafana</span></h3>
-          <p>资源总览大屏汇总各集群的节点、工作负载、Pod 与 PVC，标出风险节点、Top10 异常告警与事件，30 秒自动刷新；另内嵌 K8S、节点与高峰资源三套 Grafana 看板。指标来自内置 VictoriaMetrics，也可对接已有 Prometheus。</p>
+          <p>资源总览大屏汇总各集群的节点、工作负载、Pod 与 PVC，标出风险节点、Top10 异常告警与事件，30 秒自动刷新；另内嵌 K8S、节点与高峰资源三套 Grafana 看板。指标存入独立部署的 VictoriaMetrics，也可对接已有 Prometheus / VictoriaMetrics。</p>
         </div>
         <figure class="fcard-shot">
           <img src="assets/img/shots/k8s-monitor-card.webp" width="720" height="405" loading="lazy" decoding="async" alt="K8S 监控看板（Grafana）截图：节点内存与 CPU 比例、命名空间资源统计、工作负载与节点数量、网络流量曲线">
@@ -672,21 +672,21 @@ content_type: application/json-patch+json</pre>
     <header class="section-head reveal">
       <p class="eyebrow">// 05 · 三步部署</p>
       <h2 id="deploy-title">一个脚本，<span class="grad-text">三步上线</span></h2>
-      <p class="section-lead">一份配置文件 + 一个 bash 脚本完成部署，不再需要 Helm。PostgreSQL 独立运行在 K8S 之外，也可以直接使用现成的数据库。</p>
+      <p class="section-lead">PostgreSQL 与 VictoriaMetrics 各自独立运行在 K8S 之外，也可使用已有数据库。一个脚本安装控制端，再在网页上传 kubeconfig 安装 Agent，不再需要 Helm。</p>
     </header>
     <ul class="prereq reveal" aria-label="前置条件">
       <li class="prereq-label">前置条件</li>
       <li><b>K8S</b> ≥ 1.21</li>
       <li><b>bash 4+</b> 与 kubectl</li>
-      <li><b>时序库</b>内置 VictoriaMetrics 或已有 Prometheus</li>
-      <li><b>StorageClass</b>启用内置 VictoriaMetrics 时需要</li>
+      <li><b>时序库</b>独立 VictoriaMetrics 或已有 Prometheus</li>
+      <li><b>Docker Compose</b>独立数据库部署</li>
       <li><b>metrics-server</b>用量列、节点均衡</li>
       <li><b>镜像</b>仅 amd64</li>
     </ul>
 
     <ol class="steps">
       <li class="step reveal">
-        <div class="step-side"><span class="step-num">01</span><h3>起数据库</h3><p>在一台 K8S 节点能访问到的机器上用 docker compose 启动 PostgreSQL。无需手动建表，master 与 kubedoor-ai 启动时会自动建表。</p></div>
+        <div class="step-side"><span class="step-num">01</span><h3>起数据库与时序库</h3><p>在控制端能访问到的机器上，分别用 Docker Compose 启动 PostgreSQL 和单机 VictoriaMetrics，各自在独立目录管理账号、端口和数据。已有服务可直接复用；PostgreSQL 无需手动建表。</p></div>
         <div class="terminal">
           <div class="terminal-bar"><span class="dots" aria-hidden="true"><i></i><i></i><i></i></span><span class="terminal-title">bash · 数据库主机</span><button class="copy-btn" type="button" data-copy-target="cmd-1" aria-label="复制第一步命令"><svg class="icon" aria-hidden="true"><use href="#i-copy"/></svg><span>复制</span></button></div>
 <pre class="code"><code id="cmd-1"><span class="c-cmd">git</span> clone \
@@ -695,26 +695,33 @@ content_type: application/json-patch+json</pre>
 <span class="c-cmd">cp</span> .env.example .env
 <span class="c-c"># 至少改掉 PG_PASSWORD</span>
 <span class="c-cmd">vi</span> .env
+<span class="c-cmd">docker</span> compose up -d
+
+<span class="c-cmd">cd</span> ../victoria-metrics
+<span class="c-cmd">cp</span> .env.example .env
+<span class="c-c"># 至少改掉 VM_PASSWORD</span>
+<span class="c-cmd">vi</span> .env
 <span class="c-cmd">docker</span> compose up -d</code></pre>
         </div>
       </li>
       <li class="step reveal">
-        <div class="step-side"><span class="step-num">02</span><h3>装控制端</h3><p><code>PG_HOST</code> 要填 K8S 里的 Pod 能访问到的地址（不能是 127.0.0.1）。装完会打印 Web 控制台地址与内置超级管理员 <code>kubedoor / kubedoor</code>，首次登录会强制修改口令；之后在「系统管理」里添加账号、接入 LDAP、按集群授权。内置 Agent 账号的出厂口令是公开的，上线前请在「用户与权限」里重置，并同步修改各集群的 <code>MASTER_WS</code>。</p></div>
+        <div class="step-side"><span class="step-num">02</span><h3>装控制端</h3><p><code>PG_HOST</code>、时序库查询地址 <code>PROM_URL</code> 和完整写入地址 <code>METRICS_WRITE_URL</code> 都要能从控制端访问。单机 VM 写入路径为 <code>/api/v1/write</code>。装完会打印 Web 地址与超级管理员 <code>kubedoor / kubedoor</code>，首次登录会强制修改口令。</p></div>
         <div class="terminal">
           <div class="terminal-bar"><span class="dots" aria-hidden="true"><i></i><i></i><i></i></span><span class="terminal-title">bash · 可执行 kubectl 的机器</span><button class="copy-btn" type="button" data-copy-target="cmd-2" aria-label="复制第二步命令"><svg class="icon" aria-hidden="true"><use href="#i-copy"/></svg><span>复制</span></button></div>
 <pre class="code"><code id="cmd-2"><span class="c-c"># 与数据库不在同一台机器时，先在这里 git clone 仓库</span>
 <span class="c-cmd">cd</span> KubeDoor/deploy
-<span class="c-c"># 从模板复制一份配置，再改 PG_HOST / PG_PASSWORD / MSG_TOKEN 等</span>
+<span class="c-c"># 配置 PG_HOST / PG_PASSWORD / PROM_URL / METRICS_WRITE_URL / MSG_TOKEN 等</span>
 <span class="c-cmd">cp</span> kubedoor.conf.example kubedoor.conf
 <span class="c-cmd">vi</span> kubedoor.conf
 ./install.sh master</code></pre>
         </div>
       </li>
       <li class="step reveal">
-        <div class="step-side"><span class="step-num">03</span><h3>装集群端</h3><p>到每个业务集群执行。<code>K8S_NAME</code> 是集群唯一标识；<code>MASTER_WS</code> 必须带内置 Agent 账号，同集群填 <code>ws://Up4biLko1dNh:&lt;口令&gt;@kubedoor-master.kubedoor</code>，跨集群填 <code>ws://Up4biLko1dNh:&lt;口令&gt;@&lt;控制端节点IP&gt;:&lt;Web NodePort&gt;</code>（装控制端后脚本会打印这两行），跨集群还要把 <code>REMOTE_WRITE_URL</code> 改成控制端时序库的外部地址（用内置 VictoriaMetrics 时同样会打印）。</p></div>
+        <div class="step-side"><span class="step-num">03</span><h3>网页安装 Agent</h3><p>管理员打开「Agent 管理」→「安装 Agent」，上传 kubeconfig、选择目标 context、确认集群标识后检测并安装。目标集群能访问 KubeDoor 即可，控制连接与指标写入地址自动生成。控制端无法访问目标 K8S API 时，也可用右侧脚本；启用 vmagent 需显式填写目标集群可达的完整写入地址。</p></div>
         <div class="terminal">
-          <div class="terminal-bar"><span class="dots" aria-hidden="true"><i></i><i></i><i></i></span><span class="terminal-title">bash · 每个业务集群</span><button class="copy-btn" type="button" data-copy-target="cmd-3" aria-label="复制第三步命令"><svg class="icon" aria-hidden="true"><use href="#i-copy"/></svg><span>复制</span></button></div>
-<pre class="code"><code id="cmd-3"><span class="c-c"># 改 K8S_NAME 和 MASTER_WS（带 Agent 账号口令；跨集群再改 REMOTE_WRITE_URL）；换机器执行时先从 kubedoor.conf.example 复制</span>
+          <div class="terminal-bar"><span class="dots" aria-hidden="true"><i></i><i></i><i></i></span><span class="terminal-title">bash · 脚本安装（可选）</span><button class="copy-btn" type="button" data-copy-target="cmd-3" aria-label="复制可选的脚本安装命令"><svg class="icon" aria-hidden="true"><use href="#i-copy"/></svg><span>复制</span></button></div>
+<pre class="code"><code id="cmd-3"><span class="c-c"># 改 K8S_NAME / MASTER_WS（带 Agent 账号）/ REMOTE_WRITE_URL</span>
+<span class="c-c"># 换机器执行时先从 kubedoor.conf.example 复制</span>
 <span class="c-cmd">vi</span> kubedoor.conf
 ./install.sh agent</code></pre>
         </div>

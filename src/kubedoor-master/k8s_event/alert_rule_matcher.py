@@ -19,7 +19,7 @@ class AlertRuleMatcher:
         Args:
             rules_file: 规则文件路径，默认 k8s_event/rules/alert_rules.json（工作目录为 /）。
                 镜像内不自带规则文件，由 ConfigMap kubedoor-master-file-cfg 挂载
-                （源文件 deploy/manifests/master/alert_rules.json）。
+                （源文件 src/kubedoor-setup/resources/manifests/master/alert_rules.json）。
         """
         if rules_file is None:
             rules_file = "k8s_event/rules/alert_rules.json"

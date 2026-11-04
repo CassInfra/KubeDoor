@@ -76,7 +76,7 @@ OPERATIONS = (
     _op('workload.schedule', '工作负载', '定时 / 周期重启、扩缩容',
         '新建定时或周期执行的重启、扩缩容任务。', WEB_AI, approval=True),
     _op('workload.image', '工作负载', '更新镜像',
-        '更新 Deployment 的镜像。没有此权限的只读用户,在网页上仍可按 UPDATE_IMAGE 配置的'
+        '更新 Deployment 的镜像。没有此权限的只读用户,在网页上仍可按「镜像管理」配置的'
         '集群、时间段和用户白名单更新(「管理员」列取消时白名单也不生效)。', WEB_AI, approval=True),
     # ---- Pod ----
     _op('pod.delete', 'Pod', '删除 Pod',

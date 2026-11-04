@@ -1,0 +1,315 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>KubeDoor · 安装向导交互原型</title>
+  <style>
+    :root{--ink:#19304c;--muted:#75859a;--blue:#4263ed;--teal:#159988;--line:#e8edf5;--soft:#f6f8fc;--danger:#c24f3e}
+    *{box-sizing:border-box}[hidden]{display:none!important}body{margin:0;background:radial-gradient(ellipse at 8% 6%,#dfeaff 0,transparent 45%),radial-gradient(ellipse at 97% 88%,#e2f4ee 0,transparent 40%),#f4f7fc;color:var(--ink);font:14px/1.65 system-ui,-apple-system,"Segoe UI","Microsoft YaHei",sans-serif;min-height:100vh}
+    button,input,select{font:inherit}button{cursor:pointer}button:disabled{cursor:wait;opacity:.65}button:focus-visible,input:focus-visible,select:focus-visible,summary:focus-visible{outline:3px solid #8fb6ff;outline-offset:3px}a{color:var(--blue)}
+    .topbar{max-width:1320px;margin:auto;padding:29px 40px;display:flex;justify-content:space-between;align-items:center;gap:16px}.brand{display:flex;gap:12px;align-items:center;font-size:23px;font-weight:750;letter-spacing:-.6px}.brand-mark{display:grid;place-items:center;width:38px;height:38px;border-radius:12px;background:var(--blue);color:white;font-size:24px;box-shadow:0 5px 12px #4263ed25}.brand span:last-child{font-size:12px;font-weight:500;letter-spacing:0;color:var(--muted);padding-left:14px;border-left:1px solid #ccd7e6;margin-left:4px}.prototype{font-size:11px;color:#596981;border:1px solid #d8e1ed;border-radius:20px;padding:5px 12px;background:#ffffff80;white-space:nowrap}
+    .layout{max-width:1240px;display:grid;grid-template-columns:282px minmax(0,1fr);margin:18px auto 0;gap:38px;padding:0 28px}.rail{padding:27px 0 0}.eyebrow{font-size:11px;letter-spacing:2px;font-weight:750;color:var(--blue)}.rail h1{font-size:30px;letter-spacing:-.8px;line-height:1.35;margin:14px 0 12px}.rail-intro{color:#738399;margin:0 0 30px;font-size:13px;max-width:245px}.steps{list-style:none;margin:0;padding:0}.step{display:flex;gap:14px;position:relative;min-height:79px}.step:not(:last-child):after{content:"";position:absolute;left:17px;top:39px;width:1px;height:32px;background:#d6deec}.step-number{height:35px;width:35px;flex-shrink:0;display:grid;place-items:center;border:1px solid #d5ddeb;border-radius:50%;color:#8292a6;font-size:13px;background:#f5f8fc}.step-title{font-weight:650;color:#8997a9;padding-top:1px;font-size:14px}.step-note{font-size:11px;color:#8f9aac;margin-top:2px}.step.active .step-number{background:var(--blue);border-color:var(--blue);color:white;box-shadow:0 0 0 5px #4263ed0d}.step.active .step-title{color:var(--ink)}.step.done .step-number{background:#e2f3ef;border-color:#c6e7df;color:var(--teal)}.step.done .step-title{color:#516983}.rail-tip{margin-top:17px;padding:17px;background:#ffffff80;border:1px solid #e1e8f2;border-radius:12px;font-size:12px;color:#718196}.rail-tip b{display:block;color:#536c83;margin-bottom:5px}
+    .card{background:#fff;border:1px solid #e5ebf5;border-radius:20px;box-shadow:0 20px 60px #3657800a;overflow:hidden;min-height:680px;display:flex;flex-direction:column}.card-top{padding:32px 38px 0;display:flex;align-items:center;justify-content:space-between}.section-kicker{font-size:11px;color:#91a0b3;letter-spacing:1px}.save-note{display:flex;gap:5px;align-items:center;font-size:11px;color:#97a5b6}.save-note:before{content:"";width:5px;height:5px;background:#71b7a6;border-radius:50%}.panel{padding:10px 38px 30px;flex:1}.panel[hidden]{display:none}.panel h2{font-size:25px;margin:5px 0 6px;letter-spacing:-.6px}.subtitle{color:var(--muted);font-size:13px;margin:0 0 27px}.pill{font-size:11px;padding:3px 9px;border-radius:20px;color:#678297;background:#edf4f8;display:inline-flex;align-items:center;gap:5px}.pill.green{background:#eaf7f2;color:#278571}.pill.blue{background:#edf0ff;color:#5770da}
+    .context-card{border:1px solid var(--line);border-radius:12px;padding:20px;display:flex;gap:16px;align-items:center;margin-bottom:23px;background:linear-gradient(120deg,#f9fbff,#fff)}.cluster-icon{height:45px;width:45px;background:#edf1ff;border-radius:12px;display:grid;place-items:center;color:var(--blue);font-size:25px}.context-card h3{font-size:14px;margin:0 0 3px}.context-card p{font-size:12px;color:var(--muted);margin:0}.context-card .pill{margin-left:auto}.check-list{border:1px solid var(--line);border-radius:12px;padding:0 18px;margin-top:18px}.check-row{display:flex;align-items:center;gap:11px;padding:13px 0;font-size:12px}.check-row+.check-row{border-top:1px solid #f0f3f7}.check-row small{margin-left:auto;color:#8a98ab;font-size:11px}.check-icon{height:20px;width:20px;display:grid;place-items:center;border-radius:50%;font-size:11px;background:#e9f6f0;color:#279883}.check-icon.pending{background:#f0f3f8;color:#94a1b2}.check-icon.running{background:#edf1ff;color:var(--blue);animation:pulse 1s infinite}
+    .form-grid{display:grid;grid-template-columns:1fr 1fr;gap:18px 20px}.field{min-width:0}.field.full{grid-column:1/-1}label{display:block;font-size:12px;font-weight:650;color:#4a607a;margin-bottom:7px}.required{color:#7989a0;font-size:11px;font-weight:400;margin-left:5px}input:not([type=checkbox]),select{width:100%;padding:11px 13px;border:1px solid #dfe5ef;border-radius:8px;background:#fff;color:#354c68;height:44px;min-width:0;font-size:13px;transition:border-color .15s}input::placeholder{color:#adb7c6}input:hover,select:hover{border-color:#bbc8df}input[readonly]{background:#f6f8fc;color:#6f8198}.field-hint{font-size:11px;color:#94a0b0;margin-top:6px;line-height:1.6}.input-suffix{display:flex;align-items:center;gap:10px}.input-suffix input{flex:1}.text-button{border:0;background:transparent;color:var(--blue);padding:0;font-size:12px;white-space:nowrap}.callout{background:#f1f5ff;border:1px solid #e5ecff;border-radius:10px;padding:13px 16px;font-size:12px;color:#61789e;margin-top:22px}.callout strong{color:#496799;font-weight:650}.callout.teal{background:#f0f9f5;border-color:#e0f0e9;color:#608475}.callout.warning{background:#fff9ec;border-color:#f5e9c8;color:#947e4f}.callout p{margin:4px 0 0}.advanced{margin-top:22px;border-top:1px solid var(--line);padding-top:16px}.advanced summary{color:#7b8aa0;font-size:12px;cursor:pointer}.advanced .form-grid{margin-top:18px}.advanced p{font-size:12px;color:#8693a5}.advanced .component-list{margin-top:15px;display:flex;gap:9px;flex-wrap:wrap}.segmented{display:flex;gap:10px;margin-bottom:22px}.choice{flex:1;border:1px solid #e2e7f0;background:#fff;border-radius:9px;padding:11px 12px;text-align:left;color:#7c8ba0;font-size:12px}.choice.selected{border-color:#7c96f4;box-shadow:0 0 0 1px #7c96f425;background:#f6f8ff;color:#4963c9}.choice small{display:block;font-size:10px;color:#94a0b4;margin-top:2px}.check-label{display:flex;gap:8px;align-items:center;font-size:12px;font-weight:400;margin:0}.check-label input{accent-color:var(--blue);margin:0}.label-block{padding:17px 18px;background:#fbfcfe;border:1px solid var(--line);border-radius:11px;margin-top:23px}.label-block .title-row{display:flex;gap:9px;align-items:center;margin-bottom:10px;font-size:12px;font-weight:650}.label-block input{max-width:300px;background:white}.label-block p{font-size:11px;color:#7c8da3;margin:9px 0 0}code{font:11px/1.6 ui-monospace,SFMono-Regular,Consolas,monospace;word-break:break-word;background:#f2f5fa;color:#5d7390;border-radius:4px;padding:2px 4px}.derived{display:flex;gap:10px;align-items:flex-start;color:#8c9aad;font-size:11px;margin-top:10px}.derived code{background:#f5f8fb;font-size:11px;flex:1}.details-row{display:flex;justify-content:space-between;gap:12px;font-size:12px;padding:11px 0;border-bottom:1px solid #f0f3f7}.details-row span{color:#8a99ab}.details-row b{font-weight:550;text-align:right;overflow-wrap:anywhere}.summary-box{padding:6px 20px 12px;border:1px solid var(--line);border-radius:12px}.summary-box .details-row:last-child{border-bottom:0}.install-progress{margin-bottom:15px;display:flex;align-items:center;gap:12px;font-size:12px;color:#7e8ea4}.progress-track{background:#edf1f7;height:5px;border-radius:10px;flex:1;overflow:hidden}.progress-bar{height:100%;background:linear-gradient(90deg,#4263ed,#35b9a6);width:0;transition:width .4s}.completion{text-align:center;padding:18px 0 9px}.success-mark{display:grid;place-items:center;width:70px;height:70px;border-radius:22px;background:#edf8f1;color:#2b9e7d;font-size:31px;margin:0 auto 20px}.completion h2{font-size:28px}.completion p{font-size:13px;color:var(--muted);max-width:410px;margin:10px auto 27px}.next-card{text-align:left;background:#f8faff;border:1px solid #e4ebfc;border-radius:13px;padding:21px;display:flex;align-items:center;gap:20px;margin-top:27px}.next-card h3{font-size:14px;margin:0 0 5px}.next-card p{font-size:12px;margin:0;color:#8797ac}.next-card button{flex-shrink:0}
+    .card-footer{border-top:1px solid var(--line);padding:19px 38px;display:flex;align-items:center;justify-content:space-between;gap:15px;margin-top:auto;background:#fff}.footer-hint{font-size:11px;color:#9aa6b7;max-width:300px}.button-group{display:flex;align-items:center;gap:12px}.button{border:1px solid #dfe5ef;background:white;border-radius:8px;padding:10px 18px;font-size:12px;color:#73839a;font-weight:550;white-space:nowrap}.button.primary{background:var(--blue);border-color:var(--blue);color:white;box-shadow:0 5px 10px #4263ed18}.button.primary:hover{background:#3655dc}.button.ghost{border-color:transparent;padding-left:0}.status-message{font-size:12px;padding:11px 14px;background:#eef8f2;border-radius:8px;color:#338b6e;margin:18px 0 0}.status-message.error{background:#fff1ef;color:var(--danger)}.status-message:empty{display:none}.bottom-note{max-width:1240px;margin:22px auto;padding:0 28px 24px;text-align:right;color:#99a7b9;font-size:11px}.bottom-note span{margin:0 10px;color:#c0cad8}.toast{position:fixed;bottom:26px;left:50%;transform:translateX(-50%);padding:13px 20px;border-radius:10px;color:white;background:#243c58;box-shadow:0 10px 30px #243c5833;font-size:13px;z-index:10;max-width:calc(100vw - 30px);width:max-content}.toast[hidden]{display:none}@keyframes pulse{50%{opacity:.4}}
+    @media(max-width:1000px){.layout{gap:22px;grid-template-columns:235px minmax(0,1fr)}.card-top,.card-footer{padding-left:27px;padding-right:27px}.panel{padding-left:27px;padding-right:27px}.rail h1{font-size:27px}.footer-hint{max-width:210px}.context-card{padding:15px}.context-card .pill{display:none}.segmented{gap:7px}.choice{padding:10px}}
+    @media(max-width:760px){.topbar{padding:21px 20px;flex-wrap:wrap;gap:10px}.brand{font-size:21px}.brand span:last-child{font-size:11px}.prototype{font-size:10px}.layout{display:block;padding:0 16px;margin:0 auto}.rail{padding:12px 4px 19px}.rail .eyebrow,.rail h1,.rail-intro,.rail-tip{display:none}.steps{display:flex;justify-content:space-between;gap:4px}.step{min-height:0;flex:1;display:flex;flex-direction:column;align-items:center;gap:8px}.step:not(:last-child):after{left:calc(50% + 21px);right:calc(-50% + 21px);top:15px;width:auto;height:1px}.step-number{width:30px;height:30px;font-size:11px}.step-title{font-size:10px;text-align:center;white-space:nowrap}.step-note{display:none}.card{border-radius:14px;min-height:0}.card-top{padding:23px 21px 0}.panel{padding:12px 21px 26px}.panel h2{font-size:22px}.subtitle{font-size:12px;margin-bottom:22px}.save-note{font-size:10px}.card-footer{padding:17px 21px;flex-wrap:wrap}.footer-hint{max-width:none;order:2;flex-basis:100%;font-size:10px}.button-group{margin-left:auto}.form-grid{gap:16px;grid-template-columns:1fr}.field.full{grid-column:auto}.check-row{flex-wrap:wrap;font-size:11px;gap:8px}.check-row small{font-size:10px}.context-card{gap:12px}.context-card p{font-size:10px}.segmented{flex-wrap:wrap}.choice{flex-basis:100%;display:flex;justify-content:space-between;align-items:center}.choice small{margin:0}.label-block{padding:14px}.derived{display:block}.derived code{display:block;margin-top:5px}.next-card{display:block}.next-card button{margin-top:16px;width:100%}.bottom-note{font-size:10px;text-align:center;padding:0 15px 18px;margin-top:18px}.details-row{font-size:11px}.check-list{padding:0 13px}.completion{padding-top:10px}.summary-box{padding-left:15px;padding-right:15px}}
+    .service-list{margin:16px 0 0;padding:0;list-style:none;border:1px solid var(--line);border-radius:12px;overflow:hidden}.service-row{padding:14px 17px;display:grid;grid-template-columns:minmax(0,1fr) auto;gap:5px 12px}.service-row+.service-row{border-top:1px solid var(--line)}.service-name{font-size:13px;font-weight:650}.service-name code{font-weight:400;font-size:10px;margin-left:7px}.service-detail{grid-column:1/-1;font-size:11px;color:var(--muted);overflow-wrap:anywhere}.service-badge{font-size:11px;align-self:start;border-radius:15px;padding:2px 9px;background:#f0f3f8;color:#7b899c;white-space:nowrap}.service-row[data-status=ready] .service-badge{background:#e9f6f0;color:#278571}.service-row[data-status=checking] .service-badge,.service-row[data-status=starting] .service-badge,.service-row[data-status=pulling] .service-badge,.service-row[data-status=deploying] .service-badge{background:#edf1ff;color:#4263ed}.service-row[data-status=failed] .service-badge{background:#fff1ef;color:#bb4534}.service-row[data-status=failed] .service-detail{color:#bb4534}.service-row details{grid-column:1/-1;font-size:11px;color:#a85142}.service-row summary{cursor:pointer}.service-row details p{margin:6px 0 0;overflow-wrap:anywhere}.checks-heading{font-size:12px;margin:22px 0 0;color:#5a708c}.demo-scenario{margin-top:20px;padding:15px;background:var(--soft);border-radius:10px}.check-icon.failed{background:#fff1ef;color:#bb4534}.completion{margin-top:26px;border-top:1px solid var(--line);padding-top:26px}#progress-label{white-space:nowrap}
+    @media(max-width:760px){.service-row{padding:12px}.service-name code{display:block;margin:3px 0 0}.service-detail{line-height:1.7}.checks-heading{margin-top:19px}}
+    @media(prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}
+  </style>
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand"><span class="brand-mark" aria-hidden="true">K</span>KubeDoor<span>安装向导</span></div>
+    <div class="prototype">交互原型 · 检测与安装均为演示</div>
+  </header>
+  <main class="layout">
+    <aside class="rail" aria-label="安装步骤">
+      <div class="eyebrow">LET’S GET STARTED</div>
+      <h1>让集群管理，<br>从简单开始。</h1>
+      <p class="rail-intro">连接已有数据库，完成基础设置。<br>其余的，交给 KubeDoor。</p>
+      <ol class="steps">
+        <li class="step active" aria-current="step"><span class="step-number">1</span><div><div class="step-title">环境检查</div><div class="step-note">确认安装位置与环境</div></div></li>
+        <li class="step"><span class="step-number">2</span><div><div class="step-title">PostgreSQL</div><div class="step-note">连接业务数据库</div></div></li>
+        <li class="step"><span class="step-number">3</span><div><div class="step-title">时序数据库</div><div class="step-note">连接监控指标存储</div></div></li>
+        <li class="step"><span class="step-number">4</span><div><div class="step-title">基础设置</div><div class="step-note">管理员与访问地址</div></div></li>
+        <li class="step"><span class="step-number">5</span><div><div class="step-title">自动安装</div><div class="step-note">准备就绪，即刻开始</div></div></li>
+      </ol>
+      <div class="rail-tip"><b>只需准备两项连接信息</b>一个 PostgreSQL 数据库，以及一个可访问的时序数据库。Agent 可以在安装完成后随时接入。</div>
+    </aside>
+    <section class="card" aria-label="安装设置">
+      <div class="card-top"><div class="section-kicker" id="step-count">STEP 01 / 05</div><div class="save-note">演示数据仅保留在当前页面</div></div>
+      <section class="panel" data-step="1">
+        <h2 tabindex="-1">欢迎使用 KubeDoor</h2>
+        <p class="subtitle">接下来，我们将带你完成控制端的首次安装。</p>
+        <div class="context-card"><div class="cluster-icon" aria-hidden="true">⬡</div><div><h3>安装到当前 Kubernetes 集群</h3><p>上下文 production-example · 命名空间 kubedoor</p></div><span class="pill blue">自动识别</span></div>
+        <div class="field"><label for="setup-key">安装密钥 <span class="required">首次访问验证</span></label><input id="setup-key" type="password" value="demo-setup-key" autocomplete="off"><div class="field-hint">由启动命令提供的一次性密钥。此处为演示值，无需连接真实集群。</div></div>
+        <div class="check-list" id="environment-checks">
+          <div class="check-row"><span class="check-icon">✓</span>Kubernetes API 可访问<small>v1.30 · 演示</small></div>
+          <div class="check-row"><span class="check-icon">✓</span>命名空间部署权限可用<small>kubedoor</small></div>
+          <div class="check-row"><span class="check-icon">✓</span>节点架构与推荐镜像兼容<small>amd64</small></div>
+          <div class="check-row"><span class="check-icon">✓</span>未发现已有 KubeDoor 安装<small>可以首次安装</small></div>
+        </div>
+        <div class="callout teal"><strong>安装前需要准备什么？</strong><p>已创建的 PostgreSQL 数据库和时序库连接信息。检测到已有安装时，将进入登录或恢复流程，避免覆盖原有配置。</p></div>
+      </section>
+      <section class="panel" data-step="2" hidden>
+        <h2 tabindex="-1">连接 PostgreSQL</h2>
+        <p class="subtitle">用于保存账号、系统配置、告警和操作记录。</p>
+        <div class="form-grid">
+          <div class="field full"><label for="pg-host">数据库地址</label><input id="pg-host" value="192.0.2.10" placeholder="例如 192.0.2.10" autocomplete="off"><div class="field-hint">填写 Kubernetes Pod 可以访问的地址，不是浏览器所在电脑的 localhost。</div></div>
+          <div class="field"><label for="pg-database">数据库名</label><input id="pg-database" value="kubedoor" autocomplete="off"></div>
+          <div class="field"><label for="pg-user">数据库用户名</label><input id="pg-user" value="kubedoor" autocomplete="off"></div>
+          <div class="field full"><label for="pg-password">数据库密码</label><input id="pg-password" type="password" value="example-only-password" autocomplete="off"><div class="field-hint">当前为原型演示值。正式安装会将凭据保存为集群 Secret。</div></div>
+        </div>
+        <details class="advanced"><summary>高级连接设置</summary><div class="form-grid"><div class="field"><label for="pg-port">端口</label><input id="pg-port" type="number" value="5432" min="1" max="65535"></div><div class="field"><label for="pg-ssl">SSL 模式</label><select id="pg-ssl"><option>优先使用 SSL</option><option>校验证书与主机名</option><option>禁用 SSL（可信内网）</option></select></div></div></details>
+        <div class="callout"><strong>下一步会自动验证</strong><p>网络连接、账号认证、数据库访问和建表权限。验证通过后再继续；正式建表在最后点击「开始安装」时执行。</p></div>
+        <div class="status-message" id="pg-status" role="status"></div>
+      </section>
+      <section class="panel" data-step="3" hidden>
+        <h2 tabindex="-1">连接时序数据库</h2>
+        <p class="subtitle">让 KubeDoor 读取集群监控数据，并接收 Agent 上报的指标。</p>
+        <div class="segmented" aria-label="时序数据库类型"><button class="choice selected" type="button" data-db-type="single" aria-pressed="true">VictoriaMetrics 单机版<small>推荐 · 默认</small></button><button class="choice" type="button" data-db-type="cluster" aria-pressed="false">VM 集群版<small>自定义入口</small></button><button class="choice" type="button" data-db-type="prometheus" aria-pressed="false">Prometheus<small>已有监控</small></button></div>
+        <div class="field"><label for="metrics-url" id="metrics-url-label">服务地址</label><input id="metrics-url" type="url" value="http://192.0.2.11:8428" placeholder="http://192.0.2.11:8428"><div class="derived" id="derived-write"><span>自动生成写入地址</span><code id="write-url-preview">http://192.0.2.11:8428/api/v1/write</code></div></div>
+        <div class="field" id="custom-write-field" hidden style="margin-top:16px"><label for="custom-write">完整写入地址 <span class="required">仅接入已有采集链路时可留空</span></label><input id="custom-write" type="url" placeholder="填写时序库实际支持的写入接口"><div class="field-hint">Prometheus 接收远程写入需要启用相应能力；不能仅凭查询成功判定可以写入。</div></div>
+        <div class="form-grid" style="margin-top:17px"><div class="field"><label for="metrics-user">认证用户名 <span class="required">可选</span></label><input id="metrics-user" value="monit" autocomplete="off"></div><div class="field"><label for="metrics-password">认证密码 <span class="required">可选</span></label><input id="metrics-password" type="password" value="example-only-password" autocomplete="off"></div></div>
+        <div class="label-block"><div class="title-row">集群指标标签<span class="pill blue">重要</span></div><label for="cluster-label">用哪个标签区分不同集群？</label><input id="cluster-label" value="origin_prometheus" placeholder="origin_prometheus"><p>全新安装保持默认；已有监控填写实际标签，例如 <code>cluster</code>。<br>例如 <code>origin_prometheus="prod-k8s"</code>：这里填标签名，接入 Agent 时再填集群标识 <code>prod-k8s</code>。新安装的 Agent 自动继承该标签名。</p></div>
+        <div class="callout teal"><strong>时序库里暂时没有数据，也可以继续。</strong><p>先验证查询连接，安装时再确认写入链路。首个 Agent 接入后，再确认真实指标到达。</p></div>
+        <div class="status-message" id="metrics-status" role="status"></div>
+      </section>
+      <section class="panel" data-step="4" hidden>
+        <h2 tabindex="-1">完成基础设置</h2>
+        <p class="subtitle">设置管理员密码，以及各集群访问 KubeDoor 的统一入口。</p>
+        <div class="form-grid"><div class="field"><label for="admin-user">管理员账号</label><input id="admin-user" value="kubedoor" readonly></div><div class="field"><label for="admin-password">管理员密码</label><input id="admin-password" type="password" value="example-admin-password" autocomplete="new-password"></div><div class="field full"><label for="admin-confirm">确认管理员密码</label><input id="admin-confirm" type="password" value="example-admin-password" autocomplete="new-password"></div><div class="field full"><label for="public-url">KubeDoor 访问地址</label><input id="public-url" type="url" value="https://kubedoor.example.com" placeholder="https://kubedoor.example.com"><div class="field-hint">根据当前入口建议，需确认目标集群也能访问。正式安装将验证入口是否指向本次 KubeDoor。</div><div class="derived"><span>Agent 指标入口</span><code id="agent-write-preview">https://kubedoor.example.com/agent/metrics/write</code></div></div></div>
+        <div class="callout warning">不要填写 <code>localhost</code> 或临时端口转发地址。其他集群需要通过这个地址连接控制端。</div>
+        <details class="advanced"><summary>查看推荐组件与后续配置</summary><div class="component-list"><span class="pill">Web</span><span class="pill">控制服务</span><span class="pill">告警服务</span><span class="pill">AI 助手</span><span class="pill">Grafana</span><span class="pill">vmalert</span><span class="pill">Alertmanager</span></div><p>当前演示安装以上 7 个服务，安装时逐项显示状态。通知渠道、模型、镜像更新规则和仓库凭据可以进入控制台后配置；此处无需逐一填写。</p></details>
+        <div class="status-message" id="basic-status" role="status"></div>
+      </section>
+      <section class="panel" data-step="5" hidden>
+        <div id="review-section"><h2 tabindex="-1">一切就绪，准备安装</h2><p class="subtitle">确认下面的信息，剩下的部署工作将自动完成。</p><div class="summary-box"><div class="details-row"><span>安装位置</span><b>当前集群 / kubedoor</b></div><div class="details-row"><span>PostgreSQL</span><b id="summary-pg"></b></div><div class="details-row"><span>时序数据库</span><b id="summary-metrics"></b></div><div class="details-row"><span>集群指标标签</span><b id="summary-label"></b></div><div class="details-row"><span>访问地址</span><b id="summary-url"></b></div><div class="details-row"><span>管理员</span><b>kubedoor</b></div></div><div class="callout teal"><strong>现在开始，才会正式部署。</strong><p>自动保存配置、初始化数据表、部署控制端并验证服务。安装完成后，再接入需要管理的集群。</p></div></div>
+        <div class="demo-scenario" id="scenario-section"><label for="demo-scenario">预览安装场景 <span class="required">仅用于交互演示</span></label><select id="demo-scenario"><option value="success">全部服务顺利就绪</option><option value="failure">Grafana 镜像拉取失败，修复后重试</option></select></div>
+        <div id="running-section" hidden>
+          <h2 id="installation-title" tabindex="-1">正在安装各项服务</h2>
+          <p class="subtitle" id="installation-subtitle">逐项等待启动和健康检查通过；所有服务可用后才会通知安装成功。</p>
+          <div class="install-progress"><div class="progress-track"><div class="progress-bar" id="progress-bar"></div></div><span id="progress-label" role="status">0 / 7 服务就绪</span></div>
+          <ul class="service-list" id="service-list" aria-label="各服务安装状态"></ul>
+          <h3 class="checks-heading">外部依赖与最终检查</h3>
+          <div class="check-list" id="install-checks" aria-label="依赖与最终检查"></div>
+          <div class="status-message error" id="installation-error" role="alert" hidden></div>
+          <div class="callout">此处展示模拟状态。正式版将读取各服务实际部署、就绪和健康检查结果；不会将提交资源或 Pod 运行中直接判为安装成功。</div>
+        </div>
+        <div id="complete-section" class="completion" hidden><div class="success-mark" aria-hidden="true">✓</div><span class="pill green">演示安装完成</span><h2 tabindex="-1">你的集群管理入口，准备好了</h2><p>下一步，接入第一个 Kubernetes 集群。上传 kubeconfig，确认集群标识，KubeDoor 将自动完成 Agent 安装。</p><div class="summary-box"><div class="details-row"><span>控制台地址</span><b id="complete-url"></b></div><div class="details-row"><span>管理员</span><b>kubedoor</b></div></div><div class="next-card"><div><h3>接入第一个集群</h3><p>可选择当前集群，也可上传其他集群的 kubeconfig。</p></div><button class="button primary" type="button" id="connect-agent">接入第一个集群 →</button></div></div>
+      </section>
+      <footer class="card-footer"><div class="footer-hint" id="footer-hint">五个简单步骤，无需手写安装配置。</div><div class="button-group"><button class="button ghost" type="button" id="back-button" hidden>← 上一步</button><button class="button primary" type="button" id="next-button">开始配置 →</button></div></footer>
+    </section>
+  </main>
+  <footer class="bottom-note">KubeDoor <span>·</span> 数据留在你的环境，管理回归简单 <span>·</span> 安装体验设计</footer>
+  <div class="toast" id="toast" role="status" hidden></div>
+  <script>
+    (() => {
+      const $ = id => document.getElementById(id);
+      let step = 1, busy = false, installed = false, dbType = 'single', toastTimer;
+      let installationStarted = false, failureInjected = false;
+      const next = $('next-button'), back = $('back-button');
+      const labels = ['开始配置 →', '测试并继续 →', '测试并继续 →', '检查并继续 →', '开始安装 →'];
+      const hints = ['五个简单步骤，无需手写安装配置。', '检测从 KubeDoor 所在集群发起。', '自动生成的地址可在高级场景中调整。', '后续 Agent 自动使用同一访问入口。', '确认后部署控制端，不改动外部数据库服务。'];
+      const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
+      function message(id, text, error = false) { const el = $(id); el.textContent = text; el.classList.toggle('error', error); }
+      function toast(text) { clearTimeout(toastTimer); $('toast').textContent = text; $('toast').hidden = false; toastTimer = setTimeout(() => $('toast').hidden = true, 4500); }
+      function showStep(value) {
+        step = value;
+        document.querySelectorAll('.panel').forEach(el => el.hidden = Number(el.dataset.step) !== step);
+        document.querySelectorAll('.step').forEach((el, i) => { el.classList.toggle('active', i + 1 === step); el.classList.toggle('done', i + 1 < step || installed); el.querySelector('.step-number').textContent = i + 1 < step || installed ? '✓' : String(i + 1); if (i + 1 === step) el.setAttribute('aria-current', 'step'); else el.removeAttribute('aria-current'); });
+        $('step-count').textContent = `STEP 0${step} / 05`;
+        next.textContent = installed ? '进入控制台 →' : labels[step - 1];
+        $('footer-hint').textContent = installed ? '演示已完成。正式版将在此进入 KubeDoor 控制台。' : hints[step - 1];
+        back.hidden = step === 1 || installed;
+        if (step === 5) fillSummary();
+        document.querySelector(`.panel[data-step="${step}"] h2`).focus({ preventScroll: true });
+      }
+      function normalizeBase(value) { return value.trim().replace(/\/+$/, ''); }
+      function updateURLs() {
+        $('write-url-preview').textContent = normalizeBase($('metrics-url').value) + '/api/v1/write';
+        $('agent-write-preview').textContent = normalizeBase($('public-url').value) + '/agent/metrics/write';
+      }
+      function validURL(value) { try { const url = new URL(value); return ['http:', 'https:'].includes(url.protocol) && !url.username && !url.password; } catch { return false; } }
+      function fillSummary() {
+        $('summary-pg').textContent = `${$('pg-host').value}:${$('pg-port').value} / ${$('pg-database').value}`;
+        $('summary-metrics').textContent = $('metrics-url').value;
+        $('summary-label').textContent = $('cluster-label').value;
+        $('summary-url').textContent = $('public-url').value;
+        $('complete-url').textContent = $('public-url').value;
+      }
+      async function testStep(id, detail) {
+        busy = true; next.disabled = back.disabled = true; next.textContent = '正在检测…';
+        message(id, '正在模拟检测连接与权限…');
+        await delay(750);
+        message(id, detail);
+        await delay(550);
+        busy = false; next.disabled = back.disabled = false;
+        showStep(step + 1);
+      }
+      next.addEventListener('click', async () => {
+        if (busy) return;
+        if (installed) { toast('这是交互原型。正式版将在此进入控制台，不会从本页面发起安装。'); return; }
+        if (installationStarted) { await install(true); return; }
+        if (step === 1) { if (!$('setup-key').value.trim()) { toast('请输入演示安装密钥；此处可使用任意非空值。'); $('setup-key').focus(); return; } showStep(2); return; }
+        if (step === 2) {
+          if (['pg-host', 'pg-database', 'pg-user', 'pg-password', 'pg-port'].some(id => !$(id).value.trim())) { message('pg-status', '请填写完整的数据库连接信息。', true); return; }
+          if (/^(localhost|127(?:\.\d{1,3}){3}|0\.0\.0\.0|\[?::1\]?)$/i.test($('pg-host').value.trim())) { message('pg-status', '请使用集群内 Pod 可访问的数据库地址，不能使用 localhost。', true); return; }
+          if (Number($('pg-port').value) < 1 || Number($('pg-port').value) > 65535) { message('pg-status', '端口需在 1 到 65535 之间。', true); return; }
+          await testStep('pg-status', '✓ 演示检测通过：认证、数据库访问和建表权限可用。'); return;
+        }
+        if (step === 3) {
+          if (!validURL($('metrics-url').value)) { message('metrics-status', '请填写有效的 HTTP / HTTPS 地址，认证信息填写在下方独立字段中。', true); return; }
+          if (!/^[a-zA-Z_][a-zA-Z0-9_]*$/.test($('cluster-label').value)) { message('metrics-status', '标签名只能包含字母、数字和下划线，且不能以数字开头。', true); return; }
+          if (dbType !== 'single' && $('custom-write').value && !validURL($('custom-write').value)) { message('metrics-status', '请检查完整写入地址。', true); return; }
+          await testStep('metrics-status', '✓ 演示检测通过：查询接口可用。新时序库暂无集群数据是正常情况。'); return;
+        }
+        if (step === 4) {
+          if ($('admin-password').value.length < 8) { message('basic-status', '请输入至少 8 位的演示管理员密码。', true); return; }
+          if ($('admin-password').value !== $('admin-confirm').value) { message('basic-status', '两次管理员密码不一致。', true); return; }
+          if (!validURL($('public-url').value)) { message('basic-status', '请填写有效的 KubeDoor HTTP / HTTPS 访问地址。', true); return; }
+          const host = new URL($('public-url').value).hostname;
+          if (/^(localhost|127(?:\.\d{1,3}){3}|0\.0\.0\.0|\[?::1\]?)$/i.test(host)) { message('basic-status', '这个地址只能在本机访问，请提供目标集群可访问的 KubeDoor 入口。', true); return; }
+          await testStep('basic-status', '✓ 演示检查通过：基础设置已准备完成。'); return;
+        }
+        await install();
+      });
+      back.addEventListener('click', () => { if (!busy && step > 1 && !installed) showStep(step - 1); });
+      document.querySelectorAll('[data-db-type]').forEach(button => button.addEventListener('click', () => {
+        dbType = button.dataset.dbType;
+        document.querySelectorAll('[data-db-type]').forEach(el => { el.classList.toggle('selected', el === button); el.setAttribute('aria-pressed', String(el === button)); });
+        $('derived-write').hidden = dbType !== 'single'; $('custom-write-field').hidden = dbType === 'single';
+        $('metrics-url-label').textContent = dbType === 'single' ? '服务地址' : '完整查询入口';
+      }));
+      $('metrics-url').addEventListener('input', updateURLs); $('public-url').addEventListener('input', updateURLs);
+      document.querySelectorAll('.panel input, .panel select').forEach(input => input.addEventListener('input', () => {
+        const panel = input.closest('.panel'), status = panel.querySelector('.status-message');
+        if (status) { status.textContent = ''; status.classList.remove('error'); }
+      }));
+      $('connect-agent').addEventListener('click', () => toast('正式版将在此打开 Agent 接入向导：选择集群 → 检测 → 安装。'));
+      const services = [
+        { id: 'web', name: 'Web 控制台', resource: 'kubedoor-web', detail: '正式入口、登录代理和指标网关可用' },
+        { id: 'master', name: '控制服务', resource: 'kubedoor-master', detail: '数据库初始化完成，控制 API 健康检查通过' },
+        { id: 'ai', name: 'AI 助手', resource: 'kubedoor-ai', detail: '服务与数据库连接正常；模型可在控制台配置' },
+        { id: 'alarm', name: '告警服务', resource: 'kubedoor-alarm', detail: '服务接口与数据库连接正常；通知渠道可稍后配置' },
+        { id: 'grafana', name: '监控看板', resource: 'Grafana', detail: '健康检查通过，数据源连接正常' },
+        { id: 'vmalert', name: '告警规则计算', resource: 'vmalert', detail: '规则加载完成，时序库和告警接收端连接正常' },
+        { id: 'alertmanager', name: '告警路由', resource: 'Alertmanager', detail: '服务就绪，告警路由配置有效' }
+      ];
+      const checks = [
+        { id: 'pg', name: 'PostgreSQL · 外部数据库' },
+        { id: 'vm', name: '时序库 · 外部服务' },
+        { id: 'gateway', name: '登录与指标链路' },
+        { id: 'handoff', name: '完成标记与初始化入口关闭' }
+      ];
+      const states = { pending: '等待中', deploying: '部署中', pulling: '拉取镜像', starting: '启动中', checking: '检查中', ready: '已就绪', failed: '失败' };
+      function renderServices() {
+        $('service-list').replaceChildren();
+        services.forEach(service => {
+          const row = document.createElement('li'); row.className = 'service-row'; row.id = `service-${service.id}`;
+          const title = document.createElement('div'); title.className = 'service-name'; title.textContent = service.name;
+          const resource = document.createElement('code'); resource.textContent = service.resource; title.append(resource);
+          const badge = document.createElement('span'); badge.className = 'service-badge';
+          const detail = document.createElement('div'); detail.className = 'service-detail';
+          row.append(title, badge, detail); $('service-list').append(row);
+          setService(service, 'pending', service.id === 'web' ? '引导页面已运行，等待正式控制服务' : '等待开始部署');
+        });
+        $('install-checks').replaceChildren();
+        checks.forEach(check => {
+          const row = document.createElement('div'); row.className = 'check-row'; row.id = `check-${check.id}`;
+          const icon = document.createElement('span'); icon.className = 'check-icon pending';
+          const title = document.createElement('span'); title.textContent = check.name;
+          const status = document.createElement('small'); row.append(icon, title, status); $('install-checks').append(row);
+          setCheck(check.id, 'pending', '等待检查');
+        });
+      }
+      function setService(service, state, detail) {
+        service.state = state;
+        const row = $(`service-${service.id}`); row.dataset.status = state;
+        row.querySelector('.service-badge').textContent = states[state];
+        row.querySelector('.service-detail').textContent = detail;
+        const ready = services.filter(item => item.state === 'ready').length;
+        $('progress-bar').style.width = `${ready / services.length * 100}%`;
+        $('progress-label').textContent = `${ready} / ${services.length} 服务就绪`;
+      }
+      function setCheck(id, state, detail) {
+        checks.find(check => check.id === id).state = state;
+        const row = $(`check-${id}`); row.dataset.status = state;
+        row.querySelector('.check-icon').className = `check-icon ${state === 'ready' ? '' : state === 'checking' ? 'running' : state}`;
+        row.querySelector('.check-icon').textContent = state === 'ready' ? '✓' : state === 'checking' ? '↻' : '·';
+        row.querySelector('small').textContent = detail;
+      }
+      async function deployService(service) {
+        $(`service-${service.id}`).querySelector('details')?.remove();
+        for (const [state, detail] of [['deploying', '正在创建本次安装的资源'], ['pulling', '等待镜像拉取完成'], ['starting', '等待目标实例启动并通过就绪探测'], ['checking', '正在验证服务接口及依赖连接']]) {
+          setService(service, state, detail); await delay(400);
+          if (service.id === 'grafana' && state === 'pulling' && $('demo-scenario').value === 'failure' && !failureInjected) {
+            failureInjected = true;
+            setService(service, 'failed', '镜像拉取失败（ImagePullBackOff）。请检查镜像地址、仓库凭据和网络后重试。');
+            const details = document.createElement('details');
+            const summary = document.createElement('summary'); summary.textContent = '查看失败详情';
+            const error = document.createElement('p'); error.textContent = '演示事件：镜像仓库连接失败，Pod 未就绪。正式版在此显示脱敏事件、目标实例及检查时间。点击下方重试可演示修复后的结果。';
+            details.append(summary, error); $(`service-${service.id}`).append(details); return;
+          }
+        }
+        setService(service, 'ready', service.detail);
+      }
+      async function verifyDependencies() {
+        setCheck('pg', 'checking', '检查连接与初始化结果');
+        setCheck('vm', 'checking', '检查查询接口');
+        await delay(550);
+        setCheck('pg', 'ready', '连接与表结构检查通过');
+        setCheck('vm', 'ready', '查询检查通过');
+      }
+      function pauseInstallation() {
+        busy = false; next.disabled = false; next.textContent = '重试失败服务并复查 →';
+        $('installation-title').textContent = '安装尚未完成';
+        $('installation-subtitle').textContent = '其他服务的结果已保留；失败项修复并重新检查通过后，才能完成安装。';
+        $('installation-error').hidden = false;
+        $('installation-error').classList.add('error');
+        $('installation-error').textContent = 'Grafana 尚未就绪，暂不通知安装成功。查看失败详情后重试；其余已就绪服务不会重复部署。';
+        $('footer-hint').textContent = '还有失败服务，整体安装未完成。';
+      }
+      async function install(retry = false) {
+        busy = true; installationStarted = true; back.hidden = true; next.disabled = true; next.textContent = '等待全部服务就绪…';
+        $('review-section').hidden = true; $('scenario-section').hidden = true; $('running-section').hidden = false;
+        $('installation-error').hidden = true;
+        $('installation-title').textContent = retry ? '重试失败服务并复查' : '正在安装各项服务';
+        $('installation-subtitle').textContent = '每个服务都要通过就绪与健康检查，随后完成依赖验证，才会通知安装成功。';
+        $('footer-hint').textContent = '服务就绪数量不代表最终检查已通过。';
+        if (!retry) renderServices();
+        await verifyDependencies();
+        if (retry) {
+          await Promise.all(services.filter(service => service.state === 'failed').map(deployService));
+          await Promise.all(services.filter(service => service.state === 'ready').map(async service => {
+            setService(service, 'checking', '保留已部署资源，复查当前健康状态'); await delay(450); setService(service, 'ready', service.detail);
+          }));
+        } else {
+          await deployService(services.find(service => service.id === 'master'));
+          await Promise.all(services.filter(service => !['master', 'web', 'vmalert'].includes(service.id)).map(deployService));
+          await Promise.all(services.filter(service => ['web', 'vmalert'].includes(service.id)).map(deployService));
+        }
+        if (services.some(service => service.state !== 'ready')) { pauseInstallation(); return; }
+        $('installation-title').textContent = '服务已就绪，正在完成最终检查';
+        setCheck('gateway', 'checking', '验证登录与指标链路'); await delay(700);
+        const queryOnly = dbType !== 'single' && !$('custom-write').value.trim();
+        setCheck('gateway', 'ready', queryOnly ? '登录与查询链路检查通过' : '登录与指标读写检查通过');
+        setCheck('handoff', 'checking', '记录完成状态并关闭初始化入口'); await delay(600);
+        setCheck('handoff', 'ready', '完成状态已记录，初始化入口已关闭');
+        if (!services.every(service => service.state === 'ready') || !checks.every(check => check.state === 'ready')) return;
+        installed = true; busy = false; next.disabled = false;
+        $('complete-section').hidden = false;
+        $('installation-title').textContent = '全部服务安装与检查通过';
+        $('installation-subtitle').textContent = '以下为本次演示的逐项结果。正式安装仅在全部所选服务及最终检查通过后通知成功。';
+        showStep(5);
+        toast('演示安装成功：7 个服务全部就绪，依赖与最终检查通过。');
+        $('complete-section').querySelector('h2').focus({ preventScroll: true });
+      }
+    })();
+  </script>
+</body>
+</html>

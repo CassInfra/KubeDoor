@@ -30,6 +30,8 @@ from func_manager.workload_relay import WorkloadRelay
 from func_manager.pod_exec_relay import PodExecRelay
 from func_manager.pod_log_relay import PodLogRelay
 import image_tags_fetcher
+import image_settings
+import installation_health
 from k8s_event import process_k8s_event_async, init_pg_tables_async
 from k8s_event.event_query_api import query_k8s_events_handler, get_k8s_events_menu_options
 from promql import deployment_node
@@ -283,75 +285,13 @@ async def http_handler(request):
         username = principal.username.lower()
         direct = request.get("update_image_direct", principal.can_write(env))
         logger.info(f"🚧username={username}, permission={principal.permission(env)}: {body}")
-        # 对该集群有读写权限直接放行;只读用户按 UPDATE_IMAGE 配置(集群、时间段、用户白名单)放行
+        # 已有更新镜像权限直接放行；只读用户按数据库中的集群、时段与用户规则放行
         if direct:
             pass
         else:
-            # UPDATE_IMAGE权限检查
-            if not hasattr(utils, 'UPDATE_IMAGE') or not utils.UPDATE_IMAGE:
-                return web.json_response({"error": "拒绝操作：没有UPDATE_IMAGE权限配置"}, status=403)
-            try:
-                # 解析UPDATE_IMAGE JSON字符串
-                update_image_config = json.loads(utils.UPDATE_IMAGE)
-            except json.JSONDecodeError:
-                return web.json_response({"error": "拒绝操作：UPDATE_IMAGE配置格式错误"}, status=403)
-
-            # 获取环境相关配置
-            if env not in update_image_config:
-                if "default" not in update_image_config:
-                    return web.json_response({"error": "拒绝操作：找不到default配置"}, status=403)
-                upimage_dict = update_image_config["default"]
-            else:
-                upimage_dict = update_image_config[env]
-
-            # 检查isOperationAllowed
-            if "isOperationAllowed" not in upimage_dict:
-                return web.json_response({"error": "拒绝操作：找不到isOperationAllowed配置"}, status=403)
-
-            if not upimage_dict["isOperationAllowed"]:
-                return web.json_response({"error": f"拒绝操作：当前{env}环境禁止操作"}, status=403)
-
-            # 检查allowedOperationPeriod时间段
-            if "allowedOperationPeriod" not in upimage_dict:
-                return web.json_response({"error": "拒绝操作：找不到allowedOperationPeriod配置"}, status=403)
-
-            allowed_period = upimage_dict["allowedOperationPeriod"]
-            try:
-                start_time_str, end_time_str = allowed_period.split('-')
-                start_hour, start_minute = map(int, start_time_str.split(':'))
-                end_hour, end_minute = map(int, end_time_str.split(':'))
-
-                current_time = datetime.now()
-                current_hour = current_time.hour
-                current_minute = current_time.minute
-                current_total_minutes = current_hour * 60 + current_minute
-
-                start_total_minutes = start_hour * 60 + start_minute
-                end_total_minutes = end_hour * 60 + end_minute
-
-                # 处理跨天的情况（如19:00-08:00）
-                if start_total_minutes > end_total_minutes:
-                    # 跨天情况：当前时间应该在start_time之后或end_time之前（开始时间可以等于，结束时间不能等于）
-                    if not (current_total_minutes >= start_total_minutes or current_total_minutes < end_total_minutes):
-                        return web.json_response(
-                            {"error": f"拒绝操作：当前{env}环境只允许在{allowed_period}时段操作"}, status=403
-                        )
-                else:
-                    # 同一天情况：当前时间应该在start_time和end_time之间（开始时间可以等于，结束时间不能等于）
-                    if not (start_total_minutes <= current_total_minutes < end_total_minutes):
-                        return web.json_response(
-                            {"error": f"拒绝操作：当前{env}环境只允许在{allowed_period}时段操作"}, status=403
-                        )
-            except (ValueError, IndexError):
-                return web.json_response({"error": "拒绝操作：allowedOperationPeriod格式错误"}, status=403)
-
-            # 检查用户权限
-            if "user" not in upimage_dict:
-                return web.json_response({"error": "拒绝操作：找不到user配置"}, status=403)
-
-            user_list = upimage_dict["user"]
-            if username not in user_list:
-                return web.json_response({"error": f"拒绝操作：当前用户{username}禁止操作"}, status=403)
+            allowed, reason = await image_settings.check_update_allowed(env, username)
+            if not allowed:
+                return web.json_response({"error": reason}, status=403)
 
     elif path == "/api/agent/namespaces" and query_params.get("flush") != 'true':
         cached_namespaces = namespace_cache.get_namespaces_from_cache(env)
@@ -1079,6 +1019,8 @@ async def lb_check_pods_handler(request):
 app = web.Application(client_max_size=2 * 1024 * 1024)
 # 认证鉴权中间件 + /api/auth/*、/api/admin/* 接口,必须在下面的 /api/{tail} 兜底转发之前注册
 auth.setup(app, clients)
+image_settings.register_routes(app)
+app.router.add_get('/api/internal/setup-health', installation_health.check)
 app.router.add_get("/ws", websocket_handler)
 pod_log_relay.register_routes(app)  # Pod 实时日志(/ws/pod-logs)
 workload_relay.register_routes(app)  # Deployment/Pod 实时状态推送(/ws/workload-status)
@@ -1139,6 +1081,7 @@ app.router.add_route('*', "/api/{tail:.*}", http_handler)
 # 数据库初始化必须最先执行(建池 + 建表),再建内置账号、启动依赖 DB 的后台任务
 app.on_startup.append(init_db_and_schema)
 app.on_startup.append(auth.on_startup)
+app.on_startup.append(image_settings.on_startup)
 app.on_startup.append(agent_install_api.on_startup)
 app.on_startup.append(start_background_tasks)
 app.on_cleanup.append(cleanup_background_tasks)

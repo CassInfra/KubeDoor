@@ -1,6 +1,6 @@
 # K8S 事件告警规则配置说明
 
-> 适用于 KubeDoor 2.x。与 1.x 文档相比：规则文件改为随部署模板下发，修改后必须重启 master（不支持热重载）；事件改存 PostgreSQL。
+> 适用于 KubeDoor 2.x。规则随安装器模板下发，修改后必须重启 master（不支持热重载）；事件存 PostgreSQL。文中 `./install.sh master` 指 `tools/legacy-install/install.sh`，只用于维护原配置式部署。网页安装完成后的规则调整可直接修改下文的 ConfigMap。
 
 ## 概述
 
@@ -39,8 +39,8 @@ kubedoor-master
 
 | 环节 | 位置 |
 | --- | --- |
-| 规则模板（唯一来源） | 仓库中的 [`deploy/manifests/master/alert_rules.json`](../deploy/manifests/master/alert_rules.json) |
-| 集群中 | `./install.sh master` 把模板做成 ConfigMap `kubedoor-master-file-cfg`（key 为 `alert_rules.json`） |
+| 规则模板（唯一来源） | 仓库中的 [`src/kubedoor-setup/resources/manifests/master/alert_rules.json`](../src/kubedoor-setup/resources/manifests/master/alert_rules.json) |
+| 集群中 | 网页安装器或旧脚本把模板做成 ConfigMap `kubedoor-master-file-cfg`（key 为 `alert_rules.json`） |
 | master 容器内 | ConfigMap 挂载到 `/k8s_event/rules/`，master 读取 `/k8s_event/rules/alert_rules.json` |
 
 - master 镜像不自带规则文件，规则只能来自这个 ConfigMap。不用 install.sh、自行部署 master 时也必须按同样的路径挂载；不挂载时规则为空，事件照常入库，但**不会发出任何事件告警**。
@@ -51,13 +51,13 @@ kubedoor-master
 
 > **规则不支持热重载。** 每个 master 进程只加载一次规则（启动后收到第一条事件时）。ConfigMap 更新后，容器里的文件会被 kubelet 同步，但 master 不会重新读取，**改完必须重启 master**。
 
-**方式一：改模板后重新部署控制端（推荐，修改随仓库保留）**
+**方式一：旧配置式部署修改模板后重新下发**
 
 ```bash
-cd deploy
-vi manifests/master/alert_rules.json
-python3 -m json.tool manifests/master/alert_rules.json > /dev/null && echo "JSON OK"   # 检查语法
-./install.sh master                                    # 更新 ConfigMap
+cd tools/legacy-install
+vi ../../src/kubedoor-setup/resources/manifests/master/alert_rules.json
+python3 -m json.tool ../../src/kubedoor-setup/resources/manifests/master/alert_rules.json > /dev/null && echo "JSON OK"
+./install.sh master -c /path/to/original/kubedoor.conf                                    # 更新 ConfigMap
 kubectl -n kubedoor rollout restart deploy/kubedoor-master
 ```
 
@@ -266,7 +266,7 @@ kubectl -n kubedoor logs deploy/kubedoor-master | grep 告警规则
 
 ## 出厂默认规则
 
-`./install.sh master` 默认下发 [`deploy/manifests/master/alert_rules.json`](../deploy/manifests/master/alert_rules.json)：2 条忽略规则 + 7 条告警规则。
+`./install.sh master` 默认下发 [`src/kubedoor-setup/resources/manifests/master/alert_rules.json`](../src/kubedoor-setup/resources/manifests/master/alert_rules.json)：2 条忽略规则 + 7 条告警规则。
 
 忽略规则（`global_ignore_rules`，任一命中即忽略）：
 
@@ -408,7 +408,7 @@ K8S 事件告警由 master 直接调用 IM 机器人的 Webhook 发送：
 - 「状态」列显示新增 / 更新 / 删除（删除的含义见「DELETED 事件说明」）。
 - 筛选条件会同步到浏览器地址栏，复制链接即可分享。
 - 「资源管理 → Pod」页每行的「事件」按钮，会在新标签页打开该 Pod 最近 7 天的事件。
-- 事件默认保留 90 天，由 `RETENTION_EVENTS_DAYS` 控制（定义在 [`deploy/manifests/master/10-config.yaml`](../deploy/manifests/master/10-config.yaml)，`0` 表示不清理），master 每天清理一次。
+- 事件默认保留 90 天，由 `RETENTION_EVENTS_DAYS` 控制（定义在 [`src/kubedoor-setup/resources/manifests/master/10-config.yaml`](../src/kubedoor-setup/resources/manifests/master/10-config.yaml)，`0` 表示不清理），master 每天清理一次。
 
 ## 与告警屏蔽的关系
 

@@ -1,0 +1,32 @@
+# 独立部署 VictoriaMetrics 单机版。复制 .env.example 为 .env，修改密码后启动：
+#   docker compose up -d
+# 数据保存在命名卷 kubedoor-vmdata，KubeDoor 安装/卸载不管理此实例。
+name: kubedoor-victoria-metrics
+
+services:
+  victoria-metrics:
+    image: ${VM_IMAGE:-registry.cn-shenzhen.aliyuncs.com/starsl/victoria-metrics:stable}
+    container_name: kubedoor-victoria-metrics
+    restart: unless-stopped
+    command:
+      - "-storageDataPath=/var/lib/victoria-metrics-data"
+      - "-retentionPeriod=${VM_RETENTION:-30d}"
+      - "-httpListenAddr=:8428"
+      - "-httpAuth.username=${VM_USER:?请先在 .env 中设置 VM_USER}"
+      - "-httpAuth.password=${VM_PASSWORD:?请先在 .env 中设置 VM_PASSWORD}"
+      - "-search.maxQueryLen=655350"
+      - "-maxLabelsPerTimeseries=100"
+    ports:
+      - "${VM_BIND_ADDR:-0.0.0.0}:${VM_PORT:-8428}:8428"
+    volumes:
+      - vmdata:/var/lib/victoria-metrics-data
+    stop_grace_period: 1m
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "5"
+
+volumes:
+  vmdata:
+    name: kubedoor-vmdata

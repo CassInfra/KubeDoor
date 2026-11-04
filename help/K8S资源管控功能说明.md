@@ -264,7 +264,7 @@ kubectl -n kubedoor logs deploy/kubedoor-agent | grep admis
 
 **注意事项**：
 
-- **卸载或重装agent前，先在Web上关闭该集群的「准入控制」。** `./install.sh uninstall agent`不会删除webhook配置，残留的配置指向已不存在的agent，会拒绝该集群里所有Deployment变更（带`kubedoor-ignore`标签的命名空间除外；此时用上面的delete命令清理）。安装与卸载见[部署文档](../deploy/README.md)。
+- **卸载或重装agent前，先在Web上关闭该集群的「准入控制」。** 旧脚本 `tools/legacy-install/install.sh uninstall agent` 不会删除 webhook 配置，残留的配置指向已不存在的agent，会拒绝该集群里所有Deployment变更（带`kubedoor-ignore`标签的命名空间除外；此时用上面的delete命令清理）。安装与卸载见[部署文档](../deploy/README.md)。
 - **`kubedoor.conf`里的`NAMESPACE`必须保持`kubedoor`。** webhook配置里写死了`kubedoor`命名空间下的`kubedoor-agent`服务，装在其它命名空间时，开启准入会拒绝集群内所有Deployment变更（带`kubedoor-ignore`标签的命名空间除外）。
 - 升级、重启master或agent期间会有短暂的拒绝窗口，建议避开发布时段，或先关闭准入控制。
 

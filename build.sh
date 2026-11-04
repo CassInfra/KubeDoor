@@ -1,8 +1,8 @@
 #!/bin/bash
-# 用法: ./build.sh [master|agent|web|alarm|ai] <版本号>
+# 用法: ./build.sh [master|agent|web|alarm|ai|setup] <版本号>
 # 只传版本号时依次构建全部组件
 
-ALL_COMPONENTS="master agent web alarm ai"
+ALL_COMPONENTS="master agent web alarm ai setup"
 
 # ----------------------------
 # 1. 接收参数
@@ -58,7 +58,7 @@ build_and_push() {
     fi
 
     echo "➡️ 构建 Docker 镜像: $image"
-    if [ "$component" = "agent" ] || [ "$component" = "ai" ] || [ "$component" = "master" ]; then
+    if [ "$component" = "agent" ] || [ "$component" = "ai" ] || [ "$component" = "master" ] || [ "$component" = "setup" ]; then
         # master / Agent / AI 镜像从仓库根目录安装共享库与安装模板。
         docker build -f "$component_dir/Dockerfile" -t "$image" .
     else
