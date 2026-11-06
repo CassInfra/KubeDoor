@@ -457,14 +457,14 @@ onBeforeUnmount(() => {
             <div class="field-hint">
               {{
                 options.mode === "full"
-                  ? "安装 Agent 与指标采集，检测并复用兼容的已有采集组件。"
+                  ? "安装 Agent 与指标采集，检测并复用兼容的已有采集组件；vmagent 直接写入时序库。"
                   : "使用已有监控采集，现有指标仍需具有对应的集群标签。"
               }}
             </div>
           </el-form-item>
           <el-alert
             v-if="!defaults?.metrics_available && options.mode === 'full'"
-            title="当前未配置统一指标写入入口，请在高级设置中填写可用的写入地址，或选择仅安装 Agent。"
+            title="控制端没有配置时序库写入地址，请在高级设置中填写指标写入地址，或选择仅安装 Agent。"
             type="warning"
             :closable="false"
           />
@@ -476,7 +476,7 @@ onBeforeUnmount(() => {
                   placeholder="https://kubedoor.example.com"
                 />
                 <div class="field-hint">
-                  控制连接和指标写入地址自动生成。请勿填写本机端口转发地址。
+                  Agent 通过这个地址连接控制端。请勿填写本机端口转发地址。
                 </div>
               </el-form-item>
               <div class="field-grid">
@@ -534,8 +534,13 @@ onBeforeUnmount(() => {
                 <el-form-item label="指标写入地址覆盖（可选）">
                   <el-input
                     v-model="options.remote_write_url"
-                    placeholder="留空时从 KubeDoor 地址自动生成"
+                    placeholder="留空时使用控制端配置的时序库写入地址"
                   />
+                  <div class="field-hint">
+                    vmagent
+                    直接写入这个地址，需要能从目标集群访问；账号口令可写成
+                    http://账号:口令@地址，安装时放进目标集群的 Secret。
+                  </div>
                 </el-form-item>
               </template>
             </el-collapse-item>

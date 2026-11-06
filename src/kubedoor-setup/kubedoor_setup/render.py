@@ -1,7 +1,6 @@
 """Render the shipped master templates without evaluating user input as shell code."""
 from __future__ import annotations
 
-import base64
 import copy
 import hashlib
 import importlib.util
@@ -51,7 +50,8 @@ def load_defaults(overrides: dict | None = None) -> dict:
     return values
 
 
-def _agent_metadata(values: dict) -> tuple[dict, str]:
+def _agent_metadata(values: dict) -> dict:
+    """master 网页安装 Agent 的默认值（不含凭据）；时序库写入地址由 master 从 Secret kubedoor-connection 读取。"""
     path = ROOT / "src/kubedoor-master/agent_install/bundle.py"
     spec = importlib.util.spec_from_file_location("kubedoor_setup_agent_bundle", path)
     module = importlib.util.module_from_spec(spec)
@@ -149,13 +149,11 @@ def render_master(config: dict, secrets: dict, namespace: str, defaults: dict | 
         "KUBEDOOR_INIT_AGENT_PASSWORD": secrets["agent_password"],
         "AI_INTERNAL_TOKEN": secrets["internal_token"], "AI_ENCRYPTION_KEY": secrets["encryption_key"],
         "GRAFANA_ADMIN_PASSWORD": secrets["grafana_password"],
-        "MSG_TYPE": "wecom", "MSG_TOKEN": "", "WEB_NODEPORT_LINE": "", "ALERTMANAGER_NODEPORT_LINE": "",
+        "WEB_NODEPORT_LINE": "", "ALERTMANAGER_NODEPORT_LINE": "",
         "CONFIG_HASH_ENV": "pending", "CONFIG_HASH_MASTER": "pending", "CONFIG_HASH_GRAFANA": "pending", "CONFIG_HASH_WEB": "pending",
     })
-    metadata, proxy = _agent_metadata(values)
-    values["AGENT_INSTALL_DEFAULTS"] = json.dumps(metadata, ensure_ascii=False)
-    values["METRICS_PROXY_BASE64"] = base64.b64encode(proxy.encode()).decode()
-    files = ["05-ai-security.yaml", "06-metrics-gateway.yaml", "10-config.yaml", "20-master.yaml"]
+    values["AGENT_INSTALL_DEFAULTS"] = json.dumps(_agent_metadata(values), ensure_ascii=False)
+    files = ["05-ai-security.yaml", "10-config.yaml", "20-master.yaml"]
     files += ["25-alarm.yaml"] if components["alarm"] else []
     files += ["30-ai.yaml", "40-web.yaml"]
     files += [filename for flag, filename in (("grafana", "35-grafana.yaml"), ("vmalert", "71-vmalert.yaml"), ("alertmanager", "72-alertmanager.yaml")) if components[flag]]
@@ -230,14 +228,8 @@ def render_master(config: dict, secrets: dict, namespace: str, defaults: dict | 
             container["args"] += ["-remoteWrite.url=$(METRICS_WRITE_URL)", "-remoteWrite.disablePathAppend"]
         by_name["Service", "vmalert"]["spec"]["type"] = "ClusterIP"
     if components["alertmanager"]:
+        # 告警通知的 webhook 固定指向 kubedoor-alarm 的 /msg/kubedoor，通道由 alarm 按集群向 master 取，模板原样保留
         by_name["Service", "alertmanager"]["spec"]["type"] = "ClusterIP"
-        # A channel not configured yet must not send to an invalid empty-token URL.
-        alert_config = by_name["ConfigMap", "alertmanager-config"]["data"]
-        content = yaml.safe_load(alert_config["config.yml"])
-        for receiver in content["receivers"]:
-            if receiver["name"] == "kubedoor-alarm":
-                receiver.pop("webhook_configs", None)
-        alert_config["config.yml"] = yaml.safe_dump(content, allow_unicode=True)
     digest = hashlib.sha256(json.dumps(objects, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
     for obj in objects:
         obj["metadata"].setdefault("labels", {}).update(_meta("", namespace)["labels"])
@@ -250,9 +242,6 @@ def render_master(config: dict, secrets: dict, namespace: str, defaults: dict | 
         if values.get("IMAGE_PULL_SECRET"):
             pod["imagePullSecrets"] = [{"name": values["IMAGE_PULL_SECRET"]}]
         for container in pod.get("containers", []):
-            if obj["metadata"]["name"] == "kubedoor-alarm":
-                container.setdefault("env", []).append({"name": "AI_INTERNAL_TOKEN", "valueFrom": {
-                    "secretKeyRef": {"name": "kubedoor-ai-security", "key": "AI_INTERNAL_TOKEN"}}})
             if any(entry.get("configMapRef", {}).get("name") == "kubedoor-config" for entry in container.get("envFrom", [])):
                 container["envFrom"].append({"secretRef": {"name": "kubedoor-connection"}})
     return objects

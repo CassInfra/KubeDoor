@@ -67,6 +67,14 @@ def monitor_env(event_monitor_module):
     return event_monitor_module.K8sEventMonitor(core_v1), core_v1
 
 
+def test_event_data_no_longer_carries_msg_token(monitor_env):
+    """事件告警由 master 按集群选择通知群,agent 不再保存、也不再随事件上报通知 token"""
+    monitor, _ = monitor_env
+    data = monitor.format_event_data({"type": "ADDED", "raw_object": make_event("a", "1")})
+    assert data["eventUid"] == "a" and data["k8s"] == "test-cluster"
+    assert "msgToken" not in data and not any("token" in key.lower() for key in data)
+
+
 @pytest.mark.asyncio
 async def test_first_list_forwards_everything_and_relist_only_changes(monitor_env):
     monitor, core_v1 = monitor_env

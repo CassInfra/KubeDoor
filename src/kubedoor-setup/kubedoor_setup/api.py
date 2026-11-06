@@ -6,17 +6,20 @@ import hashlib
 import hmac
 import ipaddress
 import json
+import math
 import os
 import secrets
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from urllib.parse import quote, urlsplit
 
+import aiohttp
 from aiohttp import web
 
 from .agent import (CONCLUDED, STALE_SECONDS, AgentInstall, agent_defaults, installer_available, mark_failed,
                     mark_skipped, normalize_options, passed, start_attempt, write_url_of)
-from .config import ensure_secrets, final_config, metrics_config, postgres_config, selected_components
+from .config import (ensure_secrets, final_config, metrics_config, notification_config, notify_channels, postgres_config,
+                     redact_token, selected_components)
 from .errors import SetupError
 from .probes import check_metrics, check_postgres
 from .repository import check_row, public_marker, public_state, utcnow
@@ -25,10 +28,44 @@ from .runner import start_finalizer
 COOKIE = 'kubedoor_setup_session'
 SESSION_SECONDS = 8 * 3600
 API = '/setup-api'
+# 第 4 步「发送测试消息」：同一安装会话两次测试的最短间隔（秒）、发送超时（秒）、最多读取的返回内容（字节）
+NOTIFY_TEST_INTERVAL = 3
+NOTIFY_TIMEOUT = 10
+NOTIFY_RESPONSE_LIMIT = 64 * 1024
+# 测试消息里的时间按北京时间显示（安装服务容器没有设置时区）
+BEIJING = timezone(timedelta(hours=8), '北京时间')
 
 
 def fingerprint(value):
     return hashlib.sha256(json.dumps(value, sort_keys=True, ensure_ascii=False, separators=(',', ':')).encode()).hexdigest()
+
+
+async def send_notification(channel, content, *, session_factory=aiohttp.ClientSession):
+    """直接向 IM 群机器人发一条消息，返回 (ok, message)。
+
+    地址由 channels.build_request 按 IM 类型拼出（主机写死）；不跟随重定向，带超时，只读开头 64KB 的返回。
+    IM 返回失败、超时或连不上都不抛异常，message 是中文说明（带 IM 的错误码），不带 token。
+    """
+    channels = notify_channels()
+    kind, token = channel['type'], channel['token']
+    label = channels.TYPE_LABELS.get(kind, kind)
+    url, payload = channels.build_request(kind, token, content, channel.get('at') or '')
+    host = urlsplit(url).hostname
+    try:
+        async with session_factory(timeout=aiohttp.ClientTimeout(total=NOTIFY_TIMEOUT, connect=5), trust_env=False) as session:
+            async with session.post(url, json=payload, allow_redirects=False) as response:
+                raw = b''
+                while len(raw) < NOTIFY_RESPONSE_LIMIT:
+                    chunk = await response.content.read(NOTIFY_RESPONSE_LIMIT - len(raw))
+                    if not chunk:
+                        break
+                    raw += chunk
+                ok, message = channels.parse_response(kind, response.status, raw.decode('utf-8', errors='replace'))
+    except asyncio.TimeoutError:
+        ok, message = False, f'{NOTIFY_TIMEOUT} 秒内没有收到{label}接口的返回，请检查集群能否访问 {host}'
+    except aiohttp.ClientError:
+        ok, message = False, f'无法连接{label}接口（{host}），请检查集群能否访问外网，或是否需要代理'
+    return ok, redact_token(message, token)
 
 
 def check_revision(state, body):
@@ -63,18 +100,21 @@ async def body_of(request):
 
 class SetupAPI:
     def __init__(self, repo, *, key, runner_factory=None, pg_probe=check_postgres, metrics_probe=check_metrics,
-                 agent_installer=AgentInstall):
+                 agent_installer=AgentInstall, notify_sender=send_notification):
         if not isinstance(key, str) or len(key) < 32:
             raise ValueError('SETUP_KEY must contain at least 32 characters')
         self.repo, self.key = repo, key.encode()
         self.runner_factory = runner_factory
         self.pg_probe, self.metrics_probe = pg_probe, metrics_probe
         self.agent_installer = agent_installer
+        self.notify_sender = notify_sender
         self.task = None
         self.agent_task = None
         self.finalize_poll = 3
         self.recovery_task = None
         self.attempts = {}
+        # 安装会话 -> 上次发送测试消息的时间（monotonic）
+        self.notify_tests = {}
 
     def authenticated(self, request, state):
         raw = request.cookies.get(COOKIE, '')
@@ -247,6 +287,36 @@ class SetupAPI:
             state['phase'] = ('failed' if state.get('target_locked') else 'ready') if checked(state, private) else ('failed' if state.get('target_locked') else 'draft')
             await self.repo.write(state, private)
             return await self.state_response(state, private)
+
+    def notify_wait(self, session):
+        """同一安装会话 NOTIFY_TEST_INTERVAL 秒内只能测一次：返回还要等的秒数，0 表示可以测（同时记下这次）。"""
+        now = time.monotonic()
+        self.notify_tests = {key: value for key, value in self.notify_tests.items() if now - value < NOTIFY_TEST_INTERVAL}
+        last = self.notify_tests.get(session)
+        if last is not None:
+            return max(math.ceil(NOTIFY_TEST_INTERVAL - (now - last)), 1)
+        self.notify_tests[session] = now
+        return 0
+
+    async def notification_test(self, request):
+        """第 4 步「发送测试消息」：用页面上填的机器人地址（留空用已保存的）直接发一条测试消息，不保存配置。
+
+        IM 返回失败时仍是 200，结果在 data.ok / data.message；响应里不带 token。
+        """
+        state = await self.current(request)
+        body = await body_of(request)
+        private = await self.repo.load_private(state)
+        channel = notification_config(body.get('notification'), private['config'].get('notification'))
+        if not channel['token']:
+            label = notify_channels().TYPE_LABELS[channel['type']]
+            raise SetupError(f'请填写{label}机器人地址后再发送测试消息', 422)
+        # 会话 Cookie 已由 current() 校验过，中间一段是这个会话的随机标识
+        wait = self.notify_wait(request.cookies[COOKIE].split('.')[1])
+        if wait:
+            raise SetupError(f'测试太频繁，请 {wait} 秒后再试', 429)
+        now = datetime.now(BEIJING).strftime('%Y-%m-%d %H:%M:%S')
+        ok, message = await self.notify_sender(channel, notify_channels().test_content('全局配置', '安装向导', now))
+        return web.json_response({'success': True, 'data': {'ok': bool(ok), 'message': redact_token(message, channel['token'])}})
 
     async def start(self, request):
         body = await body_of(request)
@@ -476,9 +546,10 @@ async def safe_requests(request, handler):
 
 
 def create_app(repo, *, key=None, runner_factory=None, pg_probe=check_postgres, metrics_probe=check_metrics,
-               agent_installer=AgentInstall):
+               agent_installer=AgentInstall, notify_sender=send_notification):
     api = SetupAPI(repo, key=key or os.environ.get('SETUP_KEY', ''), runner_factory=runner_factory,
-                   pg_probe=pg_probe, metrics_probe=metrics_probe, agent_installer=agent_installer)
+                   pg_probe=pg_probe, metrics_probe=metrics_probe, agent_installer=agent_installer,
+                   notify_sender=notify_sender)
     app = web.Application(middlewares=[safe_requests], client_max_size=32 * 1024)
     app[web.AppKey('setup_api', SetupAPI)] = api
     async def health(request):
@@ -489,6 +560,7 @@ def create_app(repo, *, key=None, runner_factory=None, pg_probe=check_postgres, 
     app.router.add_get(API + '/state', api.get_state)
     app.router.add_post(API + '/check/{section}', api.probe)
     app.router.add_put(API + '/configuration', api.configure)
+    app.router.add_post(API + '/notification/test', api.notification_test)
     app.router.add_post(API + '/start', api.start)
     app.router.add_post(API + '/retry', api.start)
     app.router.add_post(API + '/agent/install', api.agent_install)

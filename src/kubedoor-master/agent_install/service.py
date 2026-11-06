@@ -20,7 +20,7 @@ from auth.store import hash_password, store as auth_store, verify_local
 from kubedoor_tools.config import parse_kubeconfig
 from loguru import logger
 
-from .bundle import defaults, normalize_options, public_options, render_agent
+from .bundle import WRITE_KEY, defaults, normalize_options, public_options, render_agent
 from .kubernetes import InstallError, Kubernetes
 from .repository import Repository
 
@@ -78,6 +78,14 @@ def error_message(exc):
 def normalize(raw, default=None):
     try:
         return normalize_options(raw, default)
+    except ValueError as exc:
+        raise InstallError(str(exc)) from None
+
+
+def render(options, **credential):
+    """渲染安装资源；参数问题（例如完整接入却没有指标写入地址）按安装错误返回给页面。"""
+    try:
+        return render_agent(options, **credential)
     except ValueError as exc:
         raise InstallError(str(exc)) from None
 
@@ -183,8 +191,8 @@ class Service:
                 raise InstallError('任务已开始安装，不能更换目标 context、集群标识或命名空间；请新建安装任务', 409)
             if not options.get('env') or not options.get('master_url'):
                 raise InstallError('请填写集群唯一标识和目标集群可访问的 KubeDoor 地址')
-            if options['mode'] == 'full' and not (options.get('metrics_available') or options.get('remote_write_url')):
-                raise InstallError('控制端尚未配置指标写入后端，请配置后再安装，或选择仅安装 Agent')
+            if options['mode'] == 'full' and not (options.get('metrics_write_url') or options.get('remote_write_url')):
+                raise InstallError('控制端没有配置时序库写入地址，请在高级设置中填写指标写入地址，或选择仅安装 Agent')
             options['installation_id'] = task['id']
             checks = []
             task['status'] = 'draft'
@@ -199,7 +207,7 @@ class Service:
                     task['env'], task['target_uid'] = options['env'], target_uid
                     await self.check_identity(task, options, kube)
                     await self.components(options, kube, checks)
-                    resources = render_agent(options, username='preflight', password='preflight')
+                    resources = render(options, username='preflight', password='preflight')
                     task['payload']['resources'] = [summary(item) for item in resources]
                     await self.check_resources(task, kube, resources)
                     checks.append({'name': '安装权限与资源', 'status': 'success', 'message': '权限、资源归属与可用的服务端预检通过'})
@@ -329,12 +337,15 @@ class Service:
                 material = unseal(task)
                 options = material['options']
                 await self.step(task, 0, 'running')
+                if WRITE_KEY not in options:
+                    # 旧版本做的安装计划（当时 vmagent 写 KubeDoor 指标网关，网关已删除），模板已变，要重新检测
+                    raise InstallError('安装计划由旧版本创建，请重新检测后再安装')
                 parsed = await asyncio.to_thread(parse, material['kubeconfig'], task['payload']['context'])
                 async with self.kubernetes(parsed) as kube:
                     identity = await kube.request('GET', '/api/v1/namespaces/kube-system')
                     if identity['metadata']['uid'] != task['target_uid']:
                         raise InstallError('目标集群身份与预检不一致，安装已停止')
-                    preview = render_agent(options, username='preflight', password='preflight')
+                    preview = render(options, username='preflight', password='preflight')
                     if fingerprint(preview) != task['payload']['plan_digest']:
                         raise InstallError('安装模板已更新，请重新创建安装计划')
                     await self.check_identity(task, options, kube)
@@ -359,7 +370,7 @@ class Service:
                         raise InstallError('安装专用账号已被修改，请创建新的安装任务')
                     await auth_store.bind_agent(user['id'], task['env'])
                     task['payload']['agent_user_id'] = user['id']
-                    resources = render_agent(options, **credential)
+                    resources = render(options, **credential)
                     for resource in resources:
                         resource['metadata'].setdefault('labels', {}).update({OWNER: task['id'], MANAGED: 'web-installer'})
                     namespace = next(r for r in resources if r['kind'] == 'Namespace')

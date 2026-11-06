@@ -710,7 +710,7 @@ content_type: application/json-patch+json</pre>
           <div class="terminal-bar"><span class="dots" aria-hidden="true"><i></i><i></i><i></i></span><span class="terminal-title">bash · 可执行 kubectl 的机器</span><button class="copy-btn" type="button" data-copy-target="cmd-2" aria-label="复制第二步命令"><svg class="icon" aria-hidden="true"><use href="#i-copy"/></svg><span>复制</span></button></div>
 <pre class="code"><code id="cmd-2"><span class="c-c"># 与数据库不在同一台机器时，先在这里 git clone 仓库</span>
 <span class="c-cmd">cd</span> KubeDoor/deploy
-<span class="c-c"># 配置 PG_HOST / PG_PASSWORD / PROM_URL / METRICS_WRITE_URL / MSG_TOKEN 等</span>
+<span class="c-c"># 配置 PG_HOST / PG_PASSWORD / PROM_URL / METRICS_WRITE_URL 等（通知装好后在「系统管理 → 消息通知」配置）</span>
 <span class="c-cmd">cp</span> kubedoor.conf.example kubedoor.conf
 <span class="c-cmd">vi</span> kubedoor.conf
 ./install.sh master</code></pre>

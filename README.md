@@ -471,7 +471,7 @@ sh install.sh
 
 **④ 在网页安装Agent**（每个要纳管的集群安装一次）
 
-管理员打开`/#/workbench/index`的「Agent管理」→「安装Agent」，上传kubeconfig、选择context、确认集群标识后检测并安装。填写一次KubeDoor连接地址即可自动生成控制连接和指标写入入口，目标集群无需保存时序库账号。
+管理员打开`/#/workbench/index`的「Agent管理」→「安装Agent」，上传kubeconfig、选择context、确认集群标识后检测并安装。填写一次KubeDoor连接地址即可自动生成控制连接；vmagent直连控制端配置的时序库写入地址，账号口令放进目标集群的Secret。
 
 控制端无法访问目标 K8S API 时，可在目标网络内使用[旧脚本安装入口](tools/legacy-install/README.md)，并沿用该集群的配置。
 

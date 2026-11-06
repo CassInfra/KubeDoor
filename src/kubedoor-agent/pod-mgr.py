@@ -701,6 +701,8 @@ async def execute_in_pod(env, ns, v1, pod_name, type, file_name="not_found", con
 
 
 def send_md(msg, env, ns, pod_name):
+    """运维通知。pod-mgr 是 runit 起的单独进程,拿不到到 master 的 WebSocket:utils.send_msg 在这里经 Unix socket
+    交给 agent 主进程(后台线程发送,短超时,失败只记日志),再由主进程发给 master(见 func_manager/notifier.py)"""
     text = f"# 【<font color=\"#5bcc85\">{env}</font>】{ns}\n## {pod_name}\n"
     text += f"{msg}\n"
     utils.send_msg(text)

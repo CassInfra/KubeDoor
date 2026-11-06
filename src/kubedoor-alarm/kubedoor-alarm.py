@@ -1,5 +1,5 @@
 #!/usr/bin/python3
-import json, requests, utils, silence
+import json, utils, silence, notify_client
 from flask import Flask, Response, request, jsonify
 from psycopg_pool import ConnectionPool
 from psycopg.rows import tuple_row
@@ -22,108 +22,9 @@ pool = ConnectionPool(conninfo=_conninfo, min_size=1, max_size=10, open=True)
 # 告警屏蔽引擎(内存缓存 alert_silences 规则,详见 silence.py)
 silence.init_engine(pool)
 
-MSG_TOKEN = utils.MSG_TOKEN
-MSG_TYPE = utils.MSG_TYPE
-DEFAULT_AT = utils.DEFAULT_AT
 ALERTMANAGER_EXTURL = utils.ALERTMANAGER_EXTURL
 KUBEDOOR_EXTURL = utils.KUBEDOOR_EXTURL
 PROM_K8S_TAG_KEY = utils.PROM_K8S_TAG_KEY
-
-
-def wecom(webhook, content, at):
-    webhook = 'https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=' + webhook
-    headers = {'Content-Type': 'application/json'}
-    params = {'msgtype': 'markdown', 'markdown': {'content': f"{content}<@{at}>"}}
-    data = bytes(json.dumps(params), 'utf-8')
-    response = requests.post(webhook, headers=headers, data=data)
-    logging.info(f'【wecom】{response.json()}')
-
-
-def dingding(webhook, content, at):
-    webhook = 'https://oapi.dingtalk.com/robot/send?access_token=' + webhook
-    headers = {'Content-Type': 'application/json'}
-    params = {
-        "msgtype": "markdown",
-        "markdown": {"title": "告警", "text": content},
-        "at": {"atMobiles": [at]},
-    }
-    data = bytes(json.dumps(params), 'utf-8')
-    response = requests.post(webhook, headers=headers, data=data)
-    logging.info(f'【dingding】{response.json()}')
-
-
-def feishu(webhook, content, at):
-    title = "告警通知"
-    webhook = f'https://open.feishu.cn/open-apis/bot/v2/hook/{webhook}'
-    headers = {'Content-Type': 'application/json'}
-    params = {
-        "msg_type": "interactive",
-        "card": {
-            "header": {"title": {"tag": "plain_text", "content": title}, "template": "red"},
-            "elements": [
-                {
-                    "tag": "markdown",
-                    "content": f"{content}\n<at id={at}></at>",
-                }
-            ],
-        },
-    }
-    data = json.dumps(params)
-    response = requests.post(webhook, headers=headers, data=data)
-    logging.info(f'【feishu】{response.json()}')
-
-
-def slack(webhook, content, at=""):
-    """发送Slack告警通知"""
-    # 构建完整的Slack Webhook URL
-    webhook_url = f'https://hooks.slack.com/services/{webhook}'
-    headers = {'Content-Type': 'application/json'}
-
-    # 遍历消息列表，每个消息都发送一条通知
-    for message in content:
-        # 构建blocks
-        blocks = []
-
-        # 第一个block：标题（加粗）
-        title_block = {
-            "type": "rich_text",
-            "elements": [
-                {
-                    "type": "rich_text_section",
-                    "elements": [{"type": "text", "text": message[0], "style": {"bold": True}}],
-                }
-            ],
-        }
-        blocks.append(title_block)
-
-        # 第二个block：消息内容（包含@用户）
-        content_text = message[1]
-        if at:
-            content_text += f" <@{at}>"
-
-        content_block = {"type": "section", "text": {"type": "mrkdwn", "text": content_text}}
-        blocks.append(content_block)
-
-        # 如果有第三个字段（告警情况），添加屏蔽链接block
-        if len(message) >= 3:
-            link_block = {
-                "type": "rich_text",
-                "elements": [
-                    {"type": "rich_text_section", "elements": [{"type": "link", "text": "【屏蔽】", "url": message[2]}]}
-                ],
-            }
-            blocks.append(link_block)
-
-        # 添加分隔线
-        divider_block = {"type": "divider"}
-        blocks.append(divider_block)
-
-        params = {"blocks": blocks}
-
-        data = json.dumps(params)
-        response = requests.post(webhook_url, headers=headers, data=data)
-
-        logging.info(f'【slack】status_code: {response.status_code}, text: {response.text}')
 
 
 def parse_alert_time(time_str):
@@ -486,12 +387,42 @@ def build_silence_url(labels):
     return f"{KUBEDOOR_EXTURL.rstrip('/')}/#/alarm/silence?prefill={quoted}"
 
 
+def build_content(kind, entries):
+    """把本批要通知的告警拼成消息。entries 是 [(状态, 摘要, 描述, 屏蔽链接), ...]。
+
+    Slack 每条告警单独发一条(列表,恢复不带屏蔽链接);其余 IM 拼成一条 markdown。
+    """
+    if kind == 'slack':
+        allmd = []
+        for status, summary, message, url in entries:
+            if status == '恢复':
+                allmd.append([f'🎉{status}: {summary}', message])
+            else:
+                allmd.append([f'💥{status}: {summary}', message, url])
+        return allmd
+    allmd = ''
+    for status, summary, message, url in entries:
+        if status == '恢复':
+            allmd += f"### {status}<font color=\"#6aa84f\">{summary}</font>\n- {message}\n\n"
+        else:
+            allmd += f"### {status}<font color=\"#ff0000\">{summary}</font>\n- {message}[【屏蔽】]({url})\n\n"
+    return allmd
+
+
+# Alertmanager 的通知 webhook:屏蔽判断后,按这批告警的集群向 master 取通知配置(系统管理 → 消息通知)发 IM
 @app.route("/msg/<path:token>", methods=['POST'])
 def alertnode(token):
-    req = request.get_json()
+    if token != 'kubedoor':
+        # 旧写法 /msg/<类型>=<token> 已删除;路径里带着机器人 token,不写进日志
+        logging.warning('收到旧格式的通知地址 /msg/<类型>=<token>,已不再支持:'
+                        '请把 Alertmanager 的 webhook 改为 /msg/kubedoor,通知通道在「系统管理 → 消息通知」配置')
+        return jsonify({'status': 'error', 'message': '通知地址已改为 /msg/kubedoor'}), 404
+    req = request.get_json(silent=True)
     logging.info('↓↓↓↓↓↓↓↓↓↓↓↓↓↓node↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓')
     logging.info(json.dumps(req, indent=2, ensure_ascii=False))
     logging.info('↑↑↑↑↑↑↑↑↑↑↑↑↑↑node↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑')
+    if not isinstance(req, dict) or not isinstance(req.get('alerts'), list):
+        return jsonify({'status': 'error', 'message': '无效的请求格式'}), 400
     now_utc = datetime.now(UTC).replace(tzinfo=None)
     now_cn = datetime.now()
 
@@ -500,13 +431,10 @@ def alertnode(token):
 
     # if (now_cn > time1830 or now_cn < time0830):
     #    return Response(status=204)
-    im, key = token.split('=', 1)
-    logging.info(f"im: {im}, key: {key}")
-    if im == 'slack':
-        allmd = []
-    else:
-        allmd = ''
-    at = DEFAULT_AT
+    env = notify_client.cluster_of(req, PROM_K8S_TAG_KEY)
+    entries = []
+    # 告警规则 annotations 里的 at 优先于通知配置里的默认 @ 人(和以前一样取本批最后一条告警的)
+    alert_at = None
     silenced_count = 0
     for i in req["alerts"]:
         # 屏蔽判断:命中规则的告警直接跳过通知(故障与恢复一并屏蔽,避免只收到恢复消息)
@@ -541,37 +469,29 @@ def alertnode(token):
 
         summary = f"{i['labels']['alertname']},{durninfo}"
         message = i['annotations']['description']
-        at = i['annotations'].get('at', DEFAULT_AT)
+        alert_at = i['annotations'].get('at')
 
         url = build_silence_url(i['labels'])
+        entries.append((status, summary, message, url))
 
-        if im == 'slack':
-            if status == '恢复':
-                info = [f'🎉{status}: {summary}', message]
-            else:
-                info = [f'💥{status}: {summary}', message, url]
-            allmd.append(info)
-        else:
-            if status == '恢复':
-                info = f"### {status}<font color=\"#6aa84f\">{summary}</font>\n- {message}\n\n"
-            else:
-                info = f"### {status}<font color=\"#ff0000\">{summary}</font>\n- {message}[【屏蔽】]({url})\n\n"
-            allmd = allmd + info
-
-    if not allmd:
+    if not entries:
         logging.info(f"本批 {silenced_count} 条告警全部被屏蔽，不发送通知")
         return Response(status=204)
     if silenced_count:
         logging.info(f"本批告警中 {silenced_count} 条被屏蔽，其余正常通知")
 
-    if im == 'wecom':
-        wecom(key, allmd, at)
-    elif im == 'dingding':
-        dingding(key, allmd, at)
-    elif im == 'feishu':
-        feishu(key, allmd, at)
-    elif im == 'slack':
-        slack(key, allmd, at)
+    # 先看该集群单独配置的群,再看全局配置;master 暂时不可用时沿用上次取到的配置
+    channel = notify_client.resolve(env)
+    if channel is None:
+        logging.info(f"没有可用的消息通知配置({notify_client.scope_label(env)}),本批 {len(entries)} 条告警不发送")
+        return Response(status=204)
+    at = channel['at'] if alert_at is None else alert_at
+    try:
+        notify_client.send(channel, build_content(channel['type'], entries), at)
+    except notify_client.SendError as exc:
+        # 返回 5xx 让 Alertmanager 重试(和以前发送异常时一样)
+        logging.error(f"{exc}({notify_client.scope_label(env)}),本批 {len(entries)} 条告警没有发出")
+        return Response(status=502)
     return Response(status=200)
 
 

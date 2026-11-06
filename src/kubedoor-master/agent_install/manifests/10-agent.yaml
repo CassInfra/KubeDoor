@@ -13,8 +13,6 @@ data:
   KUBEDOOR_MASTER: '__MASTER_WS__'
   # 本集群的名字,必须和指标里 <PROM_K8S_TAG_KEY> 标签的值一致
   PROM_K8S_TAG_VALUE: '__K8S_NAME__'
-  MSG_TYPE: '__MSG_TYPE__'
-  MSG_TOKEN: '__MSG_TOKEN__'
   # Java 服务 dump/jfr/jstack 的结果上传地址,留空则这些功能不可用
   OSS_URL: '__OSS_URL__'
 

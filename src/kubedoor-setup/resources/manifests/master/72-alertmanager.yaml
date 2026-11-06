@@ -1,7 +1,9 @@
 # Alertmanager:告警分组、去重、路由。两条 receiver 都指向 kubedoor-alarm:
 #   1) K8S_Pod.* 开头的告警额外投一份到 /alert/store 做入库(写 PostgreSQL 的
 #      k8s_pod_alert_days 表),用于 Web 上的告警分析页;
-#   2) 所有告警都走 /msg/<类型>=<token> 发到 IM。
+#   2) 所有告警都走 /msg/kubedoor 发到 IM。地址里不带 IM 类型和 token:kubedoor-alarm
+#      按这批告警的集群标签向 master 取通知配置(系统管理 → 消息通知),该集群没有单独
+#      配置时用全局配置,都没有就不发。下面按集群标签分组,保证一批告警属于同一个集群。
 #
 # 告警屏蔽在 kubedoor-alarm 侧做(见 docs/alert-silence.md),命中屏蔽的告警
 # 仍然入库并标记 silenced=true,只拦通知,所以这里不需要配 Alertmanager 的 silence。
@@ -50,7 +52,7 @@ data:
 
       - name: 'kubedoor-alarm'
         webhook_configs:
-          - url: 'http://kubedoor-alarm.__NAMESPACE__/msg/__MSG_TYPE__=__MSG_TOKEN__'
+          - url: 'http://kubedoor-alarm.__NAMESPACE__/msg/kubedoor'
             send_resolved: true
 
 ---

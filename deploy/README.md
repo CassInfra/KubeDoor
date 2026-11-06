@@ -38,7 +38,7 @@ sh install.sh
 - 全新安装发现同名绑定残留时会停止，确认不再使用后手工删除：`kubectl delete clusterrolebinding kubedoor-agent-installer-<命名空间>`。收尾前若有人手工删掉了 `kubedoor-agent-installer` 账号，绑定也需要这样手工删除。
 - 用 `--export` 导出的引导文件同样包含这个绑定，重新 `kubectl apply` 会重新授予该权限，只用于全新安装。
 
-**集群指标标签名必须与现有监控一致。** 全新部署可以保持 `origin_prometheus`；例如指标为 `cluster="prod-k8s"`，向导填写 `cluster`，接入 Agent 时集群标识填写 `prod-k8s`。新装 Agent 自动继承该标签名。远程读 / 写地址按类型自动生成（单机版 8428，集群版读 8481、写 8480），Agent 则通过 KubeDoor 的 `/agent/metrics/write` 入口上报。
+**集群指标标签名必须与现有监控一致。** 全新部署可以保持 `origin_prometheus`；例如指标为 `cluster="prod-k8s"`，向导填写 `cluster`，接入 Agent 时集群标识填写 `prod-k8s`。新装 Agent 自动继承该标签名。远程读 / 写地址按类型自动生成（单机版 8428，集群版读 8481、写 8480）。各集群的 vmagent 直连第 3 步的远程写地址（账号口令放进目标集群的 Secret），这个地址需要能从各业务集群访问。
 
 ## 镜像版本与启动参数
 
@@ -46,7 +46,7 @@ sh install.sh
 
 ```bash
 sh install.sh --context production --namespace kubedoor --nodeport 30080
-sh install.sh --image-repo registry.example.com/kubedoor --tag 2.3.0 \
+sh install.sh --image-repo registry.example.com/kubedoor --tag 2.6.0 \
   --image-pull-secret registry-pull
 sh install.sh --render     # 只预览引导资源，不连接集群、不生成凭据
 ```
@@ -67,7 +67,7 @@ kubectl apply -f kubedoor-install.yaml
 命名空间、镜像版本和端口选项同样适用于导出，例如：
 
 ```sh
-sh install.sh --namespace kubedoor --tag 2.5.0 --nodeport 30080 \
+sh install.sh --namespace kubedoor --tag 2.6.0 --nodeport 30080 \
   --export kubedoor-install.yaml
 ```
 

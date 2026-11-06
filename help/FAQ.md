@@ -177,13 +177,13 @@ Web 里的 nginx 启动时要解析配置中引用的 Service（`kubedoor-master
 
 | 改了什么 | 执行 `kubectl -n kubedoor rollout restart …` |
 |---|---|
-| `kubedoor-config`（数据库、时序库、通知等） | `deploy/kubedoor-master deploy/kubedoor-alarm`；改了 `PG_*` 再加 `deploy/kubedoor-ai` |
+| `kubedoor-config`（数据库、时序库等；通知在「系统管理 → 消息通知」配置，不在这里） | `deploy/kubedoor-master deploy/kubedoor-alarm`；改了 `PG_*` 再加 `deploy/kubedoor-ai` |
 | `kubedoor-master-file-cfg`（K8S 事件告警规则） | `deploy/kubedoor-master` |
 | `vmalert-config`（指标告警规则和阈值） | `deploy/vmalert` |
 | `alertmanager-config`（告警路由、通知地址） | `deploy/alertmanager` |
 | `nginx-config` | `deploy/kubedoor-web` |
 | `kubedoor-grafana-config`（看板数据源的数据库、时序库地址） | `deploy/kubedoor-dash` |
-| 集群端 `kubedoor-agent-config`（`KUBEDOOR_MASTER`、`MSG_TOKEN`、`OSS_URL` 等） | `deploy/kubedoor-agent`（在该业务集群执行） |
+| 集群端 `kubedoor-agent-config`（`PROM_K8S_TAG_VALUE`、`OSS_URL` 等；连接 master 的地址和账号在 Secret `kubedoor-agent-credentials`） | `deploy/kubedoor-agent`（在该业务集群执行） |
 | 集群端 `vmagent-config`（抓取任务） | `deploy/vmagent`（在该业务集群执行） |
 
 - 重跑 `./install.sh` 会用模板覆盖手工 `kubectl edit` 过的 ConfigMap，想长期保留的修改请写进 `kubedoor.conf` 或 `src/kubedoor-setup/resources/manifests/` 下的模板。
@@ -259,12 +259,12 @@ kubectl -n kubedoor logs deploy/kubedoor-agent --tail=50
 
 ### Q：跨集群部署需要开通哪些网络？
 
-Agent 安装后主动访问控制端；网页安装期间还需要控制端访问目标集群的 API Server：
+Agent 安装后主动访问控制端，vmagent 直接写时序库；网页安装期间还需要控制端访问目标集群的 API Server：
 
 | 方向 | 用途 | 对应配置 |
 |---|---|---|
 | kubedoor-agent → 控制端 Web 的 NodePort | agent 与 master 之间的 WebSocket（指令、心跳、事件、日志都走这一条） | `MASTER_WS` |
-| 网页安装的 vmagent → 控制端 Web 入口 → 时序库 | 指标远程写 | 网页自动生成 `<KubeDoor地址>/agent/metrics/write`；控制端用 `METRICS_WRITE_URL` 配置完整写入后端 |
+| 网页安装的 vmagent → 时序库 | 指标远程写（直连时序库，不经过 KubeDoor） | 默认用控制端配置的时序库写入地址（网页安装第 3 步的远程写地址，旧脚本的 `METRICS_WRITE_URL`），账号口令放进目标集群的 Secret；也可在「安装Agent」高级设置里填写本集群专用的写入地址 |
 | 脚本安装的 vmagent → 时序库 | 指标远程写 | 显式填写目标集群可达的 `REMOTE_WRITE_URL`，例如 `http://monit:<URL编码口令>@<VM宿主机IP>:8428/api/v1/write` |
 | 控制端 → 目标集群 API Server | 网页安装 Agent 的检测和资源部署 | 上传的 kubeconfig 中的 API Server 地址 |
 
@@ -326,7 +326,7 @@ kubectl -n kubedoor delete job collect-now     # 用完删掉，下次才能用�
 这两个看板直接查时序库（Grafana 数据源 KubeDoor-Prometheus）：
 
 - 先在看板顶部的「K8S」下拉框里选对集群。
-- 在业务集群看 vmagent 是否在正常远程写：`kubectl -n kubedoor logs deploy/vmagent --tail=50`。网页安装默认经 KubeDoor 的 `/agent/metrics/write` 转发，检查控制端配置的 `METRICS_WRITE_URL`；脚本启用 vmagent 时必须显式填写可达的 `REMOTE_WRITE_URL`，留空会在安装前报错。
+- 在业务集群看 vmagent 是否在正常远程写：`kubectl -n kubedoor logs deploy/vmagent --tail=50`。vmagent 直连时序库：网页安装默认写控制端配置的时序库写入地址（第 3 步的远程写地址），确认业务集群能访问这个地址、账号有写入权限；脚本启用 vmagent 时必须显式填写可达的 `REMOTE_WRITE_URL`，留空会在安装前报错。
 - 「节点监控看板📊」还需要 node-exporter 的指标（自带的或已有的，见下一条）。
 - `ENABLE_GRAFANA="false"` 时三个看板菜单仍然存在，但打开是 404。
 
@@ -651,7 +651,7 @@ KubeDoor 不提供 Ingress 模板，请在 `kubedoor-web` 这个 Service 前放�
 - 要支持 WebSocket 升级：`/ws`（agent 连接）、`/ws/pod-logs`、`/ws/workload-status`、`/grafana/api/live/`。
 - AI 对话（`/api/ai/`）和 MCP（`/mcp`、`/sse`）是流式长连接：关闭响应缓冲，把读超时调长（Web 自带的 nginx 分别是 1 小时和 24 小时）。
 - 换成 HTTPS 地址后：跨集群 agent 的 `MASTER_WS` 改为 `wss://<Agent账号>:<口令>@<域名>`；`KUBEDOOR_EXTURL`（IM 告警里【屏蔽】链接的地址）也改成 HTTPS 地址。
-- 网页安装的 vmagent 通过同一个 KubeDoor HTTPS 入口的 `/agent/metrics/write` 写入指标，控制端再按 `METRICS_WRITE_URL` 转发到时序库。脚本直接写入独立时序库时，需为该写入地址单独配置可达网络与 TLS。
+- vmagent 直连时序库，不经过 KubeDoor 入口：时序库的写入地址要单独配置各业务集群可达的网络；需要加密时给时序库（或它前面的 vmauth、反向代理）配 HTTPS，写入地址用 `https://`。
 
 ---
 
@@ -703,15 +703,16 @@ KubeDoor 有四类 IM 通知，机器人配置的位置不同：
 
 | 通知 | 发送方 | 机器人来自 | 修改后 |
 |---|---|---|---|
-| 指标告警（vmalert → Alertmanager → kubedoor-alarm） | kubedoor-alarm | 安装控制端时 `kubedoor.conf` 的 `MSG_TYPE`、`MSG_TOKEN`，写在 Alertmanager 的通知地址里 | 改 `kubedoor.conf` → `./install.sh master` → `kubectl -n kubedoor rollout restart deploy/alertmanager` |
-| K8S 事件告警 | kubedoor-master | IM 类型用 master 的 `MSG_TYPE`，机器人用**事件所在集群** agent 的 `MSG_TOKEN` | 改该集群 `kubedoor-agent-config` 的 `MSG_TOKEN`，在该集群重启 agent |
-| 运维操作通知（扩缩容、重启、更新镜像、隔离、准入等） | 各集群 kubedoor-agent | 该集群 `kubedoor-agent-config` 的 `MSG_TYPE`、`MSG_TOKEN` | 同上 |
-| 采集时发现新服务、自动加入管控表的提示 | kubedoor-master | 控制端 `kubedoor-config` 的 `MSG_TYPE`、`MSG_TOKEN` | 改 `kubedoor.conf` → `./install.sh master` → `kubectl -n kubedoor rollout restart deploy/kubedoor-master` |
+| 指标告警（vmalert → Alertmanager → kubedoor-alarm） | kubedoor-alarm | 「系统管理 → 消息通知」：按告警的集群标签选该集群单独配置的群，没有就用全局配置（Alertmanager 的通知地址固定为 `/msg/kubedoor`，不带 token） | 保存后最多 15 秒生效（kubedoor-alarm 按集群缓存 15 秒），不用重启 |
+| K8S 事件告警 | kubedoor-master | 「系统管理 → 消息通知」：**事件所在集群**单独配置的群，没有就用全局配置 | 保存后马上生效，不用重启 |
+| 运维操作通知（扩缩容、重启、更新镜像、隔离、准入等） | 各集群 kubedoor-agent 交给 kubedoor-master 发送 | 同上，按通知来自哪个集群选群 | 同上 |
+| 采集时发现新服务、自动加入管控表的提示 | kubedoor-master | 同上，按服务所在集群选群 | 同上 |
 
-- `MSG_TOKEN` 只填机器人 Webhook 地址里的密钥部分：企业微信是 `key=` 后面的值，钉钉是 `access_token=` 后面的值，飞书是 `/hook/` 后面的值，Slack 是 `/services/` 后面的部分。
+- 先在「系统管理 → 消息通知」点「发送测试消息」：测试失败时页面会显示 IM 返回的错误（例如 token 错误、关键词不匹配）。全局和该集群都没有配置时，通知不会发送。
+- 机器人地址可以粘贴整条 Webhook 地址，也可以只填密钥部分：企业微信是 `key=` 后面的值，钉钉是 `access_token=` 后面的值，飞书是 `/hook/` 后面的值，Slack 是 `/services/` 后面的部分。钉钉的「加签」、飞书的「签名校验」目前不支持，请用「自定义关键词」。
 - 钉钉机器人的安全设置请把「自定义关键词」设为「告警」。
-- 各集群的机器人要与 master 的 `MSG_TYPE` 是同一种 IM，否则事件告警发不出去。
-- 看日志：指标告警看 `kubectl -n kubedoor logs deploy/kubedoor-alarm`；master（事件告警）、agent（运维操作通知）日志里以 `【wecom】`、`【dingding】`、`【feishu】`、`【slack】` 开头的内容是 IM 接口的返回结果。
+- 群机器人有频率限制（企业微信、钉钉约每分钟 20 条），KubeDoor 按机器人排队限速发送；Agent 断线期间的运维操作通知会暂存（最多 200 条、30 分钟），重连后补发，晚到超过 1 分钟的会标注「延迟送达」和产生时间。
+- 看日志：指标告警看 `kubectl -n kubedoor logs deploy/kubedoor-alarm`；事件告警、运维操作通知、管控表通知都由 master 发送，看 `kubectl -n kubedoor logs deploy/kubedoor-master`，发送失败会记录 IM 返回的错误码（日志里不含 token）。
 
 ### Q：修改了 vmalert 告警阈值，没有生效？
 
@@ -727,7 +728,7 @@ kubectl -n kubedoor rollout restart deploy/vmalert
 ### Q：「告警面板」「K8S告警详情」里没有记录？
 
 - 只有名字以 `K8S_Pod` 开头的指标告警会入库（Alertmanager 把它们额外发一份到 kubedoor-alarm 的 `/alert/store`）；节点、Deployment 等其它告警只发通知、不入库。命中「告警屏蔽」的告警照常入库，只是不发通知。
-- 入库依赖 vmalert → Alertmanager → kubedoor-alarm 这条链路。`ENABLE_ALERTMANAGER="false"` 用自己的 Alertmanager 时，要把 webhook 指到 `http://kubedoor-alarm.kubedoor/alert/store`（入库）和 `http://kubedoor-alarm.kubedoor/msg/<MSG_TYPE>=<MSG_TOKEN>`（通知）。
+- 入库依赖 vmalert → Alertmanager → kubedoor-alarm 这条链路。`ENABLE_ALERTMANAGER="false"` 用自己的 Alertmanager 时，要把 webhook 指到 `http://kubedoor-alarm.kubedoor/alert/store`（入库）和 `http://kubedoor-alarm.kubedoor/msg/kubedoor`（通知，发到哪个群在「系统管理 → 消息通知」里配置；kubedoor-alarm 按每批告警 `commonLabels` / `groupLabels` 里的集群标签选群，所以通知路由的 `group_by` 要带上集群标签，一批告警混了几个集群时用全局配置）。
 - K8S 事件告警不在这两个页面里，在「K8S事件详情」按「级别」=「已告警」筛选。
 
 ### Q：IM 告警里的【屏蔽】链接打不开？

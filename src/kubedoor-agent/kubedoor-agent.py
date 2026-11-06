@@ -32,6 +32,7 @@ from func_manager.ai_tools import AiToolHandler
 from func_manager.pod_exec import PodExecManager
 from func_manager.pod_log_stream import PodLogStreamer, MAX_STREAMS as MAX_LOG_STREAMS
 from func_manager.ws_lifecycle import run_connection_tasks, MasterConnection
+from func_manager import notifier
 from k8s_client_manager import OffloadApiClient, load_incluster_config
 from scaler.scale_service import ScaleService
 from scaler.cci_scaler import get_schedule_profile_info
@@ -302,7 +303,8 @@ async def monitor_health_check():
 async def connect_to_server():
     """连接到 WebSocket 服务端，并处理连接断开的情况"""
     # ai_tools=1:支持通用 AI 工具;data_tools=1:支持 AI 只读查询数据库 / Redis / ES(master 按这两个标记判断 agent 版本)
-    uri = f"{utils.KUBEDOOR_MASTER}/ws?env={utils.PROM_K8S_TAG_VALUE}&ver={VERSION}&ai_tools=1&data_tools=1"
+    # notify=1:运维通知经这条连接发给 master({"type": "notify"}),由 master 发到 IM
+    uri = f"{utils.KUBEDOOR_MASTER}/ws?env={utils.PROM_K8S_TAG_VALUE}&ver={VERSION}&ai_tools=1&data_tools=1&notify=1"
     while True:
         try:
             async with ClientSession() as session:
@@ -323,10 +325,13 @@ async def connect_to_server():
                     event_monitor.set_websocket_connection(ws)
                     # 实时状态推送改用新连接,旧连接上的订阅作废(master 会重新下发)
                     workload_streamer.attach(ws)
+                    # 运维通知改走新连接,断线期间暂存的马上补发
+                    notifier.attach(ws)
 
                     try:
                         await run_connection_tasks(ws, event_monitor, process_request, heartbeat, monitor_health_check)
                     finally:
+                        notifier.detach(ws)
                         event_monitor.set_websocket_connection(None)
                         workload_streamer.detach()
                         pod_exec_manager.close_all()
@@ -340,6 +345,7 @@ async def connect_to_server():
         except Exception as e:
             logger.error(f"连接到服务端失败：{e}")
             # 确保清理资源
+            notifier.detach()
             if event_monitor:
                 await event_monitor.stop_monitoring()
                 event_monitor.set_websocket_connection(None)
@@ -675,6 +681,8 @@ async def start_https_server():
 async def cleanup():
     """清理资源"""
     global http_session
+    # 关掉运维通知的 Unix socket 和发送任务
+    await notifier.stop()
     if ai_tool_handler:
         await ai_tool_handler.close()
     # 停止 Deployment/Pod 缓存和实时推送
@@ -699,6 +707,8 @@ async def cleanup():
 async def main():
     """主函数"""
     global http_session
+    # 运维通知最先启动:之后 utils.send_msg 入队(经 master 发送,断线时暂存),并开 Unix socket 接收 pod-mgr 的通知
+    await notifier.start()
     init_kubernetes()  # 初始化 Kubernetes 配置
     # Deployment/Pod 缓存跟进程走,只启动一次,不随 master 连接重建
     workload_cache.start()

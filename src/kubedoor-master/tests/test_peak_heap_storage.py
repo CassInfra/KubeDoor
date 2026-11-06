@@ -227,14 +227,18 @@ def test_existing_control_update_tracks_peak_observation_but_keeps_jvm_and_limit
 
 def test_new_service_in_update_uses_selected_peak_heap(monkeypatch):
     write = AsyncMock()
+    notify = Mock()
     monkeypatch.setattr(utils, 'pg_fetchval', AsyncMock(return_value=None))
     monkeypatch.setattr(utils.db, 'pg_copy_records', write)
-    monkeypatch.setattr(utils, 'send_msg', Mock())
+    monkeypatch.setattr(utils, 'notify', notify)
     monkeypatch.setattr(utils, 'invalidate_admis_cache', Mock())
     assert asyncio.run(utils.update_control_data([selected_peak_row()])) is True
     _, batch, columns = write.call_args.args
     assert dict(zip(columns, batch[0]))['p95_pod_heap_pct'] == 72.5
     assert dict(zip(columns, batch[0]))['p95_pod_g1e_pct'] == 67.25
+    # 新服务加入管控表的通知按这个集群选群机器人
+    content, env = notify.call_args.args
+    assert env == 'prod' and '【prod】【team】【service】' in content
 
 
 def test_old_selected_peak_rows_initialize_unknown_heap():

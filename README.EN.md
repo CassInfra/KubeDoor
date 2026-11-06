@@ -475,7 +475,7 @@ Open the printed Web URL and enter the one-time setup key. The five steps check 
 
 **④ Install Agents from the Web UI** (once per managed cluster)
 
-As a system admin, open 「Agent管理」 at `/#/workbench/index`, click 「安装Agent」, upload a kubeconfig, select its context, confirm the cluster identifier, then check and install. The KubeDoor connection URL supplies both the control connection and metrics gateway, so target clusters do not need the time-series database credentials.
+As a system admin, open 「Agent管理」 at `/#/workbench/index`, click 「安装Agent」, upload a kubeconfig, select its context, confirm the cluster identifier, then check and install. The KubeDoor connection URL supplies the control connection; vmagent writes straight to the time-series database write URL configured on the control plane, with its credentials stored in a Secret in the target cluster.
 
 If the control plane cannot reach the target Kubernetes API, use the [legacy installer](tools/legacy-install/README.md) from a machine in that network, preserving the cluster's original configuration.
 

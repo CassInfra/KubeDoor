@@ -50,6 +50,10 @@ def test_metrics_endpoints_render_verbatim_and_grafana_gets_split_credentials(co
     assert connection["PROM_URL"] == f"http://{VM_AUTH}@metrics.example.invalid:8428"
     assert connection["METRICS_WRITE_URL"] == f"http://{VM_AUTH}@metrics.example.invalid:8428/api/v1/write"
     assert resources["ConfigMap", "kubedoor-config"]["data"]["PROM_TYPE"] == "Victoria-Metrics-Single"
+    # 写地址带账号密码：只在 Secret 里，master 经 envFrom 拿到后交给网页安装的 vmagent 直连；没有指标网关
+    assert "METRICS_WRITE_URL" not in resources["ConfigMap", "kubedoor-config"]["data"]
+    assert ("Secret", "kubedoor-metrics-gateway") not in resources
+    assert "metrics_available" not in json.loads(resources["ConfigMap", "kubedoor-config"]["data"]["AGENT_INSTALL_DEFAULTS"])
     grafana, source = prometheus_source(resources)
     assert (grafana["metrics-url"], grafana["metrics-user"], grafana["metrics-password"]) == ("http://metrics.example.invalid:8428", "monit", VM_PASSWORD)
     assert source["basicAuth"] is True

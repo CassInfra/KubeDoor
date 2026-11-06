@@ -214,7 +214,7 @@ kubectl label namespace <ns> kubedoor-ignore-       # 取消豁免
 
 ## 🔔通知
 
-准入相关通知由该集群的agent用它自己的机器人配置发送（安装agent时`kubedoor.conf`里的`MSG_TYPE`、`MSG_TOKEN`），前缀为`admis:【集群】【命名空间】【Deployment】`：
+准入相关通知由该集群的agent产生，交给master统一发送，发到哪个群在「系统管理 → 消息通知」配置（该集群单独配置的群优先，没有就用全局配置），前缀为`admis:【集群】【命名空间】【Deployment】`：
 
 | 通知内容 | 含义 |
 |---|---|

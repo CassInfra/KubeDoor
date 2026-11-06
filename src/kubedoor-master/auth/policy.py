@@ -338,12 +338,14 @@ _AGENT_READ_PATHS = '|'.join([
 
 RULES = (
     _rule('GET', '/api/internal/setup-health', 'internal'),
+    # kubedoor-alarm 取消息通知的通道(返回明文 token,handler 只认不带用户名的内部 token)
+    _rule('GET', '/api/internal/notification', 'internal'),
     # ---- 登录 / 账号自助 ----
     _rule('POST', '/api/auth/login', 'public'),
     _rule('', '/api/auth/verify', 'public'),
     _rule('POST', '/api/auth/logout', 'public'),  # 会话失效时也要能清 Cookie
     _rule('GET|POST', '/api/auth/(me|password)', 'session'),
-    # ---- 系统管理:用户、集群授权、LDAP、审计、权限与审批、获取代码接口、获取运行配置接口 ----
+    # ---- 系统管理:用户、集群授权、LDAP、审计、权限与审批、获取代码接口、获取运行配置接口、消息通知 ----
     _rule('', '/api/admin/.+', 'admin'),
     # ---- AI 服务内部桥(获取代码、获取运行配置等由 handler 再按集群和操作权限校验)----
     _rule('', '/api/ai/internal/.+', 'internal'),

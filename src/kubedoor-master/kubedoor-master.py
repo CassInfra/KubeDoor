@@ -29,6 +29,8 @@ from func_manager import runtime_config
 from func_manager.workload_relay import WorkloadRelay
 from func_manager.pod_exec_relay import PodExecRelay
 from func_manager.pod_log_relay import PodLogRelay
+from notify import api as notify_api
+from notify import notify
 import image_tags_fetcher
 import image_settings
 import installation_health
@@ -170,6 +172,8 @@ async def websocket_handler(request):
     clients[env]["heartbeat_received"] = False
     # 新版 agent 带 data_tools=1:AI 能经它只读查询 MySQL / Redis / ES(ai_api 的 agent-execute 据此判断)
     clients[env]["data_tools"] = request.query.get("data_tools") == "1"
+    # 新版 agent 带 notify=1:运维操作通知经这条连接发给 master,由 master 按集群选群机器人发送(只用于排查)
+    clients[env]["notify"] = request.query.get("notify") == "1"
     asyncio.create_task(workload_relay.on_agent_connected(env))
 
     try:
@@ -220,6 +224,13 @@ async def websocket_handler(request):
                     elif data.get("type") == "pod_exec":
                         # Pod 终端的输出 / 状态:只入队不等待,转给对应的浏览器
                         pod_exec_relay.dispatch(env, data)
+                    elif data.get("type") == "notify":
+                        # agent 的运维操作通知:按这条连接的集群选群机器人,只放进发送队列(按机器人限速),不等待
+                        content = data.get("content")
+                        if isinstance(content, str):
+                            notify(content[:20000], env=env)
+                        else:
+                            logger.warning(f"客户端 env={env} 发来的通知没有文本内容,已忽略")
                     elif data.get("type") == "k8s_event":
                         # 处理来自agent的K8S事件消息（单条）
                         # 使用 create_task 发射后不管，避免阻塞WebSocket消息循环
@@ -1059,6 +1070,9 @@ code_info.register_routes(app, call_agent_api)
 runtime_config.register_routes(app)
 agent_install_api.register_routes(app, clients)
 
+# ==================== 消息通知(系统管理 → 消息通知 /api/admin/notification;kubedoor-alarm 取通道 /api/internal/notification) ====================
+notify_api.register_routes(app)
+
 
 # ==================== 负载均衡路由注册 ====================
 app.router.add_get("/api/load-balance/config", lb_get_config_handler)
@@ -1081,10 +1095,12 @@ app.router.add_route('*', "/api/{tail:.*}", http_handler)
 # 数据库初始化必须最先执行(建池 + 建表),再建内置账号、启动依赖 DB 的后台任务
 app.on_startup.append(init_db_and_schema)
 app.on_startup.append(auth.on_startup)
+app.on_startup.append(notify_api.on_startup)  # 加载消息通知配置,启动每 10 秒的后台刷新
 app.on_startup.append(image_settings.on_startup)
 app.on_startup.append(agent_install_api.on_startup)
 app.on_startup.append(start_background_tasks)
 app.on_cleanup.append(cleanup_background_tasks)
+app.on_cleanup.append(notify_api.on_cleanup)
 app.on_cleanup.append(agent_install_api.on_cleanup)
 app.on_cleanup.append(close_db)
 

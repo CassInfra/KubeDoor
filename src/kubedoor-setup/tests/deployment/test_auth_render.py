@@ -42,7 +42,7 @@ def test_nginx_delegates_authentication_to_master(tmp_path):
     for legacy in ("auth_basic", "auth_ldap", "$remote_user", "user_permission", "conf.d"):
         assert legacy not in conf
     # 四种鉴权子请求合成一个内部 location;子请求带回的身份在 server 级统一取出
-    auth = block(conf, "location ~ ^/_kd_auth/(session|mcp|grafana|alert|metrics)$")
+    auth = block(conf, "location ~ ^/_kd_auth/(session|mcp|grafana|alert)$")
     assert "internal;" in auth and "proxy_pass http://kubedoor_master/api/auth/verify?for=$1;" in auth
     assert "proxy_pass_request_body off;" in auth and 'proxy_set_header X-Kubedoor-Token "";' in auth
     # 只调大 proxy_buffer_size 的话 nginx -t 直接报错(busy_buffers 默认是它的 2 倍,超出 8 个 4k 缓冲的上限)
@@ -73,7 +73,7 @@ def test_nginx_delegates_authentication_to_master(tmp_path):
     web = docs[("Deployment", "kubedoor-web")]["spec"]["template"]["spec"]
     assert all(v["name"] != "nginx-auth" for v in web["volumes"])
     mounts = {m["mountPath"] for m in web["containers"][0]["volumeMounts"]}
-    assert mounts == {"/etc/nginx/nginx.conf", "/etc/nginx/ai-security", "/etc/nginx/metrics"}
+    assert mounts == {"/etc/nginx/nginx.conf", "/etc/nginx/ai-security"}
 
 
 def test_config_changes_roll_only_the_affected_pods(tmp_path):
@@ -81,7 +81,7 @@ def test_config_changes_roll_only_the_affected_pods(tmp_path):
     assert all(re.fullmatch(r"[0-9a-f]{16}", value) for value in base.values())
     # 同样的配置再渲染一次(AI 密钥是另一套随机值)摘要不变:重跑安装脚本不会无谓地重启
     assert config_hashes(render_master(tmp_path / "again")[0]) == base
-    env = config_hashes(render_master(tmp_path / "env", ("MSG_TOKEN=changed",))[0])
+    env = config_hashes(render_master(tmp_path / "env", ("ALERT_DEDUP_WINDOW=600",))[0])
     assert {name for name in base if env[name] != base[name]} == {"kubedoor-master", "kubedoor-alarm", "kubedoor-ai"}
     nginx = config_hashes(render_master(tmp_path / "nginx", ("ENABLE_MCP=false",))[0])
     assert {name for name in base if nginx[name] != base[name]} == {"kubedoor-web"}

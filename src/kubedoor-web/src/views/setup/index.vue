@@ -14,6 +14,7 @@ import {
   setupApi,
   SetupRequestError,
   type MetricsSettings,
+  type NotificationInput,
   type PostgresSettings,
   type SetupAgentOptions,
   type SetupCheck,
@@ -34,13 +35,28 @@ import {
   isInstalling,
   metricsEndpoints,
   metricsPayload,
+  NOTICE_NOTE,
+  NOTICE_ROWS,
+  notificationBadge,
+  notificationFormFrom,
+  notificationPayload,
+  notificationSummary,
+  notificationTestRequest,
+  notificationTokenPlaceholder,
+  notifyErrorView,
+  notifyHint,
+  notifyResultView,
+  NOTIFY_LABELS,
+  NOTIFY_TYPES,
   postgresPayload,
   publicURL,
   serviceStatus,
   SETUP_STEPS,
   stateStep,
   toneMark,
-  type AgentForm
+  type AgentForm,
+  type NotificationForm,
+  type NotifyTestView
 } from "./setup-utils";
 
 defineOptions({ name: "Setup" });
@@ -74,7 +90,7 @@ const steps = [
   { title: "环境检查", note: "确认安装位置与环境" },
   { title: "PostgreSQL", note: "连接业务数据库" },
   { title: "时序数据库", note: "连接监控指标存储" },
-  { title: "基础设置", note: "管理员与告警组件" },
+  { title: "基础设置", note: "管理员、告警与通知" },
   { title: "自动安装", note: "逐项检查，确认就绪" },
   { title: "安装 Agent", note: "可选：本集群接入" }
 ];
@@ -108,6 +124,15 @@ const basics = reactive({
 /** 访问地址默认自动获取、只读，点「修改」后才能填写 */
 const editingURL = ref(false);
 const publicURLInput = ref<HTMLInputElement>();
+/** 第 4 步的告警通知（可选）：机器人地址只在这次输入时有值，已保存的不回传 */
+const notification = reactive<NotificationForm>(notificationFormFrom());
+/** 「发送测试消息」的结果，改动通知设置后清掉 */
+const notifyTest = ref<NotifyTestView>();
+const notifyTesting = ref(false);
+const notifyOptions = NOTIFY_TYPES.map(value => ({
+  value,
+  label: NOTIFY_LABELS[value]
+}));
 const agentForm = reactive<AgentForm>(agentFormFrom());
 const phase = computed(() => completedMarker.value?.phase || task.value?.phase);
 const completed = computed(() => phase.value === "succeeded");
@@ -193,7 +218,7 @@ const autoURL = computed(() =>
 const publicURLNote = computed(() => {
   const url = basics.public_url.trim().replace(/\/+$/, "");
   const usage =
-    "其他集群的 Agent 通过这个地址连接 KubeDoor、上报指标，告警通知里的链接也指向它。";
+    "其他集群的 Agent 通过这个地址连接 KubeDoor，告警通知里的链接也指向它。";
   if (!url) return `未能自动获取，请填写访问地址。${usage}`;
   if (editingURL.value)
     return `${usage}请确认各目标集群都能访问，不能填写本机地址或临时端口转发地址。`;
@@ -205,6 +230,15 @@ const publicURLNote = computed(() => {
         : "";
   return `${source}${usage}使用域名或负载均衡时点「修改」。`;
 });
+/** 已保存的告警通知（只有 IM 类型、默认 @ 人和是否已配置） */
+const savedNotification = computed(() => task.value?.config?.notification);
+const notifyHints = computed(() => notifyHint(notification.type));
+const notifyPlaceholder = computed(() =>
+  notificationTokenPlaceholder(notification, savedNotification.value)
+);
+const notifyBadge = computed(() =>
+  notificationBadge(notification, savedNotification.value)
+);
 // 环境检查和本集群 Agent 安装权限都记在安装状态的 checks 里
 const environmentNames = ["environment", "agent_installer"];
 const environmentChecks = computed(
@@ -324,6 +358,8 @@ function applyState(next: SetupState, syncForms = false, restoreStep = false) {
     basics.public_url = next.config.public_url || autoURL.value;
     basics.alerting = next.config.components?.alerting !== false;
     editingURL.value = false;
+    Object.assign(notification, notificationFormFrom(next.config.notification));
+    notifyTest.value = undefined;
   }
   fillAgentForm(next, previousAgent);
   if (restoreStep || (hasInstallation(next.phase) && !repairing.value))
@@ -556,7 +592,8 @@ async function advance() {
           ...(basics.admin.password ? { password: basics.admin.password } : {})
         },
         public_url: publicURL(basics.public_url),
-        components: { alerting: basics.alerting }
+        components: { alerting: basics.alerting },
+        notification: notificationPayload(notification, savedNotification.value)
       };
       await perform(() => setupApi.configure(task.value.revision, data), 5);
     } else if (!executing.value) {
@@ -592,6 +629,53 @@ function resetURL() {
   basics.public_url = autoURL.value;
   editingURL.value = false;
   edited();
+}
+
+/** 改了告警通知：之前的测试结果作废 */
+function notifyEdited() {
+  notifyTest.value = undefined;
+}
+
+/** 填了新的机器人地址就不再是「清除」 */
+function notifyTokenEdited() {
+  if (notification.token.trim()) notification.clear = false;
+  notifyEdited();
+}
+
+/** 清除已保存的告警通知：保存后不发通知 */
+function clearNotification() {
+  Object.assign(notification, { token: "", at: "", clear: true });
+  notifyEdited();
+  edited();
+}
+
+/** 「发送测试消息」：安装服务直接发给 IM，不保存配置，结果显示在按钮下方 */
+async function testNotification() {
+  if (locked.value || notifyTesting.value || !task.value) return;
+  let data: NotificationInput;
+  try {
+    data = notificationTestRequest(notification, savedNotification.value);
+  } catch (reason) {
+    notifyTest.value = notifyErrorView(reason);
+    return;
+  }
+  notifyTesting.value = true;
+  notifyTest.value = undefined;
+  try {
+    notifyTest.value = notifyResultView(
+      await setupApi.testNotification(data),
+      data.type
+    );
+  } catch (reason) {
+    if (reason instanceof SetupRequestError && reason.status === 401) {
+      authenticated.value = false;
+      error.value = errorText(reason);
+      return;
+    }
+    notifyTest.value = notifyErrorView(reason);
+  } finally {
+    notifyTesting.value = false;
+  }
 }
 
 /** 第 6 步：勾选时校验并在本集群安装 Agent；不勾选或选择跳过时直接完成安装 */
@@ -663,6 +747,7 @@ onBeforeUnmount(() => {
   stopPolling();
   key.value = "";
   postgres.password = metrics.password = basics.admin.password = "";
+  notification.token = "";
   passwordConfirmation.value = "";
 });
 </script>
@@ -804,7 +889,7 @@ onBeforeUnmount(() => {
                     <li>kubedoor-ai</li>
                     <li
                       class="arch-more"
-                      title="Grafana 看板、指标网关，以及可选的告警组件 kubedoor-alarm、vmalert、Alertmanager"
+                      title="Grafana 看板，以及可选的告警组件 kubedoor-alarm、vmalert、Alertmanager"
                     >
                       ···
                     </li>
@@ -827,7 +912,7 @@ onBeforeUnmount(() => {
               </div>
               <p class="arch-note">
                 本次安装 <b>kubedoor-master 控制端</b>：Web 入口、控制服务、AI
-                助手、Grafana 监控看板、指标网关，以及第 4
+                助手、Grafana 监控看板，以及第 4
                 步选择的告警组件（vmalert、Alertmanager、kubedoor-alarm）。<b
                   >kubedoor-agent</b
                 >
@@ -1060,7 +1145,8 @@ onBeforeUnmount(() => {
                   />
                   <p class="field-hint">
                     按上面的类型、地址和账号自动生成；端口或路径不同（如经过
-                    vmauth、反向代理）时可直接修改，再改上面的内容会重新生成。
+                    vmauth、反向代理）时可直接修改，再改上面的内容会重新生成。各集群的
+                    vmagent 直接写入这个地址，需要能从各 K8S 集群访问。
                   </p>
                 </div>
                 <div class="label-card">
@@ -1105,7 +1191,7 @@ onBeforeUnmount(() => {
             <template v-else-if="step === 4">
               <h2>完成基础设置</h2>
               <p class="subtitle">
-                设置管理员密码，确认访问地址，选择是否安装告警组件。
+                设置管理员密码，确认访问地址，选择是否安装告警组件，按需填写告警通知。
               </p>
               <fieldset :disabled="locked" @input="edited" @change="edited">
                 <div class="field-grid">
@@ -1227,9 +1313,129 @@ onBeforeUnmount(() => {
                     }}K8S 事件告警由控制服务直接发送，不受这里影响。
                   </p>
                 </details>
+                <details class="advanced notification">
+                  <summary>
+                    告警通知<span class="optional">可选</span
+                    ><span
+                      class="summary-state"
+                      :class="{ off: !notifyBadge.on }"
+                      >{{ notifyBadge.text }}</span
+                    >
+                  </summary>
+                  <p class="field-hint">
+                    把下表的通知发到 IM
+                    群机器人。留空表示不发通知，装完可以在「系统管理 →
+                    消息通知」配置，还能给各集群单独配置群。
+                  </p>
+                  <div class="field-grid">
+                    <div>
+                      <label for="notify-type">IM 类型</label
+                      ><select
+                        id="notify-type"
+                        v-model="notification.type"
+                        @change="notifyEdited"
+                      >
+                        <option
+                          v-for="item in notifyOptions"
+                          :key="item.value"
+                          :value="item.value"
+                        >
+                          {{ item.label }}
+                        </option>
+                      </select>
+                    </div>
+                    <div>
+                      <label for="notify-at"
+                        >默认 @ 人 <span class="optional">可选</span></label
+                      ><input
+                        id="notify-at"
+                        v-model="notification.at"
+                        autocomplete="off"
+                        maxlength="128"
+                        :placeholder="notifyHints.at"
+                        @input="notifyEdited"
+                      />
+                    </div>
+                    <div class="full">
+                      <label for="notify-token">机器人地址</label>
+                      <div class="url-field notify-field">
+                        <input
+                          id="notify-token"
+                          v-model="notification.token"
+                          type="password"
+                          autocomplete="off"
+                          :placeholder="notifyPlaceholder"
+                          @input="notifyTokenEdited"
+                        /><button
+                          v-if="
+                            savedNotification?.configured && !notification.clear
+                          "
+                          class="secondary-button"
+                          type="button"
+                          @click="clearNotification"
+                        >
+                          清除</button
+                        ><button
+                          class="secondary-button"
+                          type="button"
+                          data-notify-test-button
+                          :disabled="notifyTesting"
+                          @click="testNotification"
+                        >
+                          {{ notifyTesting ? "正在发送…" : "发送测试消息" }}
+                        </button>
+                      </div>
+                      <p class="field-hint">
+                        {{
+                          notifyHints.tokenHelp
+                        }}。可以粘贴整条地址，只保存其中的 token，页面不回显。
+                      </p>
+                    </div>
+                  </div>
+                  <ul
+                    v-if="notifyTest"
+                    class="checks-list"
+                    aria-label="测试消息结果"
+                    aria-live="polite"
+                  >
+                    <li
+                      :class="notifyTest.tone"
+                      :data-notify-test="notifyTest.tone"
+                    >
+                      <span class="check-dot">{{
+                        toneMark(notifyTest.tone)
+                      }}</span
+                      ><span
+                        >测试消息<small>{{ notifyTest.message }}</small></span
+                      ><b>{{ notifyTest.label }}</b>
+                    </li>
+                  </ul>
+                  <table class="notice-table">
+                    <thead>
+                      <tr>
+                        <th scope="col">通知</th>
+                        <th scope="col">谁发送</th>
+                        <th scope="col">什么时候发</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      <tr
+                        v-for="row in NOTICE_ROWS"
+                        :key="row.name"
+                        data-notice-row
+                      >
+                        <th scope="row">{{ row.name }}</th>
+                        <td>{{ row.sender }}</td>
+                        <td>{{ row.when }}</td>
+                      </tr>
+                    </tbody>
+                  </table>
+                  <p class="field-hint">{{ NOTICE_NOTE }}</p>
+                </details>
               </fieldset>
               <div class="setup-callout">
-                AI 模型、通知渠道、镜像更新规则和仓库凭据，可进入控制台后配置。
+                AI
+                模型、按集群单独配置的通知群、镜像更新规则和仓库凭据，可进入控制台后配置。
               </div>
             </template>
             <template v-else-if="!executing">
@@ -1274,6 +1480,10 @@ onBeforeUnmount(() => {
                         : "不安装"
                     }}
                   </dd>
+                </div>
+                <div data-summary="notification">
+                  <dt>告警通知</dt>
+                  <dd>{{ notificationSummary(savedNotification) }}</dd>
                 </div>
                 <div v-if="agentInstallerCheck">
                   <dt>本集群 Agent</dt>
@@ -2109,6 +2319,43 @@ input[readonly] {
 }
 .url-field .secondary-button {
   flex-shrink: 0;
+}
+/* 告警通知的说明表：每类通知由谁发送、什么时候发 */
+.notice-table {
+  width: 100%;
+  margin-top: 16px;
+  overflow: hidden;
+  font-size: 11px;
+  line-height: 1.6;
+  color: #5d7390;
+  border: 1px solid var(--line);
+  border-spacing: 0;
+  border-collapse: separate;
+  border-radius: 12px;
+}
+.notice-table th,
+.notice-table td {
+  padding: 9px 12px;
+  text-align: left;
+  vertical-align: top;
+}
+.notice-table thead th {
+  font-weight: 650;
+  color: #4a607a;
+  white-space: nowrap;
+  background: #f6f8fc;
+}
+.notice-table tbody th,
+.notice-table tbody td {
+  border-top: 1px solid var(--line);
+}
+.notice-table tbody th {
+  font-weight: 650;
+  color: var(--ink);
+  white-space: nowrap;
+}
+.notice-table tbody td:nth-child(2) {
+  width: 30%;
 }
 .alert-flow {
   display: flex;
@@ -2984,6 +3231,20 @@ code {
   }
   .label-card {
     padding: 14px;
+  }
+  /* 窄屏：机器人地址的两个按钮换到输入框下面，说明表的第一列允许换行 */
+  .notify-field {
+    flex-wrap: wrap;
+  }
+  .notify-field input {
+    flex-basis: 100%;
+  }
+  .notice-table th,
+  .notice-table td {
+    padding: 8px 9px;
+  }
+  .notice-table tbody th {
+    white-space: normal;
   }
   .agent-choice,
   .agent-options {

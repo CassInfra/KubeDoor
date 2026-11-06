@@ -5,12 +5,12 @@ set -eu
 # 修改以下镜像后再首次安装；--tag 可覆盖 KubeDoor 组件版本。
 # BEGIN KUBEDOOR IMAGE DEFAULTS
 IMAGE_REPO="swr.cn-south-1.myhuaweicloud.com/starsl.cn"
-TAG_MASTER="2.5.0"
-TAG_AGENT="2.5.0"
-TAG_WEB="2.5.0"
-TAG_AI="2.5.0"
-TAG_SETUP="2.5.0"
-TAG_ALARM="2.5.0"
+TAG_MASTER="2.6.0"
+TAG_AGENT="2.6.0"
+TAG_WEB="2.6.0"
+TAG_AI="2.6.0"
+TAG_SETUP="2.6.0"
+TAG_ALARM="2.6.0"
 IMAGE_GRAFANA="registry.cn-shenzhen.aliyuncs.com/starsl/grafana-oss:11.4.0"
 IMAGE_VMAGENT="registry.cn-shenzhen.aliyuncs.com/starsl/vmagent"
 IMAGE_VMALERT="registry.cn-shenzhen.aliyuncs.com/starsl/vmalert"

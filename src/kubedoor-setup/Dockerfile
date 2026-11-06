@@ -10,6 +10,7 @@ RUN sed -i 's/dl-cdn.alpinelinux.org/repo.huaweicloud.com/g' /etc/apk/repositori
 COPY src/kubedoor-setup/ /app/src/kubedoor-setup/
 COPY src/kubedoor-master/agent_install/bundle.py /app/src/kubedoor-master/agent_install/bundle.py
 COPY src/kubedoor-master/auth/passwords.py /app/src/kubedoor-master/auth/passwords.py
+COPY src/kubedoor-master/notify/channels.py /app/src/kubedoor-master/notify/channels.py
 COPY deploy/install.sh /app/deploy/install.sh
 
 ENV PYTHONPATH=/app/src/kubedoor-setup \

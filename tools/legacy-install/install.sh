@@ -214,7 +214,7 @@ validate_master() {
     check_no_quote NAMESPACE IMAGE_REPO PROM_K8S_TAG_KEY \
         TAG_MASTER TAG_WEB TAG_ALARM TAG_AI \
         PG_HOST PG_PORT PG_USER PG_PASSWORD PG_DATABASE \
-        MSG_TYPE MSG_TOKEN DEFAULT_AT PROM_URL PROM_TYPE \
+        PROM_URL METRICS_WRITE_URL PROM_TYPE \
         ALERTMANAGER_EXTURL KUBEDOOR_EXTURL \
         GRAFANA_ADMIN_USER GRAFANA_ADMIN_PASSWORD \
         KUBEDOOR_INIT_ADMIN_PASSWORD KUBEDOOR_INIT_AGENT_PASSWORD AGENT_AUTH_REQUIRED \
@@ -231,8 +231,13 @@ validate_master() {
 
     require_var PROM_URL "请填写独立部署的 VictoriaMetrics 或已有时序库的查询地址"
 
-    if [[ "${ENABLE_ALERTMANAGER:-true}" == "true" ]]; then
-        [[ -n "${MSG_TOKEN:-}" ]] || warn "MSG_TOKEN 为空,告警通知发不出去(装完可以改 kubedoor-config 这个 ConfigMap)"
+    warn_legacy_notify
+}
+
+# 通知改由 master 统一发送,IM 机器人在控制台「系统管理 → 消息通知」配置;旧配置里的 MSG_* / DEFAULT_AT 不再生效
+warn_legacy_notify() {
+    if [[ -n "${MSG_TOKEN:-}" ]]; then
+        warn "MSG_TYPE / MSG_TOKEN / DEFAULT_AT 已不再生效:告警通知改在控制台「系统管理 → 消息通知」配置(可以按集群单独配置),装完请在那里填写机器人地址"
     fi
 }
 
@@ -254,9 +259,10 @@ validate_agent() {
     fi
 
     check_no_quote NAMESPACE IMAGE_REPO PROM_K8S_TAG_KEY TAG_AGENT \
-        K8S_NAME MASTER_WS OSS_URL MSG_TYPE MSG_TOKEN \
+        K8S_NAME MASTER_WS OSS_URL \
         REMOTE_WRITE_URL \
         IMAGE_VMAGENT IMAGE_KUBE_STATE_METRICS IMAGE_NODE_EXPORTER
+    warn_legacy_notify
 }
 
 # ---------------------------------------------------------------------------
@@ -283,8 +289,6 @@ build_common_vars() {
     VARS[NAMESPACE]="$NAMESPACE"
     VARS[IMAGE_REPO]="$IMAGE_REPO"
     VARS[PROM_K8S_TAG_KEY]="$PROM_K8S_TAG_KEY"
-    VARS[MSG_TYPE]="${MSG_TYPE:-wecom}"
-    VARS[MSG_TOKEN]="${MSG_TOKEN:-}"
 }
 
 # Persist encryption keys independently of tracked configuration. A render is
@@ -357,8 +361,9 @@ build_master_vars() {
     # 时序库独立部署，这里只消费连接地址。
     VARS[PROM_URL]="${PROM_URL:-}"
     VARS[PROM_TYPE]="${PROM_TYPE:-Victoria-Metrics-Single}"
+    # 网页安装 Agent 时各集群的 vmagent 默认直连的写入地址，须能从各业务集群访问；留空则只能仅安装 Agent
+    VARS[METRICS_WRITE_URL]="${METRICS_WRITE_URL:-}"
 
-    VARS[DEFAULT_AT]="${DEFAULT_AT:-}"
     VARS[ALERTMANAGER_EXTURL]="${ALERTMANAGER_EXTURL:-}"
     VARS[KUBEDOOR_EXTURL]="${KUBEDOOR_EXTURL:-}"
     VARS[ALERT_DEDUP_WINDOW]="${ALERT_DEDUP_WINDOW:-300}"
@@ -396,9 +401,6 @@ build_master_vars() {
     VARS[IMAGE_NODE_EXPORTER]="${IMAGE_NODE_EXPORTER:-}"
     VARS[OSS_URL]="${OSS_URL:-}"
     VARS[AGENT_INSTALL_DEFAULTS]="$(bundle_vars | "$PYTHON_BIN" "$REPO_ROOT/src/kubedoor-master/agent_install/bundle.py" metadata --field defaults)"
-    local metrics_proxy
-    metrics_proxy="$(bundle_vars | "$PYTHON_BIN" "$REPO_ROOT/src/kubedoor-master/agent_install/bundle.py" metadata --field proxy)"
-    VARS[METRICS_PROXY_BASE64]="$(printf '%s\n' "$metrics_proxy" | base64 | tr -d '\n')"
 
     # 看板 ConfigMap 的 projected sources 列表,按 dashboards/ 下的文件动态生成
     local src="" f
@@ -416,7 +418,7 @@ build_master_vars() {
     local d="$MANIFEST_DIR/master"
     VARS[CONFIG_HASH_ENV]="$(render_file "$d/10-config.yaml" | content_hash)"
     VARS[CONFIG_HASH_MASTER]="$({ render_file "$d/10-config.yaml"; render_file "$d/alert_rules.json"; } | content_hash)"
-    VARS[CONFIG_HASH_WEB]="$({ render_file "$d/40-web.yaml"; printf '%s' "${VARS[METRICS_PROXY_BASE64]}"; } | content_hash)"
+    VARS[CONFIG_HASH_WEB]="$(render_file "$d/40-web.yaml" | content_hash)"
     VARS[CONFIG_HASH_GRAFANA]="$(render_file "$d/35-grafana.yaml" | content_hash)"
 }
 
@@ -469,7 +471,6 @@ bundle_vars() {
     for key in ENABLE_VMAGENT ENABLE_KUBE_STATE_METRICS ENABLE_NODE_EXPORTER; do
         printf '%s\0%s\0' "$key" "${!key:-true}"
     done
-    printf 'METRICS_WRITE_URL\0%s\0' "${METRICS_WRITE_URL:-}"
 }
 
 # 把模板里的 __VAR__ 换成配置值。用 bash 参数替换,不走 sed,
@@ -511,7 +512,7 @@ render_file() {
 master_manifests() {
     local d="$MANIFEST_DIR/master"
     # kubedoor-ai(AI 助手 + MCP)是必装组件
-    printf '%s\n' "$d/00-namespace.yaml" "$d/05-ai-security.yaml" "$d/06-metrics-gateway.yaml" "$d/10-config.yaml" "$d/20-master.yaml" "$d/25-alarm.yaml" "$d/30-ai.yaml"
+    printf '%s\n' "$d/00-namespace.yaml" "$d/05-ai-security.yaml" "$d/10-config.yaml" "$d/20-master.yaml" "$d/25-alarm.yaml" "$d/30-ai.yaml"
     [[ "${ENABLE_GRAFANA:-true}" == "true" ]] && printf '%s\n' "$d/35-grafana.yaml"
     printf '%s\n' "$d/40-web.yaml"
     [[ "${ENABLE_VMALERT:-true}"          == "true" ]] && printf '%s\n' "$d/71-vmalert.yaml"

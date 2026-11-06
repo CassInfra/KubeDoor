@@ -56,12 +56,42 @@ export interface SetupComponents {
   alerting: boolean;
 }
 
+/** 告警通知的 IM 类型，和 master notify/channels.py 的 TYPES 一致 */
+export type NotifyType = "wecom" | "dingding" | "feishu" | "slack";
+
+/** 第 4 步保存的告警通知：页面只拿到是否已配置，不返回机器人地址 */
+export interface NotificationSettings {
+  type: NotifyType;
+  /** 默认 @ 的人：企微 userid、钉钉手机号、飞书 open_id、Slack 用户 ID */
+  at: string;
+  configured: boolean;
+}
+
+/**
+ * 提交的告警通知：token 可以是整条 Webhook 地址或其中的 token，留空沿用已保存的；
+ * clear 为 true 时清除已保存的配置（不发通知）
+ */
+export interface NotificationInput {
+  type: NotifyType;
+  token: string;
+  at: string;
+  clear?: boolean;
+}
+
+/** 发送测试消息的结果：IM 返回失败时 ok 为 false，message 是 IM 的错误码和说明 */
+export interface NotificationTestResult {
+  ok: boolean;
+  message: string;
+}
+
 export interface SetupConfig {
   postgres: PostgresSettings;
   metrics: MetricsSettings;
   admin: { username: string; has_password?: boolean; password?: string };
   public_url: string;
   components: SetupComponents;
+  /** 旧版安装服务没有这一项 */
+  notification?: NotificationSettings;
 }
 
 /**
@@ -263,13 +293,23 @@ export const setupApi = {
     request<SetupState>("/check/metrics", "POST", { revision, metrics }, 60000),
   configure: (
     revision: number,
-    options: Pick<SetupConfig, "admin" | "public_url" | "components">
+    options: Pick<SetupConfig, "admin" | "public_url" | "components"> & {
+      notification?: NotificationInput;
+    }
   ) =>
     request<SetupState>(
       "/configuration",
       "PUT",
       { revision, ...options },
       60000
+    ),
+  /** 第 4 步「发送测试消息」：安装服务直接发给 IM，不保存配置；同一会话 3 秒内只能测一次（429） */
+  testNotification: (notification: NotificationInput) =>
+    request<NotificationTestResult>(
+      "/notification/test",
+      "POST",
+      { notification },
+      30000
     ),
   start: (revision: number) =>
     request<SetupState>("/start", "POST", { revision }),

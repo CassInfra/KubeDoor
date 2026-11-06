@@ -52,11 +52,9 @@ class K8SEventProcessor:
             # 存储到 PostgreSQL
             self.pg_client.upsert_event(processed_data)
 
-            # 处理告警规则匹配
+            # 处理告警规则匹配(命中后按事件所在集群发消息通知)
             try:
-                # 从事件数据中提取msgToken
-                msg_token = event_data.get('msgToken')
-                alert_info = self.alert_processor.process_event(processed_data, msg_token)
+                alert_info = self.alert_processor.process_event(processed_data)
                 if alert_info:
                     logger.debug(f"触发告警: {alert_info['alert_id']} - {alert_info['message']}")
             except Exception as e:

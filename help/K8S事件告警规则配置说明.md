@@ -353,20 +353,18 @@ kubectl -n kubedoor logs deploy/kubedoor-master | grep 告警规则
 
 ### 1. 发到哪里
 
-K8S 事件告警由 master 直接调用 IM 机器人的 Webhook 发送：
+K8S 事件告警由 master 直接调用 IM 机器人的 Webhook 发送，发到哪个群在控制台「系统管理 → 消息通知」配置（首次安装时也可以在安装向导第 4 步填写）：
 
 | 项目 | 取值来源 | 说明 |
 | --- | --- | --- |
-| IM 类型 | master 的 `MSG_TYPE`（`kubedoor.conf` → ConfigMap `kubedoor-config`） | `wecom` / `dingding` / `feishu` / `slack` |
-| 机器人 | **事件所在集群** agent 的 `MSG_TOKEN`（安装该集群 agent 时 `kubedoor.conf` 里的值 → 该集群的 ConfigMap `kubedoor-agent-config`） | agent 把自己的 token 随事件一起上报，master 用它发送 |
-| @ 的人 | master 的 `DEFAULT_AT`（IM 里的用户 ID，钉钉填手机号） | 事件告警不能按规则 @ 不同的人 |
+| IM 类型、机器人 | **事件所在集群**单独配置的群；没有单独配置时用全局配置 | 企业微信 / 钉钉 / 飞书 / Slack，每个集群可以用不同的 IM |
+| @ 的人 | 同一份配置里的「默认 @ 人」（企微 userid、钉钉手机号、飞书 open_id、Slack 用户 ID） | 事件告警不能按规则 @ 不同的人 |
 
-- 不同集群的事件告警可以发到不同的群：安装各集群 agent 时填不同的 `MSG_TOKEN` 即可。这个机器人同时也接收该集群 agent 的运维操作通知（扩缩容、隔离、更新镜像等）。
-- 所有集群的机器人都要和 master 的 `MSG_TYPE` 是同一种 IM。
-- 某个集群 agent 的 `MSG_TOKEN` 为空时，该集群的事件告警发不出去（不会改用 master 的 `MSG_TOKEN`）。
-- `MSG_TOKEN` 只填机器人 Webhook 地址里的密钥部分：企业微信是 `key=` 后面的值，钉钉是 `access_token=` 后面的值，飞书是 `/hook/` 后面的值，Slack 是 `/services/` 后面的路径。
+- 不同集群的事件告警可以发到不同的群：在「消息通知」页给该集群单独配置即可。这个群同时也接收该集群的运维操作通知（扩缩容、隔离、更新镜像等）和指标告警。
+- 全局配置和该集群的单独配置都没有时，不发送（只记 master 日志）。
+- 机器人地址可以直接粘贴整条 Webhook 地址，也可以只填密钥部分：企业微信是 `key=` 后面的值，钉钉是 `access_token=` 后面的值，飞书是 `/hook/` 后面的值，Slack 是 `/services/` 后面的路径。
 - 钉钉机器人的安全设置请把「自定义关键词」设为「告警」。
-- 安装后修改某个集群的机器人：在该集群执行 `kubectl -n kubedoor edit configmap kubedoor-agent-config` 修改 `MSG_TOKEN`，再执行 `kubectl -n kubedoor rollout restart deploy/kubedoor-agent`。
+- 修改后马上生效，不用重启 master 或 agent；页面上的「发送测试消息」可以先验证机器人是否可用。
 
 ### 2. 消息格式
 
@@ -385,7 +383,7 @@ K8S 事件告警由 master 直接调用 IM 机器人的 Webhook 发送：
 
 - 第一行的图标由 `severity` 决定：`critical` 为 🚨，`warning` 为 ⚠️，`info` 为 ℹ️，其它值按 ⚠️ 显示；后面是规则名。
 - 「级别」是 `severity` 的大写；「时间」是事件的首次 ~ 最后发生时间（北京时间）；「原因」后面是累计次数；「来源」是 `reportingComponent/reportingInstance`。
-- 消息会 @ master 的 `DEFAULT_AT`。
+- 消息会 @「消息通知」里配置的默认 @ 人（该集群单独配置的优先）。
 
 ## 告警去重
 
@@ -434,10 +432,10 @@ master 日志里带 `【wecom】`、`【dingding】`、`【feishu】`、`【slac
 | 改了规则不生效 | master 没有重启；或重跑 `./install.sh master` 后，ConfigMap 被模板覆盖 | `kubectl -n kubedoor rollout restart deploy/kubedoor-master`，确认日志「加载了 N 条告警规则」；长期修改写进模板 |
 | 完全没有事件告警，日志有「加载告警规则失败」 | JSON 不合法（注释、尾逗号、中文引号），或 ConfigMap 没有挂载 | 按报错的行列号修正，重启 master |
 | 日志是「加载了 0 条告警规则」 | `alert_rules` 为空或键名写错 | 检查顶层键名 |
-| 某些集群完全没有事件告警 | 忽略规则里的 `k8s` 条件写反（`not_contains` 双重否定）；或该集群 agent 的 `MSG_TOKEN` 为空 | 按「忽略规则里的双重否定」中的表自查；检查该集群的 `kubedoor-agent-config` |
+| 某些集群完全没有事件告警 | 忽略规则里的 `k8s` 条件写反（`not_contains` 双重否定）；或全局和该集群都没有配置通知 | 按「忽略规则里的双重否定」中的表自查；在「系统管理 → 消息通知」检查配置并发送测试消息 |
 | 「K8S事件详情」查不到某集群的事件 | agent 不在线或采集出错，与规则无关 | 在「Agent管理」页确认「状态」为「在线」；agent 日志里应有「K8S事件监控已启动」，不应反复出现「K8S事件 list/watch 失败」 |
 | 事件存在，但「级别」不是「已告警」 | 被忽略规则吞掉、条件不满足、被 `DELETED` 跳过、字段名或条件类型写错 | 拿事件的各字段值逐条对照规则，注意子串匹配和大小写不敏感 |
-| 已标记「已告警」，但没收到通知 | 处于去重窗口内；该集群 agent 的 `MSG_TOKEN` 为空或填错；IM 类型和 master 的 `MSG_TYPE` 不一致；钉钉关键词不是「告警」 | 看 master 日志「告警被去重阻止」「发送告警失败」以及机器人返回内容 |
+| 已标记「已告警」，但没收到通知 | 处于去重窗口内；「消息通知」里该集群（或全局）的机器人没配置或填错；钉钉关键词不是「告警」 | 看 master 日志「告警被去重阻止」「发送告警失败」以及机器人返回内容 |
 | 告警发到了另一个群 | 事件告警用的是事件所在集群 agent 的机器人，不是 master 的 | 修改该集群的 `kubedoor-agent-config` 并重启 agent |
 | 同一个问题收到多条通知 | 不同 Pod 或不同事件对象各算一条；master 重启后去重记录清空；agent 重启后会把集群里仍存在的事件重新上报，超过去重窗口的可能再通知一次 | 调大 `ALERT_DEDUP_WINDOW`，或给规则加 `count` 条件 |
 | 日志「更新事件数据失败」 | 写 PostgreSQL 失败，这些事件不会告警 | 检查数据库连接 |

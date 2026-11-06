@@ -21,10 +21,11 @@ Alertmanager
    │                              └─► 命中：仍写入 k8s_pod_alert_days，
    │                                        silenced=true, silence_id=<规则ID>
    │
-   └─ POST /msg/<im>=<token> ──► 通知路径
+   └─ POST /msg/kubedoor ──────► 通知路径
                                   silence.match_alert(count_hit=True)
                                   ├─► 命中：跳过该条，累加规则 match_count
-                                  └─► 全部命中：返回 204，一条通知都不发
+                                  ├─► 全部命中：返回 204，一条通知都不发
+                                  └─► 其余按集群标签向 master 取通知配置（系统管理 → 消息通知），发到 IM
 
 Web ──► kubedoor-master /api/db/silence/* ──► alert_silences 表
                                                     ▲

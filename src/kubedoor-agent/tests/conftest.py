@@ -103,14 +103,31 @@ def ai_tools_module():
 
 @pytest.fixture
 def event_monitor_module(monkeypatch):
+    # 只给 PROM_K8S_TAG_VALUE:事件数据不再带通知 token,模块要是还从 utils 取 MSG_TOKEN,这里导入就会失败
     fake_utils = ModuleType("utils")
     fake_utils.PROM_K8S_TAG_VALUE = "test-cluster"
-    fake_utils.MSG_TOKEN = "test-token"
     monkeypatch.setitem(sys.modules, "utils", fake_utils)
     package = ModuleType("func_manager")
     package.__path__ = [str(AGENT_ROOT / "func_manager")]
     monkeypatch.setitem(sys.modules, "func_manager", package)
     return load_module("agent_test_k8s_event_monitor", AGENT_ROOT / "func_manager" / "k8s_event_monitor.py")
+
+
+@pytest.fixture
+def notifier_module():
+    """func_manager/notifier.py:每个用例单独加载一份,模块级的队列 / 发送线程互不影响"""
+    return load_module("agent_test_notifier", AGENT_ROOT / "func_manager" / "notifier.py")
+
+
+@pytest.fixture
+def utils_module(monkeypatch, notifier_module):
+    """agent 的 utils.py:它 import func_manager.notifier,挂在假的 func_manager 包下加载,不依赖从哪个目录跑测试"""
+    package = ModuleType("func_manager")
+    package.__path__ = [str(AGENT_ROOT / "func_manager")]
+    package.notifier = notifier_module
+    monkeypatch.setitem(sys.modules, "func_manager", package)
+    monkeypatch.setitem(sys.modules, "func_manager.notifier", notifier_module)
+    return load_module("agent_test_utils", AGENT_ROOT / "utils.py")
 
 
 @pytest.fixture

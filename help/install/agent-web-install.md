@@ -1,6 +1,6 @@
 # Agent 网页安装方案与实现
 
-在 `/#/workbench/index` 的 Agent 管理页完成目标 K8S 的接入。常规操作为：**上传 kubeconfig → 确认集群信息 → 安装并等待上线**。安装接口、后台任务、独立 Agent 凭据、共享模板及统一指标写入入口均已实现；使用方式见 [安装说明](../../deploy/README.md)。
+在 `/#/workbench/index` 的 Agent 管理页完成目标 K8S 的接入。常规操作为：**上传 kubeconfig → 确认集群信息 → 安装并等待上线**。安装接口、后台任务、独立 Agent 凭据、共享模板及 vmagent 直连时序库均已实现；使用方式见 [安装说明](../../deploy/README.md)。
 
 实现入口：master 的 `agent_install/`、Web 的 `views/workbench/AgentInstallDialog.vue`。上线需重新构建 master/Web 镜像并应用新版 master 清单；不要求预先安装 Agent 或启用 AI 功能。浏览器操作使用模拟接口验证，尚未对真实目标 K8S 执行安装。
 
@@ -49,35 +49,29 @@ Agent 管理页增加管理员可见的「安装 Agent」按钮，打开三步�
 
 ## 2. 只填一个 master 地址
 
-**用户只配置一个 KubeDoor 连接地址，系统即可生成控制连接和指标写入地址。** Web 入口已提供统一指标写入代理，VictoriaMetrics 在 `deploy/victoria-metrics/` 独立部署，或使用已有时序库。
+**用户只配置一个 KubeDoor 连接地址，系统即可生成控制连接；vmagent 直连控制端配置的时序库。** VictoriaMetrics 在 `deploy/victoria-metrics/` 独立部署，或使用已有时序库。
 
 地址和凭据的分工：
 
 - `PROM_URL` 为控制端查询时序库的地址。
-- `METRICS_WRITE_URL` 为控制端配置的完整写入后端地址；认证信息保存在网关 Secret 中。
-- `src/kubedoor-setup/resources/manifests/master/40-web.yaml` 将 `/agent/metrics/write` 经 Agent 身份校验后代理到上述写入后端。
-- 网页安装自动生成目标集群的 `REMOTE_WRITE_URL`；脚本安装启用 vmagent 时需要显式填写可达的完整写入地址。
+- `METRICS_WRITE_URL` 为控制端配置的时序库完整写入地址（网页安装第 3 步的远程写地址，带账号口令），网页安装 Agent 时各集群的 vmagent 默认直连它，所以它必须能从各业务集群访问。网页安装把它放在 Secret `kubedoor-connection`，旧配置式部署放在 `kubedoor-config`；master 从环境变量读取，不返回给浏览器。
+- 安装时把写入地址里的账号口令拆出来，放进目标集群的 Secret `kubedoor-metrics-credentials`，vmagent 用 `-remoteWrite.basicAuth.username` 和 `passwordFile` 认证，口令不出现在启动参数里。
+- 高级设置的「指标写入地址覆盖」优先：网络特殊、需要单独写入账号的集群可以填自己的地址。脚本安装启用 vmagent 时需要显式填写可达的 `REMOTE_WRITE_URL`。
 
 全局安装设置维护「Agent 可访问的 KubeDoor 地址」，优先复用已填写的 `KUBEDOOR_EXTURL` 作为默认值。未配置时可用浏览器当前地址提供建议，但不能认定该地址在目标集群中可达，例如浏览器可能使用本机 port-forward。
 
-假设填写 `https://kubedoor.example.com`：
+假设填写 `https://kubedoor.example.com`、控制端的写入地址为 `http://monit:<口令>@192.0.2.11:8428/api/v1/write`：
 
 | 用途 | 自动生成的地址 |
 | --- | --- |
 | Agent 控制连接 | `wss://kubedoor.example.com/ws` |
-| vmagent 指标写入 | `https://kubedoor.example.com/agent/metrics/write` |
+| vmagent 指标写入 | `http://192.0.2.11:8428/api/v1/write`（账号 `monit`，口令在 Secret 里） |
 
 当前 Agent 会自行在 `KUBEDOOR_MASTER` 后追加 `/ws`，所以写入其环境变量的应是 WebSocket 基础地址，避免重复 `/ws`。使用 URL 解析器转换 `http → ws`、`https → wss`，保留显式端口，去掉浏览器 hash、查询参数和登录路径。当前入口按域名根路径部署；若后续支持子路径部署，需要同时配置代理与路径前缀，不能仅在表单里拼接。
 
-新增的 `/agent/metrics/write` 由 Web nginx 直接代理到指标后端：
+指标不经过 KubeDoor：vmagent 直接远程写时序库，不给 Web 入口和 master 增加指标流量和鉴权请求，Web 或 master 重启也不影响指标写入。早期测试版本曾有一个经 Web 入口转发的 `/agent/metrics/write` 指标网关，已删除；用它装过的 Agent 需要重新安装，或手工把 vmagent 的 `-remoteWrite.url` 改成时序库地址。
 
-- 仅开放所需的 remote-write 路径和方法，不把整个 VM 查询/管理接口暴露出去。
-- 使用 Agent 凭据认证，不能依赖浏览器登录 Cookie。认证成功后再由网关附加指标后端所需的认证信息。
-- VM 的服务端账号口令保留在 master 侧网关 Secret；不要求每个集群填写，也不直接分发给各业务集群。
-- 指标流量不经过 master 的 Python 进程；master 只处理认证检查与安装管理。
-- 网关目标在安装 master 时生成并校验，只允许代理到已配置的指标写入后端，不能由每次请求指定任意上游。
-
-管理员在首次安装向导中配置时序库及认证；旧配置式部署在 `kubedoor.conf` 中配置 `METRICS_WRITE_URL`，例如独立单机 VM 使用 `http://monit:<URL编码口令>@<VM宿主机IP>:8428/api/v1/write`。读地址 `PROM_URL` 与写地址可能不同，不能互相替代。VM 的镜像、存储、端口和账号由其独立目录的 `.env` 管理。特殊网络需要直写时，在高级设置中覆盖；完全不安装 vmagent 时不要求写入地址。
+管理员在首次安装向导中配置时序库及认证；旧配置式部署在 `kubedoor.conf` 中配置 `METRICS_WRITE_URL`，例如独立单机 VM 使用 `http://monit:<URL编码口令>@<VM宿主机IP>:8428/api/v1/write`。读地址 `PROM_URL` 与写地址可能不同，不能互相替代。VM 的镜像、存储、端口和账号由其独立目录的 `.env` 管理。控制端没有配置写入地址时，「完整接入」需要在高级设置里填写写入地址，否则只能选「仅安装 Agent」；完全不安装 vmagent 时不要求写入地址。
 
 ## 3. 安装由谁执行
 
@@ -87,12 +81,11 @@ flowchart LR
     M -->|创建安装资源| K[目标 K8S API Server]
     K --> A[Agent / 采集组件]
     A -->|WebSocket 主动连接| W[Web 统一入口]
-    A -->|remote write| W
     W -->|控制连接| M
-    W -->|指标流量| V[指标写入后端]
+    A -->|remote write 直连| V[时序库]
 ```
 
-安装期间要求 **master 能访问目标集群 API Server**，且 kubeconfig 中的地址和认证能在 master 环境使用；浏览器电脑能够 kubectl 并不代表 master 能访问。运行期间仍然由 Agent 主动访问 KubeDoor。目标集群到 master 的连通性必须从目标环境验证，不能由 master 对自身地址的检测代替。
+安装期间要求 **master 能访问目标集群 API Server**，且 kubeconfig 中的地址和认证能在 master 环境使用；浏览器电脑能够 kubectl 并不代表 master 能访问。运行期间仍然由 Agent 主动访问 KubeDoor，vmagent 直接访问时序库。目标集群到 master、到时序库的连通性必须从目标环境验证，不能由 master 对自身地址的检测代替。
 
 对于 API Server 不向 master 开放的集群，保留 `tools/legacy-install/` 中的脚本安装，后续可以增加「下载安装 YAML」作为同一份安装计划的出口。网页直接安装不会自动穿透目标集群网络。
 
@@ -124,7 +117,7 @@ master 重启后，未结束任务标记为待核对；重连目标集群检查�
 
 将 Agent 参数默认值、校验和渲染抽成可由 master 与脚本共同使用的模块；随 master 镜像打包模板及发布清单。脚本成为同一渲染器的命令行入口，安装目标和安装结果应一致。master 不能假设运行容器里能读到部署机器上的 `deploy/kubedoor.conf`。
 
-发布清单提供推荐 Agent/采集组件镜像；全局运行配置提供指标标签键、通知配置、对象存储默认值、入口地址和指标后端配置。正常安装不让用户逐项抄写这些值。
+发布清单提供推荐 Agent/采集组件镜像；全局运行配置提供指标标签键、通知配置、对象存储默认值、入口地址和时序库写入地址。正常安装不让用户逐项抄写这些值。
 
 使用 Kubernetes API 按 Namespace → RBAC/Secret/ConfigMap → Service/工作负载顺序应用。采用 Server-Side Apply，固定 field manager；对外部管理字段发生冲突时明确报告，不默认强制接管。给配置增加摘要 annotation，使配置/Secret 变更能触发所需的滚动更新。
 
@@ -154,12 +147,12 @@ master 重启后，未结束任务标记为待核对；重连目标集群检查�
 
 ## 6. 建议首版范围与验收
 
-首版交付完整的管理员网页安装：独立安装 API、临时 kubeconfig、权限和冲突预检、模板共用、后台任务、状态恢复、统一指标入口、自动地址与凭据，以及完整接入/仅 Agent 两种模式。跨网络集群继续支持脚本；批量安装、云厂商动态登录插件和任意 Helm 管理可后续扩展。
+首版交付完整的管理员网页安装：独立安装 API、临时 kubeconfig、权限和冲突预检、模板共用、后台任务、状态恢复、vmagent 直连时序库、自动地址与凭据，以及完整接入/仅 Agent 两种模式。跨网络集群继续支持脚本；批量安装、云厂商动态登录插件和任意 Helm 管理可后续扩展。
 
 验收重点：
 
 1. 一个全新集群，只上传 kubeconfig 并确认集群标识，即可安装上线；关闭 AI 功能仍可执行。
-2. HTTP NodePort / HTTPS 域名均可从同一入口派生正确的控制及指标地址，不要求手填 VM 端口和密码。
+2. HTTP NodePort / HTTPS 域名均可从同一入口派生正确的控制连接地址；vmagent 默认使用控制端配置的时序库写入地址，不要求手填 VM 端口和密码。
 3. API 不可达、权限不足、准入拒绝、镜像拉取失败、Agent 认证失败、指标写入失败分别显示准确步骤和原因。
 4. 多 context 不会装错目标；标识重名、目标已有安装和重复点击不会产生第二套冲突资源。
 5. 刷新网页或 master 重启后可继续查看并核对任务；失败重试不删除已有 namespace/业务资源。

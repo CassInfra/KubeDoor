@@ -13,7 +13,7 @@ master 统一负责认证、授权与审计,nginx 不再做认证。本目录是
 | `rw` 读写 | 读写 | |
 | `read` 只读(默认) | 只读 | |
 | `none` 无 | 无 | 只能访问单独授权的集群 |
-| `agent` Agent 账号 | 无 | 注册 agent(`/ws`)、投递告警;网页安装的绑定账号还可写入指标,不能登录 Web 或访问管理接口 |
+| `agent` Agent 账号 | 无 | 注册 agent(`/ws`)、投递告警,不能登录 Web 或访问管理接口 |
 
 集群授权 `auth_user_clusters(user_id, env, permission)`,`permission` 取 `admin` / `rw` / `read` / `none`,**优先于全局角色**。
 某个集群的有效权限:系统管理员一律 `admin`;有授权用授权;否则按全局角色兜底(`Principal.permission`)。
@@ -132,7 +132,9 @@ AI 通用工具(kubectl / istioctl / K8S API / Pod 内命令 / 诊断)怎么归�
 | `op_any` | 至少一个集群允许 `rule.op`(粗检,handler 再按具体集群判断;Istio 的修改用) |
 | `env_write` | 目标集群读写及以上(没登记的 `/api/*` 兜底) |
 | `custom` | 自定义校验:改镜像(有「更新镜像」直接放行,没有的只读用户走「镜像管理」中保存到数据库的例外规则)、Secret 内容(「查看 Secret 内容」)、资源 YAML 编辑 / 删除(再加目标识别)、管控表新增 / 编辑(本集群和同步的集群都要「资源管控」)、节点均衡全局配置(按全局角色那一列)、屏蔽规则(按 matcher 里的 env,没限定集群的按全局角色那一列)、告警处理(按告警所属集群) |
-| `agent` / `internal` | agent 注册通道 / AI 服务内部桥 |
+| `agent` / `internal` | agent 注册通道 / AI 服务内部桥;kubedoor-alarm 取通知通道的 `GET /api/internal/notification` 也是 `internal`,只认不带 `X-User-Name` 的内部 token(返回明文机器人 token) |
+
+消息通知的管理接口 `GET/PUT /api/admin/notification`、`POST /api/admin/notification/test` 落在 `/api/admin/.+` 的 `admin` 规则里,只有系统管理员能用;保存和测试分别记审计 `notification.update`、`notification.test`(不记 token)。
 
 **没登记的 `/api/*` 按「目标集群读写及以上」处理(默认拒绝)**。新增接口时在 `RULES` 里登记;
 `tests/test_auth_policy.py::test_every_master_route_has_explicit_rule` 会检查 master 自己注册的路由都有显式规则。
@@ -161,9 +163,8 @@ AI 助手、MCP、Grafana、自定义告警不经过 master,nginx 用 `auth_requ
 | `mcp` | Cookie 或 Basic | 同上 | 同上 |
 | `grafana` | 会话 Cookie | 同上,且能看到全部集群(Grafana 做不到按集群隔离) | 另有 `X-Kubedoor-Grafana-Role`(系统管理员 Admin,其他 Viewer) |
 | `alert` | Basic | Agent 账号或全局角色读写及以上 | 同上 |
-| `metrics` | Basic | 具有 `auth_agent_bindings` 记录的 Agent 账号 | 另有 `X-Kubedoor-Agent-Env`(绑定集群) |
 
-网页安装为每个安装创建独立 Agent 账号,通过 `auth_agent_bindings(user_id, env)` 绑定集群。`/ws` 在认证后核对绑定与 `env`,同一绑定可重试,已绑定账号不能改绑其它集群。旧脚本使用的未绑定账号继续按原有方式连接,但不开放新增的指标代理入口。绑定校验用于控制连接身份;remote-write 数据内容的标签不由此接口验证。
+网页安装为每个安装创建独立 Agent 账号,通过 `auth_agent_bindings(user_id, env)` 绑定集群。`/ws` 在认证后核对绑定与 `env`,同一绑定可重试,已绑定账号不能改绑其它集群。旧脚本使用的未绑定账号继续按原有方式连接。绑定校验只用于控制连接身份。vmagent 直连时序库、用时序库自己的账号写入,不经过 KubeDoor,这里不参与指标写入的认证。
 
 nginx 把这些值写进 `X-User-Name` / `X-User-Permission` / `X-User-Clusters`(AI 服务)或
 `X-WEBAUTH-USER` / `X-WEBAUTH-ROLE`(Grafana auth proxy),客户端自己带的同名头会被覆盖。

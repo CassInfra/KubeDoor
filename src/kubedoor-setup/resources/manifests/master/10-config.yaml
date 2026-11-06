@@ -22,14 +22,16 @@ data:
   # --- 时序库 ---
   PROM_TYPE: '__PROM_TYPE__'
   PROM_URL: '__PROM_URL__'
+  # 时序库远程写地址(带账号密码):网页安装 Agent 时各集群的 vmagent 默认直连它,须能从各业务集群访问。
+  # 网页安装把它和 PROM_URL 一起放进 Secret kubedoor-connection,不留在这个 ConfigMap 里
+  METRICS_WRITE_URL: '__METRICS_WRITE_URL__'
   PROM_K8S_TAG_KEY: '__PROM_K8S_TAG_KEY__'
   # 网页安装 Agent 的默认配置，来自与脚本相同的发布配置。
   AGENT_INSTALL_DEFAULTS: '__AGENT_INSTALL_DEFAULTS__'
 
   # --- 通知 ---
-  MSG_TYPE: '__MSG_TYPE__'
-  MSG_TOKEN: '__MSG_TOKEN__'
-  DEFAULT_AT: '__DEFAULT_AT__'
+  # IM 机器人(企业微信 / 钉钉 / 飞书 / Slack)不在这里配置:在控制台「系统管理 → 消息通知」里设置,
+  # 可以按集群单独配置,保存后立即生效,不用重启。下面两项是通知消息里链接指向的外部地址
   ALERTMANAGER_EXTURL: '__ALERTMANAGER_EXTURL__'
   KUBEDOOR_EXTURL: '__KUBEDOOR_EXTURL__'
 

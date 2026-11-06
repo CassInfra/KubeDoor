@@ -1,6 +1,10 @@
 import type {
   AgentComponentChoice,
   MetricsSettings,
+  NotificationInput,
+  NotificationSettings,
+  NotificationTestResult,
+  NotifyType,
   PostgresSettings,
   SetupAgent,
   SetupAgentOptions,
@@ -430,4 +434,275 @@ export function publicURL(value: string): string {
       "访问地址必须能从目标集群访问，不能填写 localhost 或回环地址。"
     );
   return url;
+}
+
+/* ---------- 第 4 步：告警通知（可选） ---------- */
+
+/** IM 类型，顺序即下拉里的顺序；和 master notify/channels.py 的 TYPES 一致 */
+export const NOTIFY_TYPES: NotifyType[] = [
+  "wecom",
+  "dingding",
+  "feishu",
+  "slack"
+];
+
+export const NOTIFY_LABELS: Record<NotifyType, string> = {
+  wecom: "企业微信",
+  dingding: "钉钉",
+  feishu: "飞书",
+  slack: "Slack"
+};
+
+export interface NotifyHint {
+  /** 机器人地址输入框的 placeholder（没有已保存的地址时） */
+  token: string;
+  /** 机器人地址输入框下面的说明 */
+  tokenHelp: string;
+  /** 默认 @ 人输入框的 placeholder */
+  at: string;
+}
+
+/** 按 IM 类型给的输入提示，和控制台「系统管理 → 消息通知」页一致 */
+export const NOTIFY_HINTS: Record<NotifyType, NotifyHint> = {
+  wecom: {
+    token: "粘贴群机器人 Webhook 地址，或 key= 后面那一段",
+    tokenHelp:
+      "群机器人的 Webhook 地址，形如 https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=xxx",
+    at: "企业微信成员的 userid（账号，不是姓名），可以不填"
+  },
+  dingding: {
+    token: "粘贴机器人 Webhook 地址，或 access_token= 后面那一段",
+    tokenHelp:
+      "自定义机器人的 Webhook 地址，形如 https://oapi.dingtalk.com/robot/send?access_token=xxx；安全设置不支持「加签」",
+    at: "钉钉成员的手机号，可以不填"
+  },
+  feishu: {
+    token: "粘贴自定义机器人 Webhook 地址，或 hook/ 后面那一段",
+    tokenHelp:
+      "自定义机器人的 Webhook 地址，形如 https://open.feishu.cn/open-apis/bot/v2/hook/xxx；安全设置不支持「签名校验」",
+    at: "飞书用户的 open_id（ou_ 开头），可以不填"
+  },
+  slack: {
+    token: "粘贴 Incoming Webhook 地址，或 services/ 后面那一段",
+    tokenHelp:
+      "Incoming Webhook 地址，形如 https://hooks.slack.com/services/T000/B000/xxx",
+    at: "Slack 成员 ID（例如 U012AB3CD），可以不填"
+  }
+};
+
+/** 某个 IM 类型的输入提示；不认识的类型按企业微信提示 */
+export function notifyHint(type: string): NotifyHint {
+  return NOTIFY_HINTS[type as NotifyType] || NOTIFY_HINTS.wecom;
+}
+
+export interface NoticeRow {
+  /** 通知 */
+  name: string;
+  /** 谁发送 */
+  sender: string;
+  /** 什么时候发 */
+  when: string;
+}
+
+/** 说明表（和控制台「系统管理 → 消息通知」页共用的文字，保持一致） */
+export const NOTICE_ROWS: NoticeRow[] = [
+  {
+    name: "K8S 事件告警",
+    sender: "控制服务 kubedoor-master",
+    when: "K8S 事件命中「事件告警规则」时，例如重启、健康检查失败、挂载失败、调度失败、资源压力；不受告警屏蔽影响"
+  },
+  {
+    name: "运维操作通知",
+    sender: "各集群的 kubedoor-agent，经控制服务发送",
+    when: "扩缩容、重启、更新镜像（开始、成功、超时）、准入控制改写副本数或资源、定时任务创建或删除失败、取消禁止调度失败、jstack / jmap 诊断结果"
+  },
+  {
+    name: "指标告警",
+    sender: "告警服务 kubedoor-alarm（安装了告警组件才有）",
+    when: "vmalert 告警规则触发和恢复时；可以按规则屏蔽，消息里带【屏蔽】链接"
+  },
+  {
+    name: "管控表通知",
+    sender: "控制服务 kubedoor-master",
+    when: "每天采集高峰期数据时，发现新服务并自动加入管控表"
+  }
+];
+
+export const NOTICE_NOTE =
+  "给某个集群单独配置后，这个集群的上述通知都发到它自己的群，其他集群用全局配置。";
+
+/** 第 4 步的告警通知表单：token 是这次新填的（留空沿用已保存的），clear 表示清除已保存的配置 */
+export interface NotificationForm {
+  type: NotifyType;
+  token: string;
+  at: string;
+  clear: boolean;
+}
+
+/** 按已保存的配置预填表单，机器人地址一律留空（安装服务不回传） */
+export function notificationFormFrom(
+  saved?: NotificationSettings
+): NotificationForm {
+  return {
+    type: saved && NOTIFY_TYPES.includes(saved.type) ? saved.type : "wecom",
+    token: "",
+    at: saved?.at || "",
+    clear: false
+  };
+}
+
+/** 有已保存的地址、没点清除、IM 类型也没改：机器人地址留空就沿用已保存的 */
+export function keepsSavedNotification(
+  form: NotificationForm,
+  saved?: NotificationSettings
+): boolean {
+  return !form.clear && !!saved?.configured && saved.type === form.type;
+}
+
+/** 机器人地址输入框的 placeholder：已保存时提示留空保留，否则按 IM 类型提示怎么填 */
+export function notificationTokenPlaceholder(
+  form: NotificationForm,
+  saved?: NotificationSettings
+): string {
+  if (keepsSavedNotification(form, saved)) return "已保存，留空保留";
+  if (form.clear) return "已清除，留空表示不发通知";
+  if (saved?.configured)
+    return `换了 IM 类型，请重新填写${NOTIFY_LABELS[form.type]}机器人地址`;
+  return notifyHint(form.type).token;
+}
+
+/** 折叠栏标题上的状态：填了地址或沿用已保存的显示 IM 类型，否则「未配置」 */
+export function notificationBadge(
+  form: NotificationForm,
+  saved?: NotificationSettings
+): { on: boolean; text: string } {
+  return (form.token || "").trim() || keepsSavedNotification(form, saved)
+    ? { on: true, text: NOTIFY_LABELS[form.type] || form.type }
+    : { on: false, text: "未配置" };
+}
+
+/** 第 5 步摘要：企业微信 / 未配置 */
+export function notificationSummary(saved?: NotificationSettings): string {
+  return saved?.configured ? NOTIFY_LABELS[saved.type] || saved.type : "未配置";
+}
+
+const WEBHOOK_HOSTS: Record<string, NotifyType> = {
+  "qyapi.weixin.qq.com": "wecom",
+  "oapi.dingtalk.com": "dingding",
+  "open.feishu.cn": "feishu",
+  "hooks.slack.com": "slack"
+};
+
+/** 粘贴的是整条 Webhook 地址（可以没写 https://）时按主机认出是哪家的；只填了 token 或认不出时返回 "" */
+export function webhookType(value: string): NotifyType | "" {
+  const match = /^(?:https?:\/\/)?([^/?#:@\s]+)[/?#:]/i.exec(value.trim());
+  return (match && WEBHOOK_HOSTS[match[1].toLowerCase()]) || "";
+}
+
+const MAX_NOTIFY_TOKEN = 512;
+const MAX_NOTIFY_AT = 128;
+
+/** 含控制字符（0x00~0x1f、0x7f） */
+function hasControl(value: string): boolean {
+  return Array.from(value).some(char => {
+    const code = char.charCodeAt(0);
+    return code < 0x20 || code === 0x7f;
+  });
+}
+
+/** 校验表单里填的内容（规则同安装服务），返回去掉首尾空白的 {type, token, at} */
+function checkNotification(form: NotificationForm): NotificationInput {
+  const type = form.type;
+  if (!NOTIFY_TYPES.includes(type))
+    throw new Error("请选择告警通知的 IM 类型。");
+  const token = (form.token || "").trim();
+  const at = (form.at || "").trim();
+  if (token) {
+    if (/\s/.test(token) || hasControl(token))
+      throw new Error("告警通知的机器人地址不能包含空格、换行或控制字符。");
+    if (token.length > MAX_NOTIFY_TOKEN)
+      throw new Error(
+        `告警通知的机器人地址太长（最多 ${MAX_NOTIFY_TOKEN} 个字符）。`
+      );
+    const detected = webhookType(token);
+    if (detected && detected !== type)
+      throw new Error(
+        `告警通知的机器人地址是${NOTIFY_LABELS[detected]}的，IM 类型却选了${NOTIFY_LABELS[type]}。`
+      );
+  }
+  if (hasControl(at)) throw new Error("默认 @ 人不能包含换行等控制字符。");
+  if (Array.from(at).length > MAX_NOTIFY_AT)
+    throw new Error(`默认 @ 人最多 ${MAX_NOTIFY_AT} 个字符。`);
+  return { type, token, at };
+}
+
+/**
+ * 第 4 步提交的告警通知：点了清除（没再填地址）时只带 clear；
+ * 已保存的地址换了 IM 类型又没填新地址时提示重新填写。都没填表示不发通知。
+ */
+export function notificationPayload(
+  form: NotificationForm,
+  saved?: NotificationSettings
+): NotificationInput {
+  if (form.clear && !(form.token || "").trim())
+    return { type: form.type, token: "", at: "", clear: true };
+  const input = checkNotification(form);
+  if (!input.token && saved?.configured && saved.type !== input.type)
+    throw new Error(
+      `告警通知的 IM 类型从${NOTIFY_LABELS[saved.type] || saved.type}改成了${NOTIFY_LABELS[input.type]}，请重新填写机器人地址；不发通知时点「清除」。`
+    );
+  return input;
+}
+
+/** 「发送测试消息」的请求：填了地址用填的，没填用已保存的（IM 类型要和保存时一致） */
+export function notificationTestRequest(
+  form: NotificationForm,
+  saved?: NotificationSettings
+): NotificationInput {
+  const input = checkNotification(form);
+  if (!input.token && !keepsSavedNotification(form, saved))
+    throw new Error(
+      saved?.configured && !form.clear
+        ? "换了 IM 类型，请先填写新的机器人地址。"
+        : `请先填写${NOTIFY_LABELS[input.type]}机器人地址。`
+    );
+  return input;
+}
+
+/** 测试结果的一行，样式同检查结果：通过绿色、失败红色、请稍后橙色 */
+export interface NotifyTestView {
+  tone: "success" | "warning" | "error";
+  /** 右侧的结果文字 */
+  label: string;
+  message: string;
+}
+
+/** 测试接口正常返回时的显示：IM 接口失败时带上它返回的错误码和说明 */
+export function notifyResultView(
+  result: NotificationTestResult | undefined,
+  type: NotifyType
+): NotifyTestView {
+  if (result?.ok)
+    return {
+      tone: "success",
+      label: "检查通过",
+      message: `测试消息已发送，请到${NOTIFY_LABELS[type] || ""}群里确认收到。`
+    };
+  const reason = (result?.message || "").trim();
+  return {
+    tone: "error",
+    label: "失败",
+    message: reason ? `发送失败：${reason}` : "发送失败，IM 接口没有返回原因。"
+  };
+}
+
+/** 没能发送（填写有误、测试太频繁、安装服务连不上）时的显示；429 用「请稍后」 */
+export function notifyErrorView(reason: unknown): NotifyTestView {
+  const message =
+    reason instanceof Error && reason.message
+      ? reason.message
+      : "发送测试消息失败，请稍后重试。";
+  if ((reason as { status?: number } | undefined)?.status === 429)
+    return { tone: "warning", label: "请稍后", message };
+  return { tone: "error", label: "未发送", message };
 }

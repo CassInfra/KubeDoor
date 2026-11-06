@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import asyncio
 import copy
-import hashlib
 import json
 import os
 import secrets
@@ -12,13 +11,12 @@ import time
 from urllib.parse import quote
 
 import aiohttp
-import asyncpg
 
 from .agent import CONCLUDED, installer_available, new_agent_state, unavailable_agent_state
-from .config import selected_components
+from .config import metrics_endpoints, redact_token, selected_components, url_credentials
 from .errors import SetupError
 from .kubernetes import OWNER, resource, resource_path, workload_ready
-from .probes import check_postgres, check_metrics, metrics_query_base, pg_connect_options, reserve_database
+from .probes import check_postgres, check_metrics, metrics_query_base, query_metrics, reserve_database
 from .render import render_master, load_defaults
 from .repository import utcnow
 
@@ -96,6 +94,17 @@ def probe_write(installation_id, timestamp):
         count = (length.bit_length() + 7) // 8
         literal = bytes([(59 + count) << 2]) + length.to_bytes(count, 'little')
     return _varint(len(payload)) + literal + payload
+
+
+def probe_visible(data, timestamp):
+    """查询结果（Prometheus 查询接口的 data 部分）里有没有本次写入的那个检测样本。"""
+    for row in (data or {}).get('result') or []:
+        try:
+            if float(row['value'][1]) == timestamp:
+                return True
+        except (KeyError, IndexError, TypeError, ValueError):
+            continue
+    return False
 
 
 def finalizer_job(setup, namespace, installation_id):
@@ -266,7 +275,8 @@ class InstallRunner:
                 await self.update(check='endpoints', status='error', message=error.message)
                 await self.fail(error.message)
                 return
-            await self.update(check='endpoints', status='success', message='对外入口、登录与所选指标链路验证通过')
+            await self.update(check='endpoints', status='success', message='对外入口、登录与所选指标链路验证通过' +
+                              ('，告警通知已保存为全局配置' if self.notification_configured() else ''))
             # Recheck every current generation, including components that passed on a previous retry.
             for sid, _, _ in SERVICES:
                 if not self.selected[sid]:
@@ -559,63 +569,94 @@ class InstallRunner:
                 check = await self.request('GET', base + '/grafana/api/datasources/uid/' + uid + '/health')
                 if str(check.get('status', '')).lower() != 'ok':
                     raise SetupError('Grafana 数据源连接验证失败', 502)
-            if self.config['metrics'].get('write_url'):
-                await self.verify_metrics(base)
-            else:
-                await self.update(check='write', status='skipped', message='使用已有采集链路，仅验证查询')
+            await self.save_notification(base)
         finally:
             await self.request('POST', base + '/api/auth/logout', expected=(200, 204), json={})
+        if self.config['metrics'].get('write_url'):
+            await self.verify_metrics()
+        else:
+            await self.update(check='write', status='skipped', message='使用已有采集链路，仅验证查询')
 
-    async def verify_metrics(self, base):
-        await self.update(check='write', status='running', message='通过指标网关发送一条安装检测指标并查询确认')
-        username = 'setup_probe_' + self.installation_id.replace('-', '')[:32]
-        password = hashlib.sha256((self.secrets['agent_password'] + self.installation_id).encode()).hexdigest()
-        conn = await asyncpg.connect(**pg_connect_options(self.config['postgres']))
-        user_id = None
+    def notification_configured(self):
+        return bool((self.config.get('notification') or {}).get('token'))
+
+    async def save_notification(self, base):
+        """第 4 步填了告警通知时，用刚登录的管理员会话保存为控制台「系统管理 → 消息通知」的全局配置。
+
+        保存失败按对外入口检查失败处理；失败原因里不带 token。
+        """
+        if not self.notification_configured():
+            return
+        channel = self.config['notification']
+        await self.update(check='endpoints', status='running', message='保存告警通知配置（系统管理 → 消息通知）')
+        # 不带 clusters：控制服务沿用已保存的按集群配置，重试时不会清掉有人已在控制台配好的集群群
+        body = {'default': {'type': channel['type'], 'token': channel['token'], 'at': channel.get('at') or ''}}
         try:
-            previous = await conn.fetchrow('SELECT id,comment FROM auth_users WHERE username=$1', username)
-            if previous:
-                if previous['comment'] != 'setup:' + self.installation_id:
-                    raise SetupError('安装检测账号与已有用户冲突', 409)
-                user_id = previous['id']
+            # 400 / 401 / 403 / 409 / 422 / 429 / 503 是控制服务给出原因的拒绝，从返回内容取原因
+            result = await self.request('PUT', base + '/api/admin/notification', json=body,
+                                        expected=(200, 400, 401, 403, 409, 422, 429, 503))
+        except ServiceCheckError as error:
+            if error.http_status == 404:
+                reason = (f'kubedoor-master 镜像 {self.image_of("master")} 没有消息通知接口（HTTP 404），镜像版本过旧；'
+                          '请换用新版镜像后重试，或回到第 4 步清除告警通知')
+            elif error.http_status:
+                reason = f'控制服务返回 HTTP {error.http_status}，请查看 kubedoor-master 日志后重试'
             else:
-                created = await self.request('POST', base + '/api/admin/users', json={
-                    'username': username, 'password': password, 'source': 'local', 'role': 'agent',
-                    'comment': 'setup:' + self.installation_id})
-                user_id = created.get('data', {}).get('id')
-                if not user_id:
-                    raise SetupError('无法创建指标验证账号', 502)
-            await conn.execute('INSERT INTO auth_agent_bindings(user_id,env) VALUES($1,$2) '
-                               'ON CONFLICT(user_id) DO NOTHING', user_id, username)
-            timestamp = int(time.time() * 1000)
-            # No browser session on the Agent request: the gateway must exercise Basic identity.
-            async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=20), trust_env=False) as agent_http:
-                try:
-                    async with agent_http.post(base + '/agent/metrics/write',
-                                               data=probe_write(self.installation_id, timestamp),
-                                               auth=aiohttp.BasicAuth(username, password),
-                                               headers={'Content-Type': 'application/x-protobuf', 'Content-Encoding': 'snappy',
-                                                        'X-Prometheus-Remote-Write-Version': '0.1.0'}, allow_redirects=False) as response:
-                        if response.status not in (200, 204):
-                            raise SetupError(f'指标网关写入验证失败（HTTP {response.status}）', 502)
-                except (aiohttp.ClientError, asyncio.TimeoutError):
-                    raise SetupError('指标网关写入连接失败', 502) from None
-            query_base, auth = metrics_query_base(self.config['metrics'])
-            deadline = time.monotonic() + self.health_timeout
-            while time.monotonic() < deadline:
-                data = await self.request('GET', query_base + '/api/v1/query',
-                                          params={'query': 'kubedoor_install_probe{installation_id="' + self.installation_id + '"}'}, auth=auth)
-                if data.get('status') == 'success' and any(float(row.get('value', [0, 0])[1]) == timestamp
-                    for row in data.get('data', {}).get('result', [])):
-                    await self.update(check='write', status='success', message='指标网关写入及查询验证通过')
-                    return
-                await self.update(check='write', status='running', message='已写入检测指标，等待查询可见')
-                await asyncio.sleep(self.poll_interval)
-            raise SetupError('指标已发送但查询尚不可见，请检查写入目标与查询目标是否一致', 504)
-        finally:
-            if user_id:
-                await self.request('DELETE', base + '/api/admin/users/' + str(user_id), expected=(200, 204))
-            await conn.close()
+                reason = '连接控制服务超时或失败，请检查对外地址和网络后重试'
+            raise SetupError(f'保存告警通知配置失败：{reason}', 502) from None
+        if result.get('success') is not True:
+            reason = str(result.get('message') or result.get('error') or '控制服务没有给出原因，请查看 kubedoor-master 日志').strip()
+            raise SetupError(f'保存告警通知配置失败：{redact_token(reason, channel["token"])}；'
+                             '可回到第 4 步修改告警通知后重试', 502)
+
+    async def verify_metrics(self):
+        """直接向第 3 步的远程写地址写一条安装检测指标，再用远程读地址查回来。
+
+        各集群的 vmagent 也直连这个写地址：这里验证地址、账号和写入到查询的链路。
+        用单独的会话，不带 KubeDoor 的登录 Cookie。
+        """
+        await self.update(check='write', status='running', message='向时序库远程写地址写入一条安装检测指标并查询确认')
+        try:
+            async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=20, connect=8), trust_env=False) as session:
+                timestamp = int(time.time() * 1000)
+                await self.write_probe(session, timestamp)
+                await self.wait_probe(session, timestamp)
+        except SetupError as error:
+            await self.update(check='write', status='error', message=error.message)
+            raise
+        await self.update(check='write', status='success', message='时序库写入及查询验证通过')
+
+    async def write_probe(self, session, timestamp):
+        _, write_url = metrics_endpoints(self.config['metrics'])
+        target, user, password = url_credentials(write_url)
+        try:
+            async with session.post(target, data=probe_write(self.installation_id, timestamp),
+                                    auth=aiohttp.BasicAuth(user, password) if user else None,
+                                    headers={'Content-Type': 'application/x-protobuf', 'Content-Encoding': 'snappy',
+                                             'X-Prometheus-Remote-Write-Version': '0.1.0'},
+                                    allow_redirects=False) as response:
+                if response.status in (401, 403):
+                    raise SetupError(f'时序库拒绝写入（HTTP {response.status}），请检查第 3 步远程写地址里的账号、密码和写入权限', 502)
+                if response.status not in (200, 204):
+                    raise SetupError(f'时序库写入验证失败（HTTP {response.status}），请检查第 3 步的远程写地址', 502)
+        except (aiohttp.ClientError, asyncio.TimeoutError):
+            raise SetupError('无法连接时序库远程写地址，请检查集群到时序库的网络和证书', 502) from None
+
+    async def wait_probe(self, session, timestamp):
+        query_base, auth = metrics_query_base(self.config['metrics'])
+        query = 'kubedoor_install_probe{installation_id="' + self.installation_id + '"}'
+        deadline = time.monotonic() + self.health_timeout
+        while True:
+            try:
+                data = await query_metrics(session, query_base, auth, query)
+            except (aiohttp.ClientError, asyncio.TimeoutError):
+                raise SetupError('无法连接时序库远程读地址，请检查集群到时序库的网络和证书', 502) from None
+            if probe_visible(data, timestamp):
+                return
+            if time.monotonic() >= deadline:
+                raise SetupError('检测指标已写入但查询不到，请检查远程写地址和远程读地址是否指向同一个时序库', 504)
+            await self.update(check='write', status='running', message='已写入检测指标，等待查询可见')
+            await asyncio.sleep(self.poll_interval)
 
     async def fail(self, message):
         await self.update(phase='failed', error=message)

@@ -55,7 +55,7 @@ def test_cleanup_preserves_all_unrelated_content_and_permissions(tmp_path):
     config = tmp_path / "cluster.conf"
     prefix = '# Keep this comment\r\nPG_HOST="pg.example.invalid"\r\n'
     middle = "# Preserve the section comment\r\n"
-    suffix = 'MSG_TOKEN="test-token"\r\n'
+    suffix = 'KUBEDOOR_EXTURL="https://kubedoor.example.invalid"\r\n'
     config.write_bytes((prefix + "UPDATE_IMAGE_JSON='" + json.dumps(RULES, indent=2) + "'\r\n"
                         + middle + "export REGISTRY_SECRET_JSON='" + json.dumps(REGISTRY, indent=2) + "'\r\n"
                         + suffix).encode())

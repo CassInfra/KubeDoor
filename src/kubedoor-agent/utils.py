@@ -1,16 +1,9 @@
 import os
 import sys
-import json
-import asyncio
-from concurrent.futures import ThreadPoolExecutor
 from urllib.parse import urlencode
-import requests
 from loguru import logger
 
-# 用于异步执行同步HTTP请求的线程池（发送通知消息用）
-_executor = ThreadPoolExecutor(max_workers=5)
-# 发通知的 HTTP 超时(秒):不设超时时 webhook 一卡,这 5 个线程会永远占着,之后的通知全部排队发不出去
-MSG_TIMEOUT = 10
+from func_manager import notifier
 
 
 NODE_LABLE_VALUE = "kubedoor-scheduler"
@@ -23,10 +16,8 @@ logger.add(
 )
 
 
-# 环境变量
+# 环境变量(运维通知不再需要 IM 的配置:统一交给 master 按集群选群发送)
 
-MSG_TOKEN = os.environ.get('MSG_TOKEN')
-MSG_TYPE = os.environ.get('MSG_TYPE')
 KUBEDOOR_MASTER = os.environ.get('KUBEDOOR_MASTER')
 PROM_K8S_TAG_VALUE = os.environ.get('PROM_K8S_TAG_VALUE')
 OSS_URL = os.environ.get('OSS_URL')
@@ -57,101 +48,13 @@ def get_version():
         return "unknown"
 
 
-def _send_msg_sync(content):
-    """同步发送消息（内部使用）"""
-    try:
-        return _send_msg_impl(content)
-    except Exception as e:
-        # 在线程池里执行,异常没人取,不记日志就悄悄丢了
-        logger.error(f"发送通知失败【{MSG_TYPE}】: {type(e).__name__}: {e}")
-        return f"发送通知失败: {e}"
-
-
-def _send_msg_impl(content):
-    response = ""
-    if MSG_TYPE == "wecom":
-        response = wecom(MSG_TOKEN, content)
-    elif MSG_TYPE == "dingding":
-        response = dingding(MSG_TOKEN, content)
-    elif MSG_TYPE == "feishu":
-        response = feishu(MSG_TOKEN, content)
-    elif MSG_TYPE == "slack":
-        response = slack(MSG_TOKEN, content)
-    else:
-        logger.warning(f"不支持的消息类型：{MSG_TYPE}")
-        return f"不支持的消息类型：{MSG_TYPE}"
-
-    logger.info(f'【{MSG_TYPE}】{response}')
-    return f'【{MSG_TYPE}】{response}'
-
-
 def send_msg(content):
-    """非阻塞发送消息，在后台线程执行，不阻塞事件循环"""
-    try:
-        loop = asyncio.get_running_loop()
-        # 在线程池中执行，不阻塞事件循环
-        loop.run_in_executor(_executor, _send_msg_sync, content)
-    except RuntimeError:
-        # 没有运行中的事件循环，直接同步执行
-        _send_msg_sync(content)
+    """发运维通知:agent 不直接调 IM 接口,交给 master 按集群选群发送。
 
-
-def wecom(webhook, content, at=""):
-    webhook = 'https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=' + webhook
-    headers = {'Content-Type': 'application/json'}
-    params = {'msgtype': 'markdown', 'markdown': {'content': f"{content}<@{at}>"}}
-    data = bytes(json.dumps(params), 'utf-8')
-    response = requests.post(webhook, headers=headers, data=data, timeout=MSG_TIMEOUT)
-    return response.json()
-
-
-def dingding(webhook, content, at=""):
-    webhook = 'https://oapi.dingtalk.com/robot/send?access_token=' + webhook
-    headers = {'Content-Type': 'application/json'}
-    params = {"msgtype": "markdown", "markdown": {"title": "告警", "text": content}, "at": {"atMobiles": [at]}}
-    data = bytes(json.dumps(params), 'utf-8')
-    response = requests.post(webhook, headers=headers, data=data, timeout=MSG_TIMEOUT)
-    return response.json()
-
-
-def feishu(webhook, content, at=""):
-    title = "告警通知"
-    webhook = f'https://open.feishu.cn/open-apis/bot/v2/hook/{webhook}'
-    headers = {'Content-Type': 'application/json'}
-    params = {
-        "msg_type": "interactive",
-        "card": {
-            "header": {"title": {"tag": "plain_text", "content": title}, "template": "red"},
-            "elements": [
-                {
-                    "tag": "markdown",
-                    "content": f"{content}\n<at id={at}></at>",
-                }
-            ],
-        },
-    }
-    data = json.dumps(params)
-    response = requests.post(webhook, headers=headers, data=data, timeout=MSG_TIMEOUT)
-    return response.json()
-
-
-def slack(webhook, content, at=""):
-    """发送Slack告警通知"""
-    # 构建完整的Slack Webhook URL
-    webhook_url = f'https://hooks.slack.com/services/{webhook}'
-    headers = {'Content-Type': 'application/json'}
-
-    # 构建消息内容，如果有@用户则添加
-    message_text = content
-    if at:
-        message_text += f" <@{at}>"
-
-    params = {"text": message_text}
-
-    data = json.dumps(params)
-    response = requests.post(webhook_url, headers=headers, data=data, timeout=MSG_TIMEOUT)
-    logger.info(f'【slack】{response.json()}')
-    return response.json()
+    不阻塞调用方,事件循环里、线程里都可以调用。主进程经 WebSocket 发给 master(断线时暂存、重连后补发),
+    pod-mgr 经 Unix socket 交给主进程,见 func_manager/notifier.py。
+    """
+    notifier.send_msg(content)
 
 
 def parse_cpu(value) -> float:

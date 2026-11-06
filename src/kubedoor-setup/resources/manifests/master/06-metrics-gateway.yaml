@@ -1,9 +1,0 @@
-# 远程写后端只配置在控制端；不要把时序库口令分发给业务集群。
-apiVersion: v1
-kind: Secret
-metadata:
-  name: kubedoor-metrics-gateway
-  namespace: __NAMESPACE__
-type: Opaque
-data:
-  metrics.conf: '__METRICS_PROXY_BASE64__'

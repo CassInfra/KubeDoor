@@ -3,6 +3,7 @@ import copy
 import json
 import struct
 from unittest.mock import AsyncMock
+from urllib.parse import quote
 
 import aiohttp
 import pytest
@@ -271,6 +272,135 @@ def test_metrics_probe_is_snappy_prometheus_write_request_with_unique_sample():
     assert labels == {'__name__': 'kubedoor_install_probe', 'installation_id': ID}
     sample = dict(message_fields(next(value for number, value in fields if number == 2)))
     assert sample == {1: float(timestamp), 2: timestamp}
+
+
+def probe_timestamp(raw):
+    """从 probe_write 的请求体（Snappy 字面量块 + WriteRequest）里取出样本时间戳。"""
+    _, offset = read_varint(raw)
+    literal = raw[offset] >> 2
+    offset += 1 + (literal - 59 if literal >= 60 else 0)
+    series = message_fields(message_fields(raw[offset:])[0][1])
+    return dict(message_fields(next(value for number, value in series if number == 2)))[2]
+
+
+class FakeTimeSeries:
+    """假的 VictoriaMetrics：记录远程写请求，查询时按需返回刚写入的检测样本。"""
+
+    def __init__(self, write_status=204, visible_after=1):
+        self.write_status, self.visible_after = write_status, visible_after
+        self.writes, self.queries = [], []
+
+    def app(self):
+        app = web.Application()
+        app.router.add_post('/api/v1/write', self.write)
+        app.router.add_get('/api/v1/query', self.query)
+        return app
+
+    async def write(self, request):
+        body = await request.read()
+        self.writes.append({'authorization': request.headers.get('Authorization'), 'cookie': request.headers.get('Cookie'),
+                            'encoding': request.headers.get('Content-Encoding'), 'timestamp': probe_timestamp(body)})
+        return web.Response(status=self.write_status)
+
+    async def query(self, request):
+        self.queries.append(request.query['query'])
+        rows = []
+        if self.writes and len(self.queries) >= self.visible_after:
+            rows = [{'metric': {'installation_id': ID}, 'value': [1, str(self.writes[-1]['timestamp'])]}]
+        return web.json_response({'status': 'success', 'data': {'resultType': 'vector', 'result': rows}})
+
+
+def metrics_runner(server, password='p@ss:w/rd'):
+    runner = ObservedRunner(MemoryRepo(), FakeKubernetes())
+    runner.config, runner.installation_id = runner.repo.private['config'], ID
+    origin = f"http://monit:{quote(password, safe='')}@{server.host}:{server.port}"
+    runner.config['metrics'].update(user='monit', password=password, read_url=origin, write_url=origin + '/api/v1/write')
+    runner.health_timeout = 5
+    return runner
+
+
+def check_row(repo, name):
+    return next(row for row in repo.state['checks'] if row['name'] == name)
+
+
+@pytest.mark.asyncio
+async def test_metrics_write_goes_straight_to_time_series_and_is_queried_back():
+    tsdb = FakeTimeSeries(visible_after=2)
+    async with TestServer(tsdb.app()) as server:
+        runner = metrics_runner(server)
+        await runner.verify_metrics()
+    # 直连时序库：带第 3 步写地址里的账号密码，不带 KubeDoor 的登录 Cookie，也不经过指标网关
+    assert len(tsdb.writes) == 1
+    assert tsdb.writes[0]['authorization'] == aiohttp.BasicAuth('monit', 'p@ss:w/rd').encode()
+    assert tsdb.writes[0]['cookie'] is None and tsdb.writes[0]['encoding'] == 'snappy'
+    assert tsdb.queries == ['kubedoor_install_probe{installation_id="' + ID + '"}'] * 2
+    row = check_row(runner.repo, 'write')
+    assert (row['status'], row['message']) == ('success', '时序库写入及查询验证通过')
+    assert any(check['name'] == 'write' and check['status'] == 'running'
+               for state in runner.repo.history for check in state['checks'])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('status, expected', [(401, '时序库拒绝写入（HTTP 401）'), (500, '时序库写入验证失败（HTTP 500）')])
+async def test_metrics_write_failure_marks_write_check(status, expected):
+    tsdb = FakeTimeSeries(write_status=status)
+    async with TestServer(tsdb.app()) as server:
+        runner = metrics_runner(server)
+        with pytest.raises(SetupError, match=expected):
+            await runner.verify_metrics()
+    assert tsdb.queries == []
+    row = check_row(runner.repo, 'write')
+    assert row['status'] == 'error' and row['message'].startswith(expected)
+
+
+@pytest.mark.asyncio
+async def test_invisible_probe_times_out_with_clear_reason():
+    tsdb = FakeTimeSeries(visible_after=10 ** 6)
+    async with TestServer(tsdb.app()) as server:
+        runner = metrics_runner(server)
+        runner.health_timeout = 0
+        with pytest.raises(SetupError, match='远程写地址和远程读地址是否指向同一个时序库'):
+            await runner.verify_metrics()
+    assert check_row(runner.repo, 'write')['status'] == 'error'
+
+
+@pytest.mark.asyncio
+async def test_unreachable_time_series_is_reported():
+    async with TestServer(web.Application()) as server:
+        runner = metrics_runner(server)
+    with pytest.raises(SetupError, match='无法连接时序库远程写地址'):
+        await runner.verify_metrics()
+
+
+@pytest.mark.asyncio
+async def test_endpoint_check_logs_out_before_metrics_and_creates_no_probe_account():
+    runner = ObservedRunner(MemoryRepo(), FakeKubernetes())
+    runner.config, runner.installation_id = runner.repo.private['config'], ID
+    runner.config['metrics']['write_url'] = 'http://vm.example.invalid:8428/api/v1/write'
+    calls = []
+
+    async def request(method, url, **kwargs):
+        calls.append((method, url.removeprefix(runner.config['public_url'])))
+        if url.endswith('/setup-status.json'):
+            return {'installation_id': ID}
+        return {'success': True, 'status': 'ok'}
+    runner.request = request
+    runner.verify_metrics = AsyncMock(side_effect=lambda: calls.append(('verify_metrics', '')))
+    await InstallRunner.verify_endpoints(runner)
+    assert calls[-2:] == [('POST', '/api/auth/logout'), ('verify_metrics', '')]
+    assert not any('/api/admin/users' in url or 'metrics/write' in url for _, url in calls)
+
+
+@pytest.mark.asyncio
+async def test_query_only_metrics_skip_write_check():
+    runner = ObservedRunner(MemoryRepo(), FakeKubernetes())
+    runner.config, runner.installation_id = runner.repo.private['config'], ID
+    runner.request = AsyncMock(side_effect=lambda method, url, **kwargs:
+                               {'installation_id': ID} if url.endswith('/setup-status.json') else {'success': True, 'status': 'ok'})
+    runner.verify_metrics = AsyncMock()
+    await InstallRunner.verify_endpoints(runner)
+    runner.verify_metrics.assert_not_awaited()
+    assert check_row(runner.repo, 'write')['status'] == 'skipped'
 
 
 @pytest.mark.asyncio

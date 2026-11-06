@@ -22,7 +22,7 @@ from datetime import datetime
 
 from kubernetes_asyncio.client.rest import ApiException
 from loguru import logger
-from utils import PROM_K8S_TAG_VALUE, MSG_TOKEN
+from utils import PROM_K8S_TAG_VALUE
 from func_manager.event_monitor_config import *
 
 PAGE_SIZE = 500
@@ -94,7 +94,7 @@ class K8sEventMonitor:
             reporting_component = source.get('component', '')
             reporting_instance = source.get('host', '')
 
-            # 构造事件数据
+            # 构造事件数据(不再带通知 token:事件告警由 master 按集群选择通知群)
             event_data = {
                 "eventUid": event_uid,
                 "eventStatus": event_type,
@@ -110,7 +110,6 @@ class K8sEventMonitor:
                 "lastTimestamp": last_timestamp,
                 "reportingComponent": reporting_component,
                 "reportingInstance": reporting_instance,
-                "msgToken": MSG_TOKEN,
             }
 
             return event_data

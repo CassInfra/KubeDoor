@@ -11,7 +11,8 @@ from datetime import datetime
 from loguru import logger
 from .alert_rule_matcher import AlertRuleMatcher
 from .pg_event_client import get_pg_event_client
-from utils import send_msg, ALERT_DEDUP_WINDOW
+from notify import notify
+from utils import ALERT_DEDUP_WINDOW
 
 
 class EventAlertProcessor:
@@ -36,12 +37,11 @@ class EventAlertProcessor:
         self._alert_cache = {}
         self._dedup_window = ALERT_DEDUP_WINDOW
 
-    def process_event(self, event: Dict[str, Any], msg_token: str = None) -> Optional[Dict[str, Any]]:
+    def process_event(self, event: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         """处理单个事件
 
         Args:
-            event: K8S事件数据
-            msg_token: 消息令牌，用于发送告警
+            event: K8S事件数据(k8s 字段是集群名,按它选择消息通知的群机器人)
 
         Returns:
             Optional[Dict]: 如果触发告警则返回告警信息，否则返回None
@@ -103,16 +103,15 @@ class EventAlertProcessor:
                 # 构建告警信息
                 alert_info = self._build_alert_info(alert_result)
 
-                # 发送告警
+                # 发送告警:按事件所在集群选择群机器人(集群单独配置优先,其次全局配置),
+                # 只放进发送队列(按机器人限速),不等结果;发送失败由 notify 记日志
                 try:
-                    # 直接使用kubedoor的send_msg函数发送告警
-                    response = send_msg(alert_info['message'], msg_token)
-                    self.stats['alerts_sent'] += 1
+                    if notify(alert_info['message'], env=event.get('k8s')):
+                        self.stats['alerts_sent'] += 1
+                        logger.info(f"告警已提交发送: {alert_info['alert_id']}")
 
                     # 记录告警时间用于去重
                     self._record_alert(event_uid)
-
-                    logger.info(f"告警已发送: {alert_info['alert_id']}, 响应: {response}")
                 except Exception as e:
                     logger.error(f"发送告警失败: {e}")
                     self.stats['errors'] += 1

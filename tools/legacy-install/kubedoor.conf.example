@@ -14,8 +14,8 @@ PG_DATABASE="kubedoor"
 # URL 中的账号、口令含特殊字符时需 URL 编码，例如 @ 写成 %40。
 PROM_URL=""                    # 必填，例如 http://monit:<口令>@<VM主机IP>:8428
 PROM_TYPE="Victoria-Metrics-Single" # 或 Prometheus / Victoria-Metrics-Cluster
-# 网页安装 Agent 的指标写入后端；单机 VM 在上述地址后加 /api/v1/write。
-# 使用已有采集链路、仅安装 Agent 时可留空；不能用查询地址代替完整写入地址。
+# 网页安装 Agent 时各集群 vmagent 默认直连的写入地址（带账号口令）；单机 VM 在上述地址后加 /api/v1/write。
+# 须能从各业务集群访问。使用已有采集链路、仅安装 Agent 时可留空；不能用查询地址代替完整写入地址。
 METRICS_WRITE_URL=""
 
 # 集群区分标签（重要）：这是指标标签的键名，KubeDoor 靠它查询各集群的监控数据。
@@ -29,9 +29,7 @@ PROM_K8S_TAG_KEY="origin_prometheus"
 WEB_NODEPORT=""                # 留空由 K8S 分配；指定时通常为 30000-32767
 KUBEDOOR_EXTURL=""              # 例如 http://<节点IP>:<WEB_NODEPORT>
 
-# 告警通知（可选）：wecom / dingding / feishu / slack。
-MSG_TYPE="wecom"
-MSG_TOKEN=""
+# 告警通知（IM 机器人）不在这里配置：装完后在控制台「系统管理 → 消息通知」填写，可以按集群单独配置，保存后立即生效。
 
 # 首次创建账号时的口令（可选）；留空使用出厂口令，后续在网页修改。
 # 管理员 kubedoor 出厂口令为 kubedoor；脚本 Agent 账号为 Up4biLko1dNh。

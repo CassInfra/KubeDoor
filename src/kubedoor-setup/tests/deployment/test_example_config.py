@@ -20,8 +20,12 @@ def test_example_has_no_real_environment_values():
         source = path.read_text(encoding="utf-8")
         assert not PRIVATE_IP.search(source), PRIVATE_IP.search(source).group()
     # 这些值只能由使用者自己填写,模板里必须为空
-    for key in ("PG_HOST", "PG_PASSWORD", "MSG_TOKEN", "K8S_NAME", "PROM_URL", "REMOTE_WRITE_URL"):
+    for key in ("PG_HOST", "PG_PASSWORD", "K8S_NAME", "PROM_URL", "REMOTE_WRITE_URL"):
         assert re.search(rf'^{key}=""', text, re.M), key
+    # 告警通知改在控制台「系统管理 → 消息通知」配置,模板里不再有通知配置项
+    for key in ("MSG_TYPE", "MSG_TOKEN", "DEFAULT_AT"):
+        assert not re.search(rf"^\s*(export\s+)?{key}=", text, re.M), key
+    assert "系统管理 → 消息通知" in text
 
 
 @pytest.mark.parametrize("role", ["master", "agent"])

@@ -152,30 +152,19 @@ async def test_installed_agent_is_bound_to_exact_cluster(fake):
 
 
 @pytest.mark.asyncio
-async def test_metrics_requires_bound_agent_basic_credentials(fake):
+async def test_metrics_gateway_purpose_is_gone(fake):
+    # 指标网关已删除，vmagent 直连时序库：for=metrics 和其它未知用途一样拒绝
     client = await make_client(fake)
     try:
         agent = await add_user(fake, 'agent-prod', 'agent', 'Agent-pass-1')
         await fake.bind_agent(agent['id'], 'prod')
-        endpoint = '/api/auth/verify?for=metrics'
-        assert (await client.get(endpoint)).status == 401
         headers = {'Authorization': basic('agent-prod', 'Agent-pass-1')}
-        result = await client.get(endpoint, headers=headers)
-        assert result.status == 204
-        assert result.headers['X-Kubedoor-Agent-Env'] == 'prod'
-        assert result.headers['X-Kubedoor-User'] == 'agent-prod'
-        assert (await client.post(endpoint, headers=headers)).status == 204
-        # 新指标入口不接受旧共用凭据、Web 管理员或其它人类账号。
-        await add_user(fake, 'reader', 'read', 'Reader-pass-1')
-        await add_user(fake, 'admin', 'admin', 'Admin-pass-1')
-        for name, password in (('Up4biLko1dNh', 'qCa22jDkfc9y'),
-                               ('reader', 'Reader-pass-1'), ('admin', 'Admin-pass-1')):
-            assert (await client.get(endpoint, headers={'Authorization': basic(name, password)})).status == 403
-        # 浏览器不能借用 Basic 或登录 Cookie 调用指标入口。
-        assert (await client.get(endpoint, headers={**headers, 'Sec-Fetch-Mode': 'cors'})).status == 401
-        assert (await login(client, 'admin', 'Admin-pass-1')).status == 200
-        assert (await client.get(endpoint)).status == 403
+        result = await client.get('/api/auth/verify?for=metrics', headers=headers)
+        assert result.status == 403
+        assert 'X-Kubedoor-Agent-Env' not in result.headers
         assert (await client.get('/api/auth/verify?for=unknown')).status == 403
+        # Agent 账号仍可投递自定义告警
+        assert (await client.get('/api/auth/verify?for=alert', headers=headers)).status == 204
     finally:
         await client.close()
 
@@ -188,10 +177,10 @@ async def test_bound_agent_disable_and_password_change_revoke_access(fake):
         await fake.bind_agent(agent['id'], 'prod')
         headers = {'Authorization': basic('agent-prod', 'Agent-pass-1')}
         assert (await client.get('/ws?env=prod', headers=headers)).status == 200
-        assert (await client.get('/api/auth/verify?for=metrics', headers=headers)).status == 204
+        assert (await client.get('/api/auth/verify?for=alert', headers=headers)).status == 204
         await fake.update_user(agent['id'], enabled=False)
         assert (await client.get('/ws?env=prod', headers=headers)).status == 403
-        assert (await client.get('/api/auth/verify?for=metrics', headers=headers)).status == 401
+        assert (await client.get('/api/auth/verify?for=alert', headers=headers)).status == 401
         await fake.update_user(agent['id'], enabled=True)
         await fake.set_password(agent['id'], passwords.hash_password('Agent-pass-2'))
         assert (await client.get('/ws?env=prod', headers=headers)).status == 401

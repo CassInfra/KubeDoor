@@ -30,6 +30,12 @@ spec:
           env:
             - name: TZ
               value: Asia/Shanghai
+            # 带内部 token 向 master 取各集群的通知通道(/api/internal/notification),网页安装也用它做安装健康检查
+            - name: AI_INTERNAL_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: kubedoor-ai-security
+                  key: AI_INTERNAL_TOKEN
           ports:
             - name: http
               containerPort: 80

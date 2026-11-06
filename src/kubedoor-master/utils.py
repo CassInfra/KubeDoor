@@ -20,6 +20,7 @@ from db import (
     pg_execute,
     pg_executemany,
 )
+from notify import notify
 
 # 用于异步执行同步操作的线程池
 _executor = ThreadPoolExecutor(max_workers=10)
@@ -58,10 +59,7 @@ logger.add(
     level='INFO',
 )
 
-# 环境变量
-DEFAULT_AT = os.environ.get('DEFAULT_AT')
-MSG_TOKEN = os.environ.get('MSG_TOKEN')
-MSG_TYPE = os.environ.get('MSG_TYPE')
+# 环境变量(消息通知的 IM 类型和机器人在「系统管理 → 消息通知」里配置,见 notify/)
 PROM_K8S_TAG_KEY = os.environ.get('PROM_K8S_TAG_KEY')
 # 告警去重时间窗口（秒），默认300秒
 ALERT_DEDUP_WINDOW = int(os.environ.get('ALERT_DEDUP_WINDOW', '300'))
@@ -70,7 +68,6 @@ PROM_URL = os.environ.get('PROM_URL')
 
 # 外部 HTTP 调用的超时(连接, 读取)秒。requests 默认不超时,对端不响应时线程会一直卡住
 PROM_TIMEOUT = (5, 120)
-MSG_TIMEOUT = (5, 10)
 
 # PostgreSQL 连接配置（统一 PG_ 前缀，替代原 CK_* / DB_*）
 PG_HOST = db.PG_HOST
@@ -531,95 +528,6 @@ async def get_deploy_admis_async(env, namespace, deployment, include_jvm=False):
         return [503, '查询数据库异常']
 
 
-def _send_msg_sync(content, msgToken=None):
-    """同步发送消息（内部使用）"""
-    response = ""
-    token = msgToken if msgToken is not None else MSG_TOKEN
-    if MSG_TYPE == "wecom":
-        response = wecom(token, content, DEFAULT_AT)
-    elif MSG_TYPE == "dingding":
-        response = dingding(token, content, DEFAULT_AT)
-    elif MSG_TYPE == "feishu":
-        response = feishu(token, content, DEFAULT_AT)
-    elif MSG_TYPE == "slack":
-        response = slack(token, content, DEFAULT_AT)
-    return f'【{MSG_TYPE}】{response}'
-
-
-def send_msg(content, msgToken=None):
-    """非阻塞发送消息"""
-    try:
-        loop = asyncio.get_running_loop()
-        loop.run_in_executor(_executor, _send_msg_sync, content, msgToken)
-    except RuntimeError:
-        _send_msg_sync(content, msgToken)
-
-
-def wecom(webhook, content, at=""):
-    webhook = 'https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=' + webhook
-    headers = {'Content-Type': 'application/json'}
-    params = {'msgtype': 'markdown', 'markdown': {'content': f"{content}<@{at}>"}}
-    data = bytes(json.dumps(params), 'utf-8')
-    response = requests.post(webhook, headers=headers, data=data, timeout=MSG_TIMEOUT)
-    logger.info(f'【wecom】{response.json()}')
-    return response.json()
-
-
-def dingding(webhook, content, at=""):
-    webhook = 'https://oapi.dingtalk.com/robot/send?access_token=' + webhook
-    headers = {'Content-Type': 'application/json'}
-    params = {
-        "msgtype": "markdown",
-        "markdown": {"title": "告警", "text": content},
-        "at": {"atMobiles": [at]},
-    }
-    data = bytes(json.dumps(params), 'utf-8')
-    response = requests.post(webhook, headers=headers, data=data, timeout=MSG_TIMEOUT)
-    logger.info(f'【dingding】{response.json()}')
-    return response.json()
-
-
-def feishu(webhook, content, at=""):
-    title = "告警通知"
-    webhook = f'https://open.feishu.cn/open-apis/bot/v2/hook/{webhook}'
-    headers = {'Content-Type': 'application/json'}
-    params = {
-        "msg_type": "interactive",
-        "card": {
-            "header": {"title": {"tag": "plain_text", "content": title}, "template": "red"},
-            "elements": [
-                {
-                    "tag": "markdown",
-                    "content": f"{content}\n<at id={at}></at>",
-                }
-            ],
-        },
-    }
-    data = json.dumps(params)
-    response = requests.post(webhook, headers=headers, data=data, timeout=MSG_TIMEOUT)
-    logger.info(f'【feishu】{response.json()}')
-    return response.json()
-
-
-def slack(webhook, content, at=""):
-    """发送Slack告警通知"""
-    # 构建完整的Slack Webhook URL
-    webhook_url = f'https://hooks.slack.com/services/{webhook}'
-    headers = {'Content-Type': 'application/json'}
-
-    # 构建消息内容，如果有@用户则添加
-    message_text = content
-    if at:
-        message_text += f" <@{at}>"
-
-    params = {"text": message_text}
-
-    data = json.dumps(params)
-    response = requests.post(webhook_url, headers=headers, data=data, timeout=MSG_TIMEOUT)
-    logger.info(f'【slack】{response.json()}')
-    return response.json()
-
-
 async def get_list_from_resources(env_value):
     """获取资源表信息，取最近10天cpu数据最高的一天的数据"""
     query = """
@@ -783,7 +691,7 @@ async def update_control_data(rows):
                 f"采集高峰期数据更新到管控表时，检测到新服务【{env}】【{namespace}】【{deployment}】,将新增到管控表。"
             )
             logger.info(content)
-            send_msg(content)
+            notify(content, env)
             try:
                 tmp = parse_insert_data(i)
                 await db.pg_copy_records('k8s_res_control', [tuple(tmp)], _RES_CONTROL_COLUMNS)

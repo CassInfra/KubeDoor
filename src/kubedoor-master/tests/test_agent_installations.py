@@ -25,6 +25,8 @@ CONFIG = json.dumps({
     'clusters': [{'name': 'cluster', 'cluster': {'server': 'https://k8s.example.test'}}],
     'users': [{'name': 'admin', 'user': {'token': 'private-kube-token'}}],
 })
+# 控制端配置的时序库写入地址：网页安装的 vmagent 默认直连它
+WRITE_URL = 'http://monit:vm%40secret@vm.example.test:8428/api/v1/write'
 
 
 class MemoryRepository:
@@ -133,7 +135,7 @@ class FakeCluster:
 def environment(monkeypatch):
     monkeypatch.setenv('AI_ENCRYPTION_KEY', 'ab' * 32)
     monkeypatch.setenv('KUBEDOOR_EXTURL', 'https://kubedoor.example.test')
-    monkeypatch.setenv('AGENT_INSTALL_DEFAULTS', json.dumps({'metrics_available': True}))
+    monkeypatch.setenv('METRICS_WRITE_URL', WRITE_URL)
     monkeypatch.setattr(module.audit, 'record_bg', lambda *a, **kw: None)
     monkeypatch.setattr(module.db, 'pg_execute', AsyncMock())
     monkeypatch.setattr(module.auth_store, 'get_user_by_name', AsyncMock(return_value=None))
@@ -338,3 +340,68 @@ async def test_new_marker_is_part_of_frozen_manifest(environment):
     resources = module.render_agent(material['options'], username='preflight', password='preflight')
     config = next(r for r in resources if r['kind'] == 'ConfigMap' and r['metadata']['name'] == 'vmagent-config')
     assert yaml.safe_load(config['data']['scrape.yml'])['global']['external_labels']['kubedoor_installation'] == task['id']
+
+
+@pytest.mark.asyncio
+async def test_full_install_writes_straight_to_time_series_without_exposing_credentials(environment, monkeypatch):
+    service, cluster, repo = environment
+    service.clients.clear()
+    inspected = await service.inspect(CONFIG, 'admin')
+    assert inspected['payload']['options']['metrics_available'] is True
+    assert inspected['payload']['options']['mode'] == 'full'
+    task = await plan(service, 'full')
+    monkeypatch.setattr(service, 'metrics_received', AsyncMock(return_value=True))
+    await service.start(task['id'], task['revision'])
+    await service.tasks[task['id']]
+    done = await repo.get(task['id'])
+    assert done['status'] == 'succeeded', done['payload']
+    # vmagent 直连控制端配置的时序库写入地址，账号口令在目标集群的 Secret 里
+    vmagent = cluster.resources['Deployment', 'vmagent']['spec']['template']['spec']['containers'][0]
+    assert '-remoteWrite.url=http://vm.example.test:8428/api/v1/write' in vmagent['args']
+    assert '-remoteWrite.basicAuth.username=monit' in vmagent['args']
+    secret = cluster.resources['Secret', 'kubedoor-metrics-credentials']['data']
+    assert base64.b64decode(secret['password']).decode() == 'vm@secret'
+    applied = json.dumps(cluster.applied)
+    assert 'agent/metrics/write' not in applied
+    # 页面拿到的安装任务里没有时序库写入地址和口令
+    for public in (service.public(inspected), service.public(task), service.public(done)):
+        text = json.dumps(public)
+        assert 'vm.example.test' not in text and 'vm%40secret' not in text and 'vm@secret' not in text
+        assert 'metrics_write_url' not in text
+
+
+@pytest.mark.asyncio
+async def test_full_mode_needs_master_write_url_or_override(environment, monkeypatch):
+    service, cluster, _ = environment
+    service.clients.clear()
+    monkeypatch.delenv('METRICS_WRITE_URL')
+    task = await service.inspect(CONFIG, 'admin')
+    assert task['payload']['options']['metrics_available'] is False
+    assert task['payload']['options']['mode'] == 'agent'
+    with pytest.raises(InstallError, match='时序库写入地址'):
+        await service.preflight(task['id'], 'production', {**task['payload']['options'], 'mode': 'full'})
+    override = 'https://writer:w%21x@other.example.test/api/v1/write'
+    task = await service.preflight(task['id'], 'production',
+                                   {**task['payload']['options'], 'mode': 'full', 'remote_write_url': override})
+    assert task['status'] == 'ready', task['payload']['checks']
+    assert task['payload']['options']['remote_write_url'] == 'https://other.example.test/api/v1/write'
+    resources = module.render_agent(module.unseal(task)['options'], username='preflight', password='preflight')
+    vmagent = next(r for r in resources if r['kind'] == 'Deployment' and r['metadata']['name'] == 'vmagent')
+    assert '-remoteWrite.url=https://other.example.test/api/v1/write' in vmagent['spec']['template']['spec']['containers'][0]['args']
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('mode', ['full', 'agent'])
+async def test_plan_made_by_older_master_must_be_checked_again(environment, mode):
+    service, cluster, repo = environment
+    service.clients.clear()
+    task = await plan(service, mode)
+    material = module.unseal(task)
+    material['options'].pop('metrics_write_url')
+    repo.data[task['id']]['encrypted'] = module.seal(material)
+    await service.start(task['id'], task['revision'])
+    await service.tasks[task['id']]
+    done = await repo.get(task['id'])
+    assert done['status'] == 'failed'
+    assert '重新检测' in done['payload']['error']
+    assert not cluster.applied

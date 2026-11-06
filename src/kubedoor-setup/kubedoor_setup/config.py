@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import copy
+import functools
 import importlib.util
 import ipaddress
 import os
@@ -17,6 +18,8 @@ METRICS_TYPES = ('Victoria-Metrics-Single', 'Victoria-Metrics-Cluster')
 PASSWORD_MASK = '******'
 # 告警组件：一个开关，一起装或一起不装；Grafana 看板必装，不在向导里选择
 ALERTING_SERVICES = ('alarm', 'vmalert', 'alertmanager')
+# 第 4 步的告警通知（可选）：token 为空表示不发通知
+DEFAULT_NOTIFICATION = {'type': 'wecom', 'token': '', 'at': ''}
 
 
 def default_private():
@@ -28,6 +31,7 @@ def default_private():
             'admin': {'username': 'kubedoor', 'password': ''},
             'public_url': '',
             'components': {'alerting': True},
+            'notification': dict(DEFAULT_NOTIFICATION),
         },
         'secrets': {},
     }
@@ -287,6 +291,54 @@ def validate_admin_password(password, username):
         raise SetupError(reason, 422)
 
 
+@functools.cache
+def notify_channels():
+    """master 的 notify/channels.py（IM 类型、token 解析、消息格式和返回解读，只用标准库）。
+
+    和 master 共用一份：安装镜像单独拷贝这个文件，这里按文件路径加载，不 import master 的其他模块。
+    """
+    path = Path(__file__).resolve().parents[2] / 'kubedoor-master/notify/channels.py'
+    if not path.is_file():
+        raise SetupError('安装包缺少消息通知模块', 503)
+    spec = importlib.util.spec_from_file_location('_kubedoor_setup_channels', path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def notification_config(raw, existing):
+    """第 4 步的告警通知（可选），请求 {type, token, at, clear}，返回保存的 {type, token, at}。
+
+    token 可以填 token，也可以粘贴整条 Webhook 地址（channels.normalize_token 截出 token）；
+    留空沿用已保存的（IM 类型换了要重新填写），都没有表示不发通知；clear 为 true 时清掉已保存的配置。
+    错误说明里不带 token。
+    """
+    channels = notify_channels()
+    if not isinstance(raw, dict) or type(raw.get('clear', False)) is not bool:
+        raise SetupError('告警通知设置格式不正确', 422)
+    existing = existing if isinstance(existing, dict) else {}
+    kind = raw.get('type', existing.get('type', DEFAULT_NOTIFICATION['type']))
+    if kind not in channels.TYPES:
+        raise SetupError(f'告警通知请选择 IM 类型（{"、".join(channels.TYPE_LABELS.values())}）', 422)
+    if raw.get('clear'):
+        return {**DEFAULT_NOTIFICATION, 'type': kind}
+    value = raw.get('token')
+    if value is not None and not isinstance(value, str):
+        raise SetupError('告警通知的机器人地址格式不正确', 422)
+    try:
+        at = channels.normalize_at(raw.get('at', existing.get('at', '')))
+        token = channels.normalize_token(kind, value) if (value or '').strip() else ''
+    except ValueError as error:
+        raise SetupError(f'告警通知：{error}', 422) from None
+    if not token and existing.get('token'):
+        if existing.get('type') != kind:
+            before = channels.TYPE_LABELS.get(existing.get('type'), '其他 IM')
+            raise SetupError(f'告警通知的 IM 类型从{before}改成了{channels.TYPE_LABELS[kind]}，'
+                             '请重新填写机器人地址；不发通知时点「清除」', 422)
+        token = existing['token']
+    return {'type': kind, 'token': token, 'at': at}
+
+
 def final_config(raw, existing):
     if not isinstance(raw, dict) or not isinstance(raw.get('admin'), dict):
         raise SetupError('请填写管理员设置', 422)
@@ -303,11 +355,35 @@ def final_config(raw, existing):
         alerting = components['alerting']
     else:
         alerting = alerting_choice(existing.get('components'))
+    saved = existing.get('notification')
+    if 'notification' in raw:
+        notification = notification_config(raw['notification'], saved)
+    else:
+        notification = {**DEFAULT_NOTIFICATION, **saved} if isinstance(saved, dict) else dict(DEFAULT_NOTIFICATION)
     return {
         'admin': {'username': username, 'password': password},
         'public_url': clean_url(raw.get('public_url', ''), 'KubeDoor 访问地址', base=True),
         'components': {'alerting': alerting},
+        'notification': notification,
     }
+
+
+def public_notification(notification):
+    """给页面看的告警通知：只说有没有配置，不返回 token。"""
+    notification = notification if isinstance(notification, dict) else {}
+    return {'type': notification.get('type') or DEFAULT_NOTIFICATION['type'], 'at': notification.get('at') or '',
+            'configured': bool(notification.get('token'))}
+
+
+def redact_token(text, token, limit=300):
+    """去掉文本里的机器人 token（Slack 的 token 是 T…/B…/… 三段，每段也去掉），再截到 limit 个字符。"""
+    text = str(text)
+    if token:
+        text = text.replace(token, '***')
+        for part in token.split('/'):
+            if len(part) >= 6:
+                text = text.replace(part, '***')
+    return text if len(text) <= limit else text[:limit - 1] + '…'
 
 
 def public_config(config):
@@ -320,4 +396,5 @@ def public_config(config):
         if metrics.get(key):
             metrics[key] = mask_url_password(metrics[key])
     result['components'] = {'alerting': alerting_choice(config.get('components'))}
+    result['notification'] = public_notification(config.get('notification'))
     return result

@@ -188,7 +188,7 @@ def master_options(options, namespace, write_url):
     """交给 master 预检的安装选项；镜像仓库、版本等其余参数沿用 master 的默认值。"""
     result = {key: copy.deepcopy(options[key]) for key in ('env', 'aliases', 'namespace', 'mode', 'ksm', 'node_exporter')}
     result['master_url'] = master_url(namespace)
-    # vmagent 直接写时序库：/agent/metrics/write 只有 Web 入口提供，master 本身没有这个接口
+    # vmagent 直连时序库，和控制台「接入集群」一样；这里明确带上第 3 步的远程写地址
     result['remote_write_url'] = write_url if options['mode'] == 'full' else ''
     pull_secret = bootstrap_pull_secret()
     if pull_secret and options['namespace'] == namespace:

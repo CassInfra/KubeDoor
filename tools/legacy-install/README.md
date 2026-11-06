@@ -81,9 +81,11 @@ docker compose up -d
 ```bash
 cd tools/legacy-install
 cp kubedoor.conf.example kubedoor.conf   # 第一次安装时从模板复制一份
-vi kubedoor.conf        # 改 PG_HOST / PG_PASSWORD / PROM_URL / METRICS_WRITE_URL / MSG_TOKEN 等
+vi kubedoor.conf        # 改 PG_HOST / PG_PASSWORD / PROM_URL / METRICS_WRITE_URL 等
 ./install.sh master
 ```
+
+告警通知（IM 机器人）不在 `kubedoor.conf` 里配置：装完后在控制台「系统管理 → 消息通知」填写，可以按集群单独配置，保存后立即生效。旧配置里的 `MSG_TYPE` / `MSG_TOKEN` / `DEFAULT_AT` 已不再生效，脚本发现 `MSG_TOKEN` 有值时会提示。
 
 `PG_HOST` 要填 **K8S 里的 Pod 能访问到的地址**,通常是数据库宿主机的内网 IP。填 `127.0.0.1` 脚本会直接拒绝,因为那是 Pod 自己的回环地址。
 
@@ -95,7 +97,7 @@ PROM_TYPE="Victoria-Metrics-Single"
 METRICS_WRITE_URL="http://monit:<URL编码口令>@<VM宿主机IP>:8428/api/v1/write"
 ```
 
-`PROM_URL` 用于查询；`METRICS_WRITE_URL` 是网页安装 Agent 时统一网关的完整写入地址。两者都须能从控制端访问，不能填写 Docker Compose 内部服务名。已有时序库也按其实际接口配置这两项。
+`PROM_URL` 用于查询，须能从控制端访问；`METRICS_WRITE_URL` 是网页安装 Agent 时各集群 vmagent 默认直连的完整写入地址，须能从各业务集群访问。两者都不能填写 Docker Compose 内部服务名。已有时序库也按其实际接口配置这两项。
 
 #### 配置集群指标标签（重要）
 
@@ -117,11 +119,11 @@ PROM_K8S_TAG_KEY="origin_prometheus"
 
 ### 第四步:在网页安装集群端（推荐）
 
-已有部署启用此功能时，需要更新 master 和 Web 镜像，并重新执行 `./install.sh master` 应用新增的网关 Secret 与安装配置；master 启动时自动创建安装任务表。master 镜像现在从仓库根目录构建（`build.sh` 已处理）；本地运行 master 时还需在仓库根目录执行 `pip install -e src/kubedoor-tools` 安装共享库。
+已有部署启用此功能时，需要更新 master 和 Web 镜像，并重新执行 `./install.sh master` 应用新增的安装配置（`METRICS_WRITE_URL` 会写进 `kubedoor-config`）；master 启动时自动创建安装任务表。master 镜像现在从仓库根目录构建（`build.sh` 已处理）；本地运行 master 时还需在仓库根目录执行 `pip install -e src/kubedoor-tools` 安装共享库。
 
 管理员打开「Agent 管理」→「安装 Agent」，上传 kubeconfig、选择目标 context，确认集群标识后检测并安装。默认完整接入包含 Agent 和指标采集；已有完整监控链路时可选择「仅安装 Agent」。安装进度和失败原因都显示在页面，关闭弹窗不取消后台安装。
 
-控制端需能访问 kubeconfig 中的 API Server；目标集群需能访问 KubeDoor。`KUBEDOOR_EXTURL` 可预填这个外部连接地址。完整接入的 `REMOTE_WRITE_URL` 自动生成为同一入口的 `/agent/metrics/write`，不需要将时序库账号口令复制到业务集群；管理员只需在控制端配置一次 `METRICS_WRITE_URL`（完整写入路径），不能用查询用的 `PROM_URL` 代替。
+控制端需能访问 kubeconfig 中的 API Server；目标集群需能访问 KubeDoor 和时序库。`KUBEDOOR_EXTURL` 可预填这个外部连接地址。完整接入的 vmagent 默认直连控制端配置的 `METRICS_WRITE_URL`（完整写入路径，不能用查询用的 `PROM_URL` 代替），账号口令放进目标集群的 Secret；个别集群需要不同的写入地址时，在安装弹窗的高级设置里填写。
 
 kubeconfig 仅在本次安装期间加密保存，成功后清理。只支持内嵌 token 或证书，不执行 kubeconfig 的 `exec` 插件或读取其中引用的本地文件；这种配置需要先导出可在控制端使用的版本。Agent 本身仍用集群内 ServiceAccount。
 
@@ -138,7 +140,7 @@ vi kubedoor.conf        # 改 K8S_NAME / MASTER_WS / REMOTE_WRITE_URL(换机器�
 
 - `K8S_NAME` 是这个集群的唯一标识,会作为指标标签出现在 Web 上,每个集群必须不同。
 - `MASTER_WS` 必须带 Agent 账号口令:同集群填 `ws://Up4biLko1dNh:<口令>@kubedoor-master.kubedoor`,跨集群填 `ws://Up4biLko1dNh:<口令>@<控制端节点IP>:<Web的NodePort>`。`Up4biLko1dNh` 是内置的 Agent 账号(出厂口令 `qCa22jDkfc9y`),只能用来连 agent、不能登录 Web;装控制端时脚本会把两种写法打印出来。在 Web 上改过它的口令,就要同步改这里。
-- 启用 vmagent 时必须显式填写 `REMOTE_WRITE_URL`，例如 `http://monit:<URL编码口令>@<VM宿主机IP>:8428/api/v1/write`，地址需能从目标集群访问。使用网页安装可自动经 KubeDoor 入口转发，不必在每个集群配置此地址。
+- 启用 vmagent 时必须显式填写 `REMOTE_WRITE_URL`，例如 `http://monit:<URL编码口令>@<VM宿主机IP>:8428/api/v1/write`，地址需能从目标集群访问。网页安装默认使用控制端的 `METRICS_WRITE_URL`，不必在每个集群配置。
 
 几十秒后在 Web 控制台的"Agent管理"里就能看到这个集群上线了。
 
@@ -181,7 +183,7 @@ ENABLE_MCP="false"          # 关闭外部 MCP 入口
 ```bash
 PROM_URL="http://user:pass@<host>:8428"        # 你的时序库读地址
 PROM_TYPE="Prometheus"                          # VictoriaMetrics 填 Victoria-Metrics-Single 或 Victoria-Metrics-Cluster
-METRICS_WRITE_URL="http://user:pass@<host>:8428/api/v1/write" # 网页完整接入使用；按实际写入接口修改
+METRICS_WRITE_URL="http://user:pass@<host>:8428/api/v1/write" # 网页完整接入时各集群 vmagent 直连；按实际写入接口修改
 ENABLE_VMALERT="false"                          # 如果告警规则也用你自己的
 ```
 
@@ -273,7 +275,7 @@ ENABLE_MCP="false"
 临时改参数也可以不重跑安装脚本:
 
 ```bash
-# 改环境变量类配置(数据库、通知、时序库地址...)
+# 改环境变量类配置(数据库、时序库地址...;告警通知在控制台「系统管理 → 消息通知」改,不用重启)
 kubectl -n kubedoor edit configmap kubedoor-config
 kubectl -n kubedoor rollout restart deploy/kubedoor-master deploy/kubedoor-alarm deploy/kubedoor-ai
 

@@ -1350,9 +1350,9 @@ test("环境检查显示本集群 Agent 安装权限，最终检查列表不重�
 
 /**
  * 用真正的模板渲染安装页（自定义渲染器记录节点树，不需要浏览器），
- * 返回根节点和查找元素、取文字的辅助函数。
+ * 返回根节点和查找元素、取文字的辅助函数。不传 api 时只能渲染完成页（访问安装服务直接报错）。
  */
-async function renderPage(t, marker) {
+async function renderPage(t, marker, api) {
   const originalWindow = global.window;
   global.window = { location: { origin: "https://kubedoor.example.com" } };
   const component = compile(
@@ -1360,7 +1360,7 @@ async function renderPage(t, marker) {
     {
       "@/api/setup": {
         ...client,
-        setupApi: {
+        setupApi: api || {
           status: async () => {
             throw new Error("完成页不应访问安装服务");
           }
@@ -1373,7 +1373,16 @@ async function renderPage(t, marker) {
     },
     { inlineTemplate: true }
   ).default;
-  const node = fields => ({ children: [], parent: null, props: {}, ...fields });
+  // 表单的 v-model 指令会监听事件、读下拉框的 options
+  const node = fields => ({
+    children: [],
+    parent: null,
+    props: {},
+    options: [],
+    addEventListener() {},
+    removeEventListener() {},
+    ...fields
+  });
   const detach = child => {
     const parent = child.parent;
     if (parent) parent.children.splice(parent.children.indexOf(child), 1);
@@ -1454,4 +1463,428 @@ test("安装结果列出每个服务的 Deployment 名，旧的完成标记没�
   assert.deepEqual(resourceOf(rows[0]), ["kubedoor-alarm"]);
   assert.match(page.textOf(rows[0]), /告警服务kubedoor-alarm已就绪/);
   assert.deepEqual(resourceOf(rows[1]), []);
+});
+
+/* ---------- 第 4 步：告警通知（可选） ---------- */
+
+const WECOM_URL =
+  "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=wecom-test-key";
+const DING_URL =
+  "https://oapi.dingtalk.com/robot/send?access_token=ding-test-token";
+
+test("告警通知：按 IM 类型给提示，已保存时留空保留，第 5 步摘要显示 IM 类型", () => {
+  const saved = { type: "wecom", at: "zhangsan", configured: true };
+  const form = utils.notificationFormFrom(saved);
+  // 机器人地址不回传，预填时一律留空；@ 人沿用已保存的
+  assert.deepEqual(form, {
+    type: "wecom",
+    token: "",
+    at: "zhangsan",
+    clear: false
+  });
+  assert.deepEqual(utils.notificationFormFrom(undefined), {
+    type: "wecom",
+    token: "",
+    at: "",
+    clear: false
+  });
+  assert.deepEqual(utils.NOTIFY_TYPES, [
+    "wecom",
+    "dingding",
+    "feishu",
+    "slack"
+  ]);
+  assert.match(utils.notifyHint("wecom").at, /userid/);
+  assert.match(utils.notifyHint("dingding").at, /手机号/);
+  assert.match(utils.notifyHint("feishu").at, /open_id/);
+  assert.match(utils.notifyHint("slack").at, /成员 ID/);
+  assert.match(utils.notifyHint("dingding").token, /access_token= 后面那一段/);
+  assert.match(utils.notifyHint("unknown").token, /key= 后面那一段/);
+  assert.equal(
+    utils.notificationTokenPlaceholder(form, saved),
+    "已保存，留空保留"
+  );
+  assert.equal(
+    utils.notificationTokenPlaceholder({ ...form, type: "feishu" }, saved),
+    "换了 IM 类型，请重新填写飞书机器人地址"
+  );
+  assert.equal(
+    utils.notificationTokenPlaceholder({ ...form, clear: true }, saved),
+    "已清除，留空表示不发通知"
+  );
+  assert.equal(
+    utils.notificationTokenPlaceholder(
+      { ...utils.notificationFormFrom(), type: "slack" },
+      undefined
+    ),
+    utils.NOTIFY_HINTS.slack.token
+  );
+  assert.deepEqual(utils.notificationBadge(form, saved), {
+    on: true,
+    text: "企业微信"
+  });
+  assert.deepEqual(utils.notificationBadge({ ...form, clear: true }, saved), {
+    on: false,
+    text: "未配置"
+  });
+  assert.deepEqual(
+    utils.notificationBadge(
+      { ...utils.notificationFormFrom(), type: "feishu", token: "hook" },
+      undefined
+    ),
+    { on: true, text: "飞书" }
+  );
+  assert.equal(utils.notificationSummary(saved), "企业微信");
+  assert.equal(
+    utils.notificationSummary({ type: "slack", at: "", configured: false }),
+    "未配置"
+  );
+  assert.equal(utils.notificationSummary(undefined), "未配置");
+});
+
+test("告警通知的请求体：去掉空白，留空沿用已保存的，换类型要重填，可以清除", () => {
+  const saved = { type: "wecom", at: "zhangsan", configured: true };
+  const form = utils.notificationFormFrom(saved);
+  assert.deepEqual(
+    utils.notificationPayload(
+      { ...form, token: `  ${WECOM_URL}  `, at: " lisi " },
+      saved
+    ),
+    { type: "wecom", token: WECOM_URL, at: "lisi" }
+  );
+  assert.deepEqual(utils.notificationPayload(form, saved), {
+    type: "wecom",
+    token: "",
+    at: "zhangsan"
+  });
+  // 都没填：不发通知，不是错误
+  assert.deepEqual(
+    utils.notificationPayload(utils.notificationFormFrom(), undefined),
+    { type: "wecom", token: "", at: "" }
+  );
+  assert.deepEqual(
+    utils.notificationPayload({ ...form, clear: true, at: "" }, saved),
+    { type: "wecom", token: "", at: "", clear: true }
+  );
+  // 清除后又填了新地址：按新地址保存
+  assert.deepEqual(
+    utils.notificationPayload(
+      { ...form, clear: true, type: "dingding", token: DING_URL },
+      saved
+    ),
+    { type: "dingding", token: DING_URL, at: "zhangsan" }
+  );
+  assert.throws(
+    () => utils.notificationPayload({ ...form, type: "dingding" }, saved),
+    /IM 类型从企业微信改成了钉钉，请重新填写机器人地址；不发通知时点「清除」/
+  );
+  assert.throws(
+    () => utils.notificationPayload({ ...form, token: DING_URL }, saved),
+    /机器人地址是钉钉的，IM 类型却选了企业微信/
+  );
+  assert.throws(
+    () =>
+      utils.notificationPayload(
+        { ...form, type: "feishu", token: "hooks.slack.com/services/T/B/x" },
+        saved
+      ),
+    /是Slack的/
+  );
+  assert.equal(utils.webhookType("T000/B000/secret"), "");
+  assert.equal(
+    utils.webhookType("open.feishu.cn/open-apis/bot/v2/hook/x"),
+    "feishu"
+  );
+  for (const [patch, reason] of [
+    [{ token: "a b" }, /空格/],
+    [{ token: "a\u0001b" }, /控制字符/],
+    [{ token: "x".repeat(513) }, /512/],
+    [{ at: "a\u0001" }, /控制字符/],
+    [{ at: "x".repeat(129) }, /128/],
+    [{ type: "qq" }, /IM 类型/]
+  ])
+    assert.throws(
+      () => utils.notificationPayload({ ...form, ...patch }, saved),
+      reason
+    );
+});
+
+test("测试消息的请求与结果：没填地址用已保存的，结果按检查通过 / 失败显示", () => {
+  const saved = { type: "dingding", at: "", configured: true };
+  const form = utils.notificationFormFrom(saved);
+  assert.deepEqual(utils.notificationTestRequest(form, saved), {
+    type: "dingding",
+    token: "",
+    at: ""
+  });
+  assert.throws(
+    () =>
+      utils.notificationTestRequest(utils.notificationFormFrom(), undefined),
+    /请先填写企业微信机器人地址/
+  );
+  assert.throws(
+    () => utils.notificationTestRequest({ ...form, type: "slack" }, saved),
+    /换了 IM 类型，请先填写新的机器人地址/
+  );
+  assert.throws(
+    () => utils.notificationTestRequest({ ...form, clear: true }, saved),
+    /请先填写钉钉机器人地址/
+  );
+  assert.deepEqual(
+    utils.notifyResultView({ ok: true, message: "发送成功" }, "dingding"),
+    {
+      tone: "success",
+      label: "检查通过",
+      message: "测试消息已发送，请到钉钉群里确认收到。"
+    }
+  );
+  assert.deepEqual(
+    utils.notifyResultView(
+      { ok: false, message: "错误码 310000:keywords not in content" },
+      "dingding"
+    ),
+    {
+      tone: "error",
+      label: "失败",
+      message: "发送失败：错误码 310000:keywords not in content"
+    }
+  );
+  assert.equal(
+    utils.notifyResultView({ ok: false, message: " " }, "wecom").message,
+    "发送失败，IM 接口没有返回原因。"
+  );
+  assert.deepEqual(
+    utils.notifyErrorView(
+      new client.SetupRequestError("测试太频繁，请 3 秒后再试", 429)
+    ),
+    { tone: "warning", label: "请稍后", message: "测试太频繁，请 3 秒后再试" }
+  );
+  assert.deepEqual(
+    utils.notifyErrorView(new Error("请先填写钉钉机器人地址。")),
+    { tone: "error", label: "未发送", message: "请先填写钉钉机器人地址。" }
+  );
+  assert.equal(
+    utils.notifyErrorView("x").message,
+    "发送测试消息失败，请稍后重试。"
+  );
+});
+
+test("第 4 步填写告警通知后随基础设置一起提交，保存后不再保留输入的地址", async t => {
+  const sent = [];
+  const { vm } = await harness(t, {
+    initial: state({ step: 4 }),
+    api: {
+      configure: async (revision, data) => {
+        sent.push(data);
+        const next = state({ revision: revision + 1, phase: "ready", step: 5 });
+        next.config.notification = {
+          type: data.notification.type,
+          at: data.notification.at,
+          configured: !!data.notification.token
+        };
+        return next;
+      }
+    }
+  });
+  assert.deepEqual(vm.notifyBadge, { on: false, text: "未配置" });
+  assert.equal(vm.notifyPlaceholder, utils.NOTIFY_HINTS.wecom.token);
+  vm.notification.type = "dingding";
+  assert.match(vm.notifyHints.at, /手机号/);
+  assert.match(vm.notifyHints.tokenHelp, /oapi\.dingtalk\.com/);
+  vm.notification.token = ` ${DING_URL} `;
+  vm.notifyTokenEdited();
+  vm.notification.at = "13800000000";
+  assert.deepEqual(vm.notifyBadge, { on: true, text: "钉钉" });
+  await vm.advance();
+  assert.equal(vm.step, 5);
+  assert.deepEqual(sent[0].notification, {
+    type: "dingding",
+    token: DING_URL,
+    at: "13800000000"
+  });
+  assert.deepEqual(sent[0].components, { alerting: true });
+  assert.equal(vm.notification.token, "");
+  assert.equal(vm.notifyPlaceholder, "已保存，留空保留");
+  assert.equal(utils.notificationSummary(vm.savedNotification), "钉钉");
+});
+
+test("已保存的告警通知：留空保留，换类型不填地址不能继续，点清除后提交 clear", async t => {
+  const initial = state({ step: 4 });
+  initial.config.notification = {
+    type: "wecom",
+    at: "zhangsan",
+    configured: true
+  };
+  const { vm, calls } = await harness(t, { initial });
+  assert.deepEqual(
+    { ...vm.notification },
+    { type: "wecom", token: "", at: "zhangsan", clear: false }
+  );
+  assert.equal(vm.notifyPlaceholder, "已保存，留空保留");
+  vm.notification.type = "feishu";
+  await vm.advance();
+  assert.equal(vm.step, 4);
+  assert.match(vm.error, /请重新填写机器人地址/);
+  assert.equal(calls.configure.length, 0);
+  vm.notification.type = "wecom";
+  vm.clearNotification();
+  assert.equal(vm.notifyPlaceholder, "已清除，留空表示不发通知");
+  assert.deepEqual(vm.notifyBadge, { on: false, text: "未配置" });
+  // 清除后又填了新地址：不再是清除
+  vm.notification.token = WECOM_URL;
+  vm.notifyTokenEdited();
+  assert.equal(vm.notification.clear, false);
+  vm.clearNotification();
+  await vm.advance();
+  assert.equal(vm.step, 5);
+  assert.deepEqual(calls.configure[0].data.notification, {
+    type: "wecom",
+    token: "",
+    at: "",
+    clear: true
+  });
+});
+
+test("发送测试消息：只测试不保存，结果显示为检查通过 / 失败，改动设置后清掉", async t => {
+  const requests = [];
+  let reply = { ok: true, message: "发送成功" };
+  const { vm, calls } = await harness(t, {
+    initial: state({ step: 4 }),
+    api: {
+      testNotification: async data => {
+        requests.push(data);
+        if (reply instanceof Error) throw reply;
+        return reply;
+      }
+    }
+  });
+  // 没填地址：不请求安装服务，直接提示
+  await vm.testNotification();
+  assert.equal(requests.length, 0);
+  assert.deepEqual(vm.notifyTest, {
+    tone: "error",
+    label: "未发送",
+    message: "请先填写企业微信机器人地址。"
+  });
+  vm.notification.token = WECOM_URL;
+  vm.notifyTokenEdited();
+  assert.equal(vm.notifyTest, undefined);
+  await vm.testNotification();
+  assert.deepEqual(requests, [{ type: "wecom", token: WECOM_URL, at: "" }]);
+  assert.deepEqual(vm.notifyTest, {
+    tone: "success",
+    label: "检查通过",
+    message: "测试消息已发送，请到企业微信群里确认收到。"
+  });
+  assert.equal(vm.notifyTesting, false);
+  assert.equal(calls.configure.length, 0);
+  assert.equal(vm.step, 4);
+  reply = { ok: false, message: "错误码 93000:invalid webhook url" };
+  await vm.testNotification();
+  assert.deepEqual(vm.notifyTest, {
+    tone: "error",
+    label: "失败",
+    message: "发送失败：错误码 93000:invalid webhook url"
+  });
+  reply = new client.SetupRequestError("测试太频繁，请 3 秒后再试", 429);
+  await vm.testNotification();
+  assert.equal(vm.notifyTest.tone, "warning");
+  assert.equal(vm.notifyTest.label, "请稍后");
+  vm.notification.at = "zhangsan";
+  vm.notifyEdited();
+  assert.equal(vm.notifyTest, undefined);
+  // 安装会话过期：回到输入安装密钥
+  reply = new client.SetupRequestError("请先输入安装密钥验证身份", 401);
+  await vm.testNotification();
+  assert.equal(vm.authenticated, false);
+  assert.match(vm.error, /安装密钥/);
+  assert.equal(requests.length, 4);
+  assert.deepEqual(requests[3], {
+    type: "wecom",
+    token: WECOM_URL,
+    at: "zhangsan"
+  });
+});
+
+test("页面上的告警通知：IM 类型下拉、说明表、测试结果的样式，第 5 步摘要", async t => {
+  const initial = state({ step: 4 });
+  initial.config.notification = {
+    type: "feishu",
+    at: "ou_123",
+    configured: true
+  };
+  const requests = [];
+  const page = await renderPage(t, null, {
+    status: async () => ({
+      phase: "draft",
+      authenticated: true,
+      installation_id: "install-1"
+    }),
+    state: async () => initial,
+    testNotification: async data => {
+      requests.push(data);
+      return { ok: false, message: "错误码 19021:sign match fail" };
+    }
+  });
+  const byId = id => page.findAll(item => item.props.id === id)[0];
+  const select = byId("notify-type");
+  assert.deepEqual(
+    page
+      .findAll(item => item.tag === "option", select)
+      .map(item => page.textOf(item).trim()),
+    ["企业微信", "钉钉", "飞书", "Slack"]
+  );
+  const token = byId("notify-token");
+  assert.equal(token.props.type, "password");
+  assert.equal(token.props.placeholder, "已保存，留空保留");
+  assert.match(byId("notify-at").props.placeholder, /open_id/);
+  const text = page.textOf(page.root);
+  assert.match(text, /告警通知可选飞书/);
+  assert.match(text, /留空表示不发通知，装完可以在「系统管理 → 消息通知」配置/);
+  assert.match(text, /open\.feishu\.cn\/open-apis\/bot\/v2\/hook/);
+  assert.ok(text.includes(utils.NOTICE_NOTE));
+  // 说明表：四类通知，文字和控制台消息通知页一致
+  const rows = page.findAll(item => "data-notice-row" in item.props);
+  assert.deepEqual(
+    rows.map(page.textOf),
+    utils.NOTICE_ROWS.map(row => row.name + row.sender + row.when)
+  );
+  const button = page.findAll(
+    item => "data-notify-test-button" in item.props
+  )[0];
+  assert.equal(page.textOf(button).trim(), "发送测试消息");
+  await button.props.onClick();
+  await settle();
+  assert.deepEqual(requests, [{ type: "feishu", token: "", at: "ou_123" }]);
+  const result = page.findAll(item => item.props["data-notify-test"])[0];
+  assert.equal(result.props.class, "error");
+  assert.match(
+    page.textOf(result),
+    /测试消息发送失败：错误码 19021:sign match fail/
+  );
+  assert.deepEqual(
+    page.findAll(item => item.tag === "b", result).map(page.textOf),
+    ["失败"]
+  );
+
+  for (const [notification, expected] of [
+    [{ type: "wecom", at: "", configured: true }, "企业微信"],
+    [{ type: "wecom", at: "", configured: false }, "未配置"],
+    [undefined, "未配置"]
+  ]) {
+    const ready = state({ phase: "ready", step: 5 });
+    ready.config.notification = notification;
+    const summary = await renderPage(t, null, {
+      status: async () => ({
+        phase: "ready",
+        authenticated: true,
+        installation_id: "install-1"
+      }),
+      state: async () => ready
+    });
+    const row = summary.findAll(
+      item => item.props["data-summary"] === "notification"
+    )[0];
+    assert.equal(summary.textOf(row), `告警通知${expected}`);
+  }
 });

@@ -82,7 +82,7 @@
       <section class="panel" data-step="4" hidden>
         <h2 tabindex="-1">完成基础设置</h2>
         <p class="subtitle">设置管理员密码，以及各集群访问 KubeDoor 的统一入口。</p>
-        <div class="form-grid"><div class="field"><label for="admin-user">管理员账号</label><input id="admin-user" value="kubedoor" readonly></div><div class="field"><label for="admin-password">管理员密码</label><input id="admin-password" type="password" value="example-admin-password" autocomplete="new-password"></div><div class="field full"><label for="admin-confirm">确认管理员密码</label><input id="admin-confirm" type="password" value="example-admin-password" autocomplete="new-password"></div><div class="field full"><label for="public-url">KubeDoor 访问地址</label><input id="public-url" type="url" value="https://kubedoor.example.com" placeholder="https://kubedoor.example.com"><div class="field-hint">根据当前入口建议，需确认目标集群也能访问。正式安装将验证入口是否指向本次 KubeDoor。</div><div class="derived"><span>Agent 指标入口</span><code id="agent-write-preview">https://kubedoor.example.com/agent/metrics/write</code></div></div></div>
+        <div class="form-grid"><div class="field"><label for="admin-user">管理员账号</label><input id="admin-user" value="kubedoor" readonly></div><div class="field"><label for="admin-password">管理员密码</label><input id="admin-password" type="password" value="example-admin-password" autocomplete="new-password"></div><div class="field full"><label for="admin-confirm">确认管理员密码</label><input id="admin-confirm" type="password" value="example-admin-password" autocomplete="new-password"></div><div class="field full"><label for="public-url">KubeDoor 访问地址</label><input id="public-url" type="url" value="https://kubedoor.example.com" placeholder="https://kubedoor.example.com"><div class="field-hint">根据当前入口建议，需确认目标集群也能访问。正式安装将验证入口是否指向本次 KubeDoor。</div></div></div>
         <div class="callout warning">不要填写 <code>localhost</code> 或临时端口转发地址。其他集群需要通过这个地址连接控制端。</div>
         <details class="advanced"><summary>查看推荐组件与后续配置</summary><div class="component-list"><span class="pill">Web</span><span class="pill">控制服务</span><span class="pill">告警服务</span><span class="pill">AI 助手</span><span class="pill">Grafana</span><span class="pill">vmalert</span><span class="pill">Alertmanager</span></div><p>当前演示安装以上 7 个服务，安装时逐项显示状态。通知渠道、模型、镜像更新规则和仓库凭据可以进入控制台后配置；此处无需逐一填写。</p></details>
         <div class="status-message" id="basic-status" role="status"></div>
@@ -132,7 +132,6 @@
       function normalizeBase(value) { return value.trim().replace(/\/+$/, ''); }
       function updateURLs() {
         $('write-url-preview').textContent = normalizeBase($('metrics-url').value) + '/api/v1/write';
-        $('agent-write-preview').textContent = normalizeBase($('public-url').value) + '/agent/metrics/write';
       }
       function validURL(value) { try { const url = new URL(value); return ['http:', 'https:'].includes(url.protocol) && !url.username && !url.password; } catch { return false; } }
       function fillSummary() {
@@ -192,7 +191,7 @@
       }));
       $('connect-agent').addEventListener('click', () => toast('正式版将在此打开 Agent 接入向导：选择集群 → 检测 → 安装。'));
       const services = [
-        { id: 'web', name: 'Web 控制台', resource: 'kubedoor-web', detail: '正式入口、登录代理和指标网关可用' },
+        { id: 'web', name: 'Web 控制台', resource: 'kubedoor-web', detail: '正式入口和登录代理可用' },
         { id: 'master', name: '控制服务', resource: 'kubedoor-master', detail: '数据库初始化完成，控制 API 健康检查通过' },
         { id: 'ai', name: 'AI 助手', resource: 'kubedoor-ai', detail: '服务与数据库连接正常；模型可在控制台配置' },
         { id: 'alarm', name: '告警服务', resource: 'kubedoor-alarm', detail: '服务接口与数据库连接正常；通知渠道可稍后配置' },
