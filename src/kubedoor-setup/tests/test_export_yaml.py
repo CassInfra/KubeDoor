@@ -36,8 +36,13 @@ def test_export_file_is_standalone_and_uses_selected_images(tmp_path, shell):
     objects = documents(output.read_text(encoding='utf-8'))
     bundle_id(objects)
     assert not any(obj['kind'] == 'Secret' for obj in objects)
-    assert {obj['metadata']['namespace'] for obj in objects if obj['kind'] != 'Namespace'} == {'exported-kd'}
+    assert {obj['metadata']['namespace'] for obj in objects if obj['kind'] not in ('Namespace', 'ClusterRoleBinding')} == {'exported-kd'}
     resources = {(obj['kind'], obj['metadata']['name']): obj for obj in objects}
+    # 导出文件同样包含 Agent 安装账号和它的临时集群权限，绑定名称带命名空间
+    binding = resources['ClusterRoleBinding', 'kubedoor-agent-installer-exported-kd']
+    assert binding['subjects'] == [{'kind': 'ServiceAccount', 'name': 'kubedoor-agent-installer', 'namespace': 'exported-kd'}]
+    assert ('ServiceAccount', 'kubedoor-agent-installer') in resources
+    assert resources['ConfigMap', 'kubedoor-setup-state']['data']['agent-installer'] == 'kubedoor-agent-installer-exported-kd'
     assert resources['Service', 'kubedoor-web']['spec']['ports'][0]['nodePort'] == 31234
     setup = resources['Deployment', 'kubedoor-setup']['spec']['template']['spec']
     assert setup['imagePullSecrets'] == [{'name': 'pull-key'}]

@@ -12,4 +12,6 @@ docker build -f src/kubedoor-setup/Dockerfile -t kubedoor-setup:dev .
 
 安装部署权限保存在 `kubedoor-setup` 的命名空间 Role 中，普通 Web 不持有该服务账号。`kubedoor-setup-finalizer` 的权限仅限本安装器部署、状态 ConfigMap、临时凭据和安装器 RoleBinding。安装状态位于 `kubedoor-setup-state`，敏感草稿位于 Secret；数据库中断不会触发新的初始化。
 
+第 6 步“在本集群安装 Agent”需要集群管理员级别权限，单独放在专用账号 `kubedoor-agent-installer`（引导时绑定 `cluster-admin`，绑定名 `kubedoor-agent-installer-<命名空间>`）上：setup 平时不持有它，只在用户选择安装时用 TokenRequest 签发一小时令牌，拼成 kubeconfig 交给 master 的 Agent 安装流水线（`/api/admin/agent-installations`），令牌不写入状态和日志；探测可用性时用 10 分钟令牌做 SelfSubjectAccessReview。收尾 Job 先用该账号自己的令牌删除这个 ClusterRoleBinding，再删除账号，最后才删除 setup 的 RoleBinding。相关逻辑在 `kubedoor_setup/agent.py`（安装流程）、`api.py`（`/setup-api/agent/install`、`/setup-api/agent/skip` 和看门狗）、`finalize.py`（撤销）。
+
 内部资源位于本目录的 `resources/`（运行默认值、master 模板、看板）；发行镜像版本来自 `deploy/install.sh` 顶部的镜像配置区。脚本本身内嵌引导 YAML，兼容 POSIX `sh` 和 `bash`，可以脱离仓库单独运行。渲染器只读取脚本的镜像配置块，不执行 shell。部署相关回归测试位于 `tests/deployment/`。旧配置式脚本保留在 `tools/legacy-install/`，仍需要完整仓库及原来的 Python 依赖。

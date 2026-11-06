@@ -168,6 +168,8 @@ elif verb in ("apply", "create"):
         object_key = key(obj["kind"], metadata["name"])
         if verb == "create" and object_key in objects:
             fail("AlreadyExists")
+        if cluster.get("apply_error") == object_key:
+            fail("simulated forbidden: " + object_key)
         metadata.setdefault("uid", ID if metadata["name"] == "kubedoor-setup-state" else "uid-" + metadata["name"])
         objects[object_key] = obj
         if obj["kind"] == "Deployment" and metadata["name"] == "kubedoor-setup":

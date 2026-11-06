@@ -15,10 +15,22 @@ from .errors import SetupError
 STATE_NAME = 'kubedoor-setup-state'
 PRIVATE_NAME = 'kubedoor-setup-config'
 LABELS = {'app.kubernetes.io/part-of': 'kubedoor', 'app.kubernetes.io/component': 'setup'}
+PHASES = ('draft', 'ready', 'running', 'failed', 'interrupted', 'agent', 'finalizing', 'succeeded')
+# state['agent'] 里可以给页面看的字段；attempt、started_at 等内部字段不返回
+AGENT_PUBLIC = ('status', 'deadline', 'defaults', 'options', 'steps', 'checks', 'message', 'error', 'task_id', 'updated_at')
 
 
 def utcnow():
     return datetime.now(timezone.utc).isoformat()
+
+
+def check_row(state, name, status, message):
+    rows = state.setdefault('checks', [])
+    row = next((item for item in rows if item.get('name') == name), None)
+    if row is None:
+        row = {'id': name, 'name': name}
+        rows.append(row)
+    row.update(status=status, message=message, updated_at=utcnow())
 
 
 def new_state(installation_id, namespace):
@@ -27,11 +39,17 @@ def new_state(installation_id, namespace):
             'checks': [], 'services': [], 'private_key': None, 'created_at': utcnow(), 'updated_at': utcnow()}
 
 
+def public_agent(agent):
+    return {key: copy.deepcopy(agent[key]) for key in AGENT_PUBLIC if key in agent}
+
+
 def public_state(state, private):
     result = {key: copy.deepcopy(value) for key, value in state.items()
               if not key.startswith('_') and key not in ('private_key', 'checked', 'lease', 'internal', 'run_id', 'auth_initialized')}
     result['config'] = public_config(private['config'])
     result['retryable'] = state['phase'] in ('failed', 'interrupted')
+    if isinstance(state.get('agent'), dict):
+        result['agent'] = public_agent(state['agent'])
     return result
 
 
@@ -43,6 +61,10 @@ def public_marker(state):
                       public_url=state.get('public_url', ''), completed_at=state.get('completed_at', ''))
         if state.get('error'):
             result['error'] = state['error']
+        agent = state.get('agent')
+        if isinstance(agent, dict) and agent.get('status'):
+            # 安装服务关闭后的完成页只能读到这份公开标记：只给结果和集群名称
+            result['agent'] = {'status': agent['status'], 'env': (agent.get('options') or {}).get('env', '')}
     return result
 
 
@@ -70,7 +92,7 @@ class Repository:
                 if not installation_id:
                     raise ValueError()
                 state = new_state(installation_id, self.namespace)
-            if not state.get('id') or state.get('phase') not in ('draft', 'ready', 'running', 'failed', 'interrupted', 'finalizing', 'succeeded'):
+            if not state.get('id') or state.get('phase') not in PHASES:
                 raise ValueError()
             state['_resource_version'] = resource['metadata']['resourceVersion']
         except (ValueError, KeyError, TypeError):

@@ -13,12 +13,24 @@ from kubedoor_setup.repository import new_state
 
 ROOT = Path(__file__).resolve().parents[3]
 ID = "718df732-9671-4144-8033-1c531ee41813"
+RBAC = "rbac.authorization.k8s.io/v1"
+INSTALLER = ("ServiceAccount", "kubedoor-agent-installer", "v1")
+CLUSTER_BINDING = ("ClusterRoleBinding", "kubedoor-agent-installer-kubedoor", RBAC)
+TOKEN_PATH = "/api/v1/namespaces/kubedoor/serviceaccounts/kubedoor-agent-installer/token"
 
 
 def owned(kind, name, version="v1"):
     obj = resource(kind, name, "kubedoor", version)
     obj["metadata"].update(annotations={OWNER: ID}, resourceVersion="1")
+    if kind == "ClusterRoleBinding":
+        del obj["metadata"]["namespace"]
+        obj["subjects"] = [{"kind": "ServiceAccount", "name": "kubedoor-agent-installer", "namespace": "kubedoor"}]
+        obj["roleRef"] = {"apiGroup": "rbac.authorization.k8s.io", "kind": "ClusterRole", "name": "cluster-admin"}
     return obj
+
+
+def path_of(kind, name, version):
+    return resource_path(owned(kind, name, version))
 
 
 class MemoryRepo:
@@ -61,13 +73,15 @@ class PolicyKubernetes:
         self.stuck = False
         self.pending_reads = 0
         self.objects = {}
+        self.tokens = set()
         self.rules = next(obj["rules"] for obj in render_bootstrap("--namespace", self.namespace)
                           if obj["kind"] == "Role" and obj["metadata"]["name"] == "kubedoor-setup-finalizer")
         for kind, name, version in (("Deployment", "kubedoor-setup", "apps/v1"),
                                     ("RoleBinding", "kubedoor-setup", "rbac.authorization.k8s.io/v1"),
                                     ("Secret", "kubedoor-auth-init", "v1"),
                                     ("Secret", "kubedoor-setup-auth", "v1"),
-                                    ("Secret", "kubedoor-setup-config", "v1")):
+                                    ("Secret", "kubedoor-setup-config", "v1"),
+                                    INSTALLER, CLUSTER_BINDING):
             obj = owned(kind, name, version)
             if kind == "Deployment":
                 obj["metadata"]["generation"] = 4
@@ -76,18 +90,38 @@ class PolicyKubernetes:
             elif kind == "Secret":
                 obj["data"] = {"password": "aW5pdGlhbC1wYXNzd29yZA=="}
             self.objects[resource_path(obj)] = obj
+        # 引导脚本记在状态 ConfigMap 里的标记：本次引导授予了 Agent 安装账号
+        marker = owned("ConfigMap", "kubedoor-setup-state")
+        marker["data"] = {"agent-installer": "kubedoor-agent-installer-kubedoor"}
+        self.objects[resource_path(marker)] = marker
 
     def authorize(self, verb, path):
-        segments = path.split("/")
-        name, plural = segments[-1], segments[-2]
-        group = "" if segments[1] == "api" else segments[2]
+        """按引导脚本里收尾账号的 Role 判断（含 serviceaccounts/token 子资源）。"""
+        segments = path.strip("/").split("/")
+        group, rest = ("", segments[2:]) if segments[0] == "api" else (segments[1], segments[3:])
+        if rest[0] == "namespaces":
+            rest = rest[2:]
+        plural, name = rest[0], rest[1]
+        if len(rest) > 2:
+            plural += "/" + rest[2]
         assert any(group in rule["apiGroups"] and plural in rule["resources"] and verb in rule["verbs"]
                    and name in rule.get("resourceNames", []) for rule in self.rules), (verb, path)
         self.calls.append((verb, path))
 
-    async def get(self, obj):
+    def installer(self, token, path):
+        """安装账号令牌的权限只来自它的 cluster-admin 绑定：绑定删掉后立即 403。"""
+        assert token in self.tokens
+        binding = self.objects.get(path_of(*CLUSTER_BINDING))
+        if not binding or path_of(*INSTALLER) not in self.objects:
+            raise SetupError("安装权限不足或准入策略拒绝（HTTP 403）", 403)
+        self.calls.append(("installer", path))
+
+    async def get(self, obj, token=None):
         path = resource_path(obj)
-        self.authorize("get", path)
+        if token is not None:
+            self.installer(token, path)
+        else:
+            self.authorize("get", path)
         found = self.objects.get(path)
         if found and found["kind"] == "Deployment" and found["spec"]["replicas"] == 0 and not self.stuck:
             if self.pending_reads:
@@ -103,6 +137,14 @@ class PolicyKubernetes:
         self.objects[path] = copy.deepcopy(obj)
 
     async def request(self, method, path, *, body, apply=False, params=None):
+        if method == "POST":
+            assert path == TOKEN_PATH and body["kind"] == "TokenRequest"
+            self.authorize("create", path)
+            assert path_of(*INSTALLER) in self.objects
+            token = "installer-token-%d" % len(self.tokens)
+            self.tokens.add(token)
+            self.events.append(("token", "kubedoor-agent-installer"))
+            return {"status": {"token": token}}
         assert method == "PATCH"
         self.authorize("patch", path)
         assert apply and params == {"fieldManager": "kubedoor-setup-finalizer", "force": "true"}
@@ -113,9 +155,12 @@ class PolicyKubernetes:
         obj["metadata"]["generation"] += 1
         return copy.deepcopy(obj)
 
-    async def delete(self, obj):
+    async def delete(self, obj, token=None):
         path = resource_path(obj)
-        self.authorize("delete", path)
+        if token is not None:
+            self.installer(token, path)
+        else:
+            self.authorize("delete", path)
         if self.fail_delete == obj["metadata"]["name"]:
             raise SetupError("Deletion denied", 403)
         self.events.append(("delete", obj["metadata"]["name"]))
@@ -143,6 +188,15 @@ async def test_success_requires_all_cleanup_and_bootstrap_rbac_allows_operations
     assert events.index(("update", "kubedoor-auth-init")) < events.index(("scale", "kubedoor-setup"))
     assert events.index(("scale", "kubedoor-setup")) < events.index(("delete", "kubedoor-setup"))
     assert ("delete", "kubedoor-setup-config") in events and ("delete", "kubedoor-setup-auth") in events
+    # 安装服务停止后才撤销集群权限：先用安装账号令牌删绑定，再删账号，最后删安装服务的 RoleBinding
+    order = [events.index(item) for item in (("scale", "kubedoor-setup"), ("token", "kubedoor-agent-installer"),
+                                              ("delete", "kubedoor-agent-installer-kubedoor"),
+                                              ("delete", "kubedoor-agent-installer"), ("delete", "kubedoor-setup"))]
+    assert order == sorted(order)
+    assert path_of(*CLUSTER_BINDING) not in k8s.objects and path_of(*INSTALLER) not in k8s.objects
+    # 集群级绑定只用安装账号自己的令牌访问，收尾账号没有任何集群级权限
+    assert ("installer", path_of(*CLUSTER_BINDING)) in k8s.calls
+    assert not any(verb != "installer" and "clusterrolebindings" in path for verb, path in k8s.calls)
     initial = k8s.objects[resource_path(owned("Secret", "kubedoor-auth-init"))]
     assert initial["data"] == {}  # Keep the referenced Secret so restarts still start.
     assert repo.state["private_key"] is None and "error" not in repo.state
@@ -154,7 +208,7 @@ async def test_success_requires_all_cleanup_and_bootstrap_rbac_allows_operations
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("incomplete", ["service_failed", "empty_services", "missing_required_service", "skipped_required_service", "skipped_selected_optional", "missing_selection", "pending_endpoint", "pending_write", "skipped_required_write", "wrong_id", "wrong_phase"])
+@pytest.mark.parametrize("incomplete", ["service_failed", "empty_services", "missing_required_service", "skipped_required_service", "skipped_selected_optional", "missing_selection", "pending_endpoint", "pending_write", "skipped_required_write", "wrong_id", "wrong_phase", "agent_running", "agent_choice"])
 async def test_incomplete_installation_never_runs_cleanup(env, incomplete):
     repo, k8s, events = env
     if incomplete == "service_failed": repo.state["services"][0]["status"] = "failed"
@@ -168,9 +222,20 @@ async def test_incomplete_installation_never_runs_cleanup(env, incomplete):
     if incomplete == 'skipped_required_write': repo.state['checks'][4]['status'] = 'skipped'
     if incomplete == "wrong_id": repo.state["id"] = "different"
     if incomplete == "wrong_phase": repo.state["phase"] = "failed"
+    if incomplete == "agent_running": repo.state["agent"] = {"status": "running"}
+    if incomplete == "agent_choice": repo.state["agent"] = {"status": "choice"}
     with pytest.raises(SetupError):
         await module.finalize(repo, k8s, ID)
     assert events == [] and k8s.calls == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("agent", ["succeeded", "partial", "skipped", "unavailable"])
+async def test_concluded_agent_step_can_finish(env, agent):
+    repo, k8s, _ = env
+    repo.state["agent"] = {"status": agent, "options": {"env": "prod"}}
+    await module.finalize(repo, k8s, ID)
+    assert repo.state["phase"] == "succeeded"
 
 
 @pytest.mark.asyncio
@@ -189,7 +254,8 @@ async def test_optional_unselected_services_and_query_only_can_finish(env):
                                                ("Secret", "kubedoor-auth-init", "v1"),
                                                ("Secret", "kubedoor-setup-auth", "v1"),
                                                ("Secret", "kubedoor-setup-config", "v1"),
-                                               ("RoleBinding", "kubedoor-setup", "rbac.authorization.k8s.io/v1")])
+                                               ("RoleBinding", "kubedoor-setup", "rbac.authorization.k8s.io/v1"),
+                                               INSTALLER, CLUSTER_BINDING])
 async def test_foreign_resources_are_not_removed(env, kind, name, version):
     repo, k8s, events = env
     path = resource_path(owned(kind, name, version))
@@ -199,6 +265,53 @@ async def test_foreign_resources_are_not_removed(env, kind, name, version):
     assert path in k8s.objects
     assert repo.state["phase"] == "finalizing"
     assert ("save", "succeeded") not in events
+    if kind in ("ServiceAccount", "ClusterRoleBinding"):
+        # 归属不符时安装账号和安装服务的 RoleBinding 都原样保留
+        assert path_of(*INSTALLER) in k8s.objects
+        assert ("delete", "kubedoor-setup") not in events
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("present", [(), (INSTALLER,)])
+async def test_revoke_skips_missing_grant_and_removes_unbound_account(env, present):
+    # 从未授予（旧版本引导），或授予失败 / 上次收尾已删掉绑定：都不阻断收尾
+    repo, k8s, events = env
+    for item in (INSTALLER, CLUSTER_BINDING):
+        if item not in present:
+            k8s.objects.pop(path_of(*item))
+    await module.finalize(repo, k8s, ID)
+    assert repo.state["phase"] == "succeeded"
+    assert path_of(*INSTALLER) not in k8s.objects
+    assert (("token", "kubedoor-agent-installer") in events) is bool(present)
+    assert ("delete", "kubedoor-agent-installer-kubedoor") not in events
+
+
+@pytest.mark.asyncio
+async def test_bootstrap_without_agent_installer_marker_never_touches_accounts(env):
+    # 旧版本脚本引导、新版本安装服务：没有账号也没有对应权限，收尾照常完成
+    repo, k8s, events = env
+    k8s.rules = [rule for rule in k8s.rules if not any(name.startswith("serviceaccounts") for name in rule["resources"])]
+    for item in (INSTALLER, CLUSTER_BINDING):
+        k8s.objects.pop(path_of(*item))
+    k8s.objects[path_of("ConfigMap", "kubedoor-setup-state", "v1")]["data"] = {}
+    await module.finalize(repo, k8s, ID)
+    assert repo.state["phase"] == "succeeded"
+    assert not any("serviceaccounts" in path for _, path in k8s.calls)
+
+
+@pytest.mark.asyncio
+async def test_revoke_failure_keeps_account_and_installer_access_for_retry(env):
+    repo, k8s, events = env
+    k8s.fail_delete = "kubedoor-agent-installer-kubedoor"
+    with pytest.raises(SetupError):
+        await module.finalize(repo, k8s, ID)
+    # 绑定删不掉时不删账号（否则以后同名账号重建会继承绑定），也不撤销安装服务的权限
+    assert path_of(*INSTALLER) in k8s.objects and path_of(*CLUSTER_BINDING) in k8s.objects
+    assert ("delete", "kubedoor-setup") not in events
+    k8s.fail_delete = None
+    await module.finalize(repo, k8s, ID)
+    assert repo.state["phase"] == "succeeded"
+    assert path_of(*INSTALLER) not in k8s.objects and path_of(*CLUSTER_BINDING) not in k8s.objects
 
 
 @pytest.mark.asyncio
@@ -249,7 +362,8 @@ async def test_concurrent_installation_replacement_is_not_marked_success(env):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize('name', ['kubedoor-setup', 'kubedoor-setup-config', 'kubedoor-setup-auth'])
+@pytest.mark.parametrize('name', ['kubedoor-setup', 'kubedoor-setup-config', 'kubedoor-setup-auth',
+                                  'kubedoor-agent-installer-kubedoor', 'kubedoor-agent-installer'])
 async def test_accepted_delete_is_not_completed_cleanup(env, name):
     repo, k8s, events = env
     k8s.defer_delete = name

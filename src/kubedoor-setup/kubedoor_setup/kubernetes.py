@@ -25,8 +25,29 @@ RESOURCES = {
     ('batch/v1', 'CronJob'): ('cronjobs', True),
     ('rbac.authorization.k8s.io/v1', 'Role'): ('roles', True),
     ('rbac.authorization.k8s.io/v1', 'RoleBinding'): ('rolebindings', True),
+    ('rbac.authorization.k8s.io/v1', 'ClusterRoleBinding'): ('clusterrolebindings', False),
 }
 OWNER = 'setup.kubedoor.io/installation-id'
+RBAC = 'rbac.authorization.k8s.io/v1'
+# 在本集群安装 Agent 用的专用账号：引导时绑定 cluster-admin，安装服务平时不持有它，
+# 只在用户选择安装 Agent 时签发短期令牌，收尾时先删绑定再删账号。
+AGENT_INSTALLER = 'kubedoor-agent-installer'
+
+
+def agent_installer_binding(namespace):
+    """集群级绑定的名称带命名空间，同一集群的多套安装互不覆盖。"""
+    return AGENT_INSTALLER + '-' + namespace
+
+
+async def service_account_token(k8s, namespace, name, seconds):
+    """用 TokenRequest 给 ServiceAccount 签发短期令牌；令牌只留在内存里，不写入状态和日志。"""
+    path = '/api/v1/namespaces/' + quote(namespace, safe='') + '/serviceaccounts/' + quote(name, safe='') + '/token'
+    result = await k8s.request('POST', path, body={
+        'apiVersion': 'authentication.k8s.io/v1', 'kind': 'TokenRequest', 'spec': {'expirationSeconds': seconds}})
+    token = (result or {}).get('status', {}).get('token')
+    if not isinstance(token, str) or not token.strip():
+        raise SetupError('未能为 Agent 安装账号签发临时令牌', 503)
+    return token.strip()
 
 
 def resource_path(resource):
@@ -104,11 +125,14 @@ class Kubernetes:
     async def __aexit__(self, *args):
         await self.close()
 
-    async def request(self, method, path, *, body=None, params=None, missing_ok=False, apply=False):
+    async def request(self, method, path, *, body=None, params=None, missing_ok=False, apply=False, token=None):
         if not path.startswith('/') or path.startswith('//'):
             raise SetupError('Kubernetes 请求路径无效')
-        # Projected tokens rotate; reread per request rather than cache the first token.
-        token = self.token_path.read_text().strip()
+        if token is None:
+            # Projected tokens rotate; reread per request rather than cache the first token.
+            token = self.token_path.read_text().strip()
+        elif not token:
+            raise SetupError('临时令牌为空，拒绝发送请求', 503)
         headers = {'Authorization': 'Bearer ' + token}
         if body is not None:
             headers['Content-Type'] = 'application/apply-patch+yaml' if apply else 'application/json'
@@ -136,8 +160,8 @@ class Kubernetes:
         except (ValueError, UnicodeError):
             raise SetupError('Kubernetes 返回了无效响应', 502) from None
 
-    async def get(self, obj):
-        return await self.request('GET', resource_path(obj), missing_ok=True)
+    async def get(self, obj, token=None):
+        return await self.request('GET', resource_path(obj), missing_ok=True, token=token)
 
     async def apply(self, obj, dry_run=False):
         return await self.request('PATCH', resource_path(obj), body=obj, apply=True,
@@ -146,9 +170,9 @@ class Kubernetes:
     async def replace(self, obj):
         return await self.request('PUT', resource_path(obj), body=obj)
 
-    async def delete(self, obj):
+    async def delete(self, obj, token=None):
         return await self.request('DELETE', resource_path(obj), missing_ok=True,
-                                  body={'propagationPolicy': 'Background'})
+                                  body={'propagationPolicy': 'Background'}, token=token)
 
     async def create(self, obj):
         return await self.request('POST', resource_path(obj).rsplit('/', 1)[0], body=obj)
@@ -164,7 +188,7 @@ class Kubernetes:
             if len(result) > 10000:
                 raise SetupError('安装范围内资源过多，无法完成检测')
 
-    async def allowed(self, kind, verb, name=None, version='v1'):
+    async def allowed(self, kind, verb, name=None, version='v1', token=None):
         plural, namespaced = RESOURCES[version, kind]
         attrs = {'group': '' if version == 'v1' else version.split('/')[0], 'resource': plural, 'verb': verb}
         if namespaced:
@@ -173,5 +197,5 @@ class Kubernetes:
             attrs['name'] = name
         result = await self.request('POST', '/apis/authorization.k8s.io/v1/selfsubjectaccessreviews', body={
             'apiVersion': 'authorization.k8s.io/v1', 'kind': 'SelfSubjectAccessReview',
-            'spec': {'resourceAttributes': attrs}})
+            'spec': {'resourceAttributes': attrs}}, token=token)
         return result.get('status', {}).get('allowed') is True

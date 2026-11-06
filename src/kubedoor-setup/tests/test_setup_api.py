@@ -10,14 +10,18 @@ from aiohttp import CookieJar
 from aiohttp.test_utils import TestClient, TestServer
 
 from kubedoor_setup.api import SetupAPI, create_app
-from kubedoor_setup.config import default_private, ensure_secrets, final_config, metrics_config, postgres_config
+from kubedoor_setup.config import default_private, ensure_secrets, final_config, metrics_config, postgres_config, public_config
 from kubedoor_setup.errors import SetupError
 from kubedoor_setup.repository import Repository, new_state, public_marker
 
 KEY = '42' * 32
 ID = '85c38b85-749a-4630-bb21-0b7f7e024430'
 PG = {'host': 'pg.example.com', 'port': 5432, 'database': 'kubedoor', 'user': 'kubedoor', 'password': 'super-secret-pg', 'sslmode': 'prefer'}
-VM = {'type': 'Victoria-Metrics-Single', 'url': 'https://vm.example.com/prefix', 'user': 'monit', 'password': 'super-secret-vm', 'tag_key': 'origin_prometheus'}
+VM = {'type': 'Victoria-Metrics-Single', 'scheme': 'https', 'host': 'vm.example.com', 'tenant': '0', 'user': 'monit', 'password': 'super-secret-vm',
+      'read_url': 'https://monit:super-secret-vm@vm.example.com:8428',
+      'write_url': 'https://monit:super-secret-vm@vm.example.com:8428/api/v1/write', 'tag_key': 'origin_prometheus'}
+MASKED_VM = {**VM, 'password': '', 'read_url': 'https://monit:******@vm.example.com:8428',
+             'write_url': 'https://monit:******@vm.example.com:8428/api/v1/write'}
 FINAL = {'admin': {'username': 'kubedoor', 'password': 'robust-admin-secret'}, 'public_url': 'https://kd.example.com', 'components': {'grafana': True, 'vmalert': True, 'alertmanager': True}}
 
 
@@ -175,6 +179,14 @@ async def test_saved_password_preserved_and_stale_revision_rejected():
         assert state['phase'] == 'ready'
         assert state['config']['admin']['has_password'] is True
         assert 'robust-admin-secret' not in json.dumps(state)
+        assert state['config']['metrics']['read_url'] == MASKED_VM['read_url']
+        assert state['config']['metrics']['has_password'] is True
+        assert 'super-secret-vm' not in json.dumps(state)
+        response = await client.post('/setup-api/check/metrics', json={'revision': state['revision'], 'metrics': MASKED_VM})
+        assert response.status == 200
+        state = (await response.json())['data']
+        saved = (await repo.load_private())['config']['metrics']
+        assert (saved['read_url'], saved['write_url'], saved['password']) == (VM['read_url'], VM['write_url'], VM['password'])
         response = await client.post('/setup-api/check/postgres', json={'revision': 0, 'postgres': PG})
         assert response.status == 409
         response = await client.post('/setup-api/check/postgres', json={'revision': state['revision'], 'postgres': {**PG, 'password': ''}})
@@ -358,19 +370,92 @@ async def test_missing_finalizer_job_given_creation_grace_period():
     assert (await repo.load())['phase'] == 'failed'
 
 
-@pytest.mark.parametrize('url', ['http://localhost:8428', 'http://127.0.0.1', 'http://169.254.169.254', 'https://user:password@vm.example.com', 'https://vm.example.com?q=secret', 'file:///etc/passwd'])
-def test_metrics_rejects_unsafe_or_ambiguous_urls(url):
+@pytest.mark.parametrize('url', ['http://localhost:8428', 'http://127.0.0.1', 'http://169.254.169.254', 'https://vm.example.com?q=secret',
+                                 'https://vm.example.com#top', 'https://vm.example.com:99999', 'file:///etc/passwd', 'https://:pw@vm.example.com', ''])
+@pytest.mark.parametrize('field', ['read_url', 'write_url'])
+def test_metrics_rejects_unsafe_or_ambiguous_endpoints(field, url):
     with pytest.raises(SetupError):
-        metrics_config({**VM, 'url': url}, {})
+        metrics_config({**VM, field: url}, {})
+
+
+@pytest.mark.parametrize('host', ['vm.example.com:8428', 'http://vm.example.com', 'vm.example.com/prefix', 'monit@vm.example.com',
+                                  'localhost', '127.0.0.1', '[::1]', ''])
+def test_metrics_host_has_no_scheme_port_or_path(host):
+    with pytest.raises(SetupError):
+        metrics_config({**VM, 'host': host}, {})
+
+
+def test_metrics_config_keeps_victoriametrics_only_and_normalizes_inputs():
+    with pytest.raises(SetupError, match='VictoriaMetrics'):
+        metrics_config({**VM, 'type': 'Prometheus'}, {})
+    with pytest.raises(SetupError, match='协议'):
+        metrics_config({**VM, 'scheme': 'ftp'}, {})
+    assert metrics_config({**VM, 'host': '[fd00::1]'}, {})['host'] == 'fd00::1'
+    assert metrics_config({**VM, 'read_url': VM['read_url'] + '/'}, {})['read_url'] == VM['read_url']
+    cluster = {**VM, 'type': 'Victoria-Metrics-Cluster', 'read_url': 'https://monit:super-secret-vm@vm.example.com:8481/select/7:8/prometheus',
+               'write_url': 'https://monit:super-secret-vm@vm.example.com:8480/insert/7:8/prometheus'}
+    assert metrics_config({**cluster, 'tenant': '7:8'}, {})['tenant'] == '7:8'
+    assert metrics_config({**cluster, 'tenant': '007'}, {})['tenant'] == '7'
+    assert metrics_config({**cluster, 'tenant': 3}, {})['tenant'] == '3'
+    for tenant in ('abc', '-1', '4294967296', '1:2:3'):
+        with pytest.raises(SetupError, match='租户'):
+            metrics_config({**cluster, 'tenant': tenant}, {})
+
+
+def test_metrics_endpoint_credentials_are_encoded_and_masked_values_reuse_saved_password():
+    # 地址里直接写 @ 和 : 也能解析，统一保存成 URL 编码；/ 会被当成路径开头，必须先编码
+    raw = metrics_config({**VM, 'password': 'p@ss:w/rd', 'read_url': 'https://monit:p@ss:word@vm.example.com:8428',
+                          'write_url': 'https://monit:p%40ss%3Aw%2Frd@vm.example.com:8428/api/v1/write'}, {})
+    assert raw['read_url'] == 'https://monit:p%40ss%3Aword@vm.example.com:8428'
+    assert raw['write_url'] == 'https://monit:p%40ss%3Aw%2Frd@vm.example.com:8428/api/v1/write'
+    with pytest.raises(SetupError, match='格式不正确'):
+        metrics_config({**VM, 'read_url': 'https://monit:p@ss:w/rd@vm.example.com:8428'}, {})
+    saved = metrics_config(VM, {})
+    assert metrics_config(MASKED_VM, saved)['read_url'] == VM['read_url']
+    typed = metrics_config({**MASKED_VM, 'password': 'new-secret'}, saved)
+    assert typed['read_url'] == 'https://monit:new-secret@vm.example.com:8428' and typed['password'] == 'new-secret'
+    reader = metrics_config({**VM, 'read_url': 'https://reader:read-secret@vm.example.com:8428'}, {})
+    reused = metrics_config({**MASKED_VM, 'read_url': 'https://reader:******@vm.example.com:8428'}, reader)
+    assert reused['read_url'] == 'https://reader:read-secret@vm.example.com:8428'
+    with pytest.raises(SetupError, match='重新填写'):
+        metrics_config({**MASKED_VM, 'read_url': 'https://other:******@vm.example.com:8428'}, saved)
+    with pytest.raises(SetupError, match='请填写密码'):
+        metrics_config(MASKED_VM, {})
+
+
+def test_metrics_account_and_password_go_together_and_can_be_cleared():
+    plain = {**VM, 'user': '', 'password': '', 'read_url': 'https://vm.example.com:8428', 'write_url': 'https://vm.example.com:8428/api/v1/write'}
+    assert metrics_config(plain, metrics_config(VM, {}))['password'] == ''
+    with pytest.raises(SetupError, match='请填写账号'):
+        metrics_config({**plain, 'password': 'orphan'}, {})
+    with pytest.raises(SetupError, match='请填写密码'):
+        metrics_config({**VM, 'password': ''}, {})
+
+
+def test_public_config_masks_passwords_inside_metrics_endpoints():
+    private = default_private()['config']
+    private['metrics'] = metrics_config(VM, {})
+    public = public_config(private)
+    assert public['metrics']['read_url'] == MASKED_VM['read_url']
+    assert public['metrics']['write_url'] == MASKED_VM['write_url']
+    assert public['metrics']['has_password'] is True
+    assert 'super-secret-vm' not in json.dumps(public)
+    assert private['metrics']['read_url'] == VM['read_url']
 
 
 def test_config_handles_quotes_without_shell_and_vm_prefix_derivation():
     pg = postgres_config({**PG, 'password': "quotes' $(not-a-command) & $value"}, {})
     assert pg['password'] == "quotes' $(not-a-command) & $value"
-    assert metrics_config(VM, {})['write_url'] == 'https://vm.example.com/prefix/api/v1/write'
-    assert metrics_config({**VM, 'type': 'Prometheus', 'write_url': ''}, {})['write_url'] == ''
     with pytest.raises(SetupError):
         final_config({**FINAL, 'admin': {'username': 'kubedoor', 'password': 'password1'}}, {})
+
+
+def test_postgres_ssl_defaults_to_disable_but_keeps_explicit_choice():
+    assert default_private()['config']['postgres']['sslmode'] == 'disable'
+    without_mode = {key: value for key, value in PG.items() if key != 'sslmode'}
+    assert postgres_config(without_mode, {})['sslmode'] == 'disable'
+    assert postgres_config(without_mode, {'sslmode': 'require'})['sslmode'] == 'require'
+    assert postgres_config({**PG, 'sslmode': 'verify-full'}, {})['sslmode'] == 'verify-full'
 
 
 @pytest.mark.parametrize('phase', ['finalizing', 'succeeded'])

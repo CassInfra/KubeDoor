@@ -20,17 +20,25 @@ sh install.sh
 
 执行机器只需要 `sh`（或 `bash`）和已配置的 `kubectl`，不需要 Python、PyYAML、jq 或完整源码。脚本内嵌引导 YAML，通过 `kubectl apply` 创建资源。默认镜像面向 amd64 节点；其他架构需要使用对应架构的镜像。使用包含此安装能力的新版 setup、web、master、AI、alarm 镜像。
 
-命令使用当前 context，在 `kubedoor` 命名空间创建 Web、临时 setup 服务及必要权限。setup 在集群内生成安装密钥，脚本读取并打印密钥和访问地址。打开网页后按五步操作：
+命令使用当前 context，在 `kubedoor` 命名空间创建 Web、临时 setup 服务及必要权限。setup 在集群内生成安装密钥，脚本读取并打印密钥和访问地址。打开网页后按步骤操作：
 
 1. **环境检查**：核对目标集群及部署权限。
-2. **PostgreSQL**：填写地址、库名和凭据，检查真实连接、认证及建表权限。
-3. **时序库**：连接外部 VictoriaMetrics 或 Prometheus，检查查询，配置指标写入。
+2. **PostgreSQL**：填写地址、库名和凭据，检查真实连接、认证及建表权限；库不存在时用该账号自动创建。SSL 默认禁用，需要加密连接时改选 SSL 模式。
+3. **时序库**：选择 VictoriaMetrics 单机版或集群版，连接地址只填主机名或 IP（不填端口），自动生成可修改的远程读 / 写地址；检查查询，并查找带集群标签的数据。
 4. **基础设置**：设置 `kubedoor` 管理员密码，确认所有 Agent 能访问的 KubeDoor 地址。
 5. **自动安装**：分别显示 Web、控制服务、AI、告警和所选监控组件的实际状态。
+6. **安装 Agent（可选）**：控制端全部就绪后，可以直接在本集群安装 Agent（填写集群名称，选择是否安装 vmagent、kube-state-metrics、node-exporter），也可以跳过直接完成。本集群的 Agent 直连控制服务，vmagent 直接写入第 3 步的远程写地址。
 
-全部所选服务就绪、最终连接检查及安装收尾通过后，才会通知成功。数据库与时序库凭据存放在 K8S Secret 中。完成后临时安装服务停用并撤销部署权限；通过“接入第一个集群”进入 Agent 管理页，上传 kubeconfig 安装 Agent。
+全部所选服务就绪、最终连接检查及安装收尾通过后，才会通知成功。数据库与时序库凭据存放在 K8S Secret 中。完成后临时安装服务停用并撤销部署权限；其他集群通过“接入第一个集群”进入 Agent 管理页，上传 kubeconfig 安装 Agent。
 
-**集群指标标签名必须与现有监控一致。** 全新部署可以保持 `origin_prometheus`；例如指标为 `cluster="prod-k8s"`，向导填写 `cluster`，接入 Agent 时集群标识填写 `prod-k8s`。新装 Agent 自动继承该标签名。单机 VM 的写入地址自动生成，Agent 则通过 KubeDoor 的 `/agent/metrics/write` 入口上报。
+**第 6 步用到的临时集群权限**：Agent 需要集群管理员级别的权限，安装方也必须有同等权限。因此引导资源里额外创建专用账号 `kubedoor-agent-installer` 并绑定 `cluster-admin`；安装服务平时不持有它，只有在第 6 步选择安装 Agent 时才签发一小时有效的令牌使用。Agent 装完、选择不装、或 2 小时内没有选择（自动按不装处理），收尾时都会删除这个绑定和账号。
+
+- 创建这个绑定需要集群管理员权限；执行 `install.sh` 的身份没有该权限时只打印警告，控制端照常安装，第 6 步显示“未授予”，可在安装完成后到控制台上传 kubeconfig 接入本集群。
+- 用 `--setup-tag` 指定安装服务镜像时，版本不能低于脚本本身：旧版本的收尾任务不会删除这个绑定。
+- 全新安装发现同名绑定残留时会停止，确认不再使用后手工删除：`kubectl delete clusterrolebinding kubedoor-agent-installer-<命名空间>`。收尾前若有人手工删掉了 `kubedoor-agent-installer` 账号，绑定也需要这样手工删除。
+- 用 `--export` 导出的引导文件同样包含这个绑定，重新 `kubectl apply` 会重新授予该权限，只用于全新安装。
+
+**集群指标标签名必须与现有监控一致。** 全新部署可以保持 `origin_prometheus`；例如指标为 `cluster="prod-k8s"`，向导填写 `cluster`，接入 Agent 时集群标识填写 `prod-k8s`。新装 Agent 自动继承该标签名。远程读 / 写地址按类型自动生成（单机版 8428，集群版读 8481、写 8480），Agent 则通过 KubeDoor 的 `/agent/metrics/write` 入口上报。
 
 ## 镜像版本与启动参数
 
@@ -81,7 +89,7 @@ kubectl -n kubedoor get service kubedoor-web -o 'jsonpath={.spec.ports[0].nodePo
 
 ## 准备外部数据库
 
-已有 PostgreSQL、VictoriaMetrics 或 Prometheus 时直接使用，无需再部署。连接地址必须能从 K8S Pod 访问。
+已有 PostgreSQL、VictoriaMetrics 时直接使用，无需再部署（网页安装只支持 VictoriaMetrics 单机版或集群版）。连接地址必须能从 K8S Pod 访问。
 
 没有 PostgreSQL 时，从仓库根目录执行：
 
@@ -92,7 +100,7 @@ vi .env                     # 至少修改 PG_PASSWORD
 docker compose up -d
 ```
 
-不需要手动建表；控制服务和 AI 启动时会自动创建各自表结构。使用已有 PostgreSQL 时，准备一个专用数据库及其属主账号即可，不要求超级用户。
+不需要手动建表；控制服务和 AI 启动时会自动创建各自表结构。使用已有 PostgreSQL 时，准备一个专用账号即可，不要求超级用户：账号有建库权限（`CREATEDB`）时，安装向导检测时自动创建数据库；没有时由数据库管理员先执行 `CREATE DATABASE kubedoor OWNER kubedoor;`（库名、账号按实际填写）。
 
 没有时序库时，从仓库根目录执行：
 

@@ -14,9 +14,10 @@ from urllib.parse import quote
 import aiohttp
 import asyncpg
 
+from .agent import CONCLUDED, installer_available, new_agent_state, unavailable_agent_state
 from .errors import SetupError
 from .kubernetes import OWNER, resource, resource_path, workload_ready
-from .probes import check_postgres, check_metrics, pg_connect_options, reserve_database
+from .probes import check_postgres, check_metrics, metrics_query_base, pg_connect_options, reserve_database
 from .render import render_master, load_defaults
 from .repository import utcnow
 
@@ -29,6 +30,7 @@ SERVICES = (
     ('vmalert', '告警规则计算', 'vmalert'),
     ('alertmanager', '告警路由', 'alertmanager'),
 )
+FINALIZE_JOB = 'kubedoor-setup-finalize'
 
 
 def _varint(value):
@@ -58,6 +60,58 @@ def probe_write(installation_id, timestamp):
         count = (length.bit_length() + 7) // 8
         literal = bytes([(59 + count) << 2]) + length.to_bytes(count, 'little')
     return _varint(len(payload)) + literal + payload
+
+
+def finalizer_job(setup, namespace, installation_id):
+    """收尾 Job 沿用安装服务自己的镜像和拉取凭据。"""
+    pod = setup['spec']['template']['spec']
+    image = pod['containers'][0]['image']
+    return {
+        'apiVersion': 'batch/v1', 'kind': 'Job',
+        'metadata': {'name': FINALIZE_JOB, 'namespace': namespace,
+                     'annotations': {OWNER: installation_id}},
+        'spec': {'backoffLimit': 6, 'activeDeadlineSeconds': 600, 'template': {'metadata': {'labels': {'app': FINALIZE_JOB}},
+                 'spec': {'restartPolicy': 'OnFailure', 'serviceAccountName': 'kubedoor-setup-finalizer',
+                          'containers': [{'name': 'finalize', 'image': image,
+                                          'command': ['python', '-m', 'kubedoor_setup.finalize'],
+                                          'env': [{'name': 'SETUP_NAMESPACE', 'value': namespace},
+                                                  {'name': 'SETUP_INSTALLATION_ID', 'value': installation_id}]}],
+                          **({'imagePullSecrets': pod['imagePullSecrets']} if pod.get('imagePullSecrets') else {})}}}}
+
+
+async def start_finalizer(k8s, namespace, installation_id, update, *, poll_interval=3):
+    """创建收尾 Job。
+
+    update(**fields) 由调用方在锁内核对安装阶段后写入状态：不带参数时只刷新 updated_at，
+    phase='finalizing' 表示开始收尾；Job 创建失败时改为 failed 并重新抛出异常。
+    执行器（running 阶段）和 Agent 步骤（agent 阶段）共用这一段，各自传入自己的 update。
+    """
+    setup = await k8s.get(resource('Deployment', 'kubedoor-setup', namespace, 'apps/v1'))
+    if not setup:
+        raise SetupError('无法读取安装服务的收尾配置', 503)
+    job = finalizer_job(setup, namespace, installation_id)
+    existing = await k8s.get(job)
+    if existing:
+        if existing.get('metadata', {}).get('annotations', {}).get(OWNER) != installation_id:
+            raise SetupError(f"发现不属于本次安装的 Job {FINALIZE_JOB}，已停止以保护现有部署", 409)
+        failed = any(c.get('type') == 'Failed' and c.get('status') == 'True'
+                     for c in existing.get('status', {}).get('conditions', []))
+        if not failed:
+            raise SetupError('收尾任务已在运行，请等待其完成', 409)
+        await k8s.delete(job)
+        for _ in range(20):
+            if await k8s.get(job) is None:
+                break
+            await update()
+            await asyncio.sleep(poll_interval)
+        else:
+            raise SetupError('旧收尾任务尚未清理，请稍后重试', 409)
+    await update(phase='finalizing')
+    try:
+        await k8s.create(job)
+    except Exception:
+        await update(phase='failed', error='无法创建安装收尾任务，请检查 Job 部署权限后重试')
+        raise
 
 
 class InstallRunner:
@@ -188,8 +242,25 @@ class InstallRunner:
                     await self.fail('服务健康复查未通过，请重试')
                     return
                 await self.update(service=sid, status='ready', message='副本就绪及健康检查通过')
-            await self.update(check='cleanup', status='running', message='关闭初始化入口并回收临时安装权限')
-            await self.start_finalizer()
+            await self.conclude()
+
+    async def agent_installer_available(self):
+        return await installer_available(self.k8s)
+
+    async def conclude(self):
+        """最终检查已通过：能在本集群安装 Agent 时先询问用户，否则直接收尾。
+
+        之前已有结论（装好、部分成功或选择不装，例如收尾失败后重试）时不再询问。
+        """
+        state = await self.repo.load()
+        if (state.get('agent') or {}).get('status') not in CONCLUDED:
+            if await self.agent_installer_available():
+                await self.update(phase='agent', step=6, agent=new_agent_state(self.namespace, self.config),
+                                  check='cleanup', status='pending', message='等待选择是否在本集群安装 Agent')
+                return
+            await self.update(agent=unavailable_agent_state())
+        await self.update(check='cleanup', status='running', message='关闭初始化入口并回收临时安装权限')
+        await self.start_finalizer()
 
     @staticmethod
     def row(state, sid):
@@ -425,11 +496,10 @@ class InstallRunner:
                             raise SetupError(f'指标网关写入验证失败（HTTP {response.status}）', 502)
                 except (aiohttp.ClientError, asyncio.TimeoutError):
                     raise SetupError('指标网关写入连接失败', 502) from None
-            metrics = self.config['metrics']
-            auth = aiohttp.BasicAuth(metrics['user'], metrics.get('password', '')) if metrics.get('user') else None
+            query_base, auth = metrics_query_base(self.config['metrics'])
             deadline = time.monotonic() + self.health_timeout
             while time.monotonic() < deadline:
-                data = await self.request('GET', metrics['url'].rstrip('/') + '/api/v1/query',
+                data = await self.request('GET', query_base + '/api/v1/query',
                                           params={'query': 'kubedoor_install_probe{installation_id="' + self.installation_id + '"}'}, auth=auth)
                 if data.get('status') == 'success' and any(float(row.get('value', [0, 0])[1]) == timestamp
                     for row in data.get('data', {}).get('result', [])):
@@ -447,40 +517,5 @@ class InstallRunner:
         await self.update(phase='failed', error=message)
 
     async def start_finalizer(self):
-        setup = await self.k8s.get(resource('Deployment', 'kubedoor-setup', self.namespace, 'apps/v1'))
-        if not setup:
-            raise SetupError('无法读取安装服务的收尾配置', 503)
-        pod = setup['spec']['template']['spec']
-        image = pod['containers'][0]['image']
-        job = {
-            'apiVersion': 'batch/v1', 'kind': 'Job',
-            'metadata': {'name': 'kubedoor-setup-finalize', 'namespace': self.namespace,
-                         'annotations': {OWNER: self.installation_id}},
-            'spec': {'backoffLimit': 6, 'activeDeadlineSeconds': 600, 'template': {'metadata': {'labels': {'app': 'kubedoor-setup-finalize'}},
-                     'spec': {'restartPolicy': 'OnFailure', 'serviceAccountName': 'kubedoor-setup-finalizer',
-                              'containers': [{'name': 'finalize', 'image': image,
-                                              'command': ['python', '-m', 'kubedoor_setup.finalize'],
-                                              'env': [{'name': 'SETUP_NAMESPACE', 'value': self.namespace},
-                                                      {'name': 'SETUP_INSTALLATION_ID', 'value': self.installation_id}]}],
-                              **({'imagePullSecrets': pod['imagePullSecrets']} if pod.get('imagePullSecrets') else {})}}}}
-        existing = await self.k8s.get(job)
-        if existing:
-            self.assert_owned(existing)
-            failed = any(c.get('type') == 'Failed' and c.get('status') == 'True'
-                         for c in existing.get('status', {}).get('conditions', []))
-            if not failed:
-                raise SetupError('收尾任务已在运行，请等待其完成', 409)
-            await self.k8s.delete(job)
-            for _ in range(20):
-                if await self.k8s.get(job) is None:
-                    break
-                await self.update()
-                await asyncio.sleep(self.poll_interval)
-            else:
-                raise SetupError('旧收尾任务尚未清理，请稍后重试', 409)
-        await self.update(phase='finalizing')
-        try:
-            await self.k8s.create(job)
-        except Exception:
-            await self.update(phase='failed', error='无法创建安装收尾任务，请检查 Job 部署权限后重试')
-            raise
+        await start_finalizer(self.k8s, self.namespace, self.installation_id, self.update,
+                              poll_interval=self.poll_interval)

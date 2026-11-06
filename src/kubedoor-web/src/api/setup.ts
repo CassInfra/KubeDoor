@@ -5,6 +5,8 @@ export type SetupPhase =
   | "running"
   | "failed"
   | "interrupted"
+  /** 控制端已全部就绪，等待选择是否在本集群安装 Agent */
+  | "agent"
   | "finalizing"
   | "succeeded";
 
@@ -32,11 +34,17 @@ export interface PostgresSettings {
 }
 
 export interface MetricsSettings {
-  type: "Victoria-Metrics-Single" | "Victoria-Metrics-Cluster" | "Prometheus";
-  url: string;
+  type: "Victoria-Metrics-Single" | "Victoria-Metrics-Cluster";
+  /** 连接协议，连接地址只填主机名或 IP */
+  scheme: "http" | "https";
+  host: string;
+  /** 集群版租户 ID，默认 0 */
+  tenant: string;
   user: string;
   has_password?: boolean;
   password?: string;
+  /** 远程读 / 写地址，可带“账号:密码@”；已保存的密码显示为 ****** */
+  read_url: string;
   write_url: string;
   tag_key: string;
 }
@@ -55,6 +63,62 @@ export interface SetupConfig {
   components: SetupComponents;
 }
 
+/**
+ * 本集群 Agent 安装状态：choice / failed 等待选择（到 deadline 自动按不安装收尾），
+ * running 安装中，succeeded / partial 后自动收尾；unavailable 表示没有临时集群权限，不进入该阶段。
+ */
+export type SetupAgentStatus =
+  | "choice"
+  | "running"
+  | "failed"
+  | "succeeded"
+  | "partial"
+  | "skipped"
+  | "unavailable";
+
+/** kube-state-metrics / node-exporter：自动检测、安装或复用已有 */
+export type AgentComponentChoice = "auto" | "install" | "reuse";
+
+export interface SetupAgentOptions {
+  /** 集群名称，同时是指标集群标签（external_labels）的值 */
+  env: string;
+  aliases: string[];
+  namespace: string;
+  /** full：安装 vmagent 采集指标；agent：只安装 Agent */
+  mode: "full" | "agent";
+  ksm: AgentComponentChoice;
+  node_exporter: AgentComponentChoice;
+}
+
+export interface SetupAgentStep {
+  name: string;
+  /** pending / running / success / error / skipped */
+  status: string;
+  message?: string;
+}
+
+/** 公开完成标记只带 Agent 的结果 */
+export interface SetupAgentSummary {
+  status: SetupAgentStatus;
+  env?: string;
+  message?: string;
+}
+
+export interface SetupAgent extends SetupAgentSummary {
+  /** ISO 时间，choice / failed 时到点自动按不安装收尾 */
+  deadline?: string;
+  /** 表单预填值 */
+  defaults?: Partial<Omit<SetupAgentOptions, "aliases">>;
+  /** 最近一次提交的选项，重试时优先用它预填 */
+  options?: SetupAgentOptions;
+  /** master 安装任务的步骤 */
+  steps?: SetupAgentStep[];
+  /** 安装前检查（预检失败项也可能放在 steps 里） */
+  checks?: SetupCheck[];
+  error?: string;
+  task_id?: string;
+}
+
 export interface SetupMarker {
   phase: SetupPhase;
   installation_id?: string;
@@ -64,6 +128,7 @@ export interface SetupMarker {
   checks?: SetupCheck[];
   public_url?: string;
   error?: string;
+  agent?: SetupAgentSummary;
 }
 
 export interface SetupState extends SetupMarker {
@@ -82,6 +147,7 @@ export interface SetupState extends SetupMarker {
   error?: string;
   retryable?: boolean;
   target_locked?: boolean;
+  agent?: SetupAgent;
 }
 
 interface Envelope<T> {
@@ -205,5 +271,11 @@ export const setupApi = {
   start: (revision: number) =>
     request<SetupState>("/start", "POST", { revision }),
   retry: (revision: number) =>
-    request<SetupState>("/retry", "POST", { revision })
+    request<SetupState>("/retry", "POST", { revision }),
+  /** 用临时集群权限在本集群安装 Agent，受理后返回 202（agent.status 为 running） */
+  installAgent: (revision: number, options: SetupAgentOptions) =>
+    request<SetupState>("/agent/install", "POST", { revision, options }, 60000),
+  /** 不在本集群安装 Agent，直接进入收尾；安装服务会等收尾任务启动（最多十几秒）再返回 */
+  skipAgent: (revision: number) =>
+    request<SetupState>("/agent/skip", "POST", { revision }, 60000)
 };

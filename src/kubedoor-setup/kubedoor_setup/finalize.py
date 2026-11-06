@@ -6,8 +6,9 @@ import json
 import os
 
 from .errors import SetupError
-from .kubernetes import Kubernetes, resource, resource_path, OWNER
-from .repository import Repository, utcnow
+from .kubernetes import (AGENT_INSTALLER, OWNER, RBAC, Kubernetes, agent_installer_binding, resource, resource_path,
+                         service_account_token)
+from .repository import STATE_NAME, Repository, utcnow
 
 
 def verify_completion(state):
@@ -30,6 +31,10 @@ def verify_completion(state):
     if (type(write_required) is not bool or any(checks.get(name) != 'success' for name in required)
             or checks.get('write') != expected_write):
         raise SetupError('最终连接检查尚未通过，不能完成安装', 409)
+    agent = state.get('agent')
+    if agent is not None and (not isinstance(agent, dict)
+                              or agent.get('status') not in ('succeeded', 'partial', 'skipped', 'unavailable')):
+        raise SetupError('在本集群安装 Agent 的步骤尚未结束，不能完成安装', 409)
 
 
 async def delete_and_confirm(k8s, obj):
@@ -38,6 +43,44 @@ async def delete_and_confirm(k8s, obj):
         # The Job already retries with a bounded activeDeadlineSeconds. In particular,
         # a DELETE accepted for an object held by a finalizer is not completed cleanup.
         raise SetupError('临时安装资源仍在删除中，稍后自动重试', 503)
+
+
+async def _installer_get(k8s, obj, token):
+    """用安装账号自己的令牌读取：403 说明令牌已没有集群权限，绑定已删除或已不生效。"""
+    try:
+        return await k8s.get(obj, token=token)
+    except SetupError as error:
+        if error.status == 403:
+            return None
+        raise
+
+
+async def revoke_agent_installer(k8s, namespace, installation_id):
+    """撤销在本集群安装 Agent 的临时集群权限；没有授予或已撤销时跳过。
+
+    收尾账号没有集群级权限：先给安装账号签一个短期令牌，用它删除自己的 cluster-admin 绑定，
+    确认删除后再用收尾账号删除安装账号。必须先删绑定：否则以后同名账号重建会继承这个绑定。
+    """
+    # 引导脚本在状态 ConfigMap 里记下了本次是否授予；旧版本脚本既不创建账号，也不给收尾账号相应权限
+    marker = await k8s.get(resource('ConfigMap', STATE_NAME, namespace))
+    if ((marker or {}).get('data') or {}).get('agent-installer') != agent_installer_binding(namespace):
+        return
+    account = resource('ServiceAccount', AGENT_INSTALLER, namespace)
+    existing = await k8s.get(account)
+    if not existing:
+        return
+    if existing.get('metadata', {}).get('annotations', {}).get(OWNER) != installation_id:
+        raise SetupError('Agent 安装账号归属不匹配，拒绝清理', 409)
+    token = await service_account_token(k8s, namespace, AGENT_INSTALLER, 600)
+    binding = {'apiVersion': RBAC, 'kind': 'ClusterRoleBinding', 'metadata': {'name': agent_installer_binding(namespace)}}
+    current = await _installer_get(k8s, binding, token)
+    if current:
+        if current.get('metadata', {}).get('annotations', {}).get(OWNER) != installation_id:
+            raise SetupError('Agent 安装账号的集群权限绑定归属不匹配，拒绝清理', 409)
+        await k8s.delete(binding, token=token)
+        if await _installer_get(k8s, binding, token) is not None:
+            raise SetupError('临时集群权限仍在删除中，稍后自动重试', 503)
+    await delete_and_confirm(k8s, account)
 
 
 async def finalize(repo, k8s, installation_id):
@@ -78,6 +121,8 @@ async def finalize(repo, k8s, installation_id):
         await asyncio.sleep(3)
     else:
         raise SetupError('安装服务尚未停止，稍后自动重试', 503)
+    # 安装服务已停止，不会再签发令牌；先撤销集群级临时权限，再删除安装服务自己的 RoleBinding
+    await revoke_agent_installer(k8s, namespace, installation_id)
     binding = resource('RoleBinding', 'kubedoor-setup', namespace, 'rbac.authorization.k8s.io/v1')
     existing_binding = await k8s.get(binding)
     if existing_binding:

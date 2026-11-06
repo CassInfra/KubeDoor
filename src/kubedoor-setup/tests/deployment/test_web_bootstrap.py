@@ -3,6 +3,7 @@ import copy
 import json
 import re
 import sys
+from urllib.parse import quote
 
 import pytest
 import yaml
@@ -12,11 +13,18 @@ from bootstrap_shell import (ROOT, OWNER, INSTALL_ID, ShellCluster, documents, r
 sys.path.insert(0, str(ROOT / "src/kubedoor-setup"))
 from kubedoor_setup.render import load_defaults, render_master
 
+VM_PASSWORD = "vm-secret-'$&value"
+VM_AUTH = "monit:" + quote(VM_PASSWORD, safe="")
+
+
 @pytest.fixture
 def config():
     return {
         "postgres": {"host": "db.example.invalid", "port": 5432, "database": "kubedoor", "user": "kubedoor", "password": "pg-secret-'$&\\\nvalue", "sslmode": "require"},
-        "metrics": {"type": "Victoria-Metrics-Single", "url": "http://metrics.example.invalid:8428", "user": "monit", "password": "vm-secret-'$&value", "write_url": "", "tag_key": "cluster"},
+        "metrics": {"type": "Victoria-Metrics-Single", "scheme": "http", "host": "metrics.example.invalid", "tenant": "0",
+                    "user": "monit", "password": VM_PASSWORD,
+                    "read_url": f"http://{VM_AUTH}@metrics.example.invalid:8428",
+                    "write_url": f"http://{VM_AUTH}@metrics.example.invalid:8428/api/v1/write", "tag_key": "cluster"},
         "admin": {"username": "kubedoor", "password": "admin-secret-'$value"},
         "public_url": "https://kubedoor.example.invalid",
         "components": {"grafana": True, "vmalert": True, "alertmanager": True},
@@ -26,14 +34,49 @@ def config():
 SECRETS = {"internal_token": "a" * 64, "encryption_key": "b" * 64, "agent_password": "agent-secret", "grafana_password": "grafana-secret"}
 
 
-def test_prometheus_rule_profile_does_not_send_metricsql_only_functions(config):
-    config['metrics']['type'] = 'Prometheus'
-    objects = render_master(config, SECRETS, 'example')
-    rules = next(obj['data'] for obj in objects if obj['kind'] == 'ConfigMap' and obj['metadata']['name'] == 'vmalert-config')
-    combined = '\n'.join(rules.values())
-    assert 'increase_prometheus(' not in combined
-    assert 'changes_prometheus(' not in combined
-    assert 'increase(' in combined
+def rendered(config):
+    return {(obj["kind"], obj["metadata"]["name"]): obj for obj in render_master(config, SECRETS, "example")}
+
+
+def prometheus_source(resources):
+    grafana = resources["Secret", "kubedoor-grafana-datasources"]["stringData"]
+    sources = yaml.safe_load(grafana["datasources.yaml"])["datasources"]
+    return grafana, next(source for source in sources if source["type"] == "prometheus")
+
+
+def test_metrics_endpoints_render_verbatim_and_grafana_gets_split_credentials(config):
+    resources = rendered(config)
+    connection = resources["Secret", "kubedoor-connection"]["stringData"]
+    assert connection["PROM_URL"] == f"http://{VM_AUTH}@metrics.example.invalid:8428"
+    assert connection["METRICS_WRITE_URL"] == f"http://{VM_AUTH}@metrics.example.invalid:8428/api/v1/write"
+    assert resources["ConfigMap", "kubedoor-config"]["data"]["PROM_TYPE"] == "Victoria-Metrics-Single"
+    grafana, source = prometheus_source(resources)
+    assert (grafana["metrics-url"], grafana["metrics-user"], grafana["metrics-password"]) == ("http://metrics.example.invalid:8428", "monit", VM_PASSWORD)
+    assert source["basicAuth"] is True
+    args = resources["Deployment", "vmalert"]["spec"]["template"]["spec"]["containers"][0]["args"]
+    assert {"-datasource.url=$(PROM_URL)", "-remoteRead.url=$(PROM_URL)", "-remoteWrite.url=$(METRICS_WRITE_URL)"} <= set(args)
+
+
+def test_cluster_endpoints_without_account_render_without_basic_auth(config):
+    config["metrics"].update(type="Victoria-Metrics-Cluster", tenant="3", user="", password="",
+                             read_url="https://vm.example.invalid:8481/select/3/prometheus",
+                             write_url="https://vm.example.invalid:8480/insert/3/prometheus")
+    resources = rendered(config)
+    connection = resources["Secret", "kubedoor-connection"]["stringData"]
+    assert connection["PROM_URL"] == "https://vm.example.invalid:8481/select/3/prometheus"
+    assert connection["METRICS_WRITE_URL"] == "https://vm.example.invalid:8480/insert/3/prometheus"
+    assert resources["ConfigMap", "kubedoor-config"]["data"]["PROM_TYPE"] == "Victoria-Metrics-Cluster"
+    grafana, source = prometheus_source(resources)
+    assert (grafana["metrics-url"], grafana["metrics-user"], grafana["metrics-password"]) == (connection["PROM_URL"], "", "")
+    assert source["basicAuth"] is False
+
+
+def test_metrics_config_saved_by_previous_wizard_still_renders(config):
+    config["metrics"] = {"type": "Victoria-Metrics-Single", "url": "http://metrics.example.invalid:8428", "user": "monit",
+                         "password": VM_PASSWORD, "write_url": "", "tag_key": "cluster"}
+    connection = rendered(config)["Secret", "kubedoor-connection"]["stringData"]
+    assert connection["PROM_URL"] == f"http://{VM_AUTH}@metrics.example.invalid:8428"
+    assert connection["METRICS_WRITE_URL"] == f"http://{VM_AUTH}@metrics.example.invalid:8428/api/v1/write"
 
 
 def test_render_preserves_credentials_without_yaml_or_shell_injection(config):
@@ -86,10 +129,36 @@ def test_bootstrap_has_only_web_installer_and_scoped_permissions():
     resources = render_bootstrap("--namespace", "example", "--nodeport", "31234")
     workloads = [obj for obj in resources if obj["kind"] == "Deployment"]
     assert {obj["metadata"]["name"] for obj in workloads} == {"kubedoor-web", "kubedoor-setup"}
-    assert not any(obj["kind"] in ("ClusterRole", "ClusterRoleBinding") for obj in resources)
+    # 唯一的集群级资源：Agent 安装账号的 cluster-admin 绑定（第 6 步签发短期令牌使用，收尾时删除）
+    cluster_scoped = [obj for obj in resources if obj["kind"] in ("ClusterRole", "ClusterRoleBinding")]
+    assert len(cluster_scoped) == 1
+    binding = cluster_scoped[0]
+    assert binding["kind"] == "ClusterRoleBinding"
+    assert binding["metadata"]["name"] == "kubedoor-agent-installer-example"
+    assert "namespace" not in binding["metadata"]
+    assert binding["metadata"]["annotations"] == {OWNER: "preview"}
+    assert binding["metadata"]["labels"]["app.kubernetes.io/managed-by"] == "kubedoor-setup"
+    assert binding["roleRef"] == {"apiGroup": "rbac.authorization.k8s.io", "kind": "ClusterRole", "name": "cluster-admin"}
+    assert binding["subjects"] == [{"kind": "ServiceAccount", "name": "kubedoor-agent-installer", "namespace": "example"}]
+    accounts = {obj["metadata"]["name"] for obj in resources if obj["kind"] == "ServiceAccount"}
+    assert accounts == {"kubedoor-setup", "kubedoor-setup-finalizer", "kubedoor-agent-installer"}
+    # 两个 RoleBinding 只绑定各自同名账号，安装账号不跑任何工作负载
+    for obj in resources:
+        if obj["kind"] == "RoleBinding":
+            assert obj["subjects"] == [{"kind": "ServiceAccount", "name": obj["metadata"]["name"], "namespace": "example"}]
+    assert all(obj["spec"]["template"]["spec"].get("serviceAccountName") != "kubedoor-agent-installer" for obj in workloads)
     roles = {obj["metadata"]["name"]: obj["rules"] for obj in resources if obj["kind"] == "Role"}
     assert all("*" not in rule["verbs"] and "*" not in rule["resources"] for rules in roles.values() for rule in rules)
     assert all(rule.get("resourceNames") for rule in roles["kubedoor-setup-finalizer"])
+    # 只能给安装账号签发令牌；安装服务本身不能管理账号或 RBAC
+    token_rules = [rule for rules in roles.values() for rule in rules if "serviceaccounts/token" in rule["resources"]]
+    assert len(token_rules) == 2
+    assert all(rule["resources"] == ["serviceaccounts/token"] and rule["resourceNames"] == ["kubedoor-agent-installer"]
+               and rule["verbs"] == ["create"] for rule in token_rules)
+    setup_resources = {name for rule in roles["kubedoor-setup"] for name in rule["resources"]}
+    assert not {"serviceaccounts", "roles", "rolebindings", "clusterroles", "clusterrolebindings"} & setup_resources
+    account_rule = next(rule for rule in roles["kubedoor-setup-finalizer"] if rule["resources"] == ["serviceaccounts"])
+    assert account_rule["resourceNames"] == ["kubedoor-agent-installer"] and account_rule["verbs"] == ["get", "delete"]
     web = next(obj for obj in workloads if obj["metadata"]["name"] == "kubedoor-web")
     assert web["spec"]["template"]["spec"]["automountServiceAccountToken"] is False
     nginx = next(obj for obj in resources if obj["kind"] == "ConfigMap" and obj["metadata"]["name"] == "nginx-config")["data"]["nginx.conf"]
@@ -203,6 +272,102 @@ def test_completed_bootstrap_does_not_reopen_installer(tmp_path):
     assert not any("secret" in call["command"] for call in cluster.read()["calls"])
 
 
+AGENT_KEYS = ("serviceaccount/kubedoor-agent-installer", "clusterrolebinding/kubedoor-agent-installer-kubedoor")
+
+
+def test_fresh_bootstrap_grants_owned_agent_installer_with_marker(tmp_path):
+    cluster = ShellCluster(tmp_path)
+    result = cluster.run("--yes")
+    assert result.returncode == 0, result.stderr
+    assert "cluster-admin" in result.stdout
+    objects = cluster.read()["objects"]
+    for key in AGENT_KEYS:
+        assert objects[key]["metadata"]["annotations"][OWNER] == INSTALL_ID
+    binding = objects[AGENT_KEYS[1]]
+    assert binding["roleRef"]["name"] == "cluster-admin" and "namespace" not in binding["metadata"]
+    assert objects["configmap/kubedoor-setup-state"]["data"]["agent-installer"] == "kubedoor-agent-installer-kubedoor"
+    # 集群级绑定不带 -n 应用
+    applied = next(call for call in cluster.mutations() if any(obj["kind"] == "ClusterRoleBinding" for obj in call.get("objects", [])))
+    assert "-n" not in applied["args"]
+
+
+@pytest.mark.parametrize("phase", ["ready", "running", "failed", "interrupted", "agent", "succeeded"])
+def test_started_or_completed_installation_never_regrants_cluster_permission(tmp_path, phase):
+    import base64
+    objects = {
+        "configmap/kubedoor-setup-state": state_object(phase),
+        "secret/kubedoor-setup-auth": {
+            "kind": "Secret", "metadata": {"name": "kubedoor-setup-auth", "annotations": {OWNER: INSTALL_ID}},
+            "data": {"SETUP_KEY": base64.b64encode(b"original-key").decode()},
+        },
+    }
+    objects["configmap/kubedoor-setup-state"]["data"]["agent-installer"] = "kubedoor-agent-installer-kubedoor"
+    cluster = ShellCluster(tmp_path, objects)
+    result = cluster.run("--yes")
+    assert result.returncode == 0, result.stderr
+    assert cluster.mutations() == []
+    assert not any(key in cluster.read()["objects"] for key in AGENT_KEYS)
+
+
+def bootstrap_objects(*, marker=True, skip=()):
+    import base64
+    objects = {}
+    for obj in copy.deepcopy(render_bootstrap()):
+        metadata = obj["metadata"]
+        metadata.setdefault("annotations", {})[OWNER] = INSTALL_ID
+        key = obj["kind"].lower() + "/" + metadata["name"]
+        if key not in skip:
+            objects[key] = obj
+    if not marker:
+        objects["configmap/kubedoor-setup-state"]["data"].pop("agent-installer")
+    objects["secret/kubedoor-setup-auth"] = {
+        "kind": "Secret", "metadata": {"name": "kubedoor-setup-auth", "annotations": {OWNER: INSTALL_ID}},
+        "data": {"SETUP_KEY": base64.b64encode(b"draft-key").decode()},
+    }
+    return objects
+
+
+@pytest.mark.parametrize("marker", [True, False])
+def test_draft_rerun_restores_agent_installer_only_for_bootstraps_that_include_it(tmp_path, marker):
+    # 旧版本引导（没有标记）的安装服务不会撤销绑定，所以绝不补建
+    cluster = ShellCluster(tmp_path, bootstrap_objects(marker=marker, skip=AGENT_KEYS))
+    result = cluster.run("--yes", "--tag", "unrelated-new-tag")
+    assert result.returncode == 0, result.stderr
+    objects = cluster.read()["objects"]
+    assert all((key in objects) is marker for key in AGENT_KEYS)
+    assert len(cluster.mutations()) == (2 if marker else 0)
+
+
+def test_draft_rerun_refuses_foreign_cluster_binding(tmp_path):
+    objects = bootstrap_objects()
+    objects[AGENT_KEYS[1]]["metadata"]["annotations"][OWNER] = "another-installation"
+    cluster = ShellCluster(tmp_path, objects)
+    result = cluster.run("--yes")
+    assert result.returncode != 0
+    assert cluster.mutations() == []
+
+
+def test_fresh_bootstrap_refuses_leftover_cluster_binding(tmp_path):
+    # 状态 ConfigMap 已被删除但集群级绑定还在（例如删了命名空间重装）：不覆盖、不接管
+    leftover = {"kind": "ClusterRoleBinding", "metadata": {"name": "kubedoor-agent-installer-kubedoor", "annotations": {OWNER: "old"}}}
+    cluster = ShellCluster(tmp_path, {AGENT_KEYS[1]: leftover})
+    result = cluster.run("--yes")
+    assert result.returncode != 0
+    assert "ClusterRoleBinding:kubedoor-agent-installer-kubedoor" in result.stderr
+    assert cluster.mutations() == []
+
+
+def test_cluster_permission_grant_failure_does_not_block_bootstrap(tmp_path):
+    cluster = ShellCluster(tmp_path, apply_error=AGENT_KEYS[1])
+    result = cluster.run("--yes")
+    assert result.returncode == 0, result.stderr
+    assert "未能授予" in result.stderr
+    assert "test-install-key" in result.stdout
+    objects = cluster.read()["objects"]
+    assert AGENT_KEYS[1] not in objects
+    assert {"deployment/kubedoor-setup", "deployment/kubedoor-web", AGENT_KEYS[0]} <= set(objects)
+
+
 def test_ready_installation_keeps_existing_configuration(tmp_path):
     import base64
     objects = {
@@ -235,6 +400,9 @@ def test_yaml_preserves_numeric_namespace_and_boolean_like_secret_name(tmp_path)
     for obj in resources:
         if obj["kind"] == "Namespace":
             assert obj["metadata"]["name"] == "123"
+        elif obj["kind"] == "ClusterRoleBinding":
+            assert obj["metadata"]["name"] == "kubedoor-agent-installer-123"
+            assert obj["subjects"][0]["namespace"] == "123"
         else:
             assert obj["metadata"]["namespace"] == "123"
         if obj["kind"] == "Deployment":

@@ -10,9 +10,10 @@ import os
 from pathlib import Path
 import re
 import shlex
-from urllib.parse import quote, urlsplit, urlunsplit
 
 import yaml
+
+from .config import metrics_endpoints, url_credentials
 
 
 ROOT = Path(os.environ.get("KUBEDOOR_ROOT", Path(__file__).resolve().parents[3]))
@@ -41,15 +42,6 @@ def load_defaults(overrides: dict | None = None) -> dict:
                 values[match[1]] = parts[0] if parts else ""
     values.update(overrides or {})
     return values
-
-
-def credential_url(url: str, username: str = "", password: str = "") -> str:
-    if not url or not username:
-        return url
-    parsed = urlsplit(url)
-    authority = parsed.netloc.rsplit("@", 1)[-1]
-    return urlunsplit((parsed.scheme, f"{quote(username, safe='')}:{quote(password, safe='')}@{authority}",
-                       parsed.path, parsed.query, ""))
 
 
 def _agent_metadata(values: dict) -> tuple[dict, str]:
@@ -138,15 +130,12 @@ def render_master(config: dict, secrets: dict, namespace: str, defaults: dict | 
     components = {"grafana": True, "vmalert": True, "alertmanager": True, **config.get("components", {})}
     if components["vmalert"] and not components["alertmanager"]:
         raise ValueError("启用 vmalert 时需要同时启用 Alertmanager")
-    query = credential_url(metrics["url"], metrics.get("user", ""), metrics.get("password", ""))
-    write = metrics.get("write_url", "")
-    if metrics["type"] == "Victoria-Metrics-Single" and not write:
-        write = metrics["url"].rstrip("/") + "/api/v1/write"
-    write = credential_url(write, metrics.get("user", ""), metrics.get("password", ""))
+    # 远程读、写地址都带着账号密码，原样写进 PROM_URL / METRICS_WRITE_URL
+    query, write = metrics_endpoints(metrics)
     values.update({
         "NAMESPACE": namespace, "PG_HOST": pg["host"], "PG_PORT": str(pg.get("port", 5432)),
         "PG_USER": pg["user"], "PG_DATABASE": pg["database"], "PG_PASSWORD": pg["password"],
-        "PG_SSLMODE": pg.get("sslmode", "prefer"), "PROM_URL": query,
+        "PG_SSLMODE": pg.get("sslmode", "disable"), "PROM_URL": query,
         "PROM_TYPE": metrics["type"], "PROM_K8S_TAG_KEY": metrics["tag_key"],
         "METRICS_WRITE_URL": write, "KUBEDOOR_EXTURL": config["public_url"],
         "KUBEDOOR_INIT_ADMIN_PASSWORD": admin["password"],
@@ -177,18 +166,19 @@ def render_master(config: dict, secrets: dict, namespace: str, defaults: dict | 
     if components["grafana"]:
         grafana_config = by_name["ConfigMap", "kubedoor-grafana-config"]["data"]
         grafana_config.pop("datasources.yaml", None)
+        metrics_url, metrics_user, metrics_password = url_credentials(query)
         data_sources = {"apiVersion": 1, "datasources": [
             {"name": "KubeDoor-Postgres", "uid": "KubeDoor-Postgres", "type": "grafana-postgresql-datasource", "access": "proxy",
              "url": "$KUBEDOOR_PG_ADDRESS", "user": "$KUBEDOOR_PG_USER", "database": "$KUBEDOOR_PG_DATABASE", "isDefault": True,
              "secureJsonData": {"password": "$KUBEDOOR_PG_PASSWORD"},
-             "jsonData": {"sslmode": pg.get("sslmode", "prefer"), "postgresVersion": 1500, "maxOpenConns": 10, "maxIdleConns": 5, "connMaxLifetime": 14400}},
+             "jsonData": {"sslmode": pg.get("sslmode", "disable"), "postgresVersion": 1500, "maxOpenConns": 10, "maxIdleConns": 5, "connMaxLifetime": 14400}},
             {"name": "KubeDoor-Prometheus", "uid": "KubeDoor-Prometheus", "type": "prometheus", "access": "proxy",
-             "url": "$KUBEDOOR_METRICS_URL", "basicAuth": bool(metrics.get("user")), "basicAuthUser": "$KUBEDOOR_METRICS_USER",
+             "url": "$KUBEDOOR_METRICS_URL", "basicAuth": bool(metrics_user), "basicAuthUser": "$KUBEDOOR_METRICS_USER",
              "secureJsonData": {"basicAuthPassword": "$KUBEDOOR_METRICS_PASSWORD"}, "jsonData": {"httpMethod": "POST"}},
         ]}
         objects.append({"apiVersion": "v1", "kind": "Secret", "metadata": _meta("kubedoor-grafana-datasources", namespace), "type": "Opaque",
-                        "stringData": {"datasources.yaml": yaml.safe_dump(data_sources, allow_unicode=True), "metrics-password": metrics.get("password", ""),
-                                       "metrics-user": metrics.get("user", ""), "metrics-url": metrics["url"],
+                        "stringData": {"datasources.yaml": yaml.safe_dump(data_sources, allow_unicode=True), "metrics-password": metrics_password,
+                                       "metrics-user": metrics_user, "metrics-url": metrics_url,
                                        "pg-address": f"{('[' + pg['host'] + ']') if ':' in pg['host'] else pg['host']}:{pg.get('port', 5432)}"}})
         pod = by_name["Deployment", "kubedoor-dash"]["spec"]["template"]["spec"]
         pod["volumes"].append({"name": "grafana-datasources", "secret": {"secretName": "kubedoor-grafana-datasources"}})
@@ -222,10 +212,6 @@ def render_master(config: dict, secrets: dict, namespace: str, defaults: dict | 
     if values.get("WEB_NODEPORT"):
         by_name["Service", "kubedoor-web"]["spec"]["ports"][0]["nodePort"] = int(values["WEB_NODEPORT"])
     if components["vmalert"]:
-        if metrics["type"] == "Prometheus":
-            rules = by_name["ConfigMap", "vmalert-config"]["data"]
-            for name, contents in rules.items():
-                rules[name] = re.sub(r"\b(increase|changes)_prometheus\(", r"\1(", contents)
         pod = by_name["Deployment", "vmalert"]["spec"]["template"]["spec"]
         container = pod["containers"][0]
         container["envFrom"] = [{"secretRef": {"name": "kubedoor-connection"}}]

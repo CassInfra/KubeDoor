@@ -13,10 +13,13 @@ from urllib.parse import quote, urlsplit
 
 from aiohttp import web
 
+from .agent import (CONCLUDED, STALE_SECONDS, AgentInstall, agent_defaults, installer_available, mark_failed,
+                    mark_skipped, normalize_options, passed, start_attempt, write_url_of)
 from .config import ensure_secrets, final_config, metrics_config, postgres_config
 from .errors import SetupError
 from .probes import check_metrics, check_postgres
-from .repository import public_marker, public_state, utcnow
+from .repository import check_row, public_marker, public_state, utcnow
+from .runner import start_finalizer
 
 COOKIE = 'kubedoor_setup_session'
 SESSION_SECONDS = 8 * 3600
@@ -25,15 +28,6 @@ API = '/setup-api'
 
 def fingerprint(value):
     return hashlib.sha256(json.dumps(value, sort_keys=True, ensure_ascii=False, separators=(',', ':')).encode()).hexdigest()
-
-
-def check_row(state, name, status, message):
-    rows = state.setdefault('checks', [])
-    row = next((item for item in rows if item.get('name') == name), None)
-    if row is None:
-        row = {'id': name, 'name': name}
-        rows.append(row)
-    row.update(status=status, message=message, updated_at=utcnow())
 
 
 def check_revision(state, body):
@@ -67,13 +61,17 @@ async def body_of(request):
 
 
 class SetupAPI:
-    def __init__(self, repo, *, key, runner_factory=None, pg_probe=check_postgres, metrics_probe=check_metrics):
+    def __init__(self, repo, *, key, runner_factory=None, pg_probe=check_postgres, metrics_probe=check_metrics,
+                 agent_installer=AgentInstall):
         if not isinstance(key, str) or len(key) < 32:
             raise ValueError('SETUP_KEY must contain at least 32 characters')
         self.repo, self.key = repo, key.encode()
         self.runner_factory = runner_factory
         self.pg_probe, self.metrics_probe = pg_probe, metrics_probe
+        self.agent_installer = agent_installer
         self.task = None
+        self.agent_task = None
+        self.finalize_poll = 3
         self.recovery_task = None
         self.attempts = {}
 
@@ -155,6 +153,11 @@ class SetupAPI:
         except SetupError as error:
             state['environment_checked'] = False
             check_row(state, 'environment', 'error', error.message)
+        # 只是提示：没有临时集群权限也能安装控制端，完成后再上传 kubeconfig 接入本集群
+        if await installer_available(self.repo.k8s):
+            check_row(state, 'agent_installer', 'success', '已授予临时集群权限，仅在你选择在本集群安装 Agent 时使用，安装完成后撤销')
+        else:
+            check_row(state, 'agent_installer', 'warning', '未授予在本集群安装 Agent 的临时集群权限，安装完成后可在控制台上传 kubeconfig 接入本集群')
 
     async def probe(self, request):
         section = request.match_info['section']
@@ -261,9 +264,92 @@ class SetupAPI:
     async def _mark_failed(self, message, *, phase='failed', run_id):
         async with self.repo.lock:
             state = await self.repo.load()
-            if state.get('run_id') == run_id and state['phase'] not in ('succeeded', 'finalizing'):
+            if state.get('run_id') == run_id and state['phase'] not in ('succeeded', 'finalizing', 'agent'):
                 state.update(phase=phase, error=message)
                 await self.repo.save(state)
+
+    def agent_busy(self):
+        return bool(self.agent_task and not self.agent_task.done())
+
+    def agent_step(self, state, body):
+        """第 6 步接口的公共检查：阶段、修订号，返回可修改的 state['agent']。"""
+        if state['phase'] != 'agent':
+            raise SetupError('当前不在“在本集群安装 Agent”步骤', 409)
+        check_revision(state, body)
+        if not isinstance(state.get('agent'), dict):
+            state['agent'] = {}
+        return state['agent']
+
+    async def agent_install(self, request):
+        body = await body_of(request)
+        async with self.repo.lock:
+            state = await self.current(request)
+            agent = self.agent_step(state, body)
+            if agent.get('status') not in ('choice', 'failed') or self.agent_busy():
+                raise SetupError('Agent 安装已在进行或已经结束，请刷新页面查看状态', 409)
+            private = await self.repo.load_private(state)
+            defaults = agent.get('defaults') or agent_defaults(self.repo.namespace, private['config'])
+            options = normalize_options(body.get('options'), defaults, write_url_of(private['config']))
+            start_attempt(state, options, secrets.token_hex(16))
+            state['revision'] += 1
+            await self.repo.save(state)
+            self.agent_task = asyncio.create_task(self._agent_install(state['agent']['attempt']), name='kubedoor-agent-install')
+            return await self.state_response(state, private, status=202)
+
+    async def agent_skip(self, request):
+        body = await body_of(request)
+        async with self.repo.lock:
+            state = await self.current(request)
+            agent = self.agent_step(state, body)
+            if agent.get('status') == 'running':
+                raise SetupError('Agent 正在安装，请等待结果后再选择', 409)
+            if self.agent_busy():
+                raise SetupError('收尾任务正在启动，请刷新页面查看状态', 409)
+            if agent.get('status') not in CONCLUDED:
+                mark_skipped(state, '已跳过在本集群安装 Agent；安装完成后可在控制台上传 kubeconfig 接入本集群')
+                state['revision'] += 1
+                await self.repo.save(state)
+            task = self.agent_task = asyncio.create_task(self._agent_finish(), name='kubedoor-setup-agent-finish')
+        # 通常一两秒内即转为 finalizing；仍未转入时页面继续轮询，看门狗会重试
+        await asyncio.wait({task}, timeout=15)
+        return await self.state_response(await self.repo.load())
+
+    async def _agent_install(self, attempt, resume=False):
+        try:
+            concluded = await self.agent_installer(self.repo, attempt).run(resume=resume)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            # 结果没写进状态：看门狗稍后按记下的 master 任务继续跟踪，或标记失败
+            return
+        if concluded:
+            await self._agent_finish()
+
+    async def _agent_finish(self):
+        """第 6 步已有结论（装好、部分成功或不装）：创建收尾 Job。
+
+        失败时状态仍停在 agent 阶段，看门狗稍后重试；Job 创建失败时 start_finalizer 已转为 failed，可重试安装。
+        """
+        try:
+            state = await self.repo.load()
+            await start_finalizer(self.repo.k8s, self.repo.namespace, state['id'], self._agent_transition,
+                                  poll_interval=self.finalize_poll)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            pass
+
+    async def _agent_transition(self, **fields):
+        """start_finalizer 的状态写入：只有第 6 步已有结论时才从 agent 进入 finalizing。"""
+        async with self.repo.lock:
+            state = await self.repo.load()
+            expected = 'finalizing' if fields.get('phase') == 'failed' else 'agent'
+            if state['phase'] != expected or (state.get('agent') or {}).get('status') not in CONCLUDED:
+                raise SetupError('安装状态已改变，停止收尾', 409)
+            if fields.get('phase') == 'finalizing':
+                check_row(state, 'cleanup', 'running', '关闭初始化入口并回收临时安装权限')
+            state.update(fields)
+            await self.repo.save(state)
 
     async def startup(self, app):
         # A second Pod must not turn a healthy running controller into a retryable task.
@@ -300,14 +386,42 @@ class SetupAPI:
                     state.update(phase='failed', error=message)
                     check_row(state, 'cleanup', 'error', message)
                     await self.repo.save(state)
+            elif state['phase'] == 'agent':
+                await self._recover_agent(state, updated)
+
+    async def _recover_agent(self, state, updated):
+        """持有 repo.lock 时调用：到期自动按不安装收尾、重启后继续跟踪安装、补建收尾任务。"""
+        if self.agent_busy():
+            return
+        agent = state.get('agent') if isinstance(state.get('agent'), dict) else {}
+        status = agent.get('status')
+        stale = time.time() - updated > STALE_SECONDS
+        if status not in ('running',) + CONCLUDED and passed(agent.get('deadline')):
+            state['agent'] = agent
+            mark_skipped(state, '安装失败后 2 小时内没有重试，已按不在本集群安装 Agent 处理' if status == 'failed'
+                         else '超过 2 小时没有选择，已按不在本集群安装 Agent 处理')
+            state['revision'] += 1
+            await self.repo.save(state)
+            self.agent_task = asyncio.create_task(self._agent_finish(), name='kubedoor-setup-agent-finish')
+        elif status == 'running' and stale:
+            if agent.get('task_id') and agent.get('attempt'):
+                self.agent_task = asyncio.create_task(self._agent_install(agent['attempt'], resume=True),
+                                                      name='kubedoor-agent-install')
+            else:
+                mark_failed(state, '安装服务重启时本次 Agent 安装尚未开始，请重试或跳过')
+                await self.repo.save(state)
+        elif status in CONCLUDED and stale:
+            self.agent_task = asyncio.create_task(self._agent_finish(), name='kubedoor-setup-agent-finish')
 
     async def cleanup(self, app):
         if self.recovery_task:
             self.recovery_task.cancel()
             await asyncio.gather(self.recovery_task, return_exceptions=True)
-        if self.task and not self.task.done():
-            self.task.cancel()
-            await asyncio.gather(self.task, return_exceptions=True)
+        for task in (self.task, self.agent_task):
+            if task and not task.done():
+                # Agent 安装被打断时保持 running：重启后的看门狗按 master 任务 id 继续跟踪
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
 
 
 @web.middleware
@@ -335,9 +449,10 @@ async def safe_requests(request, handler):
     return response
 
 
-def create_app(repo, *, key=None, runner_factory=None, pg_probe=check_postgres, metrics_probe=check_metrics):
+def create_app(repo, *, key=None, runner_factory=None, pg_probe=check_postgres, metrics_probe=check_metrics,
+               agent_installer=AgentInstall):
     api = SetupAPI(repo, key=key or os.environ.get('SETUP_KEY', ''), runner_factory=runner_factory,
-                   pg_probe=pg_probe, metrics_probe=metrics_probe)
+                   pg_probe=pg_probe, metrics_probe=metrics_probe, agent_installer=agent_installer)
     app = web.Application(middlewares=[safe_requests], client_max_size=32 * 1024)
     app[web.AppKey('setup_api', SetupAPI)] = api
     async def health(request):
@@ -350,6 +465,8 @@ def create_app(repo, *, key=None, runner_factory=None, pg_probe=check_postgres, 
     app.router.add_put(API + '/configuration', api.configure)
     app.router.add_post(API + '/start', api.start)
     app.router.add_post(API + '/retry', api.start)
+    app.router.add_post(API + '/agent/install', api.agent_install)
+    app.router.add_post(API + '/agent/skip', api.agent_skip)
     app.on_startup.append(api.startup)
     app.on_cleanup.append(api.cleanup)
     return app

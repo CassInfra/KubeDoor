@@ -127,6 +127,17 @@ metadata:
     $OWNER: '$INSTALL_ID'
 EOF
 }
+cluster_metadata() {
+    yaml <<EOF
+metadata:
+  name: '$1'
+  labels:
+    app.kubernetes.io/part-of: kubedoor
+    app.kubernetes.io/managed-by: kubedoor-setup
+  annotations:
+    $OWNER: '$INSTALL_ID'
+EOF
+}
 pull_secret() {
     [ -z "$IMAGE_PULL_SECRET" ] || printf "      imagePullSecrets:\n        - name: '%s'\n" "$IMAGE_PULL_SECRET"
 }
@@ -147,6 +158,20 @@ roleRef:
   name: $2
 EOF
             ;;
+        ClusterRoleBinding)
+            # 只给专用安装账号：安装服务仅在网页第 6 步选择在本集群安装 Agent 时签发短期令牌使用，收尾时删除
+            printf 'apiVersion: rbac.authorization.k8s.io/v1\nkind: ClusterRoleBinding\n'; cluster_metadata "$2"
+            yaml <<EOF
+subjects:
+  - kind: ServiceAccount
+    name: $AGENT_INSTALLER
+    namespace: '$NAMESPACE'
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: cluster-admin
+EOF
+            ;;
         Role)
             printf 'apiVersion: rbac.authorization.k8s.io/v1\nkind: Role\n'; metadata "$2"
             if [ "$2" = kubedoor-setup ]; then
@@ -164,6 +189,10 @@ rules:
   - apiGroups: [batch]
     resources: [jobs, cronjobs]
     verbs: [get, list, watch, create, patch, update, delete]
+  - apiGroups: ['']
+    resources: [serviceaccounts/token]
+    resourceNames: [kubedoor-agent-installer]
+    verbs: [create]
 EOF
             else
                 yaml <<'EOF'
@@ -188,6 +217,14 @@ rules:
     resources: [secrets]
     resourceNames: [kubedoor-auth-init]
     verbs: [get, update]
+  - apiGroups: ['']
+    resources: [serviceaccounts]
+    resourceNames: [kubedoor-agent-installer]
+    verbs: [get, delete]
+  - apiGroups: ['']
+    resources: [serviceaccounts/token]
+    resourceNames: [kubedoor-agent-installer]
+    verbs: [create]
 EOF
             fi ;;
         ConfigMap)
@@ -331,17 +368,25 @@ EOF
   web-image: '$WEB_IMAGE'
   image-pull-secret: '$IMAGE_PULL_SECRET'
   requested-nodeport: '$WEB_NODEPORT'
+  agent-installer: '$AGENT_BINDING'
 EOF
 }
 namespace_yaml() { printf "apiVersion: v1\nkind: Namespace\nmetadata:\n  name: '%s'\n" "$NAMESPACE"; }
 RESOURCES='ServiceAccount:kubedoor-setup ServiceAccount:kubedoor-setup-finalizer Role:kubedoor-setup Role:kubedoor-setup-finalizer RoleBinding:kubedoor-setup RoleBinding:kubedoor-setup-finalizer ConfigMap:nginx-config Service:kubedoor-setup Service:kubedoor-web Deployment:kubedoor-setup Deployment:kubedoor-web'
+# 在本集群安装 Agent 的临时集群权限：专用账号绑定 cluster-admin，安装服务只在网页第 6 步选择安装时
+# 签发短期令牌使用，收尾时先删绑定再删账号。状态 ConfigMap 的 agent-installer 标记说明本次引导包含它们，
+# 旧版本引导的安装服务不会撤销，所以重新运行时没有标记就不补建。
+AGENT_INSTALLER=kubedoor-agent-installer
+AGENT_BINDING=$AGENT_INSTALLER-$NAMESPACE
+AGENT_RESOURCES="ServiceAccount:$AGENT_INSTALLER ClusterRoleBinding:$AGENT_BINDING"
 
 write_bundle() {
     if [ "$EXPORT_MODE" = true ]; then
         yaml <<EOF
 # KubeDoor 网页安装入口；仅用于全新安装，每套实例请单独导出。
 # kubectl apply -f <本文件>
-# 不要用此文件升级或恢复已有实例：重新 apply 会恢复 Web 引导配置。
+# 不要用此文件升级或恢复已有实例：重新 apply 会恢复 Web 引导配置，并重新授予下面的临时集群权限。
+# 包含 ClusterRoleBinding $AGENT_BINDING（cluster-admin）：仅在网页第 6 步选择在本集群安装 Agent 时使用，安装收尾时删除。
 # 如指定了 --context，请在 kubectl 命令中使用相同 context。
 # 等待入口就绪：
 # kubectl -n $NAMESPACE rollout status deployment/kubedoor-setup --timeout=240s
@@ -352,7 +397,7 @@ write_bundle() {
 EOF
     fi
     namespace_yaml; printf '%s\n' '---'; state_yaml
-    for item in $RESOURCES; do
+    for item in $RESOURCES $AGENT_RESOURCES; do
         printf '%s\n' '---'; resource_yaml "${item%%:*}" "${item#*:}"
     done
 }
@@ -408,10 +453,11 @@ read_phase() {
             *'"phase":"running"'*|*'"phase": "running"'*) PHASE=running ;;
             *'"phase":"failed"'*|*'"phase": "failed"'*) PHASE=failed ;;
             *'"phase":"interrupted"'*|*'"phase": "interrupted"'*) PHASE=interrupted ;;
+            *'"phase":"agent"'*|*'"phase": "agent"'*) PHASE=agent ;;
             *) die '无法识别已有安装状态，停止修改资源' ;;
         esac
     fi
-    case "$PHASE" in draft|ready|running|failed|interrupted|finalizing|succeeded) ;; *) die '已有安装状态无效' ;; esac
+    case "$PHASE" in draft|ready|running|failed|interrupted|agent|finalizing|succeeded) ;; *) die '已有安装状态无效' ;; esac
 }
 require_owner() {
     resource_id=$(field "$1" "$2" '{.metadata.annotations.setup\.kubedoor\.io/installation-id}')
@@ -483,7 +529,7 @@ state_uid=$(field ConfigMap kubedoor-setup-state '{.metadata.uid}')
 if [ -z "$state_uid" ]; then
     existing_uid=$(field Deployment kubedoor-master '{.metadata.uid}')
     [ -z "$existing_uid" ] || die '发现已有控制端，请使用原控制台，不能覆盖为全新安装'
-    for item in $RESOURCES Secret:kubedoor-setup-auth Secret:kubedoor-setup-config; do
+    for item in $RESOURCES $AGENT_RESOURCES Secret:kubedoor-setup-auth Secret:kubedoor-setup-config; do
         existing_uid=$(field "${item%%:*}" "${item#*:}" '{.metadata.uid}')
         [ -z "$existing_uid" ] || die "缺少安装状态但发现已有 $item，停止覆盖"
     done
@@ -494,6 +540,8 @@ if [ -z "$state_uid" ]; then
     context=$KUBE_CONTEXT
     [ -n "$context" ] || context=$(kc config current-context)
     printf '将在 context=%s、namespace=%s 启动网页安装。\n' "$context" "$NAMESPACE"
+    printf '另会创建账号 %s 并绑定 cluster-admin（%s），仅在网页第 6 步选择在本集群安装 Agent 时使用，安装收尾时删除。\n' \
+        "$AGENT_INSTALLER" "$AGENT_BINDING"
     if [ "$ASSUME_YES" != true ]; then
         printf '%s' '继续？[y/N] '
         answer=
@@ -533,8 +581,12 @@ case "$PHASE" in
             validate_image "$SETUP_IMAGE"; validate_image "$WEB_IMAGE"
             IMAGE_REPO=${SETUP_IMAGE%/kubedoor-setup:*}
         fi
+        # 本次引导包含 Agent 安装账号（有标记）时才核对和补建；旧版本引导的安装服务不会撤销它。
+        agent_marker=$(field ConfigMap kubedoor-setup-state '{.data.agent-installer}')
+        agent_items=
+        [ "$agent_marker" != "$AGENT_BINDING" ] || agent_items=$AGENT_RESOURCES
         # 先完整核对已有资源归属，再创建任何缺失资源。
-        for item in $RESOURCES; do
+        for item in $RESOURCES $agent_items; do
             existing_uid=$(field "${item%%:*}" "${item#*:}" '{.metadata.uid}')
             if [ -n "$existing_uid" ]; then
                 require_owner "${item%%:*}" "${item#*:}"
@@ -542,12 +594,18 @@ case "$PHASE" in
                 die '旧安装缺少原始镜像快照，不能用当前版本补建；请恢复原版本的引导资源'
             fi
         done
-        for item in $RESOURCES; do
+        for item in $RESOURCES $agent_items; do
             existing_uid=$(field "${item%%:*}" "${item#*:}" '{.metadata.uid}')
             if [ -z "$existing_uid" ]; then
                 read_phase
                 [ "$PHASE" = draft ] || die '安装已进入执行阶段，请刷新网页查看进度'
-                resource_yaml "${item%%:*}" "${item#*:}" | kc -n "$NAMESPACE" apply --server-side --field-manager=kubedoor-setup -f -
+                if [ "${item%%:*}" = ClusterRoleBinding ]; then
+                    # 授予失败（例如没有集群管理员权限）不阻断控制端安装：网页会提示未授予。
+                    resource_yaml "${item%%:*}" "${item#*:}" | kc apply --server-side --field-manager=kubedoor-setup -f - ||
+                        printf '%s\n' '警告：未能授予在本集群安装 Agent 所需的临时集群权限（需要集群管理员权限）；控制端仍可正常安装，完成后可在控制台上传 kubeconfig 接入本集群。' >&2
+                else
+                    resource_yaml "${item%%:*}" "${item#*:}" | kc -n "$NAMESPACE" apply --server-side --field-manager=kubedoor-setup -f -
+                fi
             fi
         done
         ;;

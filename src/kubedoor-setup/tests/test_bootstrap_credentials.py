@@ -45,7 +45,7 @@ async def test_initialized_key_loss_never_regenerates_even_before_configuration(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize('phase', ['draft', 'ready', 'running', 'failed', 'interrupted', 'finalizing', 'succeeded'])
+@pytest.mark.parametrize('phase', ['draft', 'ready', 'running', 'failed', 'interrupted', 'agent', 'finalizing', 'succeeded'])
 async def test_existing_installation_without_key_is_not_reopened(phase):
     k8s = FakeKubernetes()
     repo = Repository(k8s)
