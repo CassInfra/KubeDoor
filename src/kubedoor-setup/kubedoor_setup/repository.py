@@ -56,7 +56,9 @@ def public_state(state, private):
 def public_marker(state):
     result = {'phase': state['phase'], 'installation_id': state['id']}
     if state['phase'] in ('finalizing', 'succeeded'):
-        result.update(services=[{key: row[key] for key in ('id', 'name', 'status') if key in row} for row in state.get('services', [])],
+        # 公开标记无需登录即可读取：服务行只给名称、Deployment 名和状态，失败详情（镜像、Pod）不公开
+        result.update(services=[{key: row[key] for key in ('id', 'name', 'resource', 'status') if key in row}
+                                for row in state.get('services', [])],
                       checks=[{key: row[key] for key in ('id', 'name', 'status') if key in row} for row in state.get('checks', [])],
                       public_url=state.get('public_url', ''), completed_at=state.get('completed_at', ''))
         if state.get('error'):

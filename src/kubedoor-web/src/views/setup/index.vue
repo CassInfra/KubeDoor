@@ -1,5 +1,12 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, reactive, ref } from "vue";
+import {
+  computed,
+  nextTick,
+  onBeforeUnmount,
+  onMounted,
+  reactive,
+  ref
+} from "vue";
 import { useRouter } from "vue-router";
 import { ElMessage } from "element-plus";
 import {
@@ -19,7 +26,9 @@ import {
   agentOutcome,
   agentPayload,
   agentStepStatus,
+  autoPublicURL,
   checkTone,
+  connectionPassed,
   deadlineText,
   hasInstallation,
   isInstalling,
@@ -30,7 +39,6 @@ import {
   serviceStatus,
   SETUP_STEPS,
   stateStep,
-  suggestedPublicURL,
   toneMark,
   type AgentForm
 } from "./setup-utils";
@@ -66,7 +74,7 @@ const steps = [
   { title: "环境检查", note: "确认安装位置与环境" },
   { title: "PostgreSQL", note: "连接业务数据库" },
   { title: "时序数据库", note: "连接监控指标存储" },
-  { title: "基础设置", note: "管理员与访问地址" },
+  { title: "基础设置", note: "管理员与告警组件" },
   { title: "自动安装", note: "逐项检查，确认就绪" },
   { title: "安装 Agent", note: "可选：本集群接入" }
 ];
@@ -94,8 +102,12 @@ const metrics = reactive<MetricsSettings>({
 const basics = reactive({
   admin: { username: "kubedoor", password: "" },
   public_url: "",
-  components: { grafana: true, vmalert: true, alertmanager: true }
+  /** 告警组件 vmalert、Alertmanager、kubedoor-alarm 一起装或一起不装 */
+  alerting: true
 });
+/** 访问地址默认自动获取、只读，点「修改」后才能填写 */
+const editingURL = ref(false);
+const publicURLInput = ref<HTMLInputElement>();
 const agentForm = reactive<AgentForm>(agentFormFrom());
 const phase = computed(() => completedMarker.value?.phase || task.value?.phase);
 const completed = computed(() => phase.value === "succeeded");
@@ -173,14 +185,26 @@ const progress = computed(() =>
     ? (readyServices.value / chosenServices.value.length) * 100
     : 0
 );
-const agentWriteURL = computed(() => {
-  try {
-    return `${publicURL(basics.public_url)}/agent/metrics/write`;
-  } catch {
-    return "确认访问地址后自动生成";
-  }
-});
 const environment = computed(() => task.value?.environment);
+/** 自动获取的访问地址：当前打开安装页面的地址，端口转发打开时用 Web 的 NodePort 地址 */
+const autoURL = computed(() =>
+  autoPublicURL(window.location.origin, environment.value?.web_url)
+);
+const publicURLNote = computed(() => {
+  const url = basics.public_url.trim().replace(/\/+$/, "");
+  const usage =
+    "其他集群的 Agent 通过这个地址连接 KubeDoor、上报指标，告警通知里的链接也指向它。";
+  if (!url) return `未能自动获取，请填写访问地址。${usage}`;
+  if (editingURL.value)
+    return `${usage}请确认各目标集群都能访问，不能填写本机地址或临时端口转发地址。`;
+  const source =
+    url === autoPublicURL(window.location.origin)
+      ? "与当前打开安装页面的地址一致。"
+      : url === environment.value?.web_url
+        ? "自动使用 Web 的 NodePort 地址（节点 IP + NodePort）。"
+        : "";
+  return `${source}${usage}使用域名或负载均衡时点「修改」。`;
+});
 // 环境检查和本集群 Agent 安装权限都记在安装状态的 checks 里
 const environmentNames = ["environment", "agent_installer"];
 const environmentChecks = computed(
@@ -218,18 +242,23 @@ const installationTitle = computed(() => {
   if (["failed", "interrupted"].includes(phase.value)) return "安装尚未完成";
   return "正在安装各项服务";
 });
-const metricsCheck = computed(() =>
-  checks.value.find(check => (check.id || check.name) === "metrics")
+// 第 2、3 步测试连接和继续分两步：测试通过（含「请留意」）且之后没有改动表单，才能继续
+const connectionSection = computed(() =>
+  step.value === 2 ? "postgres" : step.value === 3 ? "metrics" : ""
 );
-// 检测通过但没查到集群标签数据：停在第 3 步展示说明，确认后再继续
-const metricsNotice = computed(
+const connectionReady = computed(
   () =>
-    step.value === 3 &&
-    !changedSteps.has(3) &&
-    metricsCheck.value?.status === "warning"
+    !!connectionSection.value &&
+    !changedSteps.has(step.value) &&
+    connectionPassed(checks.value, connectionSection.value)
 );
 const actionText = computed(() => {
-  if (busy.value) return step.value >= 5 ? "正在提交…" : "正在检查…";
+  if (busy.value)
+    return step.value >= 5
+      ? "正在提交…"
+      : connectionSection.value
+        ? "正在测试…"
+        : "正在检查…";
   if (agentPhase.value) {
     if (!agentChoosing.value)
       return agentStatus.value === "running"
@@ -241,10 +270,9 @@ const actionText = computed(() => {
   if (running.value)
     return phase.value === "finalizing" ? "正在完成安装…" : "等待全部服务就绪…";
   if (canRetry.value) return "重试失败服务并复查";
-  if (metricsNotice.value) return "继续";
-  return ["", "开始配置", "测试并继续", "测试并继续", "检查并继续", "开始安装"][
-    step.value
-  ];
+  if (connectionSection.value)
+    return connectionReady.value ? "继续" : "测试连接";
+  return ["", "开始配置", "", "", "检查并继续", "开始安装"][step.value];
 });
 const groupChecks = computed(() =>
   checks.value.filter(check => {
@@ -293,9 +321,9 @@ function applyState(next: SetupState, syncForms = false, restoreStep = false) {
     });
     hasAdminPassword.value = !!next.config.admin?.has_password;
     passwordConfirmation.value = "";
-    basics.public_url =
-      next.config.public_url || suggestedPublicURL(window.location.origin);
-    Object.assign(basics.components, next.config.components);
+    basics.public_url = next.config.public_url || autoURL.value;
+    basics.alerting = next.config.components?.alerting !== false;
+    editingURL.value = false;
   }
   fillAgentForm(next, previousAgent);
   if (restoreStep || (hasInstallation(next.phase) && !repairing.value))
@@ -513,17 +541,10 @@ async function advance() {
         throw new Error("环境检查尚未通过，请修复上述问题后刷新状态。");
       step.value = 2;
       highestStep.value = Math.max(highestStep.value, 2);
-    } else if (step.value === 2) {
-      const data = postgresPayload(postgres);
-      await perform(() => setupApi.postgres(task.value.revision, data), 3);
-    } else if (step.value === 3) {
-      if (metricsNotice.value) {
-        moveTo(4);
-        return;
-      }
-      const data = metricsPayload(metrics);
-      await perform(() => setupApi.metrics(task.value.revision, data));
-      if (!error.value && !metricsNotice.value) moveTo(4);
+    } else if (connectionSection.value) {
+      // 测试通过后才继续；没测试、测试失败或之后改过表单时先测试
+      if (connectionReady.value) moveTo(step.value + 1);
+      else await testConnection();
     } else if (step.value === 4) {
       if (!basics.admin.password && !hasAdminPassword.value)
         throw new Error("请设置管理员密码。");
@@ -535,7 +556,7 @@ async function advance() {
           ...(basics.admin.password ? { password: basics.admin.password } : {})
         },
         public_url: publicURL(basics.public_url),
-        components: { ...basics.components }
+        components: { alerting: basics.alerting }
       };
       await perform(() => setupApi.configure(task.value.revision, data), 5);
     } else if (!executing.value) {
@@ -544,6 +565,33 @@ async function advance() {
   } catch (reason) {
     error.value = errorText(reason);
   }
+}
+
+/** 第 2、3 步「测试连接」：只检测并在本页显示结果，通过后再点「继续」进入下一步 */
+async function testConnection() {
+  if (locked.value || !task.value || !connectionSection.value) return;
+  try {
+    if (step.value === 2) {
+      const data = postgresPayload(postgres);
+      await perform(() => setupApi.postgres(task.value.revision, data));
+    } else {
+      const data = metricsPayload(metrics);
+      await perform(() => setupApi.metrics(task.value.revision, data));
+    }
+  } catch (reason) {
+    error.value = errorText(reason);
+  }
+}
+
+function editURL() {
+  editingURL.value = true;
+  nextTick(() => publicURLInput.value?.focus());
+}
+
+function resetURL() {
+  basics.public_url = autoURL.value;
+  editingURL.value = false;
+  edited();
 }
 
 /** 第 6 步：勾选时校验并在本集群安装 Agent；不勾选或选择跳过时直接完成安装 */
@@ -756,7 +804,7 @@ onBeforeUnmount(() => {
                     <li>kubedoor-ai</li>
                     <li
                       class="arch-more"
-                      title="kubedoor-alarm、指标网关、Grafana、vmalert、Alertmanager"
+                      title="Grafana 看板、指标网关，以及可选的告警组件 kubedoor-alarm、vmalert、Alertmanager"
                     >
                       ···
                     </li>
@@ -779,8 +827,10 @@ onBeforeUnmount(() => {
               </div>
               <p class="arch-note">
                 本次安装 <b>kubedoor-master 控制端</b>：Web 入口、控制服务、AI
-                助手、告警服务、指标网关，以及第 4 步选择的
-                Grafana、vmalert、Alertmanager。<b>kubedoor-agent</b>
+                助手、Grafana 监控看板、指标网关，以及第 4
+                步选择的告警组件（vmalert、Alertmanager、kubedoor-alarm）。<b
+                  >kubedoor-agent</b
+                >
                 每个 K8S 集群装一个，主动连接控制端：本集群可以在第 6
                 步直接安装，其他集群在安装完成后从控制台接入。
               </p>
@@ -896,9 +946,9 @@ onBeforeUnmount(() => {
                 </div>
               </fieldset>
               <div class="setup-callout">
-                <b>下一步会自动验证</b>
+                <b>点击“测试连接”验证</b>
                 <p>
-                  网络连接、账号认证、数据库访问和建表权限；数据库不存在时用该账号自动创建。正式初始化在最后点击“开始安装”时执行。
+                  网络连接、账号认证、数据库访问和建表权限；数据库不存在时用该账号自动创建。测试通过后点“继续”，正式初始化在最后点击“开始安装”时执行。
                 </p>
               </div>
             </template>
@@ -1046,16 +1096,16 @@ onBeforeUnmount(() => {
                 </div>
               </fieldset>
               <div class="setup-callout teal">
-                <b>检测时会查找带这个标签的数据</b>
+                <b>测试连接时会查找带这个标签的数据</b>
                 <p>
-                  已有完整监控应能查到带该标签的数据；新部署的时序库查不到是正常的，可以继续。写入链路在安装时验证。
+                  已有完整监控应能查到带该标签的数据；新部署的时序库查不到是正常的，结果显示“请留意”，可以继续。写入链路在安装时验证。
                 </p>
               </div>
             </template>
             <template v-else-if="step === 4">
               <h2>完成基础设置</h2>
               <p class="subtitle">
-                设置管理员密码，以及各集群访问 KubeDoor 的统一入口。
+                设置管理员密码，确认访问地址，选择是否安装告警组件。
               </p>
               <fieldset :disabled="locked" @input="edited" @change="edited">
                 <div class="field-grid">
@@ -1098,48 +1148,84 @@ onBeforeUnmount(() => {
                     />
                   </div>
                   <div class="full">
-                    <label for="public-url">KubeDoor 访问地址</label
-                    ><input
-                      id="public-url"
-                      v-model="basics.public_url"
-                      type="url"
-                      placeholder="https://kubedoor.example.com"
-                    />
-                    <p class="field-hint">
-                      请确认各目标集群都能访问此地址。不能填写本机地址或临时端口转发地址。
-                    </p>
-                    <p class="derived-address">
-                      Agent 指标入口 <code>{{ agentWriteURL }}</code>
-                    </p>
+                    <label for="public-url">KubeDoor 访问地址</label>
+                    <div class="url-field">
+                      <input
+                        id="public-url"
+                        ref="publicURLInput"
+                        v-model="basics.public_url"
+                        type="url"
+                        :readonly="!editingURL && !!basics.public_url"
+                        placeholder="http://192.0.2.10:30080"
+                      />
+                      <button
+                        v-if="!editingURL && basics.public_url"
+                        class="secondary-button"
+                        type="button"
+                        @click="editURL"
+                      >
+                        修改</button
+                      ><button
+                        v-else-if="autoURL && basics.public_url !== autoURL"
+                        class="secondary-button"
+                        type="button"
+                        @click="resetURL"
+                      >
+                        恢复默认
+                      </button>
+                    </div>
+                    <p class="field-hint">{{ publicURLNote }}</p>
                   </div>
                 </div>
-                <details class="advanced">
-                  <summary>安装组件</summary>
-                  <p class="field-hint">
-                    Web、控制服务、AI
-                    助手和告警服务自动安装。以下组件按需选择，选中后也必须通过检查才会完成安装。
-                  </p>
-                  <div class="component-options">
-                    <label
-                      ><input
-                        v-model="basics.components.grafana"
-                        :disabled="task?.target_locked"
-                        type="checkbox"
-                      />Grafana 监控看板</label
-                    ><label
-                      ><input
-                        v-model="basics.components.vmalert"
-                        :disabled="task?.target_locked"
-                        type="checkbox"
-                      />vmalert 告警规则计算</label
-                    ><label
-                      ><input
-                        v-model="basics.components.alertmanager"
-                        :disabled="task?.target_locked"
-                        type="checkbox"
-                      />Alertmanager 告警路由</label
+                <details class="advanced alerting">
+                  <summary>
+                    安装告警组件<span
+                      class="summary-state"
+                      :class="{ off: !basics.alerting }"
+                      >{{ basics.alerting ? "安装" : "不安装" }}</span
                     >
+                  </summary>
+                  <div
+                    class="alert-flow"
+                    :class="{ off: !basics.alerting }"
+                    role="img"
+                    aria-label="告警链路：vmalert 从 VictoriaMetrics 读取指标并计算告警规则，告警交给 alertmanager 分组路由，再由 kubedoor-alarm 记录并发送通知"
+                  >
+                    <div class="flow-node external">
+                      <b>VictoriaMetrics</b><small>数据源</small>
+                    </div>
+                    <div class="arch-link back" aria-hidden="true" />
+                    <div class="flow-node">
+                      <b>vmalert</b><small>告警规则</small>
+                    </div>
+                    <div class="arch-link" aria-hidden="true" />
+                    <div class="flow-node">
+                      <b>alertmanager</b><small>告警路由</small>
+                    </div>
+                    <div class="arch-link" aria-hidden="true" />
+                    <div class="flow-node">
+                      <b>kubedoor-alarm</b><small>告警通知</small>
+                    </div>
                   </div>
+                  <label class="switch-row"
+                    ><b>是否安装</b
+                    ><input
+                      v-model="basics.alerting"
+                      type="checkbox"
+                      role="switch"
+                      :disabled="task?.target_locked"
+                    /><span class="switch-track" aria-hidden="true" /><span
+                      class="switch-state"
+                      >{{ basics.alerting ? "开启" : "关闭" }}</span
+                    ></label
+                  >
+                  <p class="field-hint">
+                    {{
+                      basics.alerting
+                        ? "开启：安装 vmalert、Alertmanager 和 kubedoor-alarm，按告警规则检查指标并发送告警通知。"
+                        : "关闭：三个组件都不安装，不会产生指标告警。"
+                    }}K8S 事件告警由控制服务直接发送，不受这里影响。
+                  </p>
                 </details>
               </fieldset>
               <div class="setup-callout">
@@ -1180,16 +1266,12 @@ onBeforeUnmount(() => {
                   <dd>{{ basics.admin.username }}</dd>
                 </div>
                 <div>
-                  <dt>可选组件</dt>
+                  <dt>告警组件</dt>
                   <dd>
                     {{
-                      [
-                        basics.components.grafana && "Grafana",
-                        basics.components.vmalert && "vmalert",
-                        basics.components.alertmanager && "Alertmanager"
-                      ]
-                        .filter(Boolean)
-                        .join("、") || "未选择"
+                      basics.alerting
+                        ? "安装 vmalert、Alertmanager、kubedoor-alarm"
+                        : "不安装"
                     }}
                   </dd>
                 </div>
@@ -1461,7 +1543,14 @@ onBeforeUnmount(() => {
                   :data-service="service.id"
                   :data-status="service.status"
                 >
-                  <strong>{{ service.name }}</strong
+                  <strong
+                    >{{ service.name
+                    }}<code
+                      v-if="service.resource"
+                      class="service-resource"
+                      :title="`Deployment ${service.resource}`"
+                      >{{ service.resource }}</code
+                    ></strong
                   ><span class="status-badge">{{
                     serviceStatus[service.status] || service.status
                   }}</span>
@@ -1601,7 +1690,11 @@ onBeforeUnmount(() => {
                         ? "可以关闭页面，后台安装会继续。"
                         : executing
                           ? "服务就绪数量不代表最终检查已通过。"
-                          : "设置通过检查后会自动保存。"
+                          : connectionSection
+                            ? connectionReady
+                              ? "测试已通过，点“继续”进入下一步。"
+                              : "先测试连接，通过后再继续。"
+                            : "设置通过检查后会自动保存。"
                 }}
               </p>
               <div>
@@ -1635,6 +1728,14 @@ onBeforeUnmount(() => {
                   @click="goStep(step - 1)"
                 >
                   ← 上一步</button
+                ><button
+                  v-if="connectionReady && !executing"
+                  class="secondary-button"
+                  type="button"
+                  :disabled="locked"
+                  @click="testConnection"
+                >
+                  重新测试</button
                 ><button
                   v-if="
                     !completed &&
@@ -1983,23 +2084,140 @@ input[readonly] {
   font-size: 12px;
   cursor: pointer;
 }
-.advanced .field-grid,
-.component-options {
+.advanced .field-grid {
   margin-top: 16px;
 }
-.component-options {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 10px 18px;
+.summary-state {
+  margin-left: 8px;
+  padding: 1px 8px;
+  border-radius: 10px;
+  font-size: 10px;
+  background: #edf0ff;
+  color: var(--blue);
 }
-.component-options label {
+.summary-state.off {
+  background: #f0f3f8;
+  color: #7b899c;
+}
+.url-field {
   display: flex;
-  gap: 7px;
+  gap: 10px;
   align-items: center;
-  font-weight: 400;
 }
-.component-options input {
-  accent-color: var(--blue);
+.url-field input {
+  flex: 1;
+}
+.url-field .secondary-button {
+  flex-shrink: 0;
+}
+.alert-flow {
+  display: flex;
+  align-items: center;
+  margin-top: 16px;
+  padding: 18px 16px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: linear-gradient(135deg, #f6f8ff 0%, #f3faf7 100%);
+}
+.alert-flow .arch-link {
+  min-width: 24px;
+  margin: 0 8px;
+}
+.flow-node {
+  display: grid;
+  flex: 0 1 auto;
+  gap: 3px;
+  justify-items: center;
+  min-width: 0;
+  padding: 9px 11px;
+  text-align: center;
+  background: #fff;
+  border: 1px solid #c7d2fb;
+  border-radius: 10px;
+  box-shadow: 0 6px 16px rgb(66 99 237 / 10%);
+  transition: opacity 0.2s;
+}
+.flow-node b {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 11px;
+  font-weight: 600;
+  color: #3e5574;
+  overflow-wrap: anywhere;
+}
+.flow-node small {
+  font-size: 10px;
+  color: var(--muted);
+}
+/* 时序库是第 3 步连接的已有服务，不在本次安装范围 */
+.flow-node.external {
+  background: #fbfcfe;
+  border-style: dashed;
+  border-color: #cfd8e6;
+  box-shadow: none;
+}
+.alert-flow.off .flow-node:not(.external),
+.alert-flow.off .arch-link {
+  opacity: 0.35;
+}
+.switch-row {
+  position: relative;
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  margin: 16px 0 0;
+  font-weight: 400;
+  cursor: pointer;
+}
+.switch-row > b {
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--ink);
+}
+/* 原生复选框保留键盘操作和读屏，只把外观换成滑块 */
+.switch-row input {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: 0;
+  opacity: 0;
+}
+.switch-track {
+  position: relative;
+  flex-shrink: 0;
+  width: 40px;
+  height: 22px;
+  background: #cdd5e2;
+  border-radius: 11px;
+  transition: background 0.2s;
+}
+.switch-track::after {
+  position: absolute;
+  top: 3px;
+  left: 3px;
+  width: 16px;
+  height: 16px;
+  content: "";
+  background: #fff;
+  border-radius: 50%;
+  box-shadow: 0 1px 3px rgb(25 48 76 / 25%);
+  transition: transform 0.2s;
+}
+.switch-row input:checked + .switch-track {
+  background: var(--blue);
+}
+.switch-row input:checked + .switch-track::after {
+  transform: translateX(18px);
+}
+.switch-row input:focus-visible + .switch-track {
+  outline: 3px solid #95b7f3;
+  outline-offset: 3px;
+}
+.switch-row input:disabled + .switch-track {
+  opacity: 0.6;
+}
+.switch-state {
+  font-size: 12px;
+  color: var(--muted);
 }
 .setup-callout {
   background: #f1f5ff;
@@ -2053,17 +2271,6 @@ code {
   color: #5d7390;
   border-radius: 4px;
   padding: 2px 4px;
-}
-.derived-address {
-  display: flex;
-  align-items: flex-start;
-  gap: 10px;
-  font-size: 11px;
-  color: #8291a6;
-  margin: 10px 0 0;
-}
-.derived-address code {
-  flex: 1;
 }
 .arch {
   display: flex;
@@ -2392,6 +2599,19 @@ code {
   font-weight: 650;
   overflow-wrap: anywhere;
 }
+/* 服务对应的 Deployment 名，方便在集群里对照（kubectl get deploy） */
+.service-resource {
+  margin-left: 8px;
+  padding: 1px 6px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 11px;
+  font-weight: 400;
+  color: #3e5574;
+  vertical-align: 1px;
+  background: #f4f7ff;
+  border: 1px solid #e2e8fb;
+  border-radius: 5px;
+}
 .status-badge {
   font-size: 11px;
   padding: 2px 9px;
@@ -2463,6 +2683,22 @@ code {
   font-size: 10px;
   white-space: nowrap;
   color: #7e8fa4;
+}
+/* 检查结果：检查通过绿色、请留意橙色、失败红色，都加粗 */
+.checks-list li.success > b,
+.checks-list li.warning > b,
+.checks-list li.error > b {
+  font-size: 11px;
+  font-weight: 700;
+}
+.checks-list li.success > b {
+  color: #18a058;
+}
+.checks-list li.warning > b {
+  color: #e67e22;
+}
+.checks-list li.error > b {
+  color: #d03050;
 }
 .check-dot {
   display: grid;
@@ -2738,12 +2974,13 @@ code {
     grid-template-columns: 1fr;
     gap: 16px;
   }
-  .derived-address {
-    display: block;
+  .alert-flow {
+    flex-direction: column;
+    align-items: stretch;
   }
-  .derived-address code {
-    display: block;
-    margin-top: 5px;
+  .alert-flow .arch-link {
+    min-width: 0;
+    margin: 8px auto;
   }
   .label-card {
     padding: 14px;

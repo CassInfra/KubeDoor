@@ -21,6 +21,8 @@ export interface SetupCheck {
 
 export interface SetupService extends SetupCheck {
   id: string;
+  /** 对应的 Deployment 名，如 kubedoor-alarm */
+  resource?: string;
 }
 
 export interface PostgresSettings {
@@ -49,10 +51,9 @@ export interface MetricsSettings {
   tag_key: string;
 }
 
+/** Grafana 看板必装；告警组件 kubedoor-alarm、vmalert、Alertmanager 一起装或一起不装 */
 export interface SetupComponents {
-  grafana: boolean;
-  vmalert: boolean;
-  alertmanager: boolean;
+  alerting: boolean;
 }
 
 export interface SetupConfig {
@@ -140,6 +141,8 @@ export interface SetupState extends SetupMarker {
     namespace: string;
     server?: string;
     version?: string;
+    /** Web 的 NodePort 地址（安装服务所在节点 IP + NodePort），取不到时为空 */
+    web_url?: string;
     checks?: SetupCheck[];
   };
   services: SetupService[];

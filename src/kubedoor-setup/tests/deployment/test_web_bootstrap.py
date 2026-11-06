@@ -27,7 +27,7 @@ def config():
                     "write_url": f"http://{VM_AUTH}@metrics.example.invalid:8428/api/v1/write", "tag_key": "cluster"},
         "admin": {"username": "kubedoor", "password": "admin-secret-'$value"},
         "public_url": "https://kubedoor.example.invalid",
-        "components": {"grafana": True, "vmalert": True, "alertmanager": True},
+        "components": {"alerting": True},
     }
 
 
@@ -102,27 +102,50 @@ def test_render_preserves_credentials_without_yaml_or_shell_injection(config):
     assert 'Cache-Control "no-store"' in nginx
 
 
+def custom_alert_location(nginx):
+    start = nginx.index("location = /api/custom_alert {")
+    return nginx[start:nginx.index("}", start) + 1]
+
+
 def test_render_keeps_shared_defaults_and_excludes_unselected_components(config):
-    config["components"] = {"grafana": False, "vmalert": False, "alertmanager": False}
+    config["components"] = {"alerting": False}
     first = render_master(config, SECRETS, "example", {"ENABLE_MCP": "false", "TAG_MASTER": "version-test"})
     second = render_master(copy.deepcopy(config), dict(SECRETS), "example", {"ENABLE_MCP": "false", "TAG_MASTER": "version-test"})
     assert first == second
     objects = {(obj["kind"], obj["metadata"]["name"]): obj for obj in first}
-    assert ("Deployment", "kubedoor-dash") not in objects
-    assert ("Deployment", "vmalert") not in objects
-    assert ("Deployment", "alertmanager") not in objects
+    # Grafana 看板必装；告警组件一起不装
+    assert ("Deployment", "kubedoor-dash") in objects
+    for name in ("kubedoor-alarm", "vmalert", "alertmanager"):
+        assert ("Deployment", name) not in objects
+    assert ("ConfigMap", "alertmanager-config") not in objects
     nginx = objects["ConfigMap", "nginx-config"]["data"]["nginx.conf"]
-    assert "proxy_pass http://kubedoor-dash" not in nginx
+    assert "proxy_pass http://kubedoor-dash.example:3000;" in nginx
+    # 没有 kubedoor-alarm 时 nginx 不能引用它，否则解析不到上游起不来；自定义告警投递直接返回 503
+    assert "kubedoor-alarm.example" not in nginx
+    assert "BEGIN-ALARM" not in nginx
+    assert nginx.count("location = /api/custom_alert {") == 1
+    stub = custom_alert_location(nginx)
+    assert "return 503" in stub and "proxy_pass" not in stub
     assert "location ~ ^/(mcp|sse|messages)" not in nginx
     assert objects["Deployment", "kubedoor-master"]["spec"]["template"]["spec"]["containers"][0]["image"].endswith(":version-test")
     assert "__CONFIG_HASH" not in json.dumps(first)
     assert "__PROM_K8S_TAG_KEY__" not in json.dumps(first)
 
 
-def test_vmalert_requires_selected_alertmanager(config):
-    config["components"]["alertmanager"] = False
-    with pytest.raises(ValueError, match="Alertmanager"):
-        render_master(config, SECRETS, "example")
+def test_alerting_components_install_together_with_alarm_proxy(config):
+    objects = rendered(config)
+    for name in ("kubedoor-dash", "kubedoor-alarm", "vmalert", "alertmanager"):
+        assert ("Deployment", name) in objects
+    nginx = objects["ConfigMap", "nginx-config"]["data"]["nginx.conf"]
+    alert = custom_alert_location(nginx)
+    assert "auth_request /_kd_auth/alert;" in alert and "proxy_pass http://kubedoor-alarm.example:80;" in alert
+
+
+def test_selection_saved_by_previous_wizard_still_renders_grafana(config):
+    config["components"] = {"grafana": False, "vmalert": True, "alertmanager": True}
+    objects = rendered(config)
+    for name in ("kubedoor-dash", "kubedoor-alarm", "vmalert", "alertmanager"):
+        assert ("Deployment", name) in objects
 
 
 def test_bootstrap_has_only_web_installer_and_scoped_permissions():

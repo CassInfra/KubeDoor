@@ -13,8 +13,9 @@ from .repository import STATE_NAME, Repository, utcnow
 
 def verify_completion(state):
     """Require the complete chosen installation, never infer selection from a skipped result."""
-    mandatory = {'web', 'master', 'ai', 'alarm'}
-    known = mandatory | {'grafana', 'vmalert', 'alertmanager'}
+    # Grafana 看板必装；告警组件（kubedoor-alarm、vmalert、Alertmanager）可以不装
+    mandatory = {'web', 'master', 'ai', 'grafana'}
+    known = mandatory | {'alarm', 'vmalert', 'alertmanager'}
     rows = state.get('services', [])
     selection = state.get('selected_services')
     if (not isinstance(selection, list) or any(not isinstance(item, str) for item in selection)

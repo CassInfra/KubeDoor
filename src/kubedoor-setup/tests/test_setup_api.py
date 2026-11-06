@@ -10,7 +10,8 @@ from aiohttp import CookieJar
 from aiohttp.test_utils import TestClient, TestServer
 
 from kubedoor_setup.api import SetupAPI, create_app
-from kubedoor_setup.config import default_private, ensure_secrets, final_config, metrics_config, postgres_config, public_config
+from kubedoor_setup.config import (alerting_choice, default_private, ensure_secrets, final_config, metrics_config,
+                                   postgres_config, public_config, selected_components)
 from kubedoor_setup.errors import SetupError
 from kubedoor_setup.repository import Repository, new_state, public_marker
 
@@ -22,7 +23,7 @@ VM = {'type': 'Victoria-Metrics-Single', 'scheme': 'https', 'host': 'vm.example.
       'write_url': 'https://monit:super-secret-vm@vm.example.com:8428/api/v1/write', 'tag_key': 'origin_prometheus'}
 MASKED_VM = {**VM, 'password': '', 'read_url': 'https://monit:******@vm.example.com:8428',
              'write_url': 'https://monit:******@vm.example.com:8428/api/v1/write'}
-FINAL = {'admin': {'username': 'kubedoor', 'password': 'robust-admin-secret'}, 'public_url': 'https://kd.example.com', 'components': {'grafana': True, 'vmalert': True, 'alertmanager': True}}
+FINAL = {'admin': {'username': 'kubedoor', 'password': 'robust-admin-secret'}, 'public_url': 'https://kd.example.com', 'components': {'alerting': True}}
 
 
 class FakeKubernetes:
@@ -293,6 +294,102 @@ async def test_missing_environment_permission_blocks_start():
 
 
 @pytest.mark.asyncio
+async def test_alerting_switch_is_saved_and_validated():
+    client, repo = await make_client()
+    async with client:
+        state = await config_ready(client)
+        assert state['config']['components'] == {'alerting': True}
+        response = await client.put('/setup-api/configuration', json={
+            'revision': state['revision'], **FINAL, 'components': {'alerting': False}})
+        assert response.status == 200
+        saved = (await response.json())['data']
+        assert saved['config']['components'] == {'alerting': False}
+        assert (await repo.load_private(await repo.load()))['config']['components'] == {'alerting': False}
+        # 不再接受逐项选择 Grafana / vmalert / Alertmanager
+        for bad in ({'alerting': 'false'}, {'grafana': True, 'vmalert': True, 'alertmanager': True}, ['alerting']):
+            response = await client.put('/setup-api/configuration', json={
+                'revision': saved['revision'], **FINAL, 'components': bad})
+            assert response.status == 422
+
+
+@pytest.mark.asyncio
+async def test_started_install_keeps_alerting_choice_including_older_saved_selection():
+    client, repo = await make_client()
+    async with client:
+        await config_ready(client)
+        state = await repo.load()
+        state.update(phase='failed', target_locked=True)
+        private = await repo.load_private(state)
+        # 旧版向导逐项保存的选择：vmalert 和 Alertmanager 都选了就是安装告警组件
+        private['config']['components'] = {'grafana': True, 'vmalert': True, 'alertmanager': True}
+        await repo.write(state, private)
+        response = await client.put('/setup-api/configuration', json={
+            'revision': state['revision'], **FINAL, 'components': {'alerting': False}})
+        assert response.status == 409
+        response = await client.put('/setup-api/configuration', json={'revision': state['revision'], **FINAL})
+        assert response.status == 200
+        assert (await response.json())['data']['config']['components'] == {'alerting': True}
+
+
+def test_component_selection_keeps_grafana_and_ties_alerting_services():
+    assert selected_components({'alerting': False}) == {'grafana': True, 'alarm': False, 'vmalert': False, 'alertmanager': False}
+    assert selected_components({'alerting': True}) == {'grafana': True, 'alarm': True, 'vmalert': True, 'alertmanager': True}
+    assert selected_components(None) == selected_components({}) == selected_components({'alerting': True})
+    # 旧版逐项保存：Grafana 不再可选；vmalert、Alertmanager 都没选才是不装告警组件
+    assert selected_components({'grafana': False, 'vmalert': False, 'alertmanager': False})['grafana'] is True
+    assert alerting_choice({'grafana': True, 'vmalert': False, 'alertmanager': False}) is False
+    assert alerting_choice({'grafana': True, 'vmalert': False, 'alertmanager': True}) is True
+    assert public_config(default_private()['config'])['components'] == {'alerting': True}
+
+
+class ForbiddenPods(FakeKubernetes):
+    async def request(self, method, path, **kwargs):
+        if '/pods/' in path:
+            raise SetupError('安装权限不足或准入策略拒绝（HTTP 403）', 403)
+        return await super().request(method, path, **kwargs)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('k8s_class, host_ip, node_port, expected', [
+    (FakeKubernetes, '192.0.2.10', 30080, 'http://192.0.2.10:30080'),
+    (FakeKubernetes, 'fd00::10', 30080, 'http://[fd00::10]:30080'),
+    (FakeKubernetes, '', 30080, ''),
+    (FakeKubernetes, '192.0.2.10', None, ''),
+    (ForbiddenPods, '192.0.2.10', 30080, ''),
+])
+async def test_environment_reports_web_nodeport_address(monkeypatch, k8s_class, host_ip, node_port, expected):
+    monkeypatch.setenv('HOSTNAME', 'kubedoor-setup-abc')
+    k8s = k8s_class()
+    port = {'name': 'http', 'port': 80, **({'nodePort': node_port} if node_port else {})}
+    k8s.resources['/api/v1/namespaces/kubedoor/services/kubedoor-web'] = {'spec': {'type': 'NodePort', 'ports': [port]}}
+    k8s.resources['/api/v1/namespaces/kubedoor/pods/kubedoor-setup-abc'] = {'status': {'hostIP': host_ip}}
+    client, _ = await make_client(k8s=k8s)
+    async with client:
+        await authorize(client)
+        state = (await (await client.get('/setup-api/state')).json())['data']
+        assert state['environment']['web_url'] == expected
+        assert state['environment_checked'] is True
+
+
+@pytest.mark.asyncio
+async def test_environment_checked_by_older_installer_gets_web_address(monkeypatch):
+    monkeypatch.setenv('HOSTNAME', 'kubedoor-setup-abc')
+    k8s = FakeKubernetes()
+    k8s.resources['/api/v1/namespaces/kubedoor/services/kubedoor-web'] = {'spec': {'ports': [{'port': 80, 'nodePort': 31234}]}}
+    k8s.resources['/api/v1/namespaces/kubedoor/pods/kubedoor-setup-abc'] = {'status': {'hostIP': '192.0.2.10'}}
+    repo = Repository(k8s)
+    state = await repo.load()
+    state.update(environment_checked=True, environment={'namespace': 'kubedoor', 'server': k8s.server, 'version': 'v1.30.0'})
+    await repo.save(state)
+    client, _ = await make_client(k8s=k8s)
+    async with client:
+        await authorize(client)
+        data = (await (await client.get('/setup-api/state')).json())['data']
+        assert data['environment']['web_url'] == 'http://192.0.2.10:31234'
+        assert data['environment']['version'] == 'v1.30.0'
+
+
+@pytest.mark.asyncio
 async def test_compare_and_swap_does_not_mix_secrets_from_concurrent_edit():
     k8s = FakeKubernetes()
     a, b = Repository(k8s), Repository(k8s)
@@ -471,6 +568,25 @@ def test_public_marker_keeps_progress_without_private_draft(phase):
     assert marker['error'] == '收尾权限检查失败，将重试'
     assert 'private' not in json.dumps(marker)
     assert 'details omitted' not in json.dumps(marker)
+
+
+@pytest.mark.parametrize('phase', ['finalizing', 'succeeded'])
+def test_public_marker_names_deployments_but_keeps_failure_details_private(phase):
+    state = new_state(ID, 'kubedoor')
+    state.update(phase=phase, services=[
+        {'id': 'alarm', 'name': '告警服务', 'resource': 'kubedoor-alarm', 'status': 'ready',
+         'message': '本次部署副本及健康检查均已通过',
+         'details': ['期望镜像：registry.example.invalid/kubedoor-alarm:2.5.0', 'Pod kubedoor-alarm-abc：Running']},
+        {'id': 'grafana', 'name': 'Grafana 看板', 'status': 'ready'},
+    ])
+    marker = public_marker(state)
+    # 安装服务关闭后完成页也能显示 Deployment 名；旧状态没有 resource 时不补
+    assert marker['services'] == [
+        {'id': 'alarm', 'name': '告警服务', 'resource': 'kubedoor-alarm', 'status': 'ready'},
+        {'id': 'grafana', 'name': 'Grafana 看板', 'status': 'ready'},
+    ]
+    text = json.dumps(marker, ensure_ascii=False)
+    assert 'registry.example.invalid' not in text and 'Pod kubedoor-alarm-abc' not in text
 
 
 @pytest.mark.asyncio

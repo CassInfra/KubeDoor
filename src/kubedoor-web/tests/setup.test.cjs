@@ -9,12 +9,14 @@ const { transformSync } = Module.createRequire(
   require.resolve("vite/package.json")
 )("esbuild");
 
+/** vue 传 true 只编译脚本；传对象时作为 compileScript 选项（如 inlineTemplate 连模板一起编译） */
 function compile(filename, overrides = {}, vue = false) {
   const target = path.resolve(__dirname, filename);
   let source = fs.readFileSync(target, "utf8");
   if (vue)
     source = compileScript(parse(source, { filename: target }).descriptor, {
-      id: "setup-test"
+      id: "setup-test",
+      ...(typeof vue === "object" ? vue : {})
     }).content;
   const instance = new Module(target, module);
   instance.paths = Module._nodeModulePaths(path.dirname(target));
@@ -58,7 +60,7 @@ const state = (extra = {}) => ({
     },
     admin: { username: "kubedoor", has_password: true },
     public_url: "https://kubedoor.example.com",
-    components: { grafana: true, vmalert: true, alertmanager: true }
+    components: { alerting: true }
   },
   environment: {
     namespace: "kubedoor",
@@ -294,9 +296,22 @@ async function settle() {
   }
 }
 
+/** 安装服务检测通过后会把检查项写进状态 */
+function withCheck(value, name, status = "success") {
+  return {
+    ...value,
+    checks: [
+      ...(value.checks || []).filter(check => check.name !== name),
+      { id: name, name, status, message: `${name} 检测结果` }
+    ]
+  };
+}
+
 async function harness(t, options = {}) {
   const originalWindow = global.window;
-  global.window = { location: { origin: "https://kubedoor.example.com" } };
+  global.window = {
+    location: { origin: options.origin || "https://kubedoor.example.com" }
+  };
   const calls = {
     postgres: [],
     metrics: [],
@@ -322,17 +337,27 @@ async function harness(t, options = {}) {
     },
     postgres: async (revision, data) => {
       calls.postgres.push({ revision, data });
-      current = {
-        ...current,
-        revision: revision + 1,
-        step: 3,
-        config: { ...current.config, postgres: { ...data, has_password: true } }
-      };
+      current = withCheck(
+        {
+          ...current,
+          revision: revision + 1,
+          step: 3,
+          config: {
+            ...current.config,
+            postgres: { ...data, has_password: true }
+          }
+        },
+        "postgres"
+      );
       return current;
     },
     metrics: async (revision, data) => {
       calls.metrics.push({ revision, data });
-      return { ...current, step: 4 };
+      current = withCheck(
+        { ...current, revision: revision + 1, step: 4 },
+        "metrics"
+      );
+      return current;
     },
     configure: async (revision, data) => {
       calls.configure.push({ revision, data });
@@ -414,24 +439,49 @@ async function harness(t, options = {}) {
   };
 }
 
-test("通过实际检测响应才前进，并清空输入密码和采用新版本", async t => {
+test("测试连接通过后停在本步显示结果，点继续才进入下一步", async t => {
   const { vm, calls } = await harness(t);
   vm.postgres.password = "new-password";
+  assert.equal(vm.actionText, "测试连接");
   await vm.advance();
-  assert.equal(vm.step, 3);
+  assert.equal(vm.step, 2);
   assert.equal(vm.task.revision, 2);
   assert.equal(vm.postgres.password, "");
   assert.equal(calls.postgres[0].data.password, "new-password");
   assert.equal(calls.postgres[0].revision, 1);
+  assert.equal(vm.connectionReady, true);
+  assert.equal(vm.actionText, "继续");
+  assert.equal(vm.groupChecks[0].status, "success");
+  assert.equal(utils.serviceStatus[vm.groupChecks[0].status], "检查通过");
+  await vm.advance();
+  assert.equal(vm.step, 3);
+  assert.equal(calls.postgres.length, 1);
 });
 
-test("检测失败留在原步骤，获取新版本，保留待修正输入", async t => {
+test("测试通过后改动表单要重新测试，也可以点重新测试再测一次", async t => {
+  const { vm, calls } = await harness(t);
+  await vm.advance();
+  assert.equal(vm.connectionReady, true);
+  vm.edited();
+  assert.equal(vm.connectionReady, false);
+  assert.equal(vm.actionText, "测试连接");
+  assert.deepEqual(vm.groupChecks, []);
+  await vm.advance();
+  assert.equal(calls.postgres.length, 2);
+  assert.equal(vm.step, 2);
+  assert.equal(vm.actionText, "继续");
+  await vm.testConnection();
+  assert.equal(calls.postgres.length, 3);
+  assert.equal(vm.step, 2);
+});
+
+test("检测失败留在原步骤显示失败结果，获取新版本，保留待修正输入", async t => {
   let current = state();
   const { vm } = await harness(t, {
     api: {
       state: async () => current,
       postgres: async () => {
-        current = state({ revision: 2 });
+        current = withCheck(state({ revision: 2 }), "postgres", "error");
         throw new client.SetupRequestError("数据库密码验证失败", 422);
       }
     }
@@ -442,42 +492,59 @@ test("检测失败留在原步骤，获取新版本，保留待修正输入", as
   assert.equal(vm.task.revision, 2);
   assert.equal(vm.postgres.password, "typed-password");
   assert.match(vm.error, /密码验证失败/);
+  assert.equal(vm.groupChecks[0].status, "error");
+  assert.equal(vm.connectionReady, false);
+  assert.equal(vm.actionText, "测试连接");
 });
 
-test("时序库检测没查到集群标签时停在第 3 步，确认后再继续", async t => {
-  const sent = [];
-  let current = state({ step: 3 });
-  const { vm } = await harness(t, {
-    initial: current,
-    api: {
-      state: async () => current,
-      metrics: async (revision, data) => {
-        sent.push(data);
-        current = state({
-          step: 4,
-          revision: revision + 1,
-          checks: [
-            {
-              id: "metrics",
-              name: "metrics",
-              status: "warning",
-              message: "最近一天没有查到带 origin_prometheus 标签的数据"
-            }
-          ]
-        });
-        return current;
+for (const status of ["success", "warning"])
+  test(`时序库测试结果为 ${status} 时停在第 3 步显示结果，点继续进入下一步`, async t => {
+    const sent = [];
+    let current = state({ step: 3 });
+    const { vm } = await harness(t, {
+      initial: current,
+      api: {
+        state: async () => current,
+        metrics: async (revision, data) => {
+          sent.push(data);
+          current = withCheck(
+            state({ step: 4, revision: revision + 1 }),
+            "metrics",
+            status
+          );
+          return current;
+        }
       }
-    }
+    });
+    assert.equal(vm.step, 3);
+    assert.equal(vm.actionText, "测试连接");
+    await vm.advance();
+    assert.equal(sent.length, 1);
+    assert.equal(vm.step, 3);
+    assert.equal(vm.actionText, "继续");
+    assert.equal(vm.groupChecks[0].status, status);
+    await vm.advance();
+    assert.equal(vm.step, 4);
+    assert.equal(sent.length, 1);
   });
-  assert.equal(vm.step, 3);
-  await vm.advance();
-  assert.equal(sent.length, 1);
-  assert.equal(vm.step, 3);
-  assert.equal(vm.actionText, "继续");
-  assert.equal(vm.groupChecks[0].status, "warning");
-  await vm.advance();
-  assert.equal(vm.step, 4);
-  assert.equal(sent.length, 1);
+
+test("连接测试只有检查通过和请留意才算通过", () => {
+  const check = status => [{ id: "metrics", name: "metrics", status }];
+  for (const status of ["success", "warning"])
+    assert.equal(utils.connectionPassed(check(status), "metrics"), true);
+  for (const status of ["error", "running", "pending"])
+    assert.equal(utils.connectionPassed(check(status), "metrics"), false);
+  assert.equal(utils.connectionPassed(check("success"), "postgres"), false);
+  // 安装执行器写的检查项只有 name
+  assert.equal(
+    utils.connectionPassed(
+      [{ name: "postgres", status: "success" }],
+      "postgres"
+    ),
+    true
+  );
+  assert.equal(utils.connectionPassed(undefined, "postgres"), false);
+  assert.equal(utils.serviceStatus.warning, "请留意");
 });
 
 test("载入时保留已保存的地址，改类型、租户或账号才重新生成", async t => {
@@ -506,6 +573,76 @@ test("恢复后保留已保存管理员密码，未重输不会提交空值覆�
   await vm.advance();
   assert.equal(vm.step, 5);
   assert.deepEqual(calls.configure[0].data.admin, { username: "kubedoor" });
+  assert.deepEqual(calls.configure[0].data.components, { alerting: true });
+});
+
+test("告警组件默认安装，关闭开关后三个组件都不安装", async t => {
+  const { vm, calls } = await harness(t, { initial: state({ step: 4 }) });
+  assert.equal(vm.basics.alerting, true);
+  vm.basics.alerting = false;
+  await vm.advance();
+  assert.deepEqual(calls.configure[0].data.components, { alerting: false });
+  const saved = state({ step: 4 });
+  saved.config.components = { alerting: false };
+  const restored = await harness(t, { initial: saved });
+  assert.equal(restored.vm.basics.alerting, false);
+});
+
+test("访问地址自动获取：优先用当前页面地址，端口转发打开时用 Web 的 NodePort 地址", async t => {
+  assert.equal(
+    utils.autoPublicURL("http://192.0.2.10:30080", "http://192.0.2.20:30080"),
+    "http://192.0.2.10:30080"
+  );
+  assert.equal(
+    utils.autoPublicURL("http://127.0.0.1:8080", "http://192.0.2.20:30080/"),
+    "http://192.0.2.20:30080"
+  );
+  assert.equal(
+    utils.autoPublicURL("http://localhost:8080", "http://[fd00::20]:30080"),
+    "http://[fd00::20]:30080"
+  );
+  assert.equal(utils.autoPublicURL("http://localhost:8080", ""), "");
+  const initial = state({
+    step: 4,
+    environment: {
+      namespace: "kubedoor",
+      web_url: "http://192.0.2.20:30080"
+    }
+  });
+  initial.config.public_url = "";
+  const { vm, calls } = await harness(t, {
+    initial,
+    origin: "http://127.0.0.1:8080"
+  });
+  assert.equal(vm.basics.public_url, "http://192.0.2.20:30080");
+  assert.match(vm.publicURLNote, /NodePort/);
+  assert.equal(vm.editingURL, false);
+  vm.editURL();
+  assert.equal(vm.editingURL, true);
+  vm.basics.public_url = "https://kubedoor.example.com";
+  assert.match(vm.publicURLNote, /不能填写本机地址/);
+  vm.resetURL();
+  assert.equal(vm.basics.public_url, "http://192.0.2.20:30080");
+  assert.equal(vm.editingURL, false);
+  await vm.advance();
+  assert.equal(calls.configure[0].data.public_url, "http://192.0.2.20:30080");
+});
+
+test("已保存的访问地址优先，取不到自动地址时需要填写", async t => {
+  const { vm } = await harness(t, { initial: state({ step: 4 }) });
+  assert.equal(vm.basics.public_url, "https://kubedoor.example.com");
+  assert.match(vm.publicURLNote, /当前打开安装页面/);
+  const empty = state({ step: 4 });
+  empty.config.public_url = "";
+  const missing = await harness(t, {
+    initial: empty,
+    origin: "http://localhost:8080"
+  });
+  assert.equal(missing.vm.basics.public_url, "");
+  assert.match(missing.vm.publicURLNote, /未能自动获取/);
+  await missing.vm.advance();
+  assert.equal(missing.vm.step, 4);
+  assert.match(missing.vm.error, /访问地址/);
 });
 
 test("某个服务失败或全部已就绪但最终检查未完成，都不会提示成功", async t => {
@@ -585,8 +722,13 @@ test("失败后可修改连接并重新检测，修复完成返回逐项结果�
   vm.postgres.password = "corrected-password";
   await vm.advance();
   assert.equal(calls.postgres[0].data.password, "corrected-password");
+  assert.equal(vm.step, 2);
+  await vm.advance();
   assert.equal(vm.step, 3);
   assert.deepEqual(calls.retry, []);
+  await vm.advance();
+  assert.equal(calls.metrics.length, 1);
+  assert.equal(vm.step, 3);
   await vm.advance();
   assert.equal(vm.step, 4);
   await vm.advance();
@@ -1204,4 +1346,112 @@ test("环境检查显示本集群 Agent 安装权限，最终检查列表不重�
   await vm.advance();
   assert.equal(vm.error, "");
   assert.equal(vm.step, 2);
+});
+
+/**
+ * 用真正的模板渲染安装页（自定义渲染器记录节点树，不需要浏览器），
+ * 返回根节点和查找元素、取文字的辅助函数。
+ */
+async function renderPage(t, marker) {
+  const originalWindow = global.window;
+  global.window = { location: { origin: "https://kubedoor.example.com" } };
+  const component = compile(
+    "../src/views/setup/index.vue",
+    {
+      "@/api/setup": {
+        ...client,
+        setupApi: {
+          status: async () => {
+            throw new Error("完成页不应访问安装服务");
+          }
+        },
+        getSetupMarker: async () => marker
+      },
+      "./setup-utils": utils,
+      "vue-router": { useRouter: () => ({ push() {} }) },
+      "element-plus": { ElMessage: { success() {} } }
+    },
+    { inlineTemplate: true }
+  ).default;
+  const node = fields => ({ children: [], parent: null, props: {}, ...fields });
+  const detach = child => {
+    const parent = child.parent;
+    if (parent) parent.children.splice(parent.children.indexOf(child), 1);
+    child.parent = null;
+  };
+  const attach = (child, parent, anchor) => {
+    detach(child);
+    const index = anchor ? parent.children.indexOf(anchor) : -1;
+    if (index >= 0) parent.children.splice(index, 0, child);
+    else parent.children.push(child);
+    child.parent = parent;
+  };
+  const renderer = createRenderer({
+    createElement: tag => node({ tag }),
+    createText: text => node({ text }),
+    createComment: () => node({ text: "" }),
+    setText: (target, text) => (target.text = text),
+    setElementText: (element, text) => {
+      element.children.forEach(child => (child.parent = null));
+      element.children = [];
+      if (text) attach(node({ text }), element);
+    },
+    parentNode: target => target.parent,
+    nextSibling: target =>
+      target.parent
+        ? target.parent.children[target.parent.children.indexOf(target) + 1] ||
+          null
+        : null,
+    insert: attach,
+    remove: detach,
+    patchProp: (element, key, _previous, next) => (element.props[key] = next),
+    insertStaticContent: (content, parent, anchor) => {
+      const text = node({ text: content.replace(/<[^>]+>/g, " ") });
+      attach(text, parent, anchor);
+      return [text, text];
+    }
+  });
+  const root = node({ tag: "root" });
+  renderer.render(h(component), root);
+  t.after(() => {
+    renderer.render(null, root);
+    global.window = originalWindow;
+  });
+  await settle();
+  const textOf = target =>
+    (target.text || "") + target.children.map(textOf).join("");
+  const findAll = (predicate, from = root) =>
+    from.children.flatMap(child => [
+      ...(predicate(child) ? [child] : []),
+      ...findAll(predicate, child)
+    ]);
+  return { root, textOf, findAll };
+}
+
+test("安装结果列出每个服务的 Deployment 名，旧的完成标记没有名称时不显示", async t => {
+  const page = await renderPage(t, {
+    phase: "succeeded",
+    installation_id: "install-1",
+    services: [
+      {
+        id: "alarm",
+        name: "告警服务",
+        resource: "kubedoor-alarm",
+        status: "ready"
+      },
+      { id: "grafana", name: "Grafana 看板", status: "ready" }
+    ]
+  });
+  const rows = page.findAll(item => item.props["data-service"]);
+  assert.deepEqual(
+    rows.map(row => row.props["data-service"]),
+    ["alarm", "grafana"]
+  );
+  const resourceOf = row =>
+    page
+      .findAll(item => item.props.class === "service-resource", row)
+      .map(page.textOf);
+  assert.deepEqual(resourceOf(rows[0]), ["kubedoor-alarm"]);
+  assert.match(page.textOf(rows[0]), /告警服务kubedoor-alarm已就绪/);
+  assert.deepEqual(resourceOf(rows[1]), []);
 });

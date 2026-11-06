@@ -15,6 +15,7 @@ import aiohttp
 import asyncpg
 
 from .agent import CONCLUDED, installer_available, new_agent_state, unavailable_agent_state
+from .config import selected_components
 from .errors import SetupError
 from .kubernetes import OWNER, resource, resource_path, workload_ready
 from .probes import check_postgres, check_metrics, metrics_query_base, pg_connect_options, reserve_database
@@ -31,6 +32,41 @@ SERVICES = (
     ('alertmanager', '告警路由', 'alertmanager'),
 )
 FINALIZE_JOB = 'kubedoor-setup-finalize'
+# 控制服务、AI 助手、告警服务的安装健康接口（Service 名、端口、路径）和它检查的依赖：
+# 要带本次安装的内部令牌访问，并返回本次安装的 id
+HEALTH_ENDPOINTS = {
+    'master': ('kubedoor-master', 80, '/api/internal/setup-health'),
+    'ai': ('kubedoor-ai', 8000, '/api/ai/internal/setup-health'),
+    'alarm': ('kubedoor-alarm', 80, '/internal/setup-health'),
+}
+HEALTH_DEPENDS = {'master': '数据库或时序库', 'ai': '数据库', 'alarm': '数据库'}
+# 失败详情里最多列出的 Pod 数
+DETAIL_PODS = 5
+
+
+class ServiceCheckError(SetupError):
+    """服务接口检查失败：http_status 是对方返回的 HTTP 状态（连不上时为空），probe 记下请求和结果，放进失败详情。"""
+
+    def __init__(self, message, *, http_status=None, probe=''):
+        super().__init__(message, 502)
+        self.http_status, self.probe = http_status, probe
+
+
+def pod_summary(pod):
+    """一个 Pod 的状态摘要：阶段、就绪容器数、重启次数、等待原因和实际运行的镜像。"""
+    metadata, status = pod.get('metadata') or {}, pod.get('status') or {}
+    containers = status.get('containerStatuses') or []
+    parts = ['删除中' if metadata.get('deletionTimestamp') else status.get('phase') or '状态未知',
+             f"就绪 {sum(1 for c in containers if c.get('ready'))}/{len(containers)}",
+             f"重启 {sum(int(c.get('restartCount') or 0) for c in containers)} 次"]
+    for container in containers:
+        reason = ((container.get('state') or {}).get('waiting') or {}).get('reason')
+        if reason:
+            parts.append(f'等待原因 {reason}')
+    images = sorted({c['image'] for c in containers if c.get('image')})
+    if images:
+        parts.append('运行镜像 ' + '、'.join(images))
+    return (f"Pod {metadata.get('name', '')}：" + '，'.join(parts))[:300]
 
 
 def _varint(value):
@@ -124,7 +160,7 @@ class InstallRunner:
         self.http = None
         self.objects = []
 
-    async def update(self, *, service=None, check=None, status=None, message=None, **fields):
+    async def update(self, *, service=None, check=None, status=None, message=None, details=None, **fields):
         async with self.repo.lock:
             state = await self.repo.load()
             if state['phase'] not in ('running', 'finalizing'):
@@ -139,6 +175,11 @@ class InstallRunner:
                     row = {key: identifier}
                     rows.append(row)
                 row.update(status=status, message=message or '', updated_at=utcnow())
+                # 详情只属于这一次结果：没有新详情时清掉上次失败留下的
+                if details:
+                    row['details'] = details
+                else:
+                    row.pop('details', None)
             state.update(fields)
             await self.repo.save(state)
             return state
@@ -149,9 +190,11 @@ class InstallRunner:
         self.run_id = state.get('run_id')
         private = await self.repo.load_private(state)
         self.config, self.secrets = private['config'], private['secrets']
+        # Web、控制服务、AI 和 Grafana 必装；告警组件按第 4 步的开关一起装或一起不装
+        self.selected = {'web': True, 'master': True, 'ai': True, **selected_components(self.config.get('components'))}
         rows = [{'id': sid, 'name': title, 'resource': deployment,
-                 'status': 'pending' if self.config['components'].get(sid, True) else 'skipped',
-                 'message': '等待部署' if self.config['components'].get(sid, True) else '未选择',
+                 'status': 'pending' if self.selected[sid] else 'skipped',
+                 'message': '等待部署' if self.selected[sid] else '未选择',
                  'updated_at': utcnow()} for sid, title, deployment in SERVICES]
         await self.update(services=rows, public_url=self.config['public_url'],
                           selected_services=[row['id'] for row in rows if row['status'] != 'skipped'],
@@ -187,14 +230,13 @@ class InstallRunner:
             state = await self.repo.load()
             if self.row(state, 'master')['status'] != 'ready':
                 for sid, _, _ in SERVICES:
-                    if sid != 'master' and self.config['components'].get(sid, True):
+                    if sid != 'master' and self.selected[sid]:
                         await self.update(service=sid, status='waiting', message='等待控制服务就绪')
                 await self.fail('控制服务未就绪，请修复后重试')
                 return
-            selected = [sid for sid, _, _ in SERVICES if sid not in ('web', 'master', 'vmalert')
-                        and self.config['components'].get(sid, True)]
+            selected = [sid for sid, _, _ in SERVICES if sid not in ('web', 'master', 'vmalert') and self.selected[sid]]
             await asyncio.gather(*(self.deploy(sid) for sid in selected))
-            if self.config['components'].get('vmalert', True):
+            if self.selected['vmalert']:
                 state = await self.repo.load()
                 if self.row(state, 'alertmanager')['status'] == 'ready':
                     await self.deploy('vmalert')
@@ -227,18 +269,20 @@ class InstallRunner:
             await self.update(check='endpoints', status='success', message='对外入口、登录与所选指标链路验证通过')
             # Recheck every current generation, including components that passed on a previous retry.
             for sid, _, _ in SERVICES:
-                if not self.config['components'].get(sid, True):
+                if not self.selected[sid]:
                     continue
                 await self.update(service=sid, status='checking', message='复查当前副本与服务健康状态')
                 obj = self.deployment(sid)
                 if not workload_ready(await self.k8s.get(obj), obj):
-                    await self.update(service=sid, status='failed', message='最终复查时服务不再就绪')
+                    await self.update(service=sid, status='failed', message='最终复查时服务不再就绪',
+                                      details=await self.failure_details(sid))
                     await self.fail('服务健康状态发生变化，请重试')
                     return
                 try:
                     await self.service_health(sid)
                 except SetupError as error:
-                    await self.update(service=sid, status='failed', message=error.message)
+                    await self.update(service=sid, status='failed', message=error.message,
+                                      details=await self.failure_details(sid, error))
                     await self.fail('服务健康复查未通过，请重试')
                     return
                 await self.update(service=sid, status='ready', message='副本就绪及健康检查通过')
@@ -347,18 +391,55 @@ class InstallRunner:
             else:
                 raise SetupError('等待副本就绪超时：' + message, 504)
             deadline = time.monotonic() + self.health_timeout
+            # 刚就绪时依赖可能还没连上（滚动更新时旧副本也可能还在响应），在 health_timeout 内重试；
+            # 重试期间把上次没通过的原因显示出来，不用等到超时才知道卡在哪
+            last = ''
             while True:
-                await self.update(service=sid, status='checking', message='副本已就绪，正在验证服务接口和依赖连接')
+                await self.update(service=sid, status='checking',
+                                  message='副本已就绪，正在验证服务接口和依赖连接' + (f'；上次未通过：{last}' if last else ''))
                 try:
                     await self.service_health(sid)
                     break
-                except SetupError:
+                except SetupError as error:
                     if time.monotonic() >= deadline:
                         raise
+                    last = error.message
                     await asyncio.sleep(self.poll_interval)
             await self.update(service=sid, status='ready', message='本次部署副本及健康检查均已通过')
         except SetupError as error:
-            await self.update(service=sid, status='timeout' if error.status == 504 else 'failed', message=error.message)
+            await self.update(service=sid, status='timeout' if error.status == 504 else 'failed', message=error.message,
+                              details=await self.failure_details(sid, error))
+
+    def image_of(self, sid):
+        """本次部署期望的镜像；副本就绪时 workload_ready 已核对过模板镜像，实际运行的就是它。"""
+        try:
+            containers = self.deployment(sid)['spec']['template']['spec']['containers']
+            return '、'.join(container['image'] for container in containers) or '（未知）'
+        except (StopIteration, KeyError, TypeError):
+            return '（未知）'
+
+    async def failure_details(self, sid, error=None):
+        """失败服务的详情（页面可展开）：Deployment、期望镜像、健康检查请求，以及各 Pod 的实际状态和运行镜像。
+
+        只用于展示，任何读取失败都不影响安装结果。
+        """
+        try:
+            obj = self.deployment(sid)
+            lines = [f"Deployment：{self.namespace}/{obj['metadata']['name']}",
+                     *(f"期望镜像：{container['image']}" for container in obj['spec']['template']['spec']['containers'])]
+            selector = ','.join(k + '=' + v for k, v in obj['spec']['selector']['matchLabels'].items())
+        except (StopIteration, KeyError, TypeError, AttributeError):
+            return []
+        if getattr(error, 'probe', ''):
+            lines.append(f'健康检查：{error.probe}')
+        try:
+            pods = await self.k8s.list('/api/v1/namespaces/' + quote(self.namespace, safe='') + '/pods', {'labelSelector': selector})
+            lines += [pod_summary(pod) for pod in pods[:DETAIL_PODS]] or [f'Pod：没有找到（{selector}）']
+            if len(pods) > DETAIL_PODS:
+                lines.append(f'另有 {len(pods) - DETAIL_PODS} 个 Pod 未列出')
+        except Exception:
+            lines.append('Pod：读取 Pod 状态失败')
+        return lines
 
     async def diagnose(self, obj, current):
         if not current:
@@ -380,10 +461,12 @@ class InstallRunner:
         return 'starting', '等待本次部署的全部副本通过就绪探测'
 
     async def request(self, method, url, *, expected=(200,), **options):
+        probe = f'{method} {url}'
         try:
             async with self.http.request(method, url, allow_redirects=False, **options) as response:
                 if response.status not in expected:
-                    raise SetupError(f'服务连接或健康验证失败（HTTP {response.status}）', 502)
+                    raise ServiceCheckError(f'服务连接或健康验证失败（HTTP {response.status}）',
+                                            http_status=response.status, probe=f'{probe} → HTTP {response.status}')
                 chunks, size = [], 0
                 async for chunk in response.content.iter_chunked(65536):
                     size += len(chunk)
@@ -398,22 +481,44 @@ class InstallRunner:
                 except ValueError:
                     return {'text': raw.decode(errors='replace')}
         except (aiohttp.ClientError, asyncio.TimeoutError):
-            raise SetupError('服务连接超时或证书验证失败，请检查网络与服务状态', 502) from None
+            raise ServiceCheckError('服务连接超时或证书验证失败，请检查网络与服务状态',
+                                    probe=f'{probe} → 连接失败或超时') from None
 
     def url(self, name, port=80):
         return f'http://{name}.{self.namespace}:{port}'
 
+    def health_hint(self, sid, error):
+        """把接口检查失败换成能照着处理的说明：哪个服务、哪个镜像、哪个接口、怎么处理。"""
+        name = next((deployment for service, _, deployment in SERVICES if service == sid), sid)
+        status = error.http_status
+        if sid in HEALTH_ENDPOINTS:
+            path = HEALTH_ENDPOINTS[sid][2]
+            if status == 404:
+                return (f'{name} 镜像 {self.image_of(sid)} 没有安装向导健康接口（{path} 返回 HTTP 404），'
+                        '镜像版本过旧；请换用包含安装向导的新版镜像后重试')
+            if status in (401, 403):
+                return (f'{name} 健康接口拒绝了安装服务的内部令牌（HTTP {status}），'
+                        '请确认 Secret kubedoor-ai-security 没有被手动修改后重试')
+            if status == 503:
+                return f'{name} 已启动，但{HEALTH_DEPENDS[sid]}连接检查失败（健康接口返回 HTTP 503），请查看 {name} 日志'
+        if status:
+            return f'{name} 健康检查未通过（{error.probe}），请查看 {name} 日志'
+        return f'无法连接 {name}（{error.probe}），请检查 Service、网络策略和 {name} 日志'
+
     async def service_health(self, sid):
+        try:
+            await self._service_health(sid)
+        except ServiceCheckError as error:
+            raise ServiceCheckError(self.health_hint(sid, error), http_status=error.http_status, probe=error.probe) from None
+
+    async def _service_health(self, sid):
         headers = {'X-Kubedoor-Token': self.secrets['internal_token'], 'X-User-Name': 'kubedoor', 'X-User-Permission': 'admin'}
-        if sid in ('master', 'ai', 'alarm'):
-            name, port, path = {
-                'master': ('kubedoor-master', 80, '/api/internal/setup-health'),
-                'ai': ('kubedoor-ai', 8000, '/api/ai/internal/setup-health'),
-                'alarm': ('kubedoor-alarm', 80, '/internal/setup-health'),
-            }[sid]
+        if sid in HEALTH_ENDPOINTS:
+            name, port, path = HEALTH_ENDPOINTS[sid]
             result = await self.request('GET', self.url(name, port) + path, headers=headers)
             if result.get('ok') is not True or result.get('installation_id') != self.installation_id:
-                raise SetupError('健康接口未确认本次安装，请确认镜像为包含安装向导的新版本', 502)
+                raise SetupError(f'{name} 健康接口没有确认本次安装（安装标识不一致），'
+                                 f'请确认镜像 {self.image_of(sid)} 为包含安装向导的新版本', 502)
         elif sid == 'grafana':
             result = await self.request('GET', self.url('kubedoor-dash', 3000) + '/grafana/api/health')
             if result.get('database') != 'ok':
@@ -450,11 +555,10 @@ class InstallRunner:
             me = await self.request('GET', base + '/api/auth/me')
             if me.get('success') is not True:
                 raise SetupError('管理员登录会话验证失败', 502)
-            if self.config['components'].get('grafana', True):
-                for uid in ('KubeDoor-Postgres', 'KubeDoor-Prometheus'):
-                    check = await self.request('GET', base + '/grafana/api/datasources/uid/' + uid + '/health')
-                    if str(check.get('status', '')).lower() != 'ok':
-                        raise SetupError('Grafana 数据源连接验证失败', 502)
+            for uid in ('KubeDoor-Postgres', 'KubeDoor-Prometheus'):
+                check = await self.request('GET', base + '/grafana/api/datasources/uid/' + uid + '/health')
+                if str(check.get('status', '')).lower() != 'ok':
+                    raise SetupError('Grafana 数据源连接验证失败', 502)
             if self.config['metrics'].get('write_url'):
                 await self.verify_metrics(base)
             else:

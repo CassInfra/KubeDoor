@@ -5,6 +5,7 @@ import type {
   SetupAgent,
   SetupAgentOptions,
   SetupAgentSummary,
+  SetupCheck,
   SetupMarker,
   SetupPhase,
   SetupState
@@ -88,6 +89,18 @@ export function checkTone(status: string): string {
 export function toneMark(tone: string): string {
   if (tone === "success") return "✓";
   return tone === "warning" || tone === "error" ? "!" : "·";
+}
+
+/**
+ * 第 2、3 步的连接测试是否已通过：「检查通过」和「请留意」都算通过，可以点「继续」。
+ * section 是检查项名称（postgres / metrics）。
+ */
+export function connectionPassed(
+  checks: SetupCheck[] | undefined,
+  section: string
+): boolean {
+  const check = (checks || []).find(item => (item.id || item.name) === section);
+  return !!check && ["success", "warning"].includes(check.status);
 }
 
 /** master Agent 安装任务的步骤状态 */
@@ -268,6 +281,14 @@ export function suggestedPublicURL(origin: string): string {
   } catch {
     return "";
   }
+}
+
+/**
+ * 自动获取的 KubeDoor 访问地址：优先用当前打开安装页面的地址；
+ * 用本机回环（端口转发）打开时，改用安装服务给出的 Web NodePort 地址（节点 IP + NodePort）。
+ */
+export function autoPublicURL(origin: string, nodePortURL?: string): string {
+  return suggestedPublicURL(origin) || suggestedPublicURL(nodePortURL || "");
 }
 
 /** 远程读写地址里已保存的密码显示成它，提交后由安装服务换成实际密码 */

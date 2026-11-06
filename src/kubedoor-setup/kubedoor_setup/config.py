@@ -15,6 +15,8 @@ from .errors import SetupError
 METRICS_TYPES = ('Victoria-Metrics-Single', 'Victoria-Metrics-Cluster')
 # 远程读写地址里已保存的密码回传页面时显示成它；提交回来时换成上面填写或已保存的密码
 PASSWORD_MASK = '******'
+# 告警组件：一个开关，一起装或一起不装；Grafana 看板必装，不在向导里选择
+ALERTING_SERVICES = ('alarm', 'vmalert', 'alertmanager')
 
 
 def default_private():
@@ -25,10 +27,25 @@ def default_private():
                         'read_url': '', 'write_url': '', 'tag_key': 'origin_prometheus'},
             'admin': {'username': 'kubedoor', 'password': ''},
             'public_url': '',
-            'components': {'grafana': True, 'vmalert': True, 'alertmanager': True},
+            'components': {'alerting': True},
         },
         'secrets': {},
     }
+
+
+def alerting_choice(components):
+    """是否安装告警组件；兼容旧版向导逐项保存的选择（选了 vmalert 或 Alertmanager 就算安装）。"""
+    if not isinstance(components, dict):
+        return True
+    if isinstance(components.get('alerting'), bool):
+        return components['alerting']
+    return components.get('vmalert') is not False or components.get('alertmanager') is not False
+
+
+def selected_components(components):
+    """本次安装的可选服务：Grafana 看板固定安装，kubedoor-alarm、vmalert、Alertmanager 跟随告警组件开关。"""
+    alerting = alerting_choice(components)
+    return {'grafana': True, **{name: alerting for name in ALERTING_SERVICES}}
 
 
 def ensure_secrets(private):
@@ -279,15 +296,17 @@ def final_config(raw, existing):
         raise SetupError('首次安装的管理员账号为 kubedoor', 422)
     password = preserved_password(admin, existing.get('admin', {}), '管理员密码')
     validate_admin_password(password, username)
-    components = raw.get('components', existing.get('components'))
-    if not isinstance(components, dict) or any(type(components.get(key)) is not bool for key in ('grafana', 'vmalert', 'alertmanager')):
-        raise SetupError('组件选择格式不正确', 422)
-    if components['vmalert'] and not components['alertmanager']:
-        raise SetupError('安装告警规则计算服务时，请同时启用 Alertmanager', 422)
+    if 'components' in raw:
+        components = raw['components']
+        if not isinstance(components, dict) or type(components.get('alerting')) is not bool:
+            raise SetupError('告警组件选择格式不正确', 422)
+        alerting = components['alerting']
+    else:
+        alerting = alerting_choice(existing.get('components'))
     return {
         'admin': {'username': username, 'password': password},
         'public_url': clean_url(raw.get('public_url', ''), 'KubeDoor 访问地址', base=True),
-        'components': {key: components[key] for key in ('grafana', 'vmalert', 'alertmanager')},
+        'components': {'alerting': alerting},
     }
 
 
@@ -300,4 +319,5 @@ def public_config(config):
     for key in ('read_url', 'write_url'):
         if metrics.get(key):
             metrics[key] = mask_url_password(metrics[key])
+    result['components'] = {'alerting': alerting_choice(config.get('components'))}
     return result

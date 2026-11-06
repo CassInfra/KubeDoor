@@ -249,6 +249,30 @@ async def test_optional_unselected_services_and_query_only_can_finish(env):
     assert repo.state["phase"] == "succeeded"
 
 
+def alerting_skipped(repo, names):
+    for row in repo.state["services"]:
+        if row["id"] in names:
+            row["status"] = "skipped"
+    repo.state["selected_services"] = [row["id"] for row in repo.state["services"] if row["id"] not in names]
+
+
+@pytest.mark.asyncio
+async def test_installation_without_alerting_components_can_finish(env):
+    repo, k8s, _ = env
+    alerting_skipped(repo, {"alarm", "vmalert", "alertmanager"})
+    await module.finalize(repo, k8s, ID)
+    assert repo.state["phase"] == "succeeded"
+
+
+@pytest.mark.asyncio
+async def test_grafana_is_required_for_completion(env):
+    repo, k8s, events = env
+    alerting_skipped(repo, {"grafana"})
+    with pytest.raises(SetupError):
+        await module.finalize(repo, k8s, ID)
+    assert events == [] and k8s.calls == []
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("kind,name,version", [("Deployment", "kubedoor-setup", "apps/v1"),
                                                ("Secret", "kubedoor-auth-init", "v1"),

@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import hmac
+import ipaddress
 import json
 import os
 import secrets
@@ -15,7 +16,7 @@ from aiohttp import web
 
 from .agent import (CONCLUDED, STALE_SECONDS, AgentInstall, agent_defaults, installer_available, mark_failed,
                     mark_skipped, normalize_options, passed, start_attempt, write_url_of)
-from .config import ensure_secrets, final_config, metrics_config, postgres_config
+from .config import ensure_secrets, final_config, metrics_config, postgres_config, selected_components
 from .errors import SetupError
 from .probes import check_metrics, check_postgres
 from .repository import check_row, public_marker, public_state, utcnow
@@ -130,13 +131,36 @@ class SetupAPI:
 
     async def get_state(self, request):
         state = await self.current(request)
-        if state['phase'] in ('draft', 'ready') and not state.get('environment_checked'):
+        if state['phase'] in ('draft', 'ready') and self.needs_environment(state):
             async with self.repo.lock:
                 state = await self.current(request)
-                if not state.get('environment_checked'):
+                if self.needs_environment(state):
                     await self.environment(state)
                     await self.repo.save(state)
         return await self.state_response(state)
+
+    @staticmethod
+    def needs_environment(state):
+        # 旧版安装服务检查过环境但没记 Web 地址：补查一次
+        return not state.get('environment_checked') or 'web_url' not in state.get('environment', {})
+
+    async def web_address(self):
+        """Web 入口的 NodePort 地址：安装服务所在节点的 IP + kubedoor-web 的 NodePort，和引导命令输出的入口一致。
+
+        只读本命名空间的 Service 和安装服务自己的 Pod；取不到时返回空，页面改用浏览器地址或让用户填写。
+        """
+        base = '/api/v1/namespaces/' + quote(self.repo.namespace, safe='')
+        pod_name = os.environ.get('HOSTNAME', '')
+        try:
+            service = await self.repo.k8s.request('GET', base + '/services/kubedoor-web', missing_ok=True) or {}
+            pod = await self.repo.k8s.request('GET', base + '/pods/' + quote(pod_name, safe=''), missing_ok=True) if pod_name else None
+            port = (service.get('spec', {}).get('ports') or [{}])[0].get('nodePort')
+            address = ipaddress.ip_address((pod or {}).get('status', {}).get('hostIP', ''))
+        except Exception:
+            return ''
+        if type(port) is not int or not 0 < port < 65536:
+            return ''
+        return f'http://[{address}]:{port}' if address.version == 6 else f'http://{address}:{port}'
 
     async def environment(self, state):
         try:
@@ -153,6 +177,7 @@ class SetupAPI:
         except SetupError as error:
             state['environment_checked'] = False
             check_row(state, 'environment', 'error', error.message)
+        state.setdefault('environment', {})['web_url'] = await self.web_address()
         # 只是提示：没有临时集群权限也能安装控制端，完成后再上传 kubeconfig 接入本集群
         if await installer_available(self.repo.k8s):
             check_row(state, 'agent_installer', 'success', '已授予临时集群权限，仅在你选择在本集群安装 Agent 时使用，安装完成后撤销')
@@ -211,7 +236,8 @@ class SetupAPI:
             values = final_config(body, private['config'])
             if state.get('target_locked') and values['admin'] != private['config']['admin']:
                 raise SetupError('管理员已在安装时初始化，请完成安装后在控制台修改密码', 409)
-            if state.get('target_locked') and values['components'] != private['config']['components']:
+            if state.get('target_locked') and (selected_components(values['components'])
+                                               != selected_components(private['config'].get('components'))):
                 raise SetupError('已开始部署，不能改变本次安装的组件；请修复失败服务后重试', 409)
             private['config'].update(values)
             state['public_url'] = values['public_url']

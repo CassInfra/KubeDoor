@@ -14,7 +14,7 @@ from kubedoor_setup.config import default_private, ensure_secrets
 from kubedoor_setup.errors import SetupError
 from kubedoor_setup.kubernetes import OWNER, resource_path
 from kubedoor_setup.repository import new_state
-from kubedoor_setup.runner import InstallRunner, SERVICES, probe_write
+from kubedoor_setup.runner import InstallRunner, SERVICES, ServiceCheckError, pod_summary, probe_write
 
 ID = '5e4eaf75-3c7c-47ba-a181-cff711e73594'
 
@@ -144,11 +144,24 @@ async def test_any_selected_service_failure_prevents_finalization(monkeypatch, b
 @pytest.mark.asyncio
 async def test_unselected_services_are_skipped_without_blocking(monkeypatch):
     setup_probes(monkeypatch)
-    repo = MemoryRepo({'grafana': False, 'vmalert': False, 'alertmanager': False})
+    repo = MemoryRepo({'alerting': False})
     runner = ObservedRunner(repo, FakeKubernetes())
     await runner.run()
     assert runner.finalized
-    assert {row['id'] for row in repo.state['services'] if row['status'] == 'skipped'} == {'grafana', 'vmalert', 'alertmanager'}
+    # 告警组件一起不装；Grafana 看板必装
+    assert {row['id'] for row in repo.state['services'] if row['status'] == 'skipped'} == {'alarm', 'vmalert', 'alertmanager'}
+    assert repo.state['selected_services'] == ['web', 'master', 'ai', 'grafana']
+
+
+@pytest.mark.asyncio
+async def test_older_saved_selection_still_installs_grafana(monkeypatch):
+    setup_probes(monkeypatch)
+    repo = MemoryRepo()
+    repo.private['config']['components'] = {'grafana': False, 'vmalert': True, 'alertmanager': True}
+    runner = ObservedRunner(repo, FakeKubernetes())
+    await runner.run()
+    assert runner.finalized
+    assert all(row['status'] == 'ready' for row in repo.state['services'])
 
 
 @pytest.mark.asyncio
@@ -323,3 +336,145 @@ async def test_vmalert_must_have_successful_rule_evaluation(rule):
     runner.request = AsyncMock(side_effect=[{}, {'status': 'success', 'data': {'groups': [{'rules': [rule]}]}}])
     with pytest.raises(SetupError):
         await InstallRunner.service_health(runner, 'vmalert')
+
+
+OLD_ALARM_IMAGE = 'registry.example.invalid/starsl.cn/kubedoor-alarm:2.1.0'
+
+
+def alarm_deployment(image=OLD_ALARM_IMAGE):
+    obj = deployment('kubedoor-alarm')
+    obj['spec']['template']['spec']['containers'][0]['image'] = image
+    return obj
+
+
+class HealthRunner(ObservedRunner):
+    """用真实的健康检查，服务地址指向本地测试服务器。"""
+    service_health = InstallRunner.service_health
+
+    def __init__(self, repo, k8s, base):
+        super().__init__(repo, k8s)
+        self.base = base
+        self.secrets = repo.private['secrets']
+        self.installation_id = ID
+
+    def url(self, name, port=80):
+        return self.base
+
+
+class PodsKubernetes(FakeKubernetes):
+    def __init__(self, existing=(), pods=()):
+        super().__init__(existing)
+        self.pods = list(pods)
+
+    async def list(self, path, params=None):
+        return copy.deepcopy(self.pods)
+
+
+RUNNING_POD = {'metadata': {'name': 'kubedoor-alarm-7d9c5-x2k4p'},
+               'status': {'phase': 'Running', 'containerStatuses': [
+                   {'name': 'kubedoor-alarm', 'ready': True, 'restartCount': 0, 'image': OLD_ALARM_IMAGE}]}}
+
+
+@pytest.mark.asyncio
+async def test_health_404_names_the_image_without_setup_health_endpoint():
+    # 旧版 kubedoor-alarm 镜像没有 /internal/setup-health：Pod 正常运行，但健康接口 404
+    app = web.Application()
+    async with TestServer(app) as server, aiohttp.ClientSession() as session:
+        runner = HealthRunner(MemoryRepo(), FakeKubernetes(), str(server.make_url('')).rstrip('/'))
+        runner.http, runner.objects = session, [alarm_deployment()]
+        with pytest.raises(ServiceCheckError) as caught:
+            await runner.service_health('alarm')
+    error = caught.value
+    assert error.http_status == 404
+    assert error.message == (f'kubedoor-alarm 镜像 {OLD_ALARM_IMAGE} 没有安装向导健康接口（/internal/setup-health 返回 HTTP 404），'
+                             '镜像版本过旧；请换用包含安装向导的新版镜像后重试')
+    assert error.probe.startswith('GET http://') and error.probe.endswith('/internal/setup-health → HTTP 404')
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('sid, status, expected', [
+    ('alarm', 403, 'kubedoor-alarm 健康接口拒绝了安装服务的内部令牌（HTTP 403）'),
+    ('master', 503, 'kubedoor-master 已启动，但数据库或时序库连接检查失败（健康接口返回 HTTP 503）'),
+    ('ai', 503, 'kubedoor-ai 已启动，但数据库连接检查失败（健康接口返回 HTTP 503）'),
+    ('ai', 500, 'kubedoor-ai 健康检查未通过（GET http://kubedoor-ai.kubedoor:8000/api/ai/internal/setup-health → HTTP 500）'),
+    ('vmalert', 404, 'vmalert 健康检查未通过（GET http://vmalert.kubedoor:8080/health → HTTP 404）'),
+    ('alarm', None, '无法连接 kubedoor-alarm（GET http://kubedoor-alarm.kubedoor:80/internal/setup-health → 连接失败或超时）'),
+])
+async def test_health_failures_explain_service_and_cause(sid, status, expected):
+    runner = ObservedRunner(MemoryRepo(), FakeKubernetes())
+    runner.secrets, runner.installation_id = runner.repo.private['secrets'], ID
+
+    async def failing(method, url, **kwargs):
+        if status is None:
+            raise ServiceCheckError('服务连接超时或证书验证失败，请检查网络与服务状态', probe=f'{method} {url} → 连接失败或超时')
+        raise ServiceCheckError(f'服务连接或健康验证失败（HTTP {status}）', http_status=status, probe=f'{method} {url} → HTTP {status}')
+    runner.request = failing
+    with pytest.raises(ServiceCheckError) as caught:
+        await InstallRunner.service_health(runner, sid)
+    assert caught.value.message.startswith(expected)
+    assert caught.value.http_status == status
+
+
+@pytest.mark.asyncio
+async def test_identity_mismatch_names_the_running_image():
+    runner = ObservedRunner(MemoryRepo(), FakeKubernetes())
+    runner.secrets, runner.installation_id, runner.objects = runner.repo.private['secrets'], ID, [alarm_deployment()]
+    runner.request = AsyncMock(return_value={'ok': True, 'installation_id': 'old-installation'})
+    with pytest.raises(SetupError, match='安装标识不一致') as caught:
+        await InstallRunner.service_health(runner, 'alarm')
+    assert OLD_ALARM_IMAGE in caught.value.message
+
+
+@pytest.mark.asyncio
+async def test_health_retry_shows_last_reason_and_failure_keeps_image_and_pod_details():
+    app = web.Application()
+    repo = MemoryRepo()
+    k8s = PodsKubernetes([alarm_deployment()], [RUNNING_POD])
+    async with TestServer(app) as server, aiohttp.ClientSession() as session:
+        runner = HealthRunner(repo, k8s, str(server.make_url('')).rstrip('/'))
+        runner.http, runner.objects = session, [alarm_deployment()]
+        runner.health_timeout, runner.poll_interval = .2, .05
+        await runner.deploy('alarm')
+    retrying = [row for state in repo.history for row in state.get('services', [])
+                if row['id'] == 'alarm' and row['status'] == 'checking']
+    assert retrying[0]['message'] == '副本已就绪，正在验证服务接口和依赖连接'
+    assert any('上次未通过：kubedoor-alarm 镜像' in row['message'] for row in retrying[1:])
+    row = runner.row(repo.state, 'alarm')
+    assert row['status'] == 'failed'
+    assert row['message'].startswith(f'kubedoor-alarm 镜像 {OLD_ALARM_IMAGE} 没有安装向导健康接口')
+    details = row['details']
+    assert details[:2] == ['Deployment：kubedoor/kubedoor-alarm', f'期望镜像：{OLD_ALARM_IMAGE}']
+    assert details[2].startswith('健康检查：GET http://') and details[2].endswith('/internal/setup-health → HTTP 404')
+    assert details[3] == f'Pod kubedoor-alarm-7d9c5-x2k4p：Running，就绪 1/1，重启 0 次，运行镜像 {OLD_ALARM_IMAGE}'
+
+
+@pytest.mark.asyncio
+async def test_new_status_clears_previous_failure_details():
+    repo = MemoryRepo()
+    runner = ObservedRunner(repo, FakeKubernetes())
+    await runner.update(service='alarm', status='failed', message='健康检查未通过', details=['期望镜像：example'])
+    assert runner.row(repo.state, 'alarm')['details'] == ['期望镜像：example']
+    await runner.update(service='alarm', status='deploying', message='创建或核对部署资源')
+    assert 'details' not in runner.row(repo.state, 'alarm')
+
+
+@pytest.mark.asyncio
+async def test_failure_details_survive_pod_listing_errors():
+    class BrokenPods(FakeKubernetes):
+        async def list(self, path, params=None):
+            raise SetupError('安装权限不足或准入策略拒绝（HTTP 403）', 403)
+    runner = ObservedRunner(MemoryRepo(), BrokenPods())
+    runner.objects = [alarm_deployment()]
+    assert await runner.failure_details('alarm') == [
+        'Deployment：kubedoor/kubedoor-alarm', f'期望镜像：{OLD_ALARM_IMAGE}', 'Pod：读取 Pod 状态失败']
+    assert await ObservedRunner(MemoryRepo(), FakeKubernetes()).failure_details('alarm') == []
+
+
+def test_pod_summary_reports_waiting_reason_restarts_and_deletion():
+    pod = {'metadata': {'name': 'kubedoor-ai-1', 'deletionTimestamp': '2026-11-07T00:00:00Z'},
+           'status': {'phase': 'Running', 'containerStatuses': [
+               {'ready': False, 'restartCount': 3, 'image': 'example/kubedoor-ai:2.5.0',
+                'state': {'waiting': {'reason': 'CrashLoopBackOff'}}}]}}
+    assert pod_summary(pod) == ('Pod kubedoor-ai-1：删除中，就绪 0/1，重启 3 次，等待原因 CrashLoopBackOff，'
+                                '运行镜像 example/kubedoor-ai:2.5.0')
+    assert pod_summary({}) == 'Pod ：状态未知，就绪 0/0，重启 0 次'

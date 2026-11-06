@@ -13,12 +13,19 @@ import shlex
 
 import yaml
 
-from .config import metrics_endpoints, url_credentials
+from .config import metrics_endpoints, selected_components, url_credentials
 
 
 ROOT = Path(os.environ.get("KUBEDOOR_ROOT", Path(__file__).resolve().parents[3]))
 TOKEN = re.compile(r"__([A-Z][A-Z0-9_]*)__")
 STATE_NAME = "kubedoor-setup-state"
+# 不装告警组件时 nginx 不能再指向 kubedoor-alarm（启动时解析不到上游会起不来），自定义告警投递直接返回 503
+ALARM_ABSENT = """            # 未安装告警组件：自定义告警投递直接返回 503
+            location = /api/custom_alert {
+                default_type application/json;
+                return 503 '{"status":"error","message":"未安装告警组件（kubedoor-alarm），不能投递自定义告警"}';
+            }
+"""
 
 
 def load_defaults(overrides: dict | None = None) -> dict:
@@ -74,6 +81,8 @@ def _objects(path: Path, values: dict, components: dict) -> list[dict]:
                            ("CRON-TZ", values.get("CRON_TIMEZONE", "true") == "true")):
         if not enabled:
             source = re.sub(rf"(?m)^.*# BEGIN-{block}.*\n[\s\S]*?^.*# END-{block}.*\n?", "", source)
+    if not components.get("alarm", True):
+        source = re.sub(r"(?m)^.*# BEGIN-ALARM.*\n[\s\S]*?^.*# END-ALARM.*\n?", lambda _: ALARM_ABSENT, source)
     # These are the only structural placeholders. All input values are substituted
     # after YAML parsing, so quotes/newlines in a credential cannot inject YAML.
     source = re.sub(r"(?m)^.*__(?:WEB_NODEPORT_LINE|ALERTMANAGER_NODEPORT_LINE)__.*\n?", "", source)
@@ -127,9 +136,7 @@ http {
 def render_master(config: dict, secrets: dict, namespace: str, defaults: dict | None = None) -> list[dict]:
     values = load_defaults(defaults)
     pg, metrics, admin = config["postgres"], config["metrics"], config["admin"]
-    components = {"grafana": True, "vmalert": True, "alertmanager": True, **config.get("components", {})}
-    if components["vmalert"] and not components["alertmanager"]:
-        raise ValueError("启用 vmalert 时需要同时启用 Alertmanager")
+    components = selected_components(config.get("components"))
     # 远程读、写地址都带着账号密码，原样写进 PROM_URL / METRICS_WRITE_URL
     query, write = metrics_endpoints(metrics)
     values.update({
@@ -148,7 +155,9 @@ def render_master(config: dict, secrets: dict, namespace: str, defaults: dict | 
     metadata, proxy = _agent_metadata(values)
     values["AGENT_INSTALL_DEFAULTS"] = json.dumps(metadata, ensure_ascii=False)
     values["METRICS_PROXY_BASE64"] = base64.b64encode(proxy.encode()).decode()
-    files = ["05-ai-security.yaml", "06-metrics-gateway.yaml", "10-config.yaml", "20-master.yaml", "25-alarm.yaml", "30-ai.yaml", "40-web.yaml"]
+    files = ["05-ai-security.yaml", "06-metrics-gateway.yaml", "10-config.yaml", "20-master.yaml"]
+    files += ["25-alarm.yaml"] if components["alarm"] else []
+    files += ["30-ai.yaml", "40-web.yaml"]
     files += [filename for flag, filename in (("grafana", "35-grafana.yaml"), ("vmalert", "71-vmalert.yaml"), ("alertmanager", "72-alertmanager.yaml")) if components[flag]]
     folder = ROOT / "src/kubedoor-setup/resources/manifests/master"
     objects = [obj for filename in files for obj in _objects(folder / filename, values, components)]
