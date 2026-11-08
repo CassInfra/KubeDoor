@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 940" width="1600" height="940" role="img" aria-labelledby="kd-arch-title kd-arch-desc">
 <title id="kd-arch-title">花折 · KubeDoor 2.x 架构图</title>
-<desc id="kd-arch-desc">控制端（namespace kubedoor）包含 kubedoor-web、kubedoor-master、kubedoor-ai、kubedoor-alarm、kubedoor-collect，以及可选的 Grafana、VictoriaMetrics、vmalert、Alertmanager；每个业务集群部署 kubedoor-agent 与可选的 vmagent、kube-state-metrics、node-exporter，agent 通过 WebSocket 主动连接控制端；PostgreSQL 18 独立部署在 K8S 之外，是唯一数据库；kubedoor-ai 调用用户配置的 OpenAI 兼容模型，并以 MCP 对外开放；登录与权限由 master 统一管理（本地账号 / LDAP，按集群授权）。</desc>
+<desc id="kd-arch-desc">控制端（namespace kubedoor，一条命令 sh install.sh 后用网页向导安装）包含 kubedoor-web、kubedoor-master、kubedoor-ai、kubedoor-collect 和固定安装的 Grafana；vmalert、Alertmanager、kubedoor-alarm 组成告警组件，由一个开关一起安装或都不装；VictoriaMetrics 时序库（单机版或集群版，可用已有的，必需）与唯一数据库 PostgreSQL 18 都独立部署在 K8S 之外；每个业务集群在控制台网页安装 kubedoor-agent 与可选的 vmagent、kube-state-metrics、node-exporter，agent 以 WebSocket 主动连接控制端，vmagent 直接 remote write 到时序库，不经过 KubeDoor；K8S 事件告警、运维操作通知与管控表通知由 master 按集群选群发送到 IM，指标告警由 kubedoor-alarm 按集群向 master 取通道后发送；kubedoor-ai 调用用户配置的 OpenAI 兼容模型，并以 MCP 对外开放；master 可调用用户自建的代码 / 运行配置接口；登录、权限与审批由 master 统一管理（本地账号 / LDAP，按集群授权）。</desc>
 
 <defs>
 <style>
@@ -69,39 +69,38 @@
 <g id="header">
 <g transform="translate(40,26)"><path d="M22 0 L41 11 L41 33 L22 44 L3 33 L3 11 Z" fill="none" stroke="url(#aigrad)" stroke-width="2.2"/><g fill="url(#aigrad)" fill-opacity="0.9"><circle cx="22" cy="15" r="5"/><circle cx="30.5" cy="21" r="5"/><circle cx="27.5" cy="31" r="5"/><circle cx="16.5" cy="31" r="5"/><circle cx="13.5" cy="21" r="5"/></g><circle cx="22" cy="23" r="3.2" fill="#070b18"/></g>
 <text x="96" y="54" font-size="28" class="title"><tspan fill="#f8fafc" font-weight="800">花折 · </tspan><tspan fill="url(#titlegrad)" font-weight="800">KubeDoor</tspan><tspan fill="#f8fafc" font-weight="800"> 2.x 架构总览</tspan></text>
-<text x="96" y="82" font-size="14" fill="#8ea0bf" class="subtitle">AI 驱动的多 K8S 集群智能管控平台 —— 控制端一套统一纳管 N 个业务集群，内置可审批、可审计的 AI 运维助手与标准 MCP</text>
+<text x="96" y="82" font-size="14" fill="#8ea0bf" class="subtitle">AI 驱动的多 K8S 集群智能管控平台 —— 一条命令 + 网页向导装好控制端，统一纳管 N 个业务集群，内置可审批、可审计的 AI 运维助手与标准 MCP</text>
 <text x="1560" y="50" font-size="15" fill="#94a3b8" text-anchor="end" class="slogan">花开堪折直须折，莫待无花空折枝</text>
 <text x="1560" y="78" font-size="13" fill="#64748b" text-anchor="end" class="repo mono">github.com/CassInfra/KubeDoor</text>
 </g>
 <g id="zones">
 <rect x="20" y="104" width="214" height="372" rx="20" fill="#2dd4bf" fill-opacity="0.035" stroke="#2dd4bf" stroke-opacity="0.45" stroke-width="1.3"/>
 <text x="38" y="131" font-size="16" class="zone-h"><tspan fill="#f8fafc" font-weight="700">外部</tspan><tspan fill="#8ea0bf" font-size="14">   用户 · AI 服务</tspan></text>
-<rect x="250" y="104" width="880" height="652" rx="20" fill="#60a5fa" fill-opacity="0.035" stroke="#60a5fa" stroke-opacity="0.45" stroke-width="1.3"/>
-<text x="268" y="131" font-size="16" class="zone-h"><tspan fill="#f8fafc" font-weight="700">控制端 Master</tspan><tspan fill="#8ea0bf" font-size="14">   namespace kubedoor · 平台只装一套 · ./install.sh master</tspan></text>
-<rect x="1160" y="90" width="434" height="652" rx="20" fill="#070b18" fill-opacity="0.9" stroke="#22d3ee" stroke-opacity="0.16" stroke-width="1.2"/>
-<rect x="1153" y="97" width="434" height="652" rx="20" fill="#070b18" fill-opacity="0.9" stroke="#22d3ee" stroke-opacity="0.22" stroke-width="1.2"/>
-<rect x="1146" y="104" width="434" height="652" rx="20" fill="#22d3ee" fill-opacity="0.035" stroke="#22d3ee" stroke-opacity="0.45" stroke-width="1.3"/>
-<text x="1164" y="131" font-size="16" class="zone-h"><tspan fill="#f8fafc" font-weight="700">集群端 Agent</tspan><tspan fill="#8ea0bf" font-size="14">   每个业务集群一套 · ./install.sh agent</tspan></text>
+<rect x="250" y="104" width="880" height="628" rx="20" fill="#60a5fa" fill-opacity="0.035" stroke="#60a5fa" stroke-opacity="0.45" stroke-width="1.3"/>
+<text x="268" y="131" font-size="16" class="zone-h"><tspan fill="#f8fafc" font-weight="700">控制端 Master</tspan><tspan fill="#8ea0bf" font-size="14">   namespace kubedoor · 平台只装一套 · sh install.sh 网页向导安装</tspan></text>
+<rect x="1160" y="90" width="434" height="628" rx="20" fill="#070b18" fill-opacity="0.9" stroke="#22d3ee" stroke-opacity="0.16" stroke-width="1.2"/>
+<rect x="1153" y="97" width="434" height="628" rx="20" fill="#070b18" fill-opacity="0.9" stroke="#22d3ee" stroke-opacity="0.22" stroke-width="1.2"/>
+<rect x="1146" y="104" width="434" height="628" rx="20" fill="#22d3ee" fill-opacity="0.035" stroke="#22d3ee" stroke-opacity="0.45" stroke-width="1.3"/>
+<text x="1164" y="131" font-size="16" class="zone-h"><tspan fill="#f8fafc" font-weight="700">集群端 Agent</tspan><tspan fill="#8ea0bf" font-size="14">   每个业务集群一套 · 控制台网页安装</tspan></text>
 <rect x="1526.89" y="116" width="37.11" height="22" rx="11" fill="#22d3ee" fill-opacity="0.14" stroke="#22d3ee" stroke-opacity="0.8"/><text x="1545.44" y="131.5" font-size="13" fill="#a5f3fc" font-weight="700" text-anchor="middle" class="zone-h">× N</text>
-<rect x="20" y="776" width="1560" height="148" rx="20" fill="#818cf8" fill-opacity="0.035" stroke="#818cf8" stroke-opacity="0.45" stroke-width="1.3"/>
-<text x="38" y="803" font-size="16" class="zone-h"><tspan fill="#f8fafc" font-weight="700">K8S 之外</tspan></text>
-<text x="38" y="828" font-size="13" fill="#8ea0bf" class="zone-h">独立部署 · 第三方服务</text>
-<rect x="20" y="494" width="214" height="262" rx="20" fill="#0b1224" fill-opacity="0.55" stroke="#334155" stroke-opacity="0.8" stroke-width="1.2"/>
+<rect x="20" y="752" width="1560" height="172" rx="20" fill="#818cf8" fill-opacity="0.035" stroke="#818cf8" stroke-opacity="0.45" stroke-width="1.3"/>
+<text x="38" y="779" font-size="16" class="zone-h"><tspan fill="#f8fafc" font-weight="700">K8S 之外</tspan><tspan fill="#8ea0bf" font-size="14">   独立部署 · 第三方服务</tspan></text>
+<rect x="20" y="494" width="214" height="238" rx="20" fill="#0b1224" fill-opacity="0.55" stroke="#334155" stroke-opacity="0.8" stroke-width="1.2"/>
 <text x="38" y="521" font-size="16" fill="#f8fafc" font-weight="700" class="zone-h">图例</text>
 <path d="M38,545 H76" stroke="#22d3ee" stroke-width="2" marker-end="url(#ah-cyan)" fill="none"/>
 <text x="86" y="550" font-size="13" fill="#cbd5e1" class="leg">业务请求 / WebSocket</text>
-<path d="M38,573 H76" stroke="#c084fc" stroke-width="2" marker-end="url(#ah-violet)" fill="none"/>
-<text x="86" y="578" font-size="13" fill="#cbd5e1" class="leg">AI 调用 / MCP</text>
-<path d="M38,601 H76" stroke="#34d399" stroke-width="2" marker-end="url(#ah-green)" fill="none"/>
-<text x="86" y="606" font-size="13" fill="#cbd5e1" class="leg">指标采集与查询</text>
-<path d="M38,629 H76" stroke="#fbbf24" stroke-width="2" marker-end="url(#ah-amber)" fill="none"/>
-<text x="86" y="634" font-size="13" fill="#cbd5e1" class="leg">告警链路</text>
-<path d="M38,657 H76" stroke="#818cf8" stroke-width="2" marker-end="url(#ah-db)" fill="none"/>
-<text x="86" y="662" font-size="13" fill="#cbd5e1" class="leg">数据库读写</text>
-<path d="M38,685 H76" stroke="#94a3b8" stroke-width="2" stroke-dasharray="7 6" marker-end="url(#ah-slate)" fill="none"/>
-<text x="86" y="690" font-size="13" fill="#cbd5e1" class="leg">可选组件 / 可选路径</text>
-<rect x="38" y="704" width="38" height="18" rx="5" fill="url(#aifill)" stroke="url(#aigrad)" stroke-width="1.6"/>
-<text x="86" y="718" font-size="13" fill="#cbd5e1" class="leg">AI 核心组件</text>
+<path d="M38,572 H76" stroke="#c084fc" stroke-width="2" marker-end="url(#ah-violet)" fill="none"/>
+<text x="86" y="577" font-size="13" fill="#cbd5e1" class="leg">AI 调用 / MCP</text>
+<path d="M38,599 H76" stroke="#34d399" stroke-width="2" marker-end="url(#ah-green)" fill="none"/>
+<text x="86" y="604" font-size="13" fill="#cbd5e1" class="leg">指标采集与查询</text>
+<path d="M38,626 H76" stroke="#fbbf24" stroke-width="2" marker-end="url(#ah-amber)" fill="none"/>
+<text x="86" y="631" font-size="13" fill="#cbd5e1" class="leg">告警与通知</text>
+<path d="M38,653 H76" stroke="#818cf8" stroke-width="2" marker-end="url(#ah-db)" fill="none"/>
+<text x="86" y="658" font-size="13" fill="#cbd5e1" class="leg">数据库读写</text>
+<path d="M38,680 H76" stroke="#94a3b8" stroke-width="2" stroke-dasharray="7 6" marker-end="url(#ah-slate)" fill="none"/>
+<text x="86" y="685" font-size="13" fill="#cbd5e1" class="leg">可选组件 / 可选路径</text>
+<rect x="38" y="698" width="38" height="18" rx="5" fill="url(#aifill)" stroke="url(#aigrad)" stroke-width="1.6"/>
+<text x="86" y="712" font-size="13" fill="#cbd5e1" class="leg">AI 核心组件</text>
 </g>
 <g id="wires">
 <path d="M218,177 L271,177" fill="none" stroke="#22d3ee" stroke-width="2.0" stroke-opacity="0.9" marker-end="url(#ah-cyan)" class="wire" data-from="browser" data-to="web" data-id="browser-web"/><path d="M218,177 L271,177" fill="none" stroke="#ffffff" stroke-opacity="0.85" stroke-width="1.6" class="flow" stroke-linecap="round"/>
@@ -113,22 +112,24 @@
 <path d="M272,404 L219,404" fill="none" stroke="#c084fc" stroke-width="2.0" stroke-opacity="0.9" marker-end="url(#ah-violet)" class="wire" data-from="ai" data-to="llm" data-id="ai-llm"/><path d="M272,404 L219,404" fill="none" stroke="#ffffff" stroke-opacity="0.85" stroke-width="1.6" class="flow" stroke-linecap="round"/>
 <path d="M548,283 L548,270 Q548,260 558,260 L692,260 A8,8 0 0 1 708,260 L1182,260 Q1192,260 1192,270 L1192,359" fill="none" stroke="#c084fc" stroke-width="2.0" stroke-opacity="0.9" marker-end="url(#ah-violet)" class="wire" data-from="ai" data-to="api" stroke-dasharray="7 6" data-id="direct"/>
 <path d="M422,608 L422,789" fill="none" stroke="#818cf8" stroke-width="2.0" stroke-opacity="0.9" marker-end="url(#ah-db)" class="wire" data-from="ai" data-to="pg" data-id="ai-pg"/><path d="M422,608 L422,789" fill="none" stroke="#ffffff" stroke-opacity="0.85" stroke-width="1.6" class="flow" stroke-linecap="round"/>
-<path d="M650,470 L621,470 Q611,470 611,480 L611,789" fill="none" stroke="#818cf8" stroke-width="2.0" stroke-opacity="0.9" marker-end="url(#ah-db)" class="wire" data-from="master" data-to="pg" data-id="master-pg"/><path d="M650,470 L621,470 Q611,470 611,480 L611,789" fill="none" stroke="#ffffff" stroke-opacity="0.85" stroke-width="1.6" class="flow" stroke-linecap="round"/>
-<path d="M759,594 L759,789" fill="none" stroke="#818cf8" stroke-width="2.0" stroke-opacity="0.9" marker-end="url(#ah-db)" class="wire" data-from="grafana" data-to="pg" stroke-dasharray="7 6" data-id="graf-pg"/>
-<path d="M908,712 L806,712 Q796,712 796,722 L796,789" fill="none" stroke="#818cf8" stroke-width="2.0" stroke-opacity="0.9" marker-end="url(#ah-db)" class="wire" data-from="alarm" data-to="pg" data-id="alarm-pg"/><path d="M908,712 L806,712 Q796,712 796,722 L796,789" fill="none" stroke="#ffffff" stroke-opacity="0.85" stroke-width="1.6" class="flow" stroke-linecap="round"/>
 <path d="M908,321 L869,321" fill="none" stroke="#22d3ee" stroke-width="2.0" stroke-opacity="0.9" marker-end="url(#ah-cyan)" class="wire" data-from="collect" data-to="master" data-id="collect"/><path d="M908,321 L869,321" fill="none" stroke="#ffffff" stroke-opacity="0.85" stroke-width="1.6" class="flow" stroke-linecap="round"/>
-<path d="M868,410 L907,410" fill="none" stroke="#34d399" stroke-width="2.0" stroke-opacity="0.9" marker-end="url(#ah-green)" class="wire" data-from="master" data-to="vm" data-id="master-vm"/><path d="M868,410 L907,410" fill="none" stroke="#ffffff" stroke-opacity="0.85" stroke-width="1.6" class="flow" stroke-linecap="round"/>
-<path d="M852,561 L878,561 Q888,561 888,551 L888,457.5 Q888,448 897.5,448 L907,448" fill="none" stroke="#34d399" stroke-width="2.0" stroke-opacity="0.9" marker-end="url(#ah-green)" class="wire" data-from="grafana" data-to="vm" stroke-dasharray="7 6" data-id="graf-vm"/>
-<path d="M1008,494 L1008,467" fill="none" stroke="#34d399" stroke-width="2.0" stroke-opacity="0.9" marker-end="url(#ah-green)" class="wire" data-from="vmalert" data-to="vm" data-id="vmalert-vm"/><path d="M1008,494 L1008,467" fill="none" stroke="#ffffff" stroke-opacity="0.85" stroke-width="1.6" class="flow" stroke-linecap="round"/>
-<path d="M1008,550 L1008,579" fill="none" stroke="#fbbf24" stroke-width="2.0" stroke-opacity="0.9" marker-end="url(#ah-amber)" class="wire" data-from="vmalert" data-to="am" data-id="vmalert-am"/><path d="M1008,550 L1008,579" fill="none" stroke="#ffffff" stroke-opacity="0.85" stroke-width="1.6" class="flow" stroke-linecap="round"/>
-<path d="M1008,636 L1008,665" fill="none" stroke="#fbbf24" stroke-width="2.0" stroke-opacity="0.9" marker-end="url(#ah-amber)" class="wire" data-from="am" data-to="alarm" data-id="am-alarm"/><path d="M1008,636 L1008,665" fill="none" stroke="#ffffff" stroke-opacity="0.85" stroke-width="1.6" class="flow" stroke-linecap="round"/>
-<path d="M1062,744 L1062,797" fill="none" stroke="#fbbf24" stroke-width="2.0" stroke-opacity="0.9" marker-end="url(#ah-amber)" class="wire" data-from="alarm" data-to="im" data-id="alarm-im"/><path d="M1062,744 L1062,797" fill="none" stroke="#ffffff" stroke-opacity="0.85" stroke-width="1.6" class="flow" stroke-linecap="round"/>
-<path d="M1248,526 L1148,526 Q1138,526 1138,516 L1138,450 Q1138,440 1128,440 L1109,440" fill="none" stroke="#34d399" stroke-width="2.0" stroke-opacity="0.9" marker-end="url(#ah-green)" class="wire" data-from="vmagent" data-to="vm" data-id="remote-write"/><path d="M1248,526 L1148,526 Q1138,526 1138,516 L1138,450 Q1138,440 1128,440 L1109,440" fill="none" stroke="#ffffff" stroke-opacity="0.85" stroke-width="1.6" class="flow" stroke-linecap="round"/>
 <path d="M1306,318 L1306,359" fill="none" stroke="#22d3ee" stroke-width="2.0" stroke-opacity="0.9" marker-end="url(#ah-cyan)" class="wire" data-from="agent" data-to="api" data-id="agent-api"/><path d="M1306,318 L1306,359" fill="none" stroke="#ffffff" stroke-opacity="0.85" stroke-width="1.6" class="flow" stroke-linecap="round"/>
 <path d="M1366,360 L1366,319" fill="none" stroke="#22d3ee" stroke-width="2.0" stroke-opacity="0.9" marker-end="url(#ah-cyan)" class="wire" data-from="api" data-to="agent" data-id="admission"/><path d="M1366,360 L1366,319" fill="none" stroke="#ffffff" stroke-opacity="0.85" stroke-width="1.6" class="flow" stroke-linecap="round"/>
 <path d="M1442,492 L1442,449" fill="none" stroke="#34d399" stroke-width="1.6" stroke-opacity="0.9" marker-end="url(#ah-green)" class="wire" data-from="vmagent" data-to="kubelet" data-id="scrape-kubelet"/><path d="M1442,492 L1442,449" fill="none" stroke="#ffffff" stroke-opacity="0.85" stroke-width="1.4" class="flow" stroke-linecap="round"/>
 <path d="M1350,560 L1350,609" fill="none" stroke="#34d399" stroke-width="1.6" stroke-opacity="0.9" marker-end="url(#ah-green)" class="wire" data-from="vmagent" data-to="ksm" data-id="scrape-ksm"/><path d="M1350,560 L1350,609" fill="none" stroke="#ffffff" stroke-opacity="0.85" stroke-width="1.4" class="flow" stroke-linecap="round"/>
-<path d="M1558,286 L1563,286 Q1568,286 1568,291 L1568,840 Q1568,850 1558,850 L1485,850" fill="none" stroke="#22d3ee" stroke-width="2.0" stroke-opacity="0.9" marker-end="url(#ah-cyan)" class="wire" data-from="agent" data-to="oss" stroke-dasharray="7 6" data-id="agent-oss"/>
+<path d="M650,476 L602,476 Q592,476 592,486 L592,789" fill="none" stroke="#818cf8" stroke-width="2.0" stroke-opacity="0.9" marker-end="url(#ah-db)" class="wire" data-from="master" data-to="pg" data-id="master-pg"/><path d="M650,476 L602,476 Q592,476 592,486 L592,789" fill="none" stroke="#ffffff" stroke-opacity="0.85" stroke-width="1.6" class="flow" stroke-linecap="round"/>
+<path d="M650,579 L620,579 Q610,579 610,589 L610,789" fill="none" stroke="#818cf8" stroke-width="2.0" stroke-opacity="0.9" marker-end="url(#ah-db)" class="wire" data-from="grafana" data-to="pg" data-id="graf-pg"/><path d="M650,579 L620,579 Q610,579 610,589 L610,789" fill="none" stroke="#ffffff" stroke-opacity="0.85" stroke-width="1.6" class="flow" stroke-linecap="round"/>
+<path d="M740,612 L740,789" fill="none" stroke="#34d399" stroke-width="2.0" stroke-opacity="0.9" marker-end="url(#ah-green)" class="wire" data-from="grafana" data-to="vm" data-id="graf-vm"/><path d="M740,612 L740,789" fill="none" stroke="#ffffff" stroke-opacity="0.85" stroke-width="1.6" class="flow" stroke-linecap="round"/>
+<path d="M850,511 L850,789" fill="none" stroke="#34d399" stroke-width="2.0" stroke-opacity="0.9" marker-end="url(#ah-green)" class="wire" data-from="master" data-to="vm" data-id="master-vm"/><path d="M850,511 L850,789" fill="none" stroke="#ffffff" stroke-opacity="0.85" stroke-width="1.6" class="flow" stroke-linecap="round"/>
+<path d="M908,454 L890,454 Q880,454 880,464 L880,789" fill="none" stroke="#34d399" stroke-width="2.0" stroke-opacity="0.9" marker-end="url(#ah-green)" class="wire" data-from="vmalert" data-to="vm" data-id="vmalert-vm"/><path d="M908,454 L890,454 Q880,454 880,464 L880,789" fill="none" stroke="#ffffff" stroke-opacity="0.85" stroke-width="1.6" class="flow" stroke-linecap="round"/>
+<path d="M1003,482 L1003,505" fill="none" stroke="#fbbf24" stroke-width="2.0" stroke-opacity="0.9" marker-end="url(#ah-amber)" class="wire" data-from="vmalert" data-to="am" data-id="vmalert-am"/><path d="M1003,482 L1003,505" fill="none" stroke="#ffffff" stroke-opacity="0.85" stroke-width="1.6" class="flow" stroke-linecap="round"/>
+<path d="M1003,562 L1003,585" fill="none" stroke="#fbbf24" stroke-width="2.0" stroke-opacity="0.9" marker-end="url(#ah-amber)" class="wire" data-from="am" data-to="alarm" data-id="am-alarm"/><path d="M1003,562 L1003,585" fill="none" stroke="#ffffff" stroke-opacity="0.85" stroke-width="1.6" class="flow" stroke-linecap="round"/>
+<path d="M940,687 L940,789" fill="none" stroke="#fbbf24" stroke-width="2.0" stroke-opacity="0.9" marker-end="url(#ah-amber)" class="wire" data-from="alarm" data-to="im" data-id="alarm-im"/><path d="M940,687 L940,789" fill="none" stroke="#ffffff" stroke-opacity="0.85" stroke-width="1.6" class="flow" stroke-linecap="round"/>
+<path d="M908,672 L888,672 A8,8 0 0 0 872,672 L858,672 A8,8 0 0 0 842,672 L748,672 A8,8 0 0 0 732,672 L640,672 Q630,672 630,682 L630,789" fill="none" stroke="#818cf8" stroke-width="2.0" stroke-opacity="0.9" marker-end="url(#ah-db)" class="wire" data-from="alarm" data-to="pg" data-id="alarm-pg"/><path d="M908,672 L888,672 A8,8 0 0 0 872,672 L858,672 A8,8 0 0 0 842,672 L748,672 A8,8 0 0 0 732,672 L640,672 Q630,672 630,682 L630,789" fill="none" stroke="#ffffff" stroke-opacity="0.85" stroke-width="1.6" class="flow" stroke-linecap="round"/>
+<path d="M868,386 L1108,386 Q1118,386 1118,396 L1118,789" fill="none" stroke="#fbbf24" stroke-width="2.0" stroke-opacity="0.9" marker-end="url(#ah-amber)" class="wire" data-from="master" data-to="im" data-id="master-im"/><path d="M868,386 L1108,386 Q1118,386 1118,396 L1118,789" fill="none" stroke="#ffffff" stroke-opacity="0.85" stroke-width="1.6" class="flow" stroke-linecap="round"/>
+<path d="M868,370 L1128,370 Q1138,370 1138,380 L1138,762 Q1138,772 1148,772 L1150,772 A8,8 0 0 1 1166,772 L1190,772 Q1200,772 1200,782 L1200,789" fill="none" stroke="#94a3b8" stroke-width="2.0" stroke-opacity="0.9" marker-end="url(#ah-slate)" class="wire" data-from="master" data-to="api-ext" stroke-dasharray="7 6" data-id="master-api"/>
+<path d="M1248,526 L1168,526 Q1158,526 1158,536 L1158,883 Q1158,893 1148,893 L903,893" fill="none" stroke="#34d399" stroke-width="2.0" stroke-opacity="0.9" marker-end="url(#ah-green)" class="wire" data-from="vmagent" data-to="vm" data-id="remote-write"/><path d="M1248,526 L1168,526 Q1158,526 1158,536 L1158,883 Q1158,893 1148,893 L903,893" fill="none" stroke="#ffffff" stroke-opacity="0.85" stroke-width="1.6" class="flow" stroke-linecap="round"/>
+<path d="M1558,286 L1563,286 Q1568,286 1568,291 L1568,762 Q1568,772 1558,772 L1480,772 Q1470,772 1470,782 L1470,789" fill="none" stroke="#22d3ee" stroke-width="2.0" stroke-opacity="0.9" marker-end="url(#ah-cyan)" class="wire" data-from="agent" data-to="oss" stroke-dasharray="7 6" data-id="agent-oss"/>
 </g>
 <g id="boxes">
 <g class="box" id="b-browser" data-id="browser">
@@ -172,12 +173,12 @@
 <text x="292" y="315" font-size="19" fill="url(#aitext)" font-weight="800" data-box="ai">kubedoor-ai</text>
 <text x="292" y="337" font-size="13" fill="#e9d5ff" data-box="ai">AI 助手 · 企微机器人 · MCP Server</text>
 <line x1="292" y1="350" x2="552" y2="350" stroke="#a78bfa" stroke-opacity="0.35"/>
-<text x="292" y="372" font-size="13" data-box="ai"><tspan fill="#e2e8f0">DeepAgents · Skills · 子 Agent 并行排查</tspan></text>
+<text x="292" y="372" font-size="13" data-box="ai"><tspan fill="#e2e8f0">DeepAgents · 3 个 Skill · 子 Agent 并行排查</tspan></text>
 <text x="292" y="394" font-size="13" data-box="ai"><tspan fill="#e2e8f0">统一工具 </tspan><tspan fill="#f0abfc" class="mono">kubedoor_tool</tspan><tspan fill="#e2e8f0">：</tspan></text>
-<text x="292" y="416" font-size="13" data-box="ai"><tspan fill="#e2e8f0">67 个业务操作 + 5 类通用执行器</tspan></text>
-<text x="292" y="438" font-size="13" data-box="ai"><tspan fill="#a5b4fc">API · kubectl · istioctl · 诊断 · Pod exec</tspan></text>
-<text x="292" y="460" font-size="13" data-box="ai"><tspan fill="#e2e8f0">只读查询自动执行，变更需审批后执行</tspan></text>
-<text x="292" y="482" font-size="13" data-box="ai"><tspan fill="#e2e8f0">冻结参数 · 变更预览 · 审计入库</tspan></text>
+<text x="292" y="416" font-size="13" data-box="ai"><tspan fill="#e2e8f0">73 个业务操作 + 8 类通用执行器</tspan></text>
+<text x="292" y="438" font-size="13" data-box="ai"><tspan fill="#a5b4fc">API · kubectl · istioctl · Pod exec · 只读查库</tspan></text>
+<text x="292" y="460" font-size="13" data-box="ai"><tspan fill="#e2e8f0">读源码 · 查运行配置 · 接入用户 MCP</tspan></text>
+<text x="292" y="482" font-size="13" data-box="ai"><tspan fill="#e2e8f0">先权限后审批 · 冻结参数 · 审计入库</tspan></text>
 <text x="292" y="504" font-size="13" data-box="ai"><tspan fill="#e2e8f0">会话 / 审批 / 全局记忆持久化到 PostgreSQL</tspan></text>
 <text x="292" y="526" font-size="13" data-box="ai"><tspan fill="#f0abfc" font-weight="700">MCP：</tspan><tspan fill="#e2e8f0">16 个兼容工具 + </tspan><tspan fill="#f0abfc" class="mono">kubedoor_tool</tspan></text>
 <text x="292" y="548" font-size="13" data-box="ai"><tspan fill="#e2e8f0">/mcp · /sse 接入，复用 Web 账号与权限</tspan></text>
@@ -187,24 +188,24 @@
 <rect x="451.75" y="564" width="85.5" height="20" rx="10" fill="none" fill-opacity="0" stroke="#c084fc" stroke-opacity="0.75" stroke-width="1"/><text x="494.5" y="578.5" font-size="13" fill="#c084fc" text-anchor="middle" data-box="ai">kubeconfig</text>
 </g>
 <g class="box" id="b-master" data-id="master">
-<rect class="frame" x="652" y="284" width="214" height="206" rx="12" fill="url(#cardfill)" stroke="#60a5fa" stroke-opacity="0.85" stroke-width="1.4"/>
+<rect class="frame" x="652" y="284" width="214" height="225" rx="12" fill="url(#cardfill)" stroke="#60a5fa" stroke-opacity="0.85" stroke-width="1.4"/>
 <rect x="668" y="282.5" width="30" height="3" rx="1.5" fill="#60a5fa"/>
 <text x="668" y="314" font-size="16" fill="#f1f5f9" font-weight="700" data-box="master">kubedoor-master</text>
 <text x="668" y="335" font-size="13" fill="#60a5fa" data-box="master">API 网关 · aiohttp</text>
-<text x="668" y="354" font-size="13" fill="#cbd5e1" data-box="master">Agent WebSocket 枢纽</text>
-<text x="668" y="373" font-size="13" fill="#cbd5e1" data-box="master">请求转发 · 日志 · 实时状态</text>
-<text x="668" y="392" font-size="13" fill="#cbd5e1" data-box="master">指标查询（PromQL）</text>
-<text x="668" y="411" font-size="13" fill="#cbd5e1" data-box="master">K8S 事件入库 + 规则告警</text>
-<text x="668" y="430" font-size="13" fill="#cbd5e1" data-box="master">告警屏蔽 · Istio 路由</text>
-<text x="668" y="449" font-size="13" fill="#cbd5e1" data-box="master">LDAP · 集群授权 · 操作审计</text>
-<text x="668" y="468" font-size="13" fill="#cbd5e1" data-box="master">AI 工具桥接 · 数据定期清理</text>
+<text x="668" y="354" font-size="13" fill="#cbd5e1" data-box="master">Agent 连接中心 · 请求转发</text>
+<text x="668" y="373" font-size="13" fill="#cbd5e1" data-box="master">日志 · 终端 · 实时状态</text>
+<text x="668" y="392" font-size="13" fill="#cbd5e1" data-box="master">指标查询 · 事件入库与告警</text>
+<text x="668" y="411" font-size="13" fill="#cbd5e1" data-box="master">消息通知 · 按集群选群</text>
+<text x="668" y="430" font-size="13" fill="#cbd5e1" data-box="master">权限与审批 · LDAP · 审计</text>
+<text x="668" y="449" font-size="13" fill="#cbd5e1" data-box="master">Istio 路由 · 告警屏蔽</text>
+<text x="668" y="468" font-size="13" fill="#cbd5e1" data-box="master">Agent 网页安装 · 自定义接口</text>
+<text x="668" y="487" font-size="13" fill="#cbd5e1" data-box="master">AI 工具桥接 · 数据定期清理</text>
 </g>
 <g class="box" id="b-grafana" data-id="grafana">
-<rect class="frame" x="668" y="530" width="182" height="62" rx="12" fill="url(#cardfill)" stroke="#34d399" stroke-opacity="0.85" stroke-width="1.4" stroke-dasharray="6 5"/>
-<rect x="684" y="528.5" width="30" height="3" rx="1.5" fill="#34d399"/>
-<text x="684" y="559" font-size="15" fill="#f1f5f9" font-weight="700" data-box="grafana">Grafana</text>
-<rect x="794" y="540" width="40" height="20" rx="10" fill="none" fill-opacity="0" stroke="#94a3b8" stroke-opacity="0.75" stroke-width="1"/><text x="814" y="554.5" font-size="13" fill="#94a3b8" text-anchor="middle" data-box="grafana">可选</text>
-<text x="684" y="579" font-size="13" fill="#cbd5e1" data-box="grafana">看板：PG + 时序库</text>
+<rect class="frame" x="652" y="548" width="182" height="62" rx="12" fill="url(#cardfill)" stroke="#34d399" stroke-opacity="0.85" stroke-width="1.4"/>
+<rect x="668" y="546.5" width="30" height="3" rx="1.5" fill="#34d399"/>
+<text x="668" y="577" font-size="15" fill="#f1f5f9" font-weight="700" data-box="grafana">Grafana</text>
+<text x="668" y="597" font-size="13" fill="#cbd5e1" data-box="grafana">看板：PG + 时序库</text>
 </g>
 <g class="box" id="b-collect" data-id="collect">
 <rect class="frame" x="910" y="284" width="196" height="74" rx="12" fill="url(#cardfill)" stroke="#60a5fa" stroke-opacity="0.85" stroke-width="1.4"/>
@@ -213,34 +214,29 @@
 <text x="926" y="332" font-size="13" fill="#cbd5e1" data-box="collect">每天 01:00（控制器时区）</text>
 <text x="926" y="351" font-size="13" fill="#cbd5e1" data-box="collect">CronJob 触发高峰期采集</text>
 </g>
-<g class="box" id="b-vm" data-id="vm">
-<rect class="frame" x="910" y="386" width="196" height="78" rx="12" fill="url(#cardfill)" stroke="#34d399" stroke-opacity="0.85" stroke-width="1.4" stroke-dasharray="6 5"/>
-<rect x="926" y="384.5" width="30" height="3" rx="1.5" fill="#34d399"/>
-<text x="926" y="415" font-size="15" fill="#f1f5f9" font-weight="700" data-box="vm">VictoriaMetrics</text>
-<rect x="1050" y="396" width="40" height="20" rx="10" fill="none" fill-opacity="0" stroke="#94a3b8" stroke-opacity="0.75" stroke-width="1"/><text x="1070" y="410.5" font-size="13" fill="#94a3b8" text-anchor="middle" data-box="vm">可选</text>
-<text x="926" y="434" font-size="13" fill="#cbd5e1" data-box="vm">时序库（可换为已有</text>
-<text x="926" y="453" font-size="13" fill="#cbd5e1" data-box="vm">Prometheus / VM）</text>
+<g class="group" id="g-alerting" data-id="alerting">
+<rect x="900" y="400" width="206" height="294" rx="16" fill="#fbbf24" fill-opacity="0.025" stroke="#94a3b8" stroke-opacity="0.7" stroke-width="1.3" stroke-dasharray="6 5"/>
+<text x="912" y="419" font-size="13" data-box="alerting"><tspan fill="#fcd34d" font-weight="700">告警组件</tspan><tspan fill="#cbd5e1" font-size="12"> · 一个开关一起装或不装</tspan></text>
 </g>
 <g class="box" id="b-vmalert" data-id="vmalert">
-<rect class="frame" x="910" y="496" width="196" height="52" rx="12" fill="url(#cardfill)" stroke="#fbbf24" stroke-opacity="0.85" stroke-width="1.4" stroke-dasharray="6 5"/>
-<rect x="926" y="494.5" width="30" height="3" rx="1.5" fill="#fbbf24"/>
-<text x="926" y="519" font-size="15" fill="#f1f5f9" font-weight="700" data-box="vmalert">vmalert</text>
-<rect x="1050" y="506" width="40" height="20" rx="10" fill="none" fill-opacity="0" stroke="#94a3b8" stroke-opacity="0.75" stroke-width="1"/><text x="1070" y="520.5" font-size="13" fill="#94a3b8" text-anchor="middle" data-box="vmalert">可选</text>
-<text x="926" y="538" font-size="13" fill="#cbd5e1" data-box="vmalert">内置告警规则</text>
+<rect class="frame" x="910" y="428" width="186" height="52" rx="12" fill="url(#cardfill)" stroke="#fbbf24" stroke-opacity="0.85" stroke-width="1.4"/>
+<rect x="926" y="426.5" width="30" height="3" rx="1.5" fill="#fbbf24"/>
+<text x="926" y="451" font-size="15" fill="#f1f5f9" font-weight="700" data-box="vmalert">vmalert</text>
+<text x="926" y="470" font-size="13" fill="#cbd5e1" data-box="vmalert">内置告警规则</text>
 </g>
 <g class="box" id="b-am" data-id="am">
-<rect class="frame" x="910" y="582" width="196" height="52" rx="12" fill="url(#cardfill)" stroke="#fbbf24" stroke-opacity="0.85" stroke-width="1.4" stroke-dasharray="6 5"/>
-<rect x="926" y="580.5" width="30" height="3" rx="1.5" fill="#fbbf24"/>
-<text x="926" y="605" font-size="15" fill="#f1f5f9" font-weight="700" data-box="am">Alertmanager</text>
-<rect x="1050" y="592" width="40" height="20" rx="10" fill="none" fill-opacity="0" stroke="#94a3b8" stroke-opacity="0.75" stroke-width="1"/><text x="1070" y="606.5" font-size="13" fill="#94a3b8" text-anchor="middle" data-box="am">可选</text>
-<text x="926" y="624" font-size="13" fill="#cbd5e1" data-box="am">分组 · 去重 · 路由</text>
+<rect class="frame" x="910" y="508" width="186" height="52" rx="12" fill="url(#cardfill)" stroke="#fbbf24" stroke-opacity="0.85" stroke-width="1.4"/>
+<rect x="926" y="506.5" width="30" height="3" rx="1.5" fill="#fbbf24"/>
+<text x="926" y="531" font-size="15" fill="#f1f5f9" font-weight="700" data-box="am">Alertmanager</text>
+<text x="926" y="550" font-size="13" fill="#cbd5e1" data-box="am">分组 · 去重 · 路由</text>
 </g>
 <g class="box" id="b-alarm" data-id="alarm">
-<rect class="frame" x="910" y="668" width="196" height="74" rx="12" fill="url(#cardfill)" stroke="#fbbf24" stroke-opacity="0.85" stroke-width="1.4"/>
-<rect x="926" y="666.5" width="30" height="3" rx="1.5" fill="#fbbf24"/>
-<text x="926" y="697" font-size="15" fill="#f1f5f9" font-weight="700" data-box="alarm">kubedoor-alarm</text>
-<text x="926" y="716" font-size="13" fill="#cbd5e1" data-box="alarm">屏蔽匹配 · 告警入库</text>
-<text x="926" y="735" font-size="13" fill="#cbd5e1" data-box="alarm">IM 通知</text>
+<rect class="frame" x="910" y="588" width="186" height="97" rx="12" fill="url(#cardfill)" stroke="#fbbf24" stroke-opacity="0.85" stroke-width="1.4"/>
+<rect x="926" y="586.5" width="30" height="3" rx="1.5" fill="#fbbf24"/>
+<text x="926" y="617" font-size="15" fill="#f1f5f9" font-weight="700" data-box="alarm">kubedoor-alarm</text>
+<text x="926" y="636" font-size="13" fill="#cbd5e1" data-box="alarm">屏蔽匹配 · 告警入库</text>
+<text x="926" y="655" font-size="13" fill="#cbd5e1" data-box="alarm">按集群向 master 取通道</text>
+<text x="926" y="674" font-size="13" fill="#cbd5e1" data-box="alarm">发送 IM 通知</text>
 </g>
 <g class="box" id="b-agent" data-id="agent">
 <rect class="frame" x="1280" y="144" width="276" height="172" rx="12" fill="url(#cardfill)" stroke="#22d3ee" stroke-opacity="0.85" stroke-width="1.4"/>
@@ -251,7 +247,7 @@
 <text x="1296" y="233" font-size="13" fill="#cbd5e1" data-box="agent">扩缩容 · 重启 · 改镜像 · 节点均衡</text>
 <text x="1296" y="252" font-size="13" fill="#cbd5e1" data-box="agent">准入 Webhook 改写副本 / 资源 / JVM</text>
 <text x="1296" y="271" font-size="13" fill="#cbd5e1" data-box="agent">事件 watch · 日志流 · 实时状态</text>
-<text x="1296" y="290" font-size="13" fill="#cbd5e1" data-box="agent">AI 执行器：API · kubectl · istioctl</text>
+<text x="1296" y="290" font-size="13" fill="#cbd5e1" data-box="agent">AI 执行器：API · kubectl · 只读查库</text>
 </g>
 <g class="box" id="b-api" data-id="api">
 <rect class="frame" x="1170" y="362" width="244" height="84" rx="12" fill="url(#cardfill)" stroke="#22d3ee" stroke-opacity="0.85" stroke-width="1.4"/>
@@ -281,36 +277,55 @@
 <rect x="1500" y="622" width="40" height="20" rx="10" fill="none" fill-opacity="0" stroke="#94a3b8" stroke-opacity="0.75" stroke-width="1"/><text x="1520" y="636.5" font-size="13" fill="#94a3b8" text-anchor="middle" data-box="ksm">可选</text>
 <text x="1186" y="655" font-size="13" fill="#cbd5e1" data-box="ksm">对象状态指标 · 节点指标</text>
 </g>
-<g class="box" id="b-pg" data-id="pg">
-<rect class="frame" x="274" y="792" width="546" height="118" rx="12" fill="url(#cardfill)" stroke="#818cf8" stroke-opacity="0.9" stroke-width="1.4"/>
-<rect x="290" y="790.5" width="30" height="3" rx="1.5" fill="#818cf8"/>
-<g fill="none" stroke="#818cf8" stroke-width="1.6"><ellipse cx="308" cy="828" rx="16" ry="6"/><path d="M292,828 v34 a16,6 0 0 0 32,0 v-34"/><path d="M292,845 a16,6 0 0 0 32,0" stroke-opacity="0.6"/></g>
-<text x="340" y="822" font-size="17" data-box="pg"><tspan fill="#f1f5f9" font-weight="700">PostgreSQL 18</tspan></text>
-<rect x="481.418" y="807" width="79" height="20" rx="10" fill="none" fill-opacity="0" stroke="#818cf8" stroke-opacity="0.75" stroke-width="1"/><text x="520.918" y="821.5" font-size="13" fill="#818cf8" text-anchor="middle" data-box="pg">唯一数据库</text>
-<text x="340" y="846" font-size="13" fill="#a5b4fc" data-box="pg">docker compose 独立部署在 K8S 外，也可用现成 PG（无需扩展）</text>
-<text x="340" y="870" font-size="13" fill="#cbd5e1" data-box="pg">管控配置 · 高峰期资源 · K8S 事件 · 告警记录 · 屏蔽规则</text>
-<text x="340" y="891" font-size="13" fill="#cbd5e1" data-box="pg">Istio 路由 · AI 会话 / 审批 / 审计 / 记忆</text>
-</g>
 <g class="box" id="b-reg" data-id="reg">
-<rect class="frame" x="842" y="800" width="172" height="100" rx="12" fill="url(#cardfill)" stroke="#94a3b8" stroke-opacity="0.85" stroke-width="1.4"/>
-<rect x="858" y="798.5" width="30" height="3" rx="1.5" fill="#94a3b8"/>
-<text x="858" y="829" font-size="15" fill="#f1f5f9" font-weight="700" data-box="reg">镜像仓库</text>
-<text x="858" y="849" font-size="13" fill="#cbd5e1" data-box="reg">SWR · ACR · Harbor</text>
-<text x="858" y="869" font-size="13" fill="#cbd5e1" data-box="reg">master 查询镜像 tag</text>
+<rect class="frame" x="38" y="792" width="178" height="108" rx="12" fill="url(#cardfill)" stroke="#94a3b8" stroke-opacity="0.85" stroke-width="1.4"/>
+<rect x="54" y="790.5" width="30" height="3" rx="1.5" fill="#94a3b8"/>
+<text x="54" y="821" font-size="15" fill="#f1f5f9" font-weight="700" data-box="reg">镜像仓库</text>
+<text x="54" y="840" font-size="13" fill="#cbd5e1" data-box="reg">SWR · ACR · Harbor</text>
+<text x="54" y="859" font-size="13" fill="#cbd5e1" data-box="reg">master 查询镜像 tag</text>
+</g>
+<g class="box" id="b-pg" data-id="pg">
+<rect class="frame" x="274" y="792" width="376" height="118" rx="12" fill="url(#cardfill)" stroke="#818cf8" stroke-opacity="0.9" stroke-width="1.4"/>
+<rect x="290" y="790.5" width="30" height="3" rx="1.5" fill="#818cf8"/>
+<g fill="none" stroke="#818cf8" stroke-width="1.6"><ellipse cx="308" cy="826" rx="16" ry="6"/><path d="M292,826 v34 a16,6 0 0 0 32,0 v-34"/><path d="M292,843 a16,6 0 0 0 32,0" stroke-opacity="0.6"/></g>
+<text x="340" y="820" font-size="17" data-box="pg"><tspan fill="#f1f5f9" font-weight="700">PostgreSQL 18</tspan></text>
+<rect x="481.418" y="806" width="79" height="20" rx="10" fill="none" fill-opacity="0" stroke="#818cf8" stroke-opacity="0.75" stroke-width="1"/><text x="520.918" y="820.5" font-size="13" fill="#818cf8" text-anchor="middle" data-box="pg">唯一数据库</text>
+<text x="340" y="840" font-size="13" fill="#a5b4fc" data-box="pg">docker compose 独立部署在 K8S 外，</text>
+<text x="340" y="858" font-size="13" fill="#a5b4fc" data-box="pg">也可用现成 PG（无需扩展）</text>
+<text x="340" y="878" font-size="13" fill="#cbd5e1" data-box="pg">管控配置 · 高峰期资源 · K8S 事件 · 告警 · 屏蔽</text>
+<text x="340" y="896" font-size="13" fill="#cbd5e1" data-box="pg">账号权限 · 通知与接口配置 · Istio · AI 会话</text>
+</g>
+<g class="box" id="b-vm" data-id="vm">
+<rect class="frame" x="668" y="792" width="232" height="118" rx="12" fill="url(#cardfill)" stroke="#34d399" stroke-opacity="0.85" stroke-width="1.4"/>
+<rect x="684" y="790.5" width="30" height="3" rx="1.5" fill="#34d399"/>
+<text x="684" y="821" font-size="15" fill="#f1f5f9" font-weight="700" data-box="vm">VictoriaMetrics</text>
+<rect x="844" y="802" width="40" height="20" rx="10" fill="none" fill-opacity="0" stroke="#34d399" stroke-opacity="0.75" stroke-width="1"/><text x="864" y="816.5" font-size="13" fill="#34d399" text-anchor="middle" data-box="vm">必需</text>
+<text x="684" y="840" font-size="13" fill="#6ee7b7" data-box="vm">指标时序库 · 单机版或集群版</text>
+<text x="684" y="858" font-size="13" fill="#6ee7b7" data-box="vm">也可用已有的 VictoriaMetrics</text>
+<text x="684" y="878" font-size="13" fill="#cbd5e1" data-box="vm">各集群 vmagent 直连写入</text>
+<text x="684" y="896" font-size="13" fill="#cbd5e1" data-box="vm">master · Grafana · vmalert 查询</text>
 </g>
 <g class="box" id="b-im" data-id="im">
-<rect class="frame" x="1032" y="800" width="236" height="100" rx="12" fill="url(#cardfill)" stroke="#fbbf24" stroke-opacity="0.85" stroke-width="1.4"/>
-<rect x="1048" y="798.5" width="30" height="3" rx="1.5" fill="#fbbf24"/>
-<text x="1048" y="829" font-size="15" fill="#f1f5f9" font-weight="700" data-box="im">IM 群机器人</text>
-<text x="1048" y="849" font-size="13" fill="#cbd5e1" data-box="im">企业微信 · 钉钉 · 飞书 · Slack</text>
-<text x="1048" y="869" font-size="13" fill="#cbd5e1" data-box="im">指标告警 · 事件告警 · 操作通知</text>
+<rect class="frame" x="918" y="792" width="222" height="86" rx="12" fill="url(#cardfill)" stroke="#fbbf24" stroke-opacity="0.85" stroke-width="1.4"/>
+<rect x="934" y="790.5" width="30" height="3" rx="1.5" fill="#fbbf24"/>
+<text x="934" y="821" font-size="15" fill="#f1f5f9" font-weight="700" data-box="im">IM 群机器人</text>
+<text x="934" y="840" font-size="13" fill="#cbd5e1" data-box="im">企业微信 · 钉钉 · 飞书 · Slack</text>
+<text x="934" y="859" font-size="13" fill="#cbd5e1" data-box="im">全局默认群 + 按集群单独配置</text>
+</g>
+<g class="box" id="b-api-ext" data-id="api-ext">
+<rect class="frame" x="1176" y="792" width="180" height="108" rx="12" fill="url(#cardfill)" stroke="#94a3b8" stroke-opacity="0.85" stroke-width="1.4" stroke-dasharray="6 5"/>
+<rect x="1192" y="790.5" width="30" height="3" rx="1.5" fill="#94a3b8"/>
+<text x="1192" y="821" font-size="15" fill="#f1f5f9" font-weight="700" data-box="api-ext">代码 / 运行配置接口</text>
+<text x="1192" y="840" font-size="13" fill="#94a3b8" data-box="api-ext">用户自建，可选</text>
+<text x="1192" y="859" font-size="13" fill="#cbd5e1" data-box="api-ext">按镜像返回代码链接</text>
+<text x="1192" y="878" font-size="13" fill="#cbd5e1" data-box="api-ext">返回服务生效配置</text>
 </g>
 <g class="box" id="b-oss" data-id="oss">
-<rect class="frame" x="1286" y="800" width="196" height="100" rx="12" fill="url(#cardfill)" stroke="#94a3b8" stroke-opacity="0.85" stroke-width="1.4"/>
-<rect x="1302" y="798.5" width="30" height="3" rx="1.5" fill="#94a3b8"/>
-<text x="1302" y="829" font-size="15" fill="#f1f5f9" font-weight="700" data-box="oss">对象存储</text>
-<text x="1302" y="849" font-size="13" fill="#cbd5e1" data-box="oss">JVM Dump / Jstack / JFR</text>
-<text x="1302" y="869" font-size="13" fill="#cbd5e1" data-box="oss">文件上传（可选）</text>
+<rect class="frame" x="1374" y="792" width="188" height="108" rx="12" fill="url(#cardfill)" stroke="#94a3b8" stroke-opacity="0.85" stroke-width="1.4"/>
+<rect x="1390" y="790.5" width="30" height="3" rx="1.5" fill="#94a3b8"/>
+<text x="1390" y="821" font-size="15" fill="#f1f5f9" font-weight="700" data-box="oss">对象存储</text>
+<text x="1390" y="840" font-size="13" fill="#cbd5e1" data-box="oss">JVM Dump / Jstack / JFR</text>
+<text x="1390" y="859" font-size="13" fill="#cbd5e1" data-box="oss">文件上传（可选）</text>
 </g>
 </g>
 <g id="labels">
@@ -320,16 +335,17 @@
 <text x="1212" y="243" font-size="13" fill="#7dd3fc" text-anchor="middle" class="lbl">同集群可直连 master</text>
 <text x="960" y="252" font-size="13" fill="#c084fc" text-anchor="middle" class="lbl">可选：kubeconfig 直连 API Server</text>
 <text x="432" y="700" font-size="13" fill="#a5b4fc" class="lbl">会话 · 审批 · 审计 · 记忆</text>
-<text x="1194" y="518" font-size="13" fill="#6ee7b7" text-anchor="middle" class="lbl">remote write</text>
-<text x="1016" y="485" font-size="13" fill="#6ee7b7" class="lbl">规则查询</text>
-<text x="1016" y="570" font-size="13" fill="#fcd34d" class="lbl">触发告警</text>
-<text x="1016" y="656" font-size="13" fill="#fcd34d" class="lbl">Webhook</text>
-<text x="1070" y="771" font-size="13" fill="#fcd34d" class="lbl">通知</text>
 <text x="1298" y="340" font-size="13" fill="#a5f3fc" text-anchor="end" class="lbl">调用 API</text>
 <text x="1374" y="340" font-size="13" fill="#a5f3fc" class="lbl">准入回调</text>
 <text x="1358" y="590" font-size="13" fill="#6ee7b7" class="lbl">抓取指标</text>
-<text x="1525" y="842" font-size="13" fill="#cbd5e1" text-anchor="middle" class="lbl">上传文件</text>
-<text x="1363" y="704" font-size="13" fill="#7dd3fc" text-anchor="middle" class="lbl">agent 与 vmagent 均主动外连：</text>
-<text x="1363" y="726" font-size="13" fill="#7dd3fc" text-anchor="middle" class="lbl">WebSocket 接入控制端 · 指标 remote write 到时序库</text>
+<text x="1243" y="518" font-size="13" fill="#6ee7b7" text-anchor="end" class="lbl">remote write</text>
+<text x="842" y="534" font-size="13" fill="#6ee7b7" text-anchor="end" class="lbl">PromQL</text>
+<text x="1011" y="497" font-size="13" fill="#fcd34d" class="lbl">触发告警</text>
+<text x="1011" y="577" font-size="13" fill="#fcd34d" class="lbl">Webhook</text>
+<text x="948" y="716" font-size="13" fill="#fcd34d" class="lbl">指标告警</text>
+<text x="1110" y="778" font-size="13" fill="#fcd34d" text-anchor="end" class="lbl">事件 · 操作 · 管控通知</text>
+<text x="1560" y="590" font-size="13" fill="#cbd5e1" text-anchor="end" class="lbl">上传文件</text>
+<text x="1363" y="694" font-size="13" fill="#7dd3fc" text-anchor="middle" class="lbl">agent 与 vmagent 均主动外连：</text>
+<text x="1363" y="714" font-size="13" fill="#7dd3fc" text-anchor="middle" class="lbl">WebSocket 接入控制端 · 指标直写时序库，不经 KubeDoor</text>
 </g>
 </svg>

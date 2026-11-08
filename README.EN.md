@@ -35,15 +35,16 @@
 * [💠Architecture](#architecture)
 * [💎Features](#features)
   * [🤖AI Assistant, WeCom Bot and MCP](#1-ai-assistant-wecom-bot-and-mcp)
-  * [🌐Istio VirtualService Management](#2-istio-virtualservice-management)
-  * [🧭CoreDNS Management](#3-coredns-management)
-  * [🎛K8S Resource Management](#4-k8s-resource-management)
-  * [📡Multi-Cluster Monitoring](#5-multi-cluster-monitoring)
-  * [🧬Alerts, Events and Silences](#6-alerts-events-and-silences)
-  * [🚧Peak-Hour Resources and Admission Control](#7-peak-hour-resources-and-admission-control)
-  * [☕JVM Control and Diagnostics](#8-jvm-control-and-diagnostics)
-  * [⚖Node Balancing and Elastic Scheduling](#9-node-balancing-and-elastic-scheduling)
-  * [🔐Platform and Permissions](#10-platform-and-permissions)
+  * [🧩Code and Runtime Config Lookup](#2-code-and-runtime-config-lookup)
+  * [🌐Istio VirtualService Management](#3-istio-virtualservice-management)
+  * [🧭CoreDNS Management](#4-coredns-management)
+  * [🎛K8S Resource Management](#5-k8s-resource-management)
+  * [📡Multi-Cluster Monitoring](#6-multi-cluster-monitoring)
+  * [🧬Alerts, Events and Notifications](#7-alerts-events-and-notifications)
+  * [🚧Peak-Hour Resources and Admission Control](#8-peak-hour-resources-and-admission-control)
+  * [☕JVM Control and Diagnostics](#9-jvm-control-and-diagnostics)
+  * [⚖Node Balancing and Elastic Scheduling](#10-node-balancing-and-elastic-scheduling)
+  * [🔐Platform, Permissions and Console Settings](#11-platform-permissions-and-console-settings)
 * [🚀Quick Start](#quick-start)
 * [♻Upgrade Notes](#upgrade-notes)
 * [📚Documentation](#documentation)
@@ -55,19 +56,21 @@
 
 ## 🌈Overview
 
-🌼**花折 - KubeDoor** is an **AI-driven intelligent management platform for multi-cluster Kubernetes**, built with Python + Vue. Install one KubeDoor control plane plus one agent in each workload cluster, and a single Web UI covers multi-cluster monitoring, resource management, alerts and events, Istio routing, CoreDNS records, peak-hour resource governance and JVM control. It has a built-in **AI ops assistant with approvals and an audit trail** that you can talk to both in the Web UI and in **WeCom** (WeChat Work), and that is exposed to external clients via **standard MCP**.
+🌼**花折 - KubeDoor** is an **AI-driven intelligent management platform for multi-cluster Kubernetes**, built with Python + Vue. **One command starts a Web wizard** that installs the control plane, and each workload cluster joins by uploading its kubeconfig in the Web UI; a single Web UI then covers multi-cluster monitoring, resource management, alerts and events, Istio routing, CoreDNS records, peak-hour resource governance and JVM control. It has a built-in **AI ops assistant with approvals and an audit trail** that you can talk to both in the Web UI and in **WeCom** (WeChat Work), that can read service source code and look up runtime configuration, and that is exposed to external clients via **standard MCP**.
 
-KubeDoor focuses on microservice resources as seen during the daily peak hours: it collects the real resource usage of every microservice during the peak, and uses K8S admission control to keep resource requests in line with that real usage. Building on this, 2.x makes the AI assistant a core capability, consolidates storage on PostgreSQL and reduces deployment to a single script.
+KubeDoor focuses on microservice resources as seen during the daily peak hours: it collects the real resource usage of every microservice during the peak, and uses K8S admission control to keep resource requests in line with that real usage. Building on this, 2.x makes the AI assistant a core capability, consolidates storage on PostgreSQL and reduces deployment to one command plus a Web wizard.
 
-- 🤖**AI ops assistant**: troubleshoot, query and make changes in natural language. It automatically calls 67 KubeDoor business operations as well as tools such as the K8S API, kubectl and istioctl; queries run automatically, while changes first show their parameters and diff and, by default, run only after a human approves them.
-- 💬**WeCom smart bot**: chat one-on-one with the bot in WeCom to have the AI assistant troubleshoot and operate, and approve changes from an approval card; members are bound to KubeDoor accounts (unbound members can share a default permission), and permissions are checked live against the account.
-- 🌐**Istio VirtualService management**: gather a project's VirtualServices across clusters into one group standard, with hosts and domains kept per cluster; compare clusters, adopt in one click, and preview the diff before pushing.
+- 🚀**One command, installed from the browser**: `sh install.sh` starts the Web wizard; fill in the database, the time-series database and the admin password, and the control-plane services are deployed together automatically and checked one by one until they are ready, with the option to install the Agent in the same cluster along the way; other clusters are installed by uploading a kubeconfig in the Web UI. The machine running it only needs `sh` and `kubectl`: no Helm, and no config files to edit.
+- 🤖**AI ops assistant**: troubleshoot, query and make changes in natural language. It automatically calls 73 KubeDoor business operations as well as tools such as the K8S API, kubectl and istioctl; it can download a service's source code to pinpoint problems, fetch the runtime configuration and run read-only queries against MySQL, Redis and Elasticsearch, and connect to your own MCP servers; queries run automatically, while changes first show their parameters and diff and, as configured, run only after a human approves them.
+- 🧩**Code and runtime config lookup**: hook up your own APIs, then from the Deployment and Pod menus open the code page, source download and latest commits for the current image in one click, or view the configuration the service actually runs with (the effective values after merging the config center, environment variables and config files); the AI assistant uses them too, to read code and check configuration.
+- 💬**WeCom smart bot**: chat one-on-one with the bot in WeCom to have the AI assistant troubleshoot and operate, and approve changes from an approval card or simply by replying 「批准」 (approve); members are bound to KubeDoor accounts (unbound members can share a default permission), and permissions are checked live against the account.
+- 🌐**Istio VirtualService management**: gather a project's VirtualServices across clusters into one group standard, with hosts and domains kept per cluster; compare clusters, adopt in one click, and preview the diff before pushing; VirtualServices are backed up automatically before a cluster is changed and can be rolled back in one click, and domain conflicts within a cluster are checked automatically.
 - 🧭**CoreDNS management**: maintain the cluster's custom DNS records as if editing a table, rewriting only the lines you changed; review the diff before saving, and confirm from inside the cluster that the records resolve.
 - 🎯**Peak-hour resource governance**: collect resource data for the business peak hours, then use admission control to enforce replica counts, requests, limits and JVM startup flags in one place.
 - 🛰**Unified multi-cluster management**: agents connect out to the control plane, so workload clusters need no inbound ports; the resources, metrics, events and alerts of all clusters live in one platform.
-- 🔔**Closed-loop alerting**: metric alerts, K8S event alerts and alert silences, with notifications sent to WeCom, DingTalk, Feishu and Slack.
-- 🔐**Accounts and permissions**: local and LDAP sign-in, per-cluster grants (Admin / Read-write / Read-only / None), a 「权限与审批」 (Permissions & approvals) table that sets what each level may do and which AI operations need human approval, and an audit trail of logins, changes and denied attempts.
-- 🚀**Simple deployment**: one command starts the Web wizard to connect external databases and deploy services automatically.
+- 🔔**Alerts and notifications**: metric alerts, K8S event alerts and alert silences, with notifications sent to WeCom, DingTalk, Feishu and Slack; configure them on the 「消息通知」 (Notifications) page, with a different group chat per cluster if needed.
+- 🔐**Accounts, permissions and approvals**: local and LDAP sign-in, per-cluster grants (Admin / Read-write / Read-only / None), a 「权限与审批」 (Permissions & approvals) table that sets, for 27 operation types, what each level may do and which AI operations need human approval, and an audit trail of logins, changes and denied attempts.
+- 🖥**Settings in the console**: notifications, permissions & approvals, LDAP, the WeCom bot, image registries and the code and runtime-config APIs are all configured under 「系统管理」 (System); changes take effect on save and sensitive values are stored encrypted, with no config files to edit and no services to restart.
 
 <div align="center">
 
@@ -81,7 +84,17 @@ K8S Resource Overview: multi-cluster resources, at-risk nodes, and today's abnor
 
 ## 🎉What's New in 2.x
 
-**Compared with 1.7, 2.x is an architecture-level upgrade: the AI assistant becomes a core capability, PostgreSQL becomes the only database, and deployment becomes a single script.** The main changes are listed below, newest version first; see [Features](#features) for details.
+**Compared with 1.7, 2.x is an architecture-level upgrade: the AI assistant becomes a core capability, PostgreSQL becomes the only database, and deployment becomes one command plus a Web wizard.** The main changes are listed below, newest version first; see [Features](#features) for details.
+
+**🚀2.6: One-command install with a Web wizard, code and runtime config lookup, an AI that reads code and checks configuration, permissions and approvals**
+- 🚀**One command + a Web installation wizard**: download `deploy/install.sh` on its own, run `sh install.sh` on a machine where `kubectl` works, and open the printed address to enter the six-step wizard (environment check → PostgreSQL → time-series database → basic settings → automatic installation → Agent for this cluster). The database is created if it does not exist, the time-series read/write URLs are generated and the access URL is detected automatically; the control-plane services are deployed together, each with its own status, duration and failure reason, success is reported only after every check passes, and afterwards the setup service is stopped and its temporary permissions are revoked automatically. Helm, Python and editing `kubedoor.conf` are no longer needed.
+- 🛰**Agent installation from the Web UI**: in 「Agent管理」 (Agent Management; English UI: "Workbench"), upload a kubeconfig and confirm the cluster identifier to install the Agent and the metrics collection components, with progress shown step by step and both the Agent coming online and its metrics verified; each cluster gets its own Agent account, vmagent writes directly to the time-series database, and once the Agent is online the cluster's 「AI Kubeconfig」 is configured automatically.
+- 🧩**Code and runtime config lookup**: system admins enter the URL and request headers of their own APIs on the 「获取代码接口」 (Get code API) and 「获取运行配置接口」 (Get runtime config API) pages; the Deployment and Pod menus then open the code page, source download and latest commits for the current image in one click, or show the configuration the service actually runs with.
+- 🤖**AI assistant enhancements**: download the source code of the running version, search it with ripgrep and find definitions with ctags, tracing an error stack down to the line of code; fetch the runtime configuration (passwords are replaced with placeholders, so the model never sees them in plain text) and run read-only queries against MySQL, Redis and Elasticsearch; connect your own MCP servers in 「MCP 管理」 (MCP management); generic operations now run through the Agent first; in WeCom, simply replying 「批准」 or 「拒绝」 (approve / reject) also works for approvals.
+- 🔐**Permissions and approvals**: for each of 27 operation types, system admins tick whether Read-only / Read-write / Admin may perform it and whether the AI needs human approval first; commands the AI runs inside Pods are classified as view / other / dangerous, and dangerous commands such as rm and kill always need approval; the Web UI, the AI assistant, the WeCom bot and external MCP share one table.
+- 🔔**Notifications page**: notifications are no longer set in environment variables; configure the global default group chat under 「系统管理 → 消息通知」 (System → Notifications), optionally send each cluster's notifications to a different group, and send a test message; operation notifications are now all sent by the master, and the agent buffers them while disconnected and resends them after reconnecting.
+- 🌐**Istio VirtualService**: automatic backups before a cluster is changed, with one-click rollback; domain conflicts within the same cluster are checked, and the push preview blocks the conflicts a push would newly introduce; comparisons show both sides line by line, and rules from a cluster's live state can be synced into the group standard; the matrix supports full-text search on rule content.
+- Also: compatibility with older clusters whose CA certificate lacks a key identifier (such as early Huawei Cloud CCE clusters, which newer Python versions refuse to connect to by default).
 
 **✨2.3: AI assistant enhancements, WeCom bot, Istio VirtualService management, CoreDNS management**
 - 🤖**AI assistant enhancements**: long conversations keep hitting the model's prefix cache, the context is compressed automatically according to the model's window and the dialog shows how much of it is in use, the new 「AI 用量看板📊」 (AI usage dashboard) tracks usage, cache hit rate and estimated cost, and the DeepSeek thinking effort is adjustable; the assistant is aware of KubeDoor resource control, so scaling, resource and JVM changes to managed services go through the control table and are read back afterwards; sessions are searchable, the last turn can be regenerated or edited and resent, and the alert, event, Deployment and Pod menus offer one-click 「问 AI」 (Ask AI).
@@ -110,17 +123,17 @@ K8S Resource Overview: multi-cluster resources, at-risk nodes, and today's abnor
 
 ## 💠Architecture
 
-**One control plane, plus one agent in each workload cluster; agents connect outbound, and all data is stored in PostgreSQL (metrics live in the time-series database).**
+**The Web wizard installs the control plane in one go, and each workload cluster gets one agent; agents connect outbound, and all data is stored in PostgreSQL (metrics live in the time-series database).**
 
 <div align="center">
 <img src="screenshot/kubedoor-arch.png" alt="KubeDoor 2.x architecture overview" />
 </div>
 
-- **Control plane** (deployed by the Web wizard): kubedoor-web (nginx single entry point + Vue 3 console), kubedoor-master (API gateway, agent connection hub), kubedoor-ai (AI assistant, WeCom bot and MCP Server), kubedoor-alarm (alert silencing, storage and IM notifications), kubedoor-collect (daily peak-hour collection CronJob), plus optional vmalert, Alertmanager and Grafana.
-- **Cluster side** (installed from Agent Management): kubedoor-agent, plus optional vmagent, kube-state-metrics and node-exporter. The agent **initiates** the WebSocket connection to the control plane, so workload clusters need no inbound ports; in the same cluster it connects directly to the master Service, while across clusters it goes through the Web entry point; either way it authenticates with the built-in agent account.
-- **PostgreSQL 18 is the only database**: deployed standalone outside K8S with docker compose, or use an existing PostgreSQL (no extensions needed).
-- **Independent time-series database**: deploy single-node VictoriaMetrics with Docker Compose in `deploy/victoria-metrics/`, or connect an existing Prometheus/VictoriaMetrics; each cluster's metrics are distinguished by the label `<PROM_K8S_TAG_KEY>=<K8S_NAME>`.
-- **Single entry point**: the Web UI, Grafana, the AI assistant and MCP share one kubedoor-web NodePort, and login and permissions are managed by the master; the external MCP endpoints (`/mcp`, `/sse`) can be turned off with `ENABLE_MCP="false"`, which does not affect the AI assistant in the Web UI.
+- **Control plane** (deployed by the Web wizard): kubedoor-web (nginx single entry point + Vue 3 console), kubedoor-master (API gateway, agent connection hub, notifications), kubedoor-ai (AI assistant, WeCom bot and MCP Server), kubedoor-collect (daily peak-hour collection CronJob) and the Grafana dashboards, plus the alerting components (vmalert, Alertmanager, kubedoor-alarm), which one switch installs or skips together. kubedoor-setup, used for installation, is a temporary service that is stopped automatically once installation is complete.
+- **Cluster side** (installed from Agent Management in the Web UI; the control plane's own cluster can also get it in the last step of the installation wizard): kubedoor-agent, plus optional vmagent, kube-state-metrics and node-exporter. The agent **initiates** the WebSocket connection to the control plane, so workload clusters need no inbound ports; in the same cluster it connects directly to the master Service, while across clusters it goes through the Web entry point, and the Web installation creates a separate Agent account for each cluster; vmagent remote-writes directly to the time-series database.
+- **PostgreSQL 18 is the only database**: deployed standalone outside K8S with docker compose, or use an existing PostgreSQL (no extensions or superuser needed; the installation wizard creates the database if it does not exist).
+- **Independent time-series database**: single-node VictoriaMetrics (Docker Compose in `deploy/victoria-metrics/`) or the VictoriaMetrics cluster version, or connect an existing one; each cluster's metrics are distinguished by the label `<PROM_K8S_TAG_KEY>=<cluster name>`.
+- **Single entry point**: the Web UI, Grafana, the AI assistant and MCP share one kubedoor-web NodePort, and login and permissions are managed by the master.
 
 ---
 
@@ -136,13 +149,16 @@ K8S Resource Overview: multi-cluster resources, at-risk nodes, and today's abnor
 
 - 🧠**Bring your own model**: enter the Base URL, API Key and model name in 「模型设置」 (Model Settings); 「测试连接」 (Test Connection) runs a real tool-calling test. Any OpenAI-compatible Chat Completions API works (including self-hosted models without authentication), with dedicated support for DeepSeek thinking mode (adjustable thinking effort); the context window and compression threshold are prefilled from the model name and can be changed. The model configuration is stored only in your own browser.
 - 🎯**Resource context**: first choose a 「K8S 集群」 (K8S cluster) — each turn only operates on the selected cluster — then optionally narrow it down to a namespace, Deployment or Pod.
-- 🧰**One governed tool**: every cluster operation goes through a single tool, `kubedoor_tool`, which covers **67 KubeDoor business operations** (38 read-only, 29 write) and **5 kinds of generic executors** (K8S API/CRD, kubectl, istioctl, diagnostic commands, Pod exec); existing KubeDoor APIs take precedence.
-- 🔌**Multiple connection modes**: existing KubeDoor APIs, the agent's in-cluster identity (no kubeconfig needed), or a direct connection with a kubeconfig that a system admin uploads in 「Agent管理」 (Agent Management; English UI: "Workbench"), stored encrypted; historical and monitoring data can still be queried while the agent is offline.
+- 🧰**One governed tool**: every cluster operation goes through a single tool, `kubedoor_tool`, which covers **73 KubeDoor business operations** (44 read-only, 29 write) and **8 kinds of generic executors** (K8S API/CRD, kubectl, istioctl, diagnostic commands, Pod exec, plus read-only queries against MySQL, Redis and Elasticsearch); existing KubeDoor APIs take precedence.
+- 🛰**Agent first, with a direct connection as fallback**: generic operations run through the online Agent inside the workload cluster first (re-checked by the master and validated again by the Agent, no kubeconfig needed); when the Agent is offline or too old, a direct connection with the cluster's kubeconfig is used instead. That kubeconfig is configured automatically from the Agent's service account when the Agent is installed from the Web UI, or a system admin can upload one in 「Agent管理」 (Agent Management; English UI: "Workbench"), stored encrypted; historical and monitoring data can still be queried while the agent is offline.
+- 🔍**Reading source code to pinpoint problems [2.6]**: look up the code page, source download and latest commits for the current image by Deployment or Pod; once an admin allows it, the AI downloads the source code of the running version, searches it with ripgrep for the exceptions in the logs, finds definitions with ctags and reads it line by line, then points out the faulty code and suggests a fix. The source is only extracted and cached inside kubedoor-ai; the model never gets the download URL and cannot pass one in.
+- 🗄**Runtime configuration and read-only database queries [2.6]**: once an admin allows it, the AI fetches the configuration a service actually runs with, with passwords and keys replaced by placeholders so the model never sees them in plain text; while troubleshooting, it uses the connection details in that configuration to run read-only queries against MySQL, Redis and Elasticsearch: the server fills in the real password at execution time and only connects to the addresses written in the configuration, and by default every query needs approval from the person who asked.
+- 🔌**Bring your own MCP [2.6]**: connect your own SSE / Streamable HTTP MCP servers (maps, ticketing, knowledge bases and so on) under 「MCP 管理」 (MCP management) in the dialog, isolated per account and stored encrypted; the AI calls them as needed, read-only tools run automatically, and the rest are approved according to your settings.
 - ⏰**Immediate / scheduled / periodic operations**: Deployment restarts and scaling can run immediately, at a set time, or periodically on a Cron schedule; when the time-series database is VictoriaMetrics, the AI can also write MetricsQL to query metrics (restricted to the current cluster).
 - 📝**Global memory**: 「总结为记忆」 (Summarize as memory) turns a conversation into a memory; once it is saved as a global memory, every logged-in user can bring it into their questions as needed.
 - 🛡**Aware of KubeDoor resource control**: before scaling or changing requests/limits or JVM options, the assistant checks whether the Deployment is under admission-control management: managed ones go through the control table (a permanent scale also writes the managed replica count; temporary scaling is available too), unmanaged ones are changed directly. The approval card shows current → target values and side effects, the result is read back after execution, and direct kubectl-style edits of managed Deployments are blocked instead of "succeeding" and being reverted.
 - 💬**Conversation experience**: search sessions by title and content; regenerate or edit-and-resend the last turn; one-click 「问 AI」 (Ask AI) in the alert, K8S event, Deployment and Pod menus fills in the cluster, resource and alert details.
-- 🧩**Powered by DeepAgents**: a built-in 「KubeDoor K8S 运维」 (KubeDoor K8S Ops) Skill, sub-agents that investigate in parallel and automatic context compression (the dialog header shows how much of the context is in use); the system prompt and history stay stable, so long conversations keep hitting the model's prefix cache; sessions are stored on the server (visible only to you), with streaming replies and resume after disconnects, and tasks keep running after you close the dialog.
+- 🧩**Powered by DeepAgents**: three built-in Skills (K8S ops, service source code analysis, and runtime configuration and data queries), sub-agents that investigate in parallel and automatic context compression (the dialog header shows how much of the context is in use); the system prompt and history stay stable, so long conversations keep hitting the model's prefix cache; sessions are stored on the server (visible only to you), with streaming replies and resume after disconnects, and tasks keep running after you close the dialog.
 
 #### 💬WeCom Smart Bot
 
@@ -153,7 +169,7 @@ K8S Resource Overview: multi-cluster resources, at-risk nodes, and today's abnor
 - 👥**Member binding and default permission**: bind a WeCom UserID to a KubeDoor account and set a default cluster; members who are not bound yet appear in the 「待绑定」 (to be bound) list after their first message. You can also set 「未绑定成员默认权限」 (default permission for unbound members) so that all unbound members use the permissions of one KubeDoor account (ideally a dedicated one, e.g. a read-only account; system admin and cluster admin accounts are not allowed) and start in a default cluster you choose; if it is not set, members must be bound first. Binding grants nothing by itself: every message is checked live against the KubeDoor account, so disabling the account or revoking its cluster access takes effect immediately.
 - 🎯**Switching clusters**: each turn operates on one cluster, which is named at the end of every answer; members who have not switched use their default cluster, and if the default cluster is 「无」 (none) they must pick a cluster before asking. Send 「集群」 (clusters) to list the accessible clusters with numbers, switch with 「切换集群 2」 or 「切换集群 <name>」 (switch cluster), or simply write a cluster's full name in your question to switch to it.
 - 🧹**Conversation boundaries**: WeCom has a single chat window, so a message sent more than 2 hours after the last one (configurable on the settings page, 0 turns it off) automatically starts a new conversation, with a note at the top of the reply. Send 「新对话」 (new conversation) to start over, which also stops any unfinished task, or 「继续上次」 (continue last) to go back to the previous conversation. The first time a member opens the chat each day, a welcome card offers both choices as buttons. When the context grows large, the end of the answer shows how much of it is in use, and a task left with only expired approvals is stopped automatically instead of blocking later questions.
-- ✅**Approval cards**: replies are streamed; permissions and approvals follow exactly the same rules as in the Web UI: a change that needs approval first has its parameters frozen, then a 「批准 / 拒绝」 (Approve / Reject) card is sent. Only the member who started the request can approve it, the card stops working once it expires, and after approval the run continues and the result is sent back.
+- ✅**Approval cards**: replies are streamed; permissions and approvals follow exactly the same rules as in the Web UI: a change that needs approval first has its parameters frozen, then a 「批准 / 拒绝」 (Approve / Reject) card is sent, with the cluster shown prominently at the top. Only the member who started the request can approve it, and they can also simply reply 「批准」 or 「拒绝」; the card stops working once it expires, and after approval the run continues and the result is sent back.
 - 🗂WeCom sessions are stored separately and do not appear in the Web AI's session list; the first version supports one-on-one text messages only.
 
 📖Details: [WeCom smart bot](src/kubedoor-ai/README.md#企业微信智能机器人) (Chinese)
@@ -166,7 +182,8 @@ K8S Resource Overview: multi-cluster resources, at-risk nodes, and today's abnor
 | Frozen parameters | The complete parameters are written to the database at the preparation stage and executed exactly as-is after approval, so the model cannot swap them; replacing the kubeconfig invalidates earlier approvals |
 | Dry-run | Generic K8S API writes first run with `dryRun=All` to produce a config diff, and carry resourceVersion/UID preconditions; `kubectl apply` first runs `--dry-run=server` |
 | No blind replays | A write that times out or loses its connection is marked 「执行结果不确定」 (result uncertain), and no further writes are made in that turn; a service restart never re-sends an operation that was already dispatched |
-| Redaction | The Web AI's API Key is only held in memory for a single run and is never written to the database or logs (the WeCom bot's model key is stored encrypted); streamed output, checkpoints, logs and memories are all redacted, and Secret contents are hidden automatically |
+| Redaction | The Web AI's API Key is only held in memory for a single run and is never written to the database or logs (the WeCom bot's model key is stored encrypted); streamed output, checkpoints, logs and memories are all redacted, and Secret contents are hidden automatically; passwords and keys in the runtime configuration are replaced with placeholders before it reaches the model, the server swaps the real values back in when querying a database, and any password that shows up in a result is masked |
+| Read-only database queries | MySQL accepts only a single query statement, run inside a read-only transaction; Redis is limited to a whitelist of read-only commands and Elasticsearch to a whitelist of query APIs; requests that do not qualify are refused outright and never reach approval; the connection address must be one written in that service's runtime configuration, so passwords cannot be sent to other hosts |
 | Per-cluster, per-operation permissions | Every operation is checked against the operation table in 「权限与审批」 using the account's permission on the selected cluster, with the same rules for the Web AI, the WeCom bot and external MCP (by default, read-only accounts can only chat and query); clusters set to "None" are invisible in the AI assistant, the WeCom bot and MCP; uploading kubeconfigs is limited to system admins |
 | Audit | Sessions, runs and every tool call (with full parameters, preview and result) are written to PostgreSQL; external MCP calls also create sessions that can be reviewed in the Web UI |
 
@@ -178,7 +195,7 @@ K8S Resource Overview: multi-cluster resources, at-risk nodes, and today's abnor
 - **Authentication**: reuses the Web accounts (local or LDAP) via the request header `Authorization: Basic <base64(username:password)>`, and runs with that account's per-cluster permissions and the 「权限与审批」 rules, the same as the Web AI.
 - **Tools**: the 16 tool names from 1.x are kept (e.g. `get_k8s_list`, `get_pods_logs`, `scale_deployment`, `get_pod_jvm_dump`) + the unified tool `kubedoor_tool` + the Skill resource `skills://kubedoor-k8s`.
 - **Operations that need approval never run directly**: operations that need approval under 「权限与审批」 (by default write operations and JVM diagnostics that run inside a Pod) return `pending` and a `browserlink` (relative path); log in to the Web UI with the **same account** and open it to approve. Results of approved operations are not pushed back to the MCP client, so query again to verify; operations that need no approval run directly and return their result.
-- **Turning off the external endpoints**: set `ENABLE_MCP="false"` in `kubedoor.conf`.
+- **Turning off the external endpoints**: legacy configuration-based deployments can set `ENABLE_MCP="false"` in `kubedoor.conf`; the AI assistant in the Web UI is not affected.
 
 Example (Cursor's `mcp.json` format, derived from the interface; for other clients, check their documentation for the field names):
 
@@ -235,18 +252,34 @@ The free-form `metrics` query requires VictoriaMetrics as the time-series databa
 
 ---
 
-### 2. 🌐Istio VirtualService Management
+### 2. 🧩Code and Runtime Config Lookup
+
+**[2.6] Hook up your own APIs, and the Deployment and Pod action menus show the code behind the current image in one click, or fetch the configuration the service actually runs with; the AI assistant also uses them to read code and check configuration while troubleshooting.** KubeDoor only defines the request and response formats; where the code is hosted and where the configuration comes from is up to your API (for example, mapping the image tag to its Git commit, or merging the config center, environment variables and config files into the effective configuration).
+
+- 🔗**Get code**: a system admin enters the API URL and request headers (such as an auth token; stored encrypted, with only the header names shown back) under 「系统管理 → 获取代码接口」 (System → Get code API), and saves once the test passes. Click 「获取代码」 (Get code) in the action menu of the Deployment page, and KubeDoor POSTs `{k8s, namespace, deployment, image}` to the API, which returns three links (the code page, the source download and the latest commits) that you open from a dialog; available to accounts with read-only access to the cluster or above.
+- ⚙**Get runtime config**: configured the same way under 「系统管理 → 获取运行配置接口」 (System → Get runtime config API). 「获取运行配置」 (Get runtime config) on the Deployment page, on the Pods in a Deployment's details and on the Pod page sends `{k8s, namespace, deployment|pod}` to the API, and the returned JSON is shown in a read-only editor with collapsible levels and one-click copy; an API that needs time to prepare the result can return 202 first, and KubeDoor retries automatically according to `Retry-After` until the configured timeout. Requires the 「查看运行配置」 (View runtime config) permission (read-write and above by default).
+- 🤖**Hand it to the AI**: once 「允许 AI 下载并分析源码」 (Allow AI to download and analyze source code) and 「允许 AI 获取运行配置」 (Allow AI to get runtime config) are turned on on the same pages (both off by default), the AI assistant can download the source code of the running version and search and read it for the exceptions in the logs to pinpoint the problem; it can also fetch the runtime configuration (with passwords replaced by placeholders) and then run read-only queries against the MySQL, Redis and Elasticsearch it references.
+- 🛡**Safety**: only http(s) links are accepted; calls have a timeout, do not follow redirects and limit the response size; every lookup is recorded in the audit log (for runtime configuration, only who fetched which service and when, never the configuration itself). The complete API contract is described on the two settings pages.
+
+📖Details: [Service source code lookup and analysis](docs/ai-assistant.md#服务源码查询与分析) · [Runtime configuration and data queries](docs/ai-assistant.md#运行配置与数据查询) (both in Chinese)
+
+---
+
+### 3. 🌐Istio VirtualService Management
 
 **[2.3] Maintain one project's VirtualServices across clusters per "Istio group": KubeDoor keeps one group standard (rules, default route and gateways are shared by the whole group), while hosts and the domain conditions inside rules stay per cluster; compare, adopt, preview and then push.**
 
 Built for the case where the same services run in test clusters and in several production clusters (multiple sites): the VirtualService rules are nearly identical everywhere and only the domains differ. Applied cluster by cluster with `kubectl apply`, they drift apart over time; now you change them in one place and push per cluster, and any cluster that has drifted stands out at a glance.
 
-- 🗺**Groups and matrix**: a group = the shared test clusters + the project's own production clusters, and a cluster can join several groups; the matrix view shows each VirtualService's hosts and status in every cluster on one screen (in sync / pending push / drifted / missing / domains missing), and each VirtualService chooses which clusters it is deployed to.
+- 🗺**Groups and matrix**: a group = the shared test clusters + the project's own production clusters, and a cluster can join several groups; the matrix view shows each VirtualService's hosts and status in every cluster on one screen (in sync / pending push / drifted / missing / domains missing), and each VirtualService chooses which clusters it is deployed to; the search box does full-text search on names, hosts and rule content.
 - 📥**Refresh the live state and adopt**: collect the VirtualServices of all clusters in parallel (read-only snapshots); compare clusters with rules aligned by match conditions and line-by-line YAML diffs, adopt the identical ones in one click (ones that differ only in hosts and domains count as identical), and for the different ones pick a base cluster to adopt from, then push to bring the others in line.
 - ✏**Visual editing**: create VirtualServices and add or edit HTTP rules (match conditions, URI rewrites, route destinations with weights or a delegate VirtualService, timeouts, priority), and tidy up priorities with 「整理优先级」 (Reorder priorities); domain-based conditions (authority, headers.host) are stored per cluster, and you can pick the domains for every cluster at once by keyword, or copy them from another cluster while replacing the site token (e.g. penglai → kunlun).
 - 🚀**Preview, then push**: before pushing, the latest live state is fetched from each cluster and the diff 「集群现状 → 将要下发」 (live state → to be pushed) is shown item by item, with an extra warning when production clusters are selected; each cell of the matrix shows who pushed last and when.
+- 🧯**Backup and rollback [2.6]**: before a VirtualService in a cluster is changed (push, rollback, delete), its latest content is fetched from the cluster and backed up, keeping the 5 most recent backups of each; on the details page, each cluster can 「回退」 (roll back) to one of them (a backup is taken before the rollback too, so it can be undone); this changes only the cluster, not the group standard, and is recorded in the audit log.
+- 🚦**Domain conflict checks [2.6]**: VirtualServices bound to the same gateway in the same cluster must not share hosts, and rules inside a VirtualService that are shadowed by earlier rules and can never take effect are flagged too. The matrix and the details page show these live; the push preview blocks the conflicts a push would newly introduce, while pre-existing ones are only reported.
+- 🔁**Sync to the group standard [2.6]**: comparisons show both sides line by line (differing lines in red, with in-line differences highlighted more strongly), and you can pick rules from a cluster's live state to add, replace, delete or reorder, then save them to the group standard; the versions of both sides are checked on save, so changes someone else has just made are not overwritten.
 - 🧩**Scope and conflicts**: a VirtualService can belong to only one group; each group defines its scope with include / ignore rules (wildcards or regular expressions), and single VirtualServices can also be ignored or included by hand; rows that conflict with another group sharing a cluster are highlighted in red and cannot be adopted or pushed.
-- 🔎**View and delete**: view the complete live object of a VirtualService in a cluster (like `kubectl get -o yaml`), or delete it from the cluster directly (with confirmation; the deleted content is kept in the audit log).
+- 🔎**View and delete**: view the complete live object of a VirtualService in a cluster (like `kubectl get -o yaml`), or delete it from the cluster directly (with confirmation; it is backed up automatically and recorded in the audit log before deletion).
 - 🛡**Lossless, permission-checked changes**: fields the editor does not model (retries, corsPolicy, redirect, fault, ...) are kept as-is, so pushing never drops configuration; viewing is filtered by per-cluster read access, and changes need the 「Istio 修改」 (Istio changes) permission on the cluster (admins only by default), with group-level changes (groups, group standards, rules, hosts) needing it on every cluster in the group.
 - 🚸The management page for delegate VirtualServices is still under development.
 
@@ -254,7 +287,7 @@ Built for the case where the same services run in test clusters and in several p
 
 ---
 
-### 3. 🧭CoreDNS Management
+### 4. 🧭CoreDNS Management
 
 **[2.3] Under 「资源管理 → CoreDNS管理」 (English UI: "Resource Management" → 「CoreDNS管理」), maintain the cluster's custom CoreDNS records (the hosts plugin entries in `kube-system/coredns`): add, edit and delete them like rows in a table, review the diff before saving, and afterwards confirm from inside the cluster that they resolve — no more hand-editing the Corefile with `kubectl edit`.**
 
@@ -268,11 +301,11 @@ Built for the case where the same services run in test clusters and in several p
 
 ---
 
-### 4. 🎛K8S Resource Management
+### 5. 🎛K8S Resource Management
 
 **Manage the Deployments, Pods, Services, Ingresses, ConfigMaps, StatefulSets, DaemonSets and nodes of all clusters in one console, with common operations a single click away.**
 
-- 🗂**Unified resource pages**: view, edit YAML in Monaco (Create / Apply / Replace) and delete; a Deployment's ready replicas, rollout status and Pod details refresh live over WebSocket [2.1].
+- 🗂**Unified resource pages**: view, edit YAML in Monaco (Create / Apply / Replace) and delete; a Deployment's ready replicas, rollout status and Pod details refresh live over WebSocket [2.1]; the Deployment and Pod action menus also offer 「获取代码」 (Get code), 「获取运行配置」 (Get runtime config) [2.6] and 「问 AI」 (Ask AI).
 - 💻**Pod and node terminals [2.2]**: open a Web terminal in a new tab; the Pod terminal picks bash / ash / sh automatically, while for the node terminal the agent starts a temporary privileged Pod that uses `nsenter` to get onto the host and is cleaned up automatically on exit; the 「网页 Pod 终端」 / 「网页节点终端」 (Web Pod / node terminal) permission is required (read-write and above by default), and sessions are recorded in the audit log.
 - 📜**Log viewer**: live follow, keyword search and jumping between matches, colors by log level, and 「重启前日志」 (logs before restart); a Deployment's logs can be viewed across all of its Pods, and full logs can be downloaded gzipped.
 - 🔁**Scaling and restarts**: run immediately, at a set time or periodically, with optional 「临时扩容」 (temporary scale-out) and 「调度到指定节点」 (schedule to specified nodes).
@@ -291,12 +324,12 @@ Built for the case where the same services run in test clusters and in several p
 
 ---
 
-### 5. 📡Multi-Cluster Monitoring
+### 6. 📡Multi-Cluster Monitoring
 
 **Each cluster's vmagent remote-writes its metrics to the same time-series database, and a single label tells the clusters apart, so you see every cluster in one Web UI.**
 
 - 🖥**Resource overview**: 「K8S资源总览」 (English UI: "K8s Overview") switches between all clusters and a single cluster, showing resource counts, at-risk nodes and the highest usage/allocation rates, plus today's Top 10 abnormal Pod alerts, the Top 10 abnormal K8S events and the alert trend of the last 10 days.
-- 🌊**Unified time-series database**: deploy single-node VictoriaMetrics with its independent Docker Compose package, or connect an existing Prometheus/VictoriaMetrics; kube-state-metrics and node-exporter already running in the cluster can be reused.
+- 🌊**Unified time-series database**: single-node or cluster VictoriaMetrics, deployed separately with the Docker Compose in `deploy/victoria-metrics`, or an existing one (legacy configuration-based deployments also support Prometheus); each cluster's vmagent remote-writes to it directly, and kube-state-metrics and node-exporter already running in the cluster can be reused.
 - 📊**Grafana dashboards**: 「K8S监控看板📊」 (K8S Monitoring Dashboard; English UI: "Resource K8S"), 「节点监控看板📊」 (Node Monitoring Dashboard; English UI: "Resource Node") and 「高峰资源看板📊」 (Peak Resource Dashboard; English UI: "Resource Statistics") are embedded in the Web UI and imported automatically at installation; system admins also get 「系统管理 → AI 用量看板📊」 (System → AI usage dashboard) with the AI assistant's token usage, cache hit rate, context size and estimated cost.
 
 <details close>
@@ -309,15 +342,16 @@ Built for the case where the same services run in test clusters and in several p
 
 ---
 
-### 6. 🧬Alerts, Events and Silences
+### 7. 🧬Alerts, Events and Notifications
 
-**Metric alerts, K8S event alerts and operation notifications are all pushed to WeCom, DingTalk, Feishu or Slack; silences only block notifications and never drop data.**
+**Metric alerts, K8S event alerts and operation notifications are all pushed to WeCom, DingTalk, Feishu or Slack, configured on the 「消息通知」 (Notifications) page with a different group chat per cluster if needed; silences only block notifications and never drop data.**
 
-- 🚨**Metric alerts**: 44 built-in vmalert alerting rules (Pods, Deployments, nodes, JVM, etc.), pushed to IM by kubedoor-alarm via Alertmanager; Pod alerts are also stored, and firing/resolved notifications show how long the alert lasted.
+- 🚨**Metric alerts**: 44 built-in vmalert alerting rules (Pods, Deployments, nodes, JVM, etc.), pushed to IM by kubedoor-alarm via Alertmanager; Pod alerts are also stored, and firing/resolved notifications show how long the alert lasted; the alerting components (vmalert, Alertmanager, kubedoor-alarm) are installed or skipped together with a single switch at installation time.
 - 📋**Alert analysis**: 「告警面板」 (Alarm Statistics) aggregates alerts by name per day; 「K8S告警详情」 (Alarm Detail) offers multi-criteria filtering and lets you isolate or delete a Pod or run Dump, Jstack or JFR on it directly, or 「屏蔽」 (silence) the alert in one click.
 - 🔕**Alert silences [2.0]**: Alertmanager-style matchers (`=`, `!=`, `=~`, `!~`), match preview and automatic expiry; the 【屏蔽】 (Silence) link in IM notifications opens the silence page with the matchers pre-filled. Silenced alerts are still stored; only their notifications are blocked.
 - 📺**K8S event center**: all K8S events of every cluster are written to PostgreSQL and can be searched by cluster, namespace, Kind, reason, message and more; event alerts are configured with JSON rules (built-in rules cover restarts, failed health checks, scheduling failures, resource pressure, etc.), and the same event is not notified twice within the dedup window.
-- 📮**Operation notifications**: isolation, scaling, restarts, image updates, admission results and more are pushed to IM by the agent, and each cluster can use a different bot; external systems can write alerts via `POST /api/custom_alert`.
+- 🔔**Notifications [2.6]**: under 「系统管理 → 消息通知」 (System → Notifications), set the IM type, the bot URL and the default people to @-mention (the token is stored encrypted and the page shows only its last 4 characters); changes take effect as soon as they are saved, and you can send a test message. A single cluster can have its own group chat, while clusters without their own settings use the global ones; a table on the page spells out who sends each of the four kinds of notifications (K8S event alerts, control table notifications, operation notifications, metric alerts) and when. This can also be filled in beforehand in step 4 of the installation wizard.
+- 📮**Operation notifications**: isolation, scaling, restarts, image updates, admission results and more are produced by the agent and handed to the master, which picks the group chat by cluster and sends them, so workload clusters no longer store bot tokens; while the agent is disconnected from the master they are buffered, then resent after it reconnects and marked as delayed. External systems can write alerts via `POST /api/custom_alert` (requires the alerting components).
 
 <details close>
 <summary>🔍Click to expand screenshots ...</summary>
@@ -331,7 +365,7 @@ Built for the case where the same services run in test clusters and in several p
 
 ---
 
-### 7. 🚧Peak-Hour Resources and Admission Control
+### 8. 🚧Peak-Hour Resources and Admission Control
 
 **Collect each microservice's real resource usage during the daily business peak, then use K8S admission control to keep its requests in line with that real peak usage: more accurate scheduling, less resource fragmentation.**
 
@@ -356,7 +390,7 @@ Peak resource dashboard (Grafana): global peak-hour resource statistics with a T
 
 ---
 
-### 8. ☕JVM Control and Diagnostics
+### 9. ☕JVM Control and Diagnostics
 
 **Startup flags, peak-hour heap usage and one-click diagnostics for Java microservices, all handled inside KubeDoor.**
 
@@ -376,7 +410,7 @@ Peak resource dashboard (Grafana): global peak-hour resource statistics with a T
 
 ---
 
-### 9. ⚖Node Balancing and Elastic Scheduling
+### 10. ⚖Node Balancing and Elastic Scheduling
 
 **Generate a migration plan from live node CPU load and migrate in batches after manual confirmation; when scaling out, Pods can also be scheduled to specified nodes or to Huawei Cloud CCI.**
 
@@ -388,15 +422,16 @@ Peak resource dashboard (Grafana): global peak-hour resource statistics with a T
 
 ---
 
-### 10. 🔐Platform and Permissions
+### 11. 🔐Platform, Permissions and Console Settings
 
-**One entry point, per-cluster permissions: the Web UI, Grafana, the AI assistant and MCP share one NodePort, and KubeDoor manages its own accounts and permissions.**
+**One entry point, permissions per cluster and per operation, and settings managed in the UI: the Web UI, Grafana, the AI assistant and MCP share one NodePort, and KubeDoor manages its own logins, permissions and settings.**
 
 - 🚪**Single entry point**: nginx in kubedoor-web only reverse-proxies; login, sessions and permission checks live in the master, and the AI assistant, MCP and Grafana (`/grafana/`) are authorized by the master through nginx `auth_request`.
-- 👥**Accounts and permissions [2.2]**: local accounts plus LDAP (configured and tested in the Web UI, auto-provisioned on first login); a global role (System admin / Cluster admin / Read-write / Read-only (default) / None) plus per-user, per-cluster grants (Admin / Read-write / Read-only / None), with grants taking precedence; clusters with "None" are hidden everywhere, including alerts and the AI. System admins additionally manage users, LDAP, the WeCom bot, agents and permissions & approvals, while cluster admins only manage clusters. The built-in super admin `kubedoor` cannot be deleted or have its role changed.
-- 🧩**Permissions and approvals**: under 「系统管理 → 权限与审批」 (System → Permissions & approvals), tick for each of 25 operation types (restart, scale, delete Pods, edit YAML, CoreDNS changes, Istio changes, Web terminals, AI commands inside Pods and so on) whether Read-only / Read-write / Admin may do it, and whether the AI needs human approval before doing it; the view-command and dangerous-command lists used for AI commands inside Pods are maintained there too. The Web UI, the AI assistant, the WeCom bot and external MCP all use this one table; the defaults match earlier behavior, except that CoreDNS and Istio changes are now admin-only.
+- 👥**Accounts and permissions [2.2]**: local accounts plus LDAP (configured and tested in the Web UI, auto-provisioned on first login); a global role (System admin / Cluster admin / Read-write / Read-only (default) / None) plus per-user, per-cluster grants (Admin / Read-write / Read-only / None), with grants taking precedence; clusters with "None" are hidden everywhere, including alerts and the AI. System admins additionally manage users, LDAP, the WeCom bot, agents, permissions & approvals and the other system settings, while cluster admins only manage clusters. The built-in super admin `kubedoor` cannot be deleted or have its role changed.
+- 🧩**Permissions and approvals [2.6]**: under 「系统管理 → 权限与审批」 (System → Permissions & approvals), tick for each of 27 operation types (restart, scale, delete Pods, edit YAML, view Secrets, view runtime config, CoreDNS changes, Istio changes, Web terminals, AI commands inside Pods, AI database queries and so on) whether Read-only / Read-write / Admin may do it, and whether the AI needs human approval before doing it; the view-command and dangerous-command lists used for AI commands inside Pods are maintained there too (dangerous commands always need approval). The Web UI, the AI assistant, the WeCom bot and external MCP all use this one table; the defaults match earlier behavior, except that CoreDNS and Istio changes are now admin-only.
+- 🖥**Console settings [2.6]**: 「系统管理」 (System) brings together users & permissions, permissions & approvals, LDAP settings, image management, the WeCom AI bot, the Get code API, the Get runtime config API, notifications, the AI usage dashboard and the audit log; these settings are stored in the database and take effect on save without a restart, and sensitive values such as tokens and request headers are stored encrypted, with the page only showing whether they are set.
 - 🧾**Audit log [2.2]**: logins, account and permission changes, and every write operation (including denied attempts) can be searched under 「系统管理 → 操作审计」 (System → Audit log).
-- 🛰**Agent management**: an agent registers itself on its first connection; view online status, heartbeat and version, update the image or restart agents one at a time or in bulk [2.2], and configure collection, admission control and 「AI Kubeconfig」 in one place.
+- 🛰**Agent management**: 「安装 Agent」 (Install Agent) installs an agent from the Web UI by uploading a kubeconfig [2.6]; an agent registers itself on its first connection; view online status, heartbeat and version, update the image or restart agents one at a time or in bulk [2.2], and configure collection, admission control and 「AI Kubeconfig」 (set up automatically for Web installations) in one place.
 - 🧹**Automatic data cleanup**: K8S events are kept for 90 days, alert records and peak snapshots for 365 days, adjustable in `kubedoor-config` (`0` means never purge).
 - 🌗**UI**: the ink-wash moon-gate sign-in page [2.2]; Simplified Chinese / English (partially translated), light/dark/auto themes, mobile-friendly.
 
@@ -414,98 +449,97 @@ Peak resource dashboard (Grafana): global peak-hour resource statistics with a T
 
 ## 🚀Quick Start
 
-**Prepare PostgreSQL and a metrics database, start the Web wizard with one command, then install the control plane and each cluster's Agent from the Web UI. No installation configuration file or Helm is required.** Existing databases can be reused. See the [deployment guide](deploy/README.md) (Chinese) for full details.
+**One command starts the Web wizard; click through six steps in the browser and the control plane is installed. Each cluster's Agent is also installed from the Web UI by uploading a kubeconfig.** No Helm and no config files to edit; the machine running it only needs `sh` and `kubectl`. See the [deployment guide](deploy/README.md) (Chinese) for full details.
 
 #### Prerequisites
 
 | Item | Requirement |
 | --- | --- |
-| Installer machine | Can reach the target cluster with `kubectl`; bash 4 or later |
+| Installer machine | Only `sh` (or `bash`) and a `kubectl` that can reach the target cluster; no Python, jq or full source checkout needed |
 | Kubernetes | ≥ 1.21; running daily collection and scheduled/periodic tasks in Beijing time (`timeZone: Asia/Shanghai`) requires ≥ 1.25 (older clusters run them in the time zone of kube-controller-manager) |
 | metrics-server | Required: Pod/node CPU and memory usage and node balancing all depend on it |
-| Time-series database | An independent VictoriaMetrics Docker Compose deployment, or an existing Prometheus/VictoriaMetrics. The Deployment list, the K8S resource overview and peak-hour collection all depend on it; without monitoring data these pages are empty and nothing can be collected |
-| Database | A machine with Docker Compose to run PostgreSQL 18 (K8S nodes must be able to reach its port 5432), or an existing PostgreSQL (14+ recommended; no extensions or superuser required) |
+| PostgreSQL | An existing PostgreSQL (14+ recommended; no extensions or superuser required; if the database does not exist, the wizard creates it with that account), or a standalone PostgreSQL 18 started with the Docker Compose in `deploy/postgres` |
+| Time-series database | Single-node or cluster VictoriaMetrics: deploy it separately with the Docker Compose in `deploy/victoria-metrics`, or use an existing one. The Deployment list, the K8S resource overview and peak-hour collection all depend on it; without monitoring data these pages are empty and nothing can be collected |
 | CPU architecture | Official images are amd64 only |
-| Network | The control plane must reach PostgreSQL, the time-series database and the target Kubernetes API; target clusters must reach KubeDoor's Web entry point, which also forwards metrics for Web-installed Agents |
+| Network | The database and the time-series database must be reachable from K8S Pods; each workload cluster's vmagent writes directly to the time-series database, and cross-cluster Agents connect to the control plane through KubeDoor's Web entry point; to install Agents in other clusters from the Web UI, the control plane must be able to reach the target cluster's API Server |
 
 #### Installation Steps
 
-If PostgreSQL and a metrics database are already available, download only [install.sh](deploy/install.sh) and go directly to step ③. The installation machine only needs `sh` (or `bash`) and `kubectl`, with no Python or full source checkout. To use the optional database Compose examples below, obtain those directories separately or clone the repository:
+**① Prepare the database and the time-series database** (skip if you already have them)
+
+If you already have PostgreSQL and VictoriaMetrics, just use them. If not, start one of each with Docker Compose on a machine the K8S nodes can reach:
 
 ```bash
 git clone https://github.com/CassInfra/KubeDoor.git
-cd KubeDoor
-```
-
-**① Start the database** (on a machine the K8S nodes can reach, starting from the repository root)
-
-```bash
-cd deploy/postgres
-cp .env.example .env
-vi .env                 # change at least PG_PASSWORD
+cd KubeDoor/deploy/postgres
+cp .env.example .env && vi .env      # change at least PG_PASSWORD
 docker compose up -d
-docker compose logs -f postgres    # ready once you see "database system is ready"
-```
 
-The default image is amd64 only; outside mainland China or on ARM machines, set `PG_IMAGE=postgres:18-alpine` in `.env`. There is no need to create tables by hand: master and kubedoor-ai create them automatically at startup.
-
-**② Start the time-series database** (skip if using an existing Prometheus/VictoriaMetrics; start from the repository root)
-
-```bash
-cd deploy/victoria-metrics
-cp .env.example .env
-vi .env                 # change at least VM_PASSWORD
+cd ../victoria-metrics
+cp .env.example .env && vi .env      # change at least VM_PASSWORD
 docker compose up -d
 ```
 
-The default image is `registry.cn-shenzhen.aliyuncs.com/starsl/victoria-metrics:stable`. Its port, credentials, retention and data volume are managed in this independent directory; see the [VictoriaMetrics deployment guide](deploy/victoria-metrics/README.md) (Chinese).
+There is no need to create tables by hand: master and kubedoor-ai create them automatically at startup. The default images are amd64 only; outside mainland China or on ARM machines, switch to the official images in `.env` (e.g. `PG_IMAGE=postgres:18-alpine`); see the [VictoriaMetrics deployment guide](deploy/victoria-metrics/README.md) (Chinese).
 
-**③ Install the control plane from the Web wizard** (copy `deploy/install.sh` to a machine that can reach the cluster with kubectl)
+**② Start the installation wizard with one command**
+
+Copy [install.sh](deploy/install.sh) on its own to a machine that can reach the cluster with `kubectl`, and run it:
 
 ```sh
-sh install.sh
-# Also supported: bash install.sh
+sh install.sh        # bash install.sh also works
 ```
 
-Open the printed Web URL and enter the one-time setup key. The five steps check the cluster, connect PostgreSQL and the metrics database, set the administrator password and public URL, and deploy the selected services. Each service has its own status; success is reported only after all selected services and final checks pass. Image repositories and versions are included at the top of the script; no separate configuration file is needed. Use newly built Web, setup, master, AI and alarm images containing this feature; `--tag <version>` selects a consistent custom release. See the [Web installation guide](deploy/README.md#网页向导安装推荐) (Chinese).
+The script starts the Web UI and a temporary setup service in the `kubedoor` namespace, and finally prints the 「Web 入口」 (Web entry point) address and a one-time setup key. Image repositories and versions are set at the top of the script; in private networks, override them with `--image-repo`, `--tag` and `--image-pull-secret`; if connecting to the cluster directly is inconvenient, export the YAML with `--export` and then `kubectl apply` it. See the [Web installation guide](deploy/README.md#网页向导安装推荐) (Chinese).
 
-- Supply PG and VM addresses reachable from Kubernetes Pods. The wizard checks authentication, queries and database schema permissions.
-- Single-node VM write URLs are derived automatically. The cluster label defaults to `origin_prometheus`; existing monitoring must use its actual label name.
-- Legacy configuration-based installation, upgrades and YAML preview are preserved under [tools/legacy-install](tools/legacy-install/README.md). `deploy/install.sh` only starts the Web installation entry point.
+**③ Click through the six steps in the browser**
 
-**④ Install Agents from the Web UI** (once per managed cluster)
+| Step | What you do | What the wizard does automatically |
+| --- | --- | --- |
+| 1. Environment check | Enter with the setup key and confirm where to install | Checks cluster access, deployment permissions, node architecture and any existing installation |
+| 2. PostgreSQL | Fill in the address, database name, user and password, click 「测试连接」 (Test Connection), then 「继续」 (Continue) | Actually checks the connection, authentication and table-creation permission; creates the database if it does not exist |
+| 3. Time-series database | Choose single-node or cluster VictoriaMetrics; enter only the host name or IP as the address | Generates the remote read / write URLs and looks for data carrying the cluster label |
+| 4. Basic settings | Set the password of the admin account `kubedoor`; choose whether to install the alerting components; optionally fill in alert notifications | Detects the access URL and generates internal keys and service credentials |
+| 5. Automatic installation | Review the summary and click 「开始安装」 (Start installation) | Deploys the services together, showing each one's status, duration and failure reason; verifies the entry point, login and metric writes |
+| 6. Install Agent (optional) | Tick the option and enter the cluster name | Installs the Agent and collection components in the control plane's cluster and verifies that it comes online; finally stops the setup service and revokes the temporary permissions |
 
-As a system admin, open 「Agent管理」 at `/#/workbench/index`, click 「安装Agent」, upload a kubeconfig, select its context, confirm the cluster identifier, then check and install. The KubeDoor connection URL supplies the control connection; vmagent writes straight to the time-series database write URL configured on the control plane, with its credentials stored in a Secret in the target cluster.
+Success is reported only after all services and checks pass, and the completion page shows the access URL, the admin account and its password. Refreshing or closing the page does not interrupt the installation; if something fails, the page shows why, and once you have fixed it you just click retry, without the database being re-initialized.
 
-If the control plane cannot reach the target Kubernetes API, use the [legacy installer](tools/legacy-install/README.md) from a machine in that network, preserving the cluster's original configuration.
+- The PostgreSQL and time-series database addresses must be reachable from K8S Pods; the wizard checks them for real from inside the cluster.
+- The cluster label name defaults to `origin_prometheus`; when connecting existing monitoring, enter the actual label name (e.g. if the metrics carry `cluster="prod-k8s"`, enter `cluster`).
+
+**④ Connect other clusters**
+
+After signing in, an admin opens 「Agent管理」 → 「安装 Agent」 (Install Agent), uploads the target cluster's kubeconfig, selects its context, confirms the cluster identifier, and installs once the checks pass; progress is shown step by step, both the Agent coming online and the metric writes are verified, and the cluster's 「AI Kubeconfig」 is configured automatically. If the control plane cannot reach the target Kubernetes API, use the [legacy installer](tools/legacy-install/README.md) from a machine in that network.
 
 #### Accessing the Web UI
 
-- Open the printed Web address and sign in as `kubedoor` using the password chosen in the wizard. The legacy script uses the factory password only when no initial password is supplied and requires changing it at first login.
+- Open the address printed during installation (also shown on the installation's completion page) in a browser, and sign in as `kubedoor` with the password set in the wizard.
 - Add accounts and grant per-cluster permissions under 「系统管理 → 用户与权限」, and connect LDAP under 「LDAP 设置」; adjust what each permission level may do, and which AI operations need approval, under 「权限与审批」 if needed.
-- Web Agent installation creates dedicated credentials. Legacy deployments still using the built-in Agent factory password should reset it under 「用户与权限」 and update all Agents sharing that account.
+- Agents installed from the Web UI each use their own credentials. Legacy deployments still using the built-in Agent factory password should reset it under 「用户与权限」 and update all Agents sharing that account.
 
 #### First Steps
 
-1. Open 「Agent管理」 (Agent Management; English UI: "Workbench") and check that the cluster's status is 「在线」 (online).
+1. Open 「Agent管理」 (Agent Management; English UI: "Workbench") and check that the cluster's status is 「在线」 (online); if step 6 of the wizard installed the Agent in this cluster, it is already online, and other clusters are connected with 「安装 Agent」 (Install Agent).
 2. Turn on 「自动采集」 (auto collection) and set 「高峰时段」 (peak hours) in the dialog (default `10:00:00-11:30:00`).
 3. Click 「采集」 (Collect) in the 「采集历史数据」 (collect historical data) column and choose 「采集天数」 (days to collect; default 10, range 1–90) to write historical peak data into the control table; from then on, collection runs automatically every day at 01:00 Beijing time (UTC+8). Newly installed monitoring only has data to collect after one full peak window has passed; after that, you can also run `kubectl -n kubedoor create job --from=cronjob/kubedoor-collect collect-now` to collect immediately.
 4. After checking that the data in 「高峰资源管控」 (Peak Resource Control) is correct, turn on 「准入控制」 (admission control) as needed (off by default).
 5. Click 「AI 助手」 (AI Assistant) → 「模型设置」 (Model Settings) in the top bar, fill in the Base URL, API Key and model name, click 「测试连接」 (Test Connection), and start chatting.
-6. (Optional) Connect the WeCom bot under 「系统管理 → 企微 AI 机器人」 (System → WeCom AI bot), then bind members or set a default permission for unbound members; see [WeCom Smart Bot](#wecom-smart-bot).
+6. (Optional) Configure or adjust alert notifications under 「系统管理 → 消息通知」 (System → Notifications) (anything filled in at step 4 of the wizard is already saved), and connect your own APIs under 「获取代码接口」 (Get code API) and 「获取运行配置接口」 (Get runtime config API).
+7. (Optional) Connect the WeCom bot under 「系统管理 → 企微 AI 机器人」 (System → WeCom AI bot), then bind members or set a default permission for unbound members; see [WeCom Smart Bot](#wecom-smart-bot).
 
 #### Production Tips
 
-- 🔒The Web UI and MCP use plain HTTP by default; in production, put HTTPS in front of the Web UI (the Ingress/LB must support WebSocket), and set `AUTH_COOKIE_SECURE` to `"true"` in `kubedoor-config` when TLS terminates in front of nginx.
+- 🔒The Web UI and MCP use plain HTTP by default; in production, put HTTPS in front of the Web UI (the Ingress/LB must support WebSocket), and if you have a domain name, change the access URL in step 4 of the wizard; set `AUTH_COOKIE_SECURE` to `"true"` in `kubedoor-config` when TLS terminates in front of nginx.
 - 🚧Admission control is fail-closed: Deployment changes are rejected while the agent or master is unavailable; in an emergency, run `kubectl delete mutatingwebhookconfiguration kubedoor-admis-configuration`. Before uninstalling or reinstalling an agent, turn off 「准入控制」 in 「Agent管理」 first.
-- 💾Back up the PostgreSQL data together with `kubedoor.conf` and `kubedoor.conf.ai-secrets` (its contents match the Secret `kubedoor-ai-security`); changing the AI encryption key makes saved kubeconfigs and the WeCom bot credentials impossible to decrypt.
-- 📌Keep `NAMESPACE` at its default value `kubedoor`; admission control, scheduled tasks and other features depend on this namespace.
+- 💾Back up the PostgreSQL data and the in-cluster Secrets for connections, authentication, `kubedoor-ai-security` and so on; legacy script deployments should also back up the original configuration and its `.ai-secrets` file. Changing the AI encryption key makes saved kubeconfigs, the WeCom bot credentials, the notification tokens and the API request headers impossible to decrypt.
+- 📌Keep the namespace at its default, `kubedoor`; admission control, scheduled tasks and other features depend on this namespace.
 
 ---
 
 ## ♻Upgrade Notes
 
-Use the Web wizard for a new installation. The historical upgrade instructions below apply to legacy configuration-based deployments: run commands from `tools/legacy-install` and pass the original configuration with `-c`. `deploy/install.sh` does not upgrade those deployments. Editing image versions after installation does not update running services; a Web upgrade flow is not yet available.
+Use the Web wizard for a new installation. The Web wizard only performs fresh installations (it does not initialize a database that already holds KubeDoor data), and editing the image versions in the script after installation does not update the running services; a Web upgrade flow is not yet available. The upgrade notes below apply to legacy configuration-based deployments: run the commands from `tools/legacy-install` and pass the original configuration with `-c`.
 
 Release image versions are stored in the image configuration block at the top of `deploy/install.sh`. Legacy `TAG_*` overrides still take precedence; see the [legacy maintenance guide](tools/legacy-install/README.md).
 
@@ -554,6 +588,16 @@ See [Deployment guide · Accounts and permissions](tools/legacy-install/README.m
 5. **Admission control behaviour change**: in controlled namespaces, changing a managed service's `spec.replicas` directly with `kubectl edit/patch/apply` used to be allowed with the requested value until the next rollout or restart; with the new agent it is rewritten to the controlled value immediately, just like `kubectl scale`. To change the replica count for good, edit the 「指定Pod」 (pinned Pod count) value; for a short scale-out, use 「临时扩容」.
 6. The AI assistant's system prompt and tools have changed, so after the upgrade the next request in each existing conversation misses the model's prefix cache (once only).
 
+#### Upgrading from 2.3.x to 2.6
+
+2.6 switches new installations to the Web wizard and moves notification settings into the console; legacy deployments are upgraded with the legacy script, and no new settings are needed in `kubedoor.conf`.
+
+1. Update to the latest repository code; if the original configuration contains `TAG_*` entries, change them to `2.6.0` (or delete these overrides to follow the default versions at the top of `deploy/install.sh`), then run `./install.sh master -c <original config>`. The master, Web, AI and alarm must be upgraded together in this release.
+2. **Notifications are now configured in the console**: `MSG_TYPE`, `MSG_TOKEN` and `DEFAULT_AT` no longer take effect (the script warns you if `MSG_TOKEN` is set). After upgrading, sign in as a system admin and enter the bot URLs again under 「系统管理 → 消息通知」 (System → Notifications), with separate settings per cluster if needed; they take effect on save. Metric alerts are still sent by kubedoor-alarm, which asks the master for the channel of the cluster each alert belongs to.
+3. Agents only need a new image: select the clusters in 「Agent管理」 and use 「批量更新」 (bulk update) to `2.6.0`. The new agent hands operation notifications to the master, which sends them per cluster; the AI's read-only MySQL / Redis / ES queries from inside the workload cluster also need the new agent (with an older agent they are started from kubedoor-ai instead, which may not be able to reach the business databases).
+4. To install Agents from the Web UI and collect their metrics, add `METRICS_WRITE_URL` to `kubedoor.conf`, set to the full write URL of the time-series database that every workload cluster can reach, then run the command from step 1 again.
+5. 「权限与审批」 gains two operation types, 「查看运行配置」 (View runtime config) and 「AI 查询数据库 / Redis / ES」 (AI database / Redis / ES queries); Read-write and above may perform them by default, and the latter needs approval by default. 「获取代码接口」 and 「获取运行配置接口」 are not configured by default: a system admin sets them up under 「系统管理」 when needed, and letting the AI use the source code and runtime configuration must be turned on separately on the same pages.
+
 > Upgrades within 2.x: master and kubedoor-ai use the Recreate strategy, so the AI assistant and MCP are briefly unavailable during an upgrade, and in clusters with admission control enabled, Deployment changes are rejected while the master restarts; upgrade during off-peak hours. The nginx config is mounted via subPath, so if the Web image tag has not changed, run `kubectl -n kubedoor rollout restart deploy/kubedoor-web` for the new config to take effect.
 
 ---
@@ -564,9 +608,10 @@ See [Deployment guide · Accounts and permissions](tools/legacy-install/README.m
 
 | Document | Contents |
 | --- | --- |
-| [Deployment guide](deploy/README.md) | Web installation for the control plane and Agents, image versions, external databases and recovery |
+| [Deployment guide](deploy/README.md) | Installing the control plane with one command and the Web wizard, exporting YAML, private image registries and failure recovery, standalone PostgreSQL and VictoriaMetrics deployments |
 | [Accounts and permissions](tools/legacy-install/README.md#账号与权限) | Local and LDAP accounts, global roles and per-cluster grants, permissions and approvals, built-in accounts, the audit log and password resets |
-| [AI assistant](docs/ai-assistant.md) | Model configuration, resource scope, multi-turn conversations, change approval, global memory, direct kubeconfig connections and external MCP |
+| [AI assistant](docs/ai-assistant.md) | Model configuration, resource scope, multi-turn conversations, permissions and approvals, global memory, direct kubeconfig connections, bringing your own MCP servers and external MCP |
+| [Service source code and runtime configuration](docs/ai-assistant.md#服务源码查询与分析) | Reading source code with the AI to pinpoint problems, fetching runtime configuration (with password placeholders) and read-only MySQL / Redis / ES queries |
 | [WeCom smart bot](src/kubedoor-ai/README.md#企业微信智能机器人) | Bot and dedicated model configuration, member binding and the default permission for unbound members, switching clusters and approval cards |
 | [Istio VirtualService management](src/kubedoor-master/istio_route/README.md) | Istio groups and the group standard, per-cluster hosts and domain conditions, status rules, typical workflows and APIs |
 | [Alert silences](docs/alert-silence.md) | Silence rule syntax, states, match preview and the IM 【屏蔽】 link |

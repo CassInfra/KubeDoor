@@ -24,14 +24,14 @@
 ```bash
 for p in deploy/README.md docs/ai-assistant.md docs/alert-silence.md docs/jvm-resource-control.md \
          help/FAQ.md help/K8S资源管控功能说明.md help/K8S事件告警规则配置说明.md help/K8S微服务镜像更新配置说明.md \
-         README.EN.md LICENSE; do
+         tools/legacy-install/README.md README.md README.EN.md LICENSE; do
   gh api "repos/CassInfra/KubeDoor/contents/$p" >/dev/null 2>&1 || echo "MISSING $p"
 done
 ```
 
 其它发布事项：
 
-- 时间线里的当前版本（`tl-current`，目前为 2.3.0）、首屏的版本标签（`hero-pill`）要和 README 的升级说明、最新的 GitHub Release 一起更新。
+- 时间线里的当前版本（`tl-current`，目前为 2.6.0）、首屏的版本标签（`hero-pill`）要和 README 的升级说明、最新的 GitHub Release 一起更新。
 - 上线后把仓库 About 的简介改为新定位「AI 驱动的多 K8S 集群智能管控平台」，Website 填 <https://cassinfra.github.io/KubeDoor/>。
 - 截图中的集群名、IP 等敏感信息做了模糊处理；替换截图时请先自行处理后再放进 `assets/img/shots/`。
 - 「账号与权限」展示带里的 `assets/img/shots/login.webp` 是 Web 登录页（`src/kubedoor-web/src/views/login/`）的截图，登录页改版后记得同步替换。
