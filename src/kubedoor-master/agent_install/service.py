@@ -1,6 +1,7 @@
 """安装草稿、预检、异步安装及重启后的任务恢复。"""
 
 import asyncio
+import base64
 import copy
 import hashlib
 import json
@@ -33,10 +34,26 @@ METRICS_STEP = len(STEP_NAMES) - 1
 METRICS_JOBS = ('vmagent', 'kube-state-metrics', 'k8s-node-exporter', 'k8s-cadvisor')
 # 安装向导在本集群安装 Agent 时生成的 kubeconfig 的 context 名（kubedoor_setup.agent.CONTEXT）
 SETUP_CONTEXT = 'in-cluster'
+# Agent 清单里 Agent 服务账号的长期令牌（manifests/10-agent.yaml 的 Secret，权限与 Agent 相同）
+AGENT_TOKEN_SECRET = 'kubedoor-agent'
+# 自动配置的 AI Kubeconfig 里的 context / user 名，「AI Kubeconfig」列显示它
+AI_CONTEXT = 'kubedoor-agent'
+AI_URL = 'http://kubedoor-ai:8000'
+AI_MANUAL_HINT = 'AI 仍可经 Agent 执行，需要时可在 Agent 管理的「AI Kubeconfig」列手动上传'
 
 
 def utcnow():
     return datetime.now(timezone.utc)
+
+
+def ai_kubeconfig(parsed, token):
+    """自动配置的 AI Kubeconfig：集群段（API Server 地址、CA、tls-server-name）沿用这次安装用的 kubeconfig，
+    凭据换成 Agent 服务账号的令牌。上传的 kubeconfig 本身仍然用完即删，不长期保存。"""
+    cluster = copy.deepcopy(parsed['config']['clusters'][0]['cluster'])
+    return {'apiVersion': 'v1', 'kind': 'Config', 'current-context': AI_CONTEXT,
+            'clusters': [{'name': AI_CONTEXT, 'cluster': cluster}],
+            'users': [{'name': AI_CONTEXT, 'user': {'token': token}}],
+            'contexts': [{'name': AI_CONTEXT, 'context': {'cluster': AI_CONTEXT, 'user': AI_CONTEXT, 'namespace': 'default'}}]}
 
 
 def metrics_query(label, env, installation):
@@ -451,6 +468,9 @@ class Service:
                     await self.wait_for(online, self.online_timeout, 'Agent 未连接控制端，请检查目标集群访问 KubeDoor 地址的网络、DNS和认证')
                     await self.step(task, index, 'success')
                     await db.pg_execute('UPDATE k8s_agent_status SET aliases=$2 WHERE env=$1', task['env'], options.get('aliases', []))
+                    # 顺带配置该集群的 AI Kubeconfig（Agent 服务账号令牌）；失败只记结果，不影响安装
+                    task['payload']['ai_connection'] = await self.configure_ai_connection(task, options, parsed, kube)
+                    await self.repo.save(task)
                     task['payload']['metrics_started_at'] = time.time()
                     index = 5
                     if options['mode'] == 'full':
@@ -482,6 +502,61 @@ class Service:
         finally:
             audit.record_bg(task['payload']['created_by'], 'agent.install.finish', env=task['env'],
                             target=task['id'], success=task['status'] == 'succeeded', detail={'status': task['status']})
+
+    async def configure_ai_connection(self, task, options, parsed, kube):
+        """Agent 上线后自动配置该集群的 AI Kubeconfig，返回 {status: saved / skipped / failed, message}。
+
+        凭据用 Agent 服务账号的长期令牌（集群里本来就有的 Secret kubedoor-agent），集群地址和 CA 沿用这次安装的
+        kubeconfig：安装向导第 6 步用的临时令牌收尾时会撤销，也不长期保存用户上传的个人凭据。
+        交给 kubedoor-ai 的保存接口（先测试连通再保存，不覆盖管理员手动上传的）；任何失败只记结果，不影响安装。
+        """
+        try:
+            token = await self.agent_token(kube, options['namespace'])
+        except Exception as exc:
+            logger.warning(f'读取 Agent 服务账号令牌失败：{type(exc).__name__}')
+            return {'status': 'failed', 'message': f'读取 Agent 服务账号令牌失败（{error_message(exc)}）。{AI_MANUAL_HINT}'}
+        if not token:
+            return {'status': 'failed', 'message': f'Agent 服务账号的令牌还没有生成（Secret {AGENT_TOKEN_SECRET}）。{AI_MANUAL_HINT}'}
+        return await self.save_ai_connection(task, ai_kubeconfig(parsed, token))
+
+    async def agent_token(self, kube, namespace):
+        """Agent 服务账号的令牌：Secret 由 K8S 的令牌控制器异步填入，工作负载就绪后一般早就有了，没有就稍等几次"""
+        path = f'/api/v1/namespaces/{quote(namespace, safe="")}/secrets/{AGENT_TOKEN_SECRET}'
+        for attempt in range(10):
+            secret = await kube.request('GET', path, missing_ok=True) or {}
+            token = (secret.get('data') or {}).get('token')
+            if token:
+                return base64.b64decode(token).decode()
+            if attempt < 9:
+                await asyncio.sleep(self.poll_interval)
+        return ''
+
+    async def save_ai_connection(self, task, config):
+        internal = os.environ.get('AI_INTERNAL_TOKEN', '')
+        if not internal:
+            return {'status': 'failed', 'message': f'控制端没有配置 AI 内部令牌（AI_INTERNAL_TOKEN）。{AI_MANUAL_HINT}'}
+        headers = {'X-Kubedoor-Token': internal, 'X-User-Name': task['payload'].get('created_by') or 'kubedoor',
+                   'X-User-Permission': 'admin'}
+        body = {'content': json.dumps(config), 'context': AI_CONTEXT, 'origin': 'agent-install'}
+        try:
+            # kubedoor-ai 保存前会测试连通（多个 API 调用，每个最多 15 秒）
+            async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=150, connect=10)) as session:
+                async with session.put(f"{AI_URL}/api/ai/connections/{quote(task['env'], safe='')}", json=body,
+                                       headers=headers, allow_redirects=False) as response:
+                    status = response.status
+                    data = await response.json(content_type=None)
+        except (aiohttp.ClientError, asyncio.TimeoutError, ValueError) as exc:
+            logger.warning(f'自动配置 AI Kubeconfig 时连不上 kubedoor-ai：{type(exc).__name__}')
+            return {'status': 'failed', 'message': f'连不上 kubedoor-ai，没有自动配置 AI Kubeconfig。{AI_MANUAL_HINT}'}
+        if status == 200 and isinstance(data, dict) and data.get('skipped'):
+            return {'status': 'skipped', 'message': '该集群已有手动上传的 AI Kubeconfig，保留不变'}
+        if status == 200:
+            return {'status': 'saved', 'message': '已用 Agent 服务账号自动配置 AI Kubeconfig'}
+        error = data.get('error') if isinstance(data, dict) else None
+        reason = ' '.join(str((error.get('message') if isinstance(error, dict) else error) or f'HTTP {status}').split())[:200]
+        if status == 422:
+            reason = f'kubedoor-ai 用它连接集群的测试没有通过：{reason}'
+        return {'status': 'failed', 'message': f'没有自动配置 AI Kubeconfig（{reason}）。{AI_MANUAL_HINT}'}
 
     async def finish_success(self, task):
         """安装成功：停用这个集群以前安装留下的 Agent 账号，销毁安装凭据。"""

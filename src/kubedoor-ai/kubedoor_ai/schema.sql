@@ -4,6 +4,8 @@ CREATE TABLE IF NOT EXISTS kubedoor_ai_connections (
     tested_at timestamptz NOT NULL DEFAULT now(), updated_by text NOT NULL,
     updated_at timestamptz NOT NULL DEFAULT now()
 );
+-- 来源：upload = 管理员在「AI Kubeconfig」列上传；agent-install = 网页安装 Agent 时 master 用 Agent 服务账号自动配置
+ALTER TABLE kubedoor_ai_connections ADD COLUMN IF NOT EXISTS origin text NOT NULL DEFAULT 'upload';
 CREATE TABLE IF NOT EXISTS kubedoor_ai_sessions (
     id uuid PRIMARY KEY, username text NOT NULL, title text NOT NULL,
     idempotency_key text, created_at timestamptz NOT NULL DEFAULT now(),

@@ -163,6 +163,7 @@ sh install.sh
 - 勾选：必填集群名称（即 external_labels 的值，例如 `prod-k8s`），可填别名，命名空间默认与控制端相同；选择是否安装 vmagent 指标采集，以及 kube-state-metrics、node-exporter 的处理方式（自动检测 / 安装 / 复用已有）。
 - 安装复用 master 的 Agent 安装流水线（`/api/admin/agent-installations`）：预检、资源归属检查、等待工作负载就绪、等待 Agent 上线、验证指标采集，页面逐步显示进度；这次安装也会出现在控制台的 Agent 安装记录里。安装服务在集群内以内部令牌身份直接调用 master，不依赖对外地址。
 - 本集群的 Agent 直连 `kubedoor-master` 服务（WebSocket），vmagent 直接写第 3 步的远程写地址，不经过 Web 入口。
+- Agent 上线后，master 用 Agent 服务账号的长期令牌（集群里的 Secret `kubedoor-agent`）和集群内 API Server 地址自动配置本集群的「AI Kubeconfig」，不用再上传；收尾撤销临时安装令牌不影响它。结果接在第 6 步的结果说明后面（没配上时写明原因，不影响安装）。
 - 成功（或 Agent 已上线但指标验证未通过，给出提示）后自动收尾；失败可以修改选项重试，或跳过直接完成。2 小时内不做选择，自动按不安装收尾。
 - 指标验证没通过时，提示里列出缺了哪些抓取任务和原因（例如 vmagent 抓取目标的报错）。这种情况 Agent 已经可用，收尾后在控制台「Agent 管理」的安装记录里点“重新验证指标采集”，只重新查询时序库，不再连接集群。收尾会撤销安装账号，这条安装记录的临时令牌随之失效，不能再用来连接集群；要重装或修改本集群的 Agent，在「Agent 管理」点“安装新集群”并上传 kubeconfig。
 

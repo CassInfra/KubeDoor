@@ -305,7 +305,11 @@ DeepAgents 加载仓库内的 `kubedoor-k8s`（K8S 运维）、`kubedoor-code`�
 | `kubedoor` | 调用现有 master、Agent、数据库和监控业务接口；满足需求且可用时优先使用 |
 | `agent` | 通过在线且声明通用工具能力的 Agent，在目标集群内执行 SDK、CLI、Pod 命令，无需 kubeconfig |
 | `direct` | AI 服务使用已保存的 kubeconfig 与选定 context，直连目标 Kubernetes API |
-| `auto` | 已有目录操作走 KubeDoor；通用操作存在 kubeconfig 时选 direct，否则选 agent；数据库 / Redis / ES 查询见[运行配置与数据查询](#运行配置与数据查询) |
+| `auto` | 已有目录操作走 KubeDoor；通用操作 Agent 优先：Agent 在线且支持时选 agent，Agent 离线或版本不支持时有 kubeconfig 才选 direct；数据库 / Redis / ES 查询见[运行配置与数据查询](#运行配置与数据查询) |
+
+经 Agent 执行时 master 复核、Agent 二次校验，诊断命令也在业务集群里跑，所以同时具备 Agent 与 kubeconfig 时默认走 Agent；
+kubeconfig 保证 Agent 掉线或版本旧时 AI 仍可用。网页安装 Agent 时会用 Agent 服务账号自动配置该集群的 kubeconfig，
+不覆盖管理员手动上传的，见 `src/kubedoor-ai/README.md` 的「人工批准与 kubeconfig」。
 
 AI 先根据用户问题选择操作，再选择来源。同一集群同时具备 Agent 与 kubeconfig
 时，可用的业务接口仍优先；`auto` 不会把通用 `api` 或 `kubectl` 自动改写成业务

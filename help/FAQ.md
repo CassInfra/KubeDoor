@@ -533,10 +533,10 @@ DeepSeek 等供应商的填写示例见 [AI 助手说明](../docs/ai-assistant.m
 
 ### Q：AI 提示「此 Agent 版本不支持通用 AI 工具，请升级 Agent 或上传 kubeconfig…」或「Agent 不在线，请使用已配置的 kubeconfig」？
 
-AI 的通用 K8S 工具（K8S API、kubectl、istioctl、Pod 内命令等）要么经支持该能力的 agent 在集群内执行，要么用上传的 kubeconfig 直连。任选其一：
+AI 的通用 K8S 工具（K8S API、kubectl、istioctl、Pod 内命令等）要么经支持该能力的 agent 在集群内执行，要么用「AI Kubeconfig」直连。两者都有时优先经 agent（master 复核、agent 二次校验，诊断命令也在业务集群里跑），agent 离线或版本不支持时才用 kubeconfig。任选其一恢复：
 
 - 提示「Agent 不在线」时先让 agent 恢复在线（见上文「Agent 连接」）；提示版本不支持时，把该集群的 agent 升级到与控制端相同的版本（改 `TAG_AGENT` 后 `./install.sh agent`，或在「Agent管理」点「更新」）。
-- 在「Agent管理」的「AI Kubeconfig」列「上传」kubeconfig（仅系统管理员；YAML / JSON，最大 1 MiB），测试通过后保存。只接受自包含的配置：CA 证书只能内嵌、不能引用文件，凭据只能是 token 或内嵌的客户端证书和私钥，不支持 `exec`、`auth-provider` 插件。
+- 网页安装的 Agent（包括安装向导第 6 步在本集群装的）会在安装时用 Agent 服务账号自动配置「AI Kubeconfig」，列里显示「自动配置」，不用再上传。显示「未配置」的（脚本安装、早先安装的，或自动配置没成功的，原因见该集群的安装记录）可以在「Agent管理」的「AI Kubeconfig」列「上传」kubeconfig（仅系统管理员；YAML / JSON，最大 1 MiB），测试通过后保存。只接受自包含的配置：CA 证书只能内嵌、不能引用文件，凭据只能是 token 或内嵌的客户端证书和私钥，不支持 `exec`、`auth-provider` 插件。手动上传的不会被之后的自动配置覆盖。
 
 已入库的历史数据和监控指标等现有接口不受影响。
 
@@ -554,6 +554,16 @@ kubectl -n kubedoor logs deploy/kubedoor-ai --tail=50
 ```
 
 kubedoor-ai 启动时要连接 PostgreSQL，并读取 Secret `kubedoor-ai-security` 里的密钥，数据库不通或密钥无效都会导致启动失败。
+
+### Q：「AI Kubeconfig」列的「自动配置」是什么？网页安装的集群为什么没有显示「自动配置」？
+
+「自动配置」表示网页安装 Agent 时，master 读取了该集群 Secret `kubedoor-agent` 里 Agent 服务账号的长期令牌（权限与 Agent 相同），集群地址和 CA 沿用安装时的 kubeconfig，交给 kubedoor-ai 测试连通后保存。上传的个人 kubeconfig 本身不长期保存。
+
+没有显示「自动配置」时，在「Agent管理」→「安装 Agent」打开该集群的安装记录，「AI Kubeconfig」一行写着原因，常见的有：
+
+- kubedoor-ai 连不上该集群的 API Server（测试没通过）：安装时是 master 去连的，kubedoor-ai 和 master 在同一个命名空间，一般网络相同；多半是 API Server 只对安装时的出口放行，或安装后又关了。AI 照样经 Agent 工作，确实需要时再手动上传一份 kubeconfig。
+- 该集群已有手动上传的 kubeconfig（列里显示它的 context 名）：自动配置不会覆盖它。
+- 早于这个版本安装的集群或脚本安装的集群：重装一次，或手动上传。
 
 ### Q：怎么让 AI 助手调用我自己的 MCP 服务（地图、工单、知识库等）？
 

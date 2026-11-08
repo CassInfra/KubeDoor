@@ -420,6 +420,9 @@ class Service:
             if problem:
                 raise AIError(problem + "；可以拒绝或停止本轮", 409, "mcp_changed")
         if run["origin"] == "mcp":
+            if decision == "approve":
+                # 执行后的回读核验等网关自己发起的 K8S 调用按来源能力选通道（Agent 优先），和网页对话恢复时一样先取一次
+                run["capabilities"] = self.capabilities(await self.ensure_env(identity, run["scope"]["env"]))
             changed = await self.store.one("UPDATE kubedoor_ai_actions SET state=$2 WHERE id=$1::uuid AND state='pending' RETURNING id", action_id, "approved" if decision == "approve" else "rejected")
             if not changed:
                 return {"run_id": rid, "status": run["status"]}
@@ -505,26 +508,30 @@ class Service:
             raise AIError("Pod 菜单需要先选择具体命名空间和 Deployment")
         scope = normalize_scope({"env": env, "namespace": ns,
                                  "deployment": {"namespace": query.get("deployment_namespace") or ns, "name": deployment_name} if kind == "pods" else None})
-        await self.ensure_env(identity, env)
+        cluster = await self.ensure_env(identity, env)
         ctx = RunContext({"scope": scope}, identity)
         try:
-            source = "direct" if await self.store.connection(env) else "agent"
+            # 和工具调用一样 Agent 优先；配置了 kubeconfig 时另一条做备用：主通道失败就换它再试，后面的查询也直接用它
+            agent_ready = bool(cluster.get("online") and cluster.get("ai_tools"))
+            configured = bool(await self.store.connection(env))
+            sources = (["agent", "direct"] if agent_ready else ["direct", "agent"]) if configured else ["agent"]
 
             async def read(path, params=None):
-                nonlocal source
-                action = {"source": source, "operation": "api", "arguments": {"method": "GET", "path": path, "query": params or {}}, "call_id": "resources:" + uuid.uuid4().hex, "read_only": True}
-                try:
-                    result = await self.gateway.execute_action(ctx, action)
-                except Exception:
-                    if source != "direct":
-                        raise
-                    result = {"success": False}
-                if not isinstance(result, dict):
-                    result = {"success": False, "error": {"code": "resource_response_invalid"}}
-                if source == "direct" and result.get("success") is False:
-                    source = "agent"
-                    action["source"] = "agent"
-                    result = await self.gateway.execute_action(ctx, action)
+                nonlocal sources
+                action = {"source": sources[0], "operation": "api", "arguments": {"method": "GET", "path": path, "query": params or {}}, "call_id": "resources:" + uuid.uuid4().hex, "read_only": True}
+                while True:
+                    action["source"] = sources[0]
+                    fallback = len(sources) > 1
+                    try:
+                        result = await self.gateway.execute_action(ctx, action)
+                    except Exception:
+                        if not fallback:
+                            raise
+                        result = None
+                    if fallback and (not isinstance(result, dict) or result.get("success") is False):
+                        sources = sources[1:]
+                        continue
+                    break
                 if not isinstance(result, dict):
                     raise AIError("资源查询返回了无效的执行器结果", 502, "resource_response_invalid")
                 if result.get("success") is False:
@@ -570,7 +577,7 @@ class Service:
                     truncated = True
                     break
                 params["continue"] = continuation
-            return {"items": sorted(items, key=lambda r: (r.get("namespace", ""), r["name"])), "truncated": truncated, "source": source}
+            return {"items": sorted(items, key=lambda r: (r.get("namespace", ""), r["name"])), "truncated": truncated, "source": sources[0]}
         finally:
             await self.gateway.close_context(ctx)
 

@@ -172,6 +172,11 @@ async function remove() {
       <el-descriptions-item label="已保存 context">{{
         saved.context
       }}</el-descriptions-item>
+      <el-descriptions-item label="来源">{{
+        saved.origin === "agent-install"
+          ? "安装 Agent 时自动配置（Agent 服务账号）"
+          : "手动上传"
+      }}</el-descriptions-item>
       <el-descriptions-item v-if="saved.server" label="API Server">{{
         saved.server
       }}</el-descriptions-item>
@@ -181,8 +186,9 @@ async function remove() {
       >
     </el-descriptions>
     <p class="connection-hint">
-      该配置由有写权限的用户共同管理，用于 AI
-      需要直接访问集群的操作。上传内容保存在服务端，界面仅展示连接摘要。
+      AI 优先经在线 Agent 执行；Agent 离线或版本不支持时，用这里的 kubeconfig
+      直连集群。只有系统管理员可以管理；网页安装 Agent
+      时会自动配置，手动上传的不会被自动配置覆盖。内容加密保存在服务端，界面仅展示连接摘要。
     </p>
     <div class="upload-row">
       <input

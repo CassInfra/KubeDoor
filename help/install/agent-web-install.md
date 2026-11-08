@@ -144,7 +144,8 @@ master 重启后，未结束任务标记为待核对；重连目标集群检查�
 ### 凭据生命周期
 
 - kubeconfig 仅接受可在服务端独立使用的内嵌凭据。沿用现有解析器对 `exec`、auth-provider、外部证书文件、tokenFile 的限制，返回可操作的中文提示。
-- 临时 kubeconfig 加密保存并设置有效期；成功后删除，失败时短时保留以便重试。默认不自动保存为 AI 的长期连接配置；后者仍由已有独立入口管理。
+- 临时 kubeconfig 加密保存并设置有效期；成功后删除，失败时短时保留以便重试。上传的 kubeconfig 本身不会保存为 AI 的长期连接配置。
+- AI Kubeconfig 自动配置：Agent 上线后，master 读取目标集群 Secret `kubedoor-agent`（Agent 清单里 Agent 服务账号的长期令牌，权限与 Agent 相同），集群地址、CA 沿用这次安装的 kubeconfig，凭据换成这个令牌，交给 kubedoor-ai 测试连通后保存为该集群的「AI Kubeconfig」（context 名 `kubedoor-agent`，列里显示「自动配置」）。安装向导第 6 步在本集群安装时同样配置，临时安装令牌收尾时撤销不影响它。已有管理员手动上传的保留不变；重装时更新自动配置的那份。没配上（例如 kubedoor-ai 连不上该集群的 API Server）不影响安装，结果和原因显示在安装记录的「AI Kubeconfig」一行。AI 优先经在线 Agent 执行，Agent 离线或版本不支持时才用它直连。
 - Agent 继续使用目标集群的 ServiceAccount，不把上传的管理员 kubeconfig 挂载进 Agent。
 - 由安装服务为每个安装生成独立的 Agent 账号和随机口令，沿用现有 Agent 账号鉴权。当前代码允许多个 Agent 账号，但尚无账号与集群绑定；新增绑定记录并在 WebSocket 握手时校验，不能直接复用面向人类账号的集群权限。不得从密码哈希反取口令，也不得通过重置共用内置 Agent 账号影响已有集群。
 - 敏感运行值写目标 Secret，保留 Agent 既有环境变量名称，无需增加一批新的 Agent 配置项。Agent 连接地址中的凭据正确 URL 编码；vmagent 认证使用独立的认证参数和 Secret 文件。

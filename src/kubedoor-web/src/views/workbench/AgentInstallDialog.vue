@@ -84,6 +84,13 @@ const resultType = computed(() => {
   if (["failed", "expired"].includes(task.value?.status || "")) return "error";
   return "info";
 });
+// AI Kubeconfig 自动配置的结果：已配置 / 保留手动上传的 / 没配上（不影响安装）
+const aiConnectionType = computed(
+  () =>
+    (({ saved: "success", skipped: "info", failed: "warning" }) as const)[
+      task.value?.ai_connection?.status || "skipped"
+    ]
+);
 
 function remember(id?: string) {
   try {
@@ -615,6 +622,10 @@ onBeforeUnmount(() => {
                   : "")
           }}</span>
         </div>
+        <div v-if="task?.ai_connection" class="check-row">
+          <el-tag :type="aiConnectionType" size="small">AI Kubeconfig</el-tag>
+          <span>{{ task.ai_connection.message }}</span>
+        </div>
         <el-alert
           v-if="task?.error"
           :title="task.error"
@@ -626,7 +637,11 @@ onBeforeUnmount(() => {
           可以关闭此窗口，后台安装会继续。再次打开可查看进度。
         </p>
         <p
-          v-else-if="task?.status === 'expired' || task?.retryable === false"
+          v-else-if="
+            task?.status === 'expired' ||
+            (['failed', 'interrupted'].includes(task?.status || '') &&
+              task?.retryable === false)
+          "
           class="muted"
         >
           请重新上传 kubeconfig 后继续安装。

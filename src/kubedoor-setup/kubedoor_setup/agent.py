@@ -221,6 +221,17 @@ def running_message(steps):
     return '正在安装 Agent：' + current['name'] if current else '正在安装 Agent'
 
 
+def ai_connection_note(result, scrub):
+    """master 在 Agent 上线后自动配置 AI Kubeconfig 的结果，接在第 6 步结果说明后面；旧版 master 没有这项时不加"""
+    if not isinstance(result, dict):
+        return ''
+    if result.get('status') == 'saved':
+        return '；已用 Agent 服务账号自动配置 AI Kubeconfig'
+    if result.get('status') == 'failed' and result.get('message'):
+        return '。' + scrub(result['message'])
+    return ''
+
+
 class MasterClient:
     """以内置管理员身份（内部令牌）调用 master 的 Agent 安装接口。"""
 
@@ -279,6 +290,8 @@ class AgentInstall:
         self.namespace = repo.namespace
         self.secrets = []
         self.written, self.written_at = {}, 0.0
+        # master 在 Agent 上线后自动配置 AI Kubeconfig 的结果（{status, message}），拼进第 6 步的结果说明
+        self.ai_connection = None
 
     def api_base(self):
         return master_url(self.namespace)
@@ -385,6 +398,7 @@ class AgentInstall:
             steps = clean_rows(task.get('steps'), self.scrub)
             detail = self.scrub(task.get('error'))
             if status in ('succeeded', 'partial'):
+                self.ai_connection = task.get('ai_connection')
                 return status, steps, detail
             if status != 'running':
                 reason = detail or {'interrupted': '控制服务重启，安装已中断', 'expired': '安装任务已过期',
@@ -426,8 +440,9 @@ class AgentInstall:
                 message = f'Agent 已在本集群安装并上线，集群名称 {env}'
             else:
                 message = ('Agent 已上线，但指标采集验证未通过' + ('：' + detail if detail else '')
-                           + '。安装完成后可在控制台查看该集群的指标；临时安装权限会在收尾时撤销，'
-                           '需要重新验证时请在 Agent 管理页上传本集群的 kubeconfig')
+                           + '。安装完成后可在控制台查看该集群的指标，或在 Agent 管理的安装记录里点「重新验证指标采集」'
+                           '（只查询时序库，不需要 kubeconfig）')
+            message += ai_connection_note(self.ai_connection, self.scrub)
             agent.update(status=status, steps=steps, checks=[], message=message, updated_at=utcnow())
             for key in ('deadline', 'error'):
                 agent.pop(key, None)

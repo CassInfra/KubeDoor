@@ -160,6 +160,8 @@ export interface AIConnection {
   updated_at?: string;
   version?: number;
   error?: string;
+  /** upload：管理员手动上传；agent-install：网页安装 Agent 时用 Agent 服务账号自动配置 */
+  origin?: "upload" | "agent-install";
 }
 
 export interface WeComConfig {

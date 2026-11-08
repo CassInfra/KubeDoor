@@ -83,6 +83,8 @@ class FakeMaster:
         self.preflight_error = None
         self.reject = None
         self.outcome, self.error, self.polls = 'succeeded', '', 1
+        # master 自动配置 AI Kubeconfig 的结果；None 表示旧版 master 没有这项
+        self.ai_connection = None
         self.server = None
 
     async def __aenter__(self):
@@ -160,6 +162,8 @@ class FakeMaster:
                     step.update(status='success')
                 task['steps'][-1].update(status=last, message=self.error if last == 'error' else '')
                 task.update(status=self.outcome, error=self.error)
+                if self.ai_connection is not None:
+                    task['ai_connection'] = copy.deepcopy(self.ai_connection)
         return self.ok(task)
 
 
@@ -396,7 +400,30 @@ async def test_partial_install_finishes_with_metrics_hint(tmp_path):
     agent = final['agent']
     assert agent['status'] == 'partial' and 'error' not in agent
     assert '指标采集验证未通过' in agent['message'] and master.error in agent['message']
+    # 重新验证只查时序库：不再让用户上传本集群的 kubeconfig
+    assert '重新验证指标采集' in agent['message'] and '上传本集群的 kubeconfig' not in agent['message']
     assert json.loads(k8s.resources[STATE]['data']['status.json'])['agent'] == {'status': 'partial', 'env': 'prod-k8s'}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('ai_connection, note', [
+    ({'status': 'saved', 'message': '已用 Agent 服务账号自动配置 AI Kubeconfig'}, '；已用 Agent 服务账号自动配置 AI Kubeconfig'),
+    ({'status': 'failed', 'message': '连不上 kubedoor-ai，没有自动配置 AI Kubeconfig。AI 仍可经 Agent 执行'},
+     '。连不上 kubedoor-ai，没有自动配置 AI Kubeconfig。AI 仍可经 Agent 执行'),
+    ({'status': 'skipped', 'message': '该集群已有手动上传的 AI Kubeconfig，保留不变'}, ''),
+    (None, ''),     # 旧版 master 没有这项
+])
+async def test_agent_result_mentions_the_ai_kubeconfig(tmp_path, ai_connection, note):
+    k8s = AgentKubernetes(tmp_path)
+    async with FakeMaster() as master:
+        master.ai_connection = ai_connection
+        client, repo, _ = await make_client(k8s, master)
+        async with client:
+            await enter_agent_phase(repo)
+            state = await current(client)
+            await client.post('/setup-api/agent/install', json={'revision': state['revision'], 'options': OPTIONS})
+            final = await settle(repo, lambda s: s['phase'] == 'finalizing')
+    assert final['agent']['message'] == 'Agent 已在本集群安装并上线，集群名称 prod-k8s' + note
 
 
 @pytest.mark.asyncio

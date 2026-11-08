@@ -52,6 +52,11 @@ export interface AgentInstallTask {
   expires_at?: string;
   retryable?: boolean;
   target_locked?: boolean;
+  /** Agent 上线后自动配置 AI Kubeconfig 的结果（Agent 服务账号令牌）；失败不影响安装 */
+  ai_connection?: {
+    status: "saved" | "skipped" | "failed";
+    message: string;
+  };
 }
 
 interface Result<T> {

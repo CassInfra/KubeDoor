@@ -148,7 +148,11 @@ Grafana 的「KubeDoor-AI助手用量与缓存命中看板」（`src/kubedoor-se
 | `kubedoor` | 优先复用已有 master、Agent 和数据库目录接口，包括资源、日志、事件、指标，以及立即、定时、周期重启和扩缩容等现有运维操作 |
 | `direct` | 通过服务端保存的 kubeconfig，在 AI 服务内执行 Kubernetes SDK、CLI 或 Pod exec；数据查询（mysql / redis / elasticsearch）从 AI 服务直接发起，不需要 kubeconfig |
 | `agent` | 通过在线 Agent 的集群内身份执行同一共享工具库，无需上传 kubeconfig |
-| `auto` | 已有目录 operation 走 `kubedoor`；通用 operation 按连接能力选择（数据查询看 Agent 是否在线且 `data_tools=true`），仍需先选对操作名 |
+| `auto` | 已有目录 operation 走 `kubedoor`；通用 operation **Agent 优先**：Agent 在线且 `ai_tools=true` 时走 `agent`，Agent 离线或版本不支持时有 kubeconfig 才走 `direct`（网关自己发起的 K8S 调用和资源下拉菜单同样如此，菜单在主通道失败时换另一条）；数据查询看 Agent 是否在线且 `data_tools=true`。仍需先选对操作名 |
+
+Agent 优先的原因：经 Agent 时 master 复核、Agent 二次校验，`diagnostic` 里的 curl / dig / nc 等也在业务集群里执行；
+`direct` 只有网关一道检查，诊断命令在 kubedoor-ai 所在的控制端集群里跑。kubeconfig 的价值是 Agent 掉线或版本旧时 AI 仍能用。
+提问、网页对话恢复审批、外部 MCP 批准时都会带上本轮的来源能力；万一没有，沿用旧规则：有 kubeconfig 就 `direct`。
 
 每轮动态注入实际工具目录，`GET /api/ai/tools` 返回同一目录。已有接口符合需求且
 可用时，查询和修改都优先使用相应目录操作；没有适合的可用接口再选择通用 K8S
@@ -303,6 +307,15 @@ Deployment，结果里的 `verification` 写明是否和期望一致，不一致
 支持多 context、静态 token 和内嵌证书；仅系统管理员可上传、测试、替换或删除。
 kubeconfig 使用 AES-256-GCM 加密后存入 PostgreSQL，原始配置不提供下载，
 测试或替换失败会保留旧配置。加密密钥独立保存，必须与数据库一起规划恢复。
+
+网页安装 Agent（Agent 管理上传 kubeconfig，或安装向导第 6 步在本集群安装）时自动配置，不用再上传：
+Agent 上线后，master 读取目标集群 Secret `kubedoor-agent`（Agent 清单里 Agent 服务账号的长期令牌，权限同 Agent），
+集群段（API Server 地址、CA、tls-server-name）沿用这次安装的 kubeconfig，context / user 名为 `kubedoor-agent`，
+以内部令牌 + 安装人身份调 `PUT /api/ai/connections/{env}`，body 带 `origin: "agent-install"`。
+kubedoor-ai 照常先测试连通再保存；`kubedoor_ai_connections.origin` 记来源（`upload` / `agent-install`，升级前的记录算 `upload`），
+自动配置只替换自动配置的那份，**不覆盖管理员手动上传的**（返回 `{"skipped": true}`；upsert 带条件，测试期间刚好有人上传也不覆盖）；
+手动上传总是替换并改成 `upload`。用户上传的个人 kubeconfig 仍然用完即删；安装向导的临时令牌收尾时撤销，不影响自动配置的这份。
+保存失败只记在安装记录的 `ai_connection`（`saved` / `skipped` / `failed` + 说明），不影响安装结果。
 
 共享执行器拒绝外部认证命令、主机文件引用、CLI 集群或凭据覆盖等绕过集群边界的输入。
 预检冻结连接 revision 和 fingerprint，批准与执行时再次核对；删除或替换连接会使

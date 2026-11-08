@@ -100,11 +100,18 @@ def create_app(service=None, token=None):
                     data = await body(request)
                     if not data.get("content") or not data.get("context"):
                         raise AIError("保存连接需要 content 和明确 context")
+                    # origin=agent-install：网页安装 Agent 时 master 用 Agent 服务账号自动配置，不覆盖管理员手动上传的
+                    origin = "agent-install" if data.get("origin") == "agent-install" else "upload"
+                    if origin == "agent-install" and ((await svc.store.connection(env)) or {}).get("origin", "agent-install") != "agent-install":
+                        return JSONResponse({"skipped": True, "message": "该集群已有手动上传的 kubeconfig，保留不变"})
                     tested, config, context = await svc.test_connection(identity, env, data)
                     if tested.get("success") is False:
                         return JSONResponse(redact(tested), status_code=422)
                     encrypted = svc.gateway.cipher.encrypt(env, config)
-                    result = await svc.store.one("INSERT INTO kubedoor_ai_connections(env,encrypted_config,context,updated_by) VALUES($1,$2,$3,$4) ON CONFLICT(env) DO UPDATE SET encrypted_config=EXCLUDED.encrypted_config,context=EXCLUDED.context,revision=kubedoor_ai_connections.revision+1,test_status='success',tested_at=now(),updated_by=EXCLUDED.updated_by,updated_at=now() RETURNING env,context,revision,test_status,tested_at", env, encrypted, context, identity.username)
+                    # 自动配置只替换自动配置的那份（测试期间管理员刚好上传了，也不覆盖）；手动上传总是替换
+                    result = await svc.store.one("INSERT INTO kubedoor_ai_connections(env,encrypted_config,context,updated_by,origin) VALUES($1,$2,$3,$4,$5) ON CONFLICT(env) DO UPDATE SET encrypted_config=EXCLUDED.encrypted_config,context=EXCLUDED.context,revision=kubedoor_ai_connections.revision+1,test_status='success',tested_at=now(),updated_by=EXCLUDED.updated_by,updated_at=now(),origin=EXCLUDED.origin WHERE EXCLUDED.origin='upload' OR kubedoor_ai_connections.origin='agent-install' RETURNING env,context,revision,test_status,tested_at,origin", env, encrypted, context, identity.username, origin)
+                    if result is None:
+                        return JSONResponse({"skipped": True, "message": "该集群已有手动上传的 kubeconfig，保留不变"})
             elif endpoint == "sessions":
                 if request.method == "GET":
                     text = (request.query_params.get("q") or "").strip()[:100]

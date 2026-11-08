@@ -109,7 +109,7 @@ class Store:
         return await self.one("SELECT * FROM kubedoor_ai_connections WHERE env=$1", env)
 
     async def summaries(self):
-        return await self.fetch("SELECT env,true AS configured,context,test_status,tested_at,revision FROM kubedoor_ai_connections ORDER BY env")
+        return await self.fetch("SELECT env,true AS configured,context,test_status,tested_at,revision,origin FROM kubedoor_ai_connections ORDER BY env")
 
     async def pending(self, rid):
         rows = await self.fetch("SELECT * FROM kubedoor_ai_actions WHERE run_id=$1::uuid AND state='pending' ORDER BY created_at", rid)

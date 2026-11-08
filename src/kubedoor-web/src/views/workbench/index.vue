@@ -165,9 +165,11 @@
                   <el-tooltip placement="top">
                     <template #content>
                       <div class="ai-connection-tip">
-                        这个 kubeconfig 会加密存储，仅供 AI
-                        助手使用，可以提供更好的 AI 调用 K8S
-                        的能力，不上传也不影响 AI 的功能。
+                        AI 优先经在线 Agent 执行；Agent
+                        离线或版本不支持时，用这里的 kubeconfig
+                        直连集群。网页安装 Agent 时会用 Agent
+                        的服务账号自动配置，也可以手动上传替换（自动配置不会覆盖手动上传的）。kubeconfig
+                        加密存储，仅供 AI 助手使用。
                       </div>
                     </template>
                     <el-icon class="ai-connection-header__hint">
@@ -193,7 +195,10 @@
                     >
                       {{
                         connections[scope.row.key]?.configured
-                          ? connections[scope.row.key].context || "已配置"
+                          ? connections[scope.row.key].origin ===
+                            "agent-install"
+                            ? "自动配置"
+                            : connections[scope.row.key].context || "已配置"
                           : aiAvailable
                             ? "未配置"
                             : "AI 未启用"
@@ -645,9 +650,13 @@ function connectionSummary(env: string) {
   if (!aiAvailable.value) return "AI 服务未启用或无法连接";
   if (!connection?.configured)
     return aiPermission.value === "admin"
-      ? "上传 YAML / JSON Kubeconfig 并测试连接"
-      : "只有系统管理员可以管理共享配置";
-  return `context: ${connection.context || ""}；测试: ${connection.test_status || "未测试"} ${connection.tested_at || ""}`;
+      ? "AI 经在线 Agent 执行；上传 kubeconfig 后，Agent 离线时 AI 也能直连集群"
+      : "AI 经在线 Agent 执行；只有系统管理员可以管理共享配置";
+  const origin =
+    connection.origin === "agent-install"
+      ? "安装 Agent 时用 Agent 服务账号自动配置"
+      : `手动上传，context: ${connection.context || ""}`;
+  return `${origin}；测试: ${connection.test_status || "未测试"} ${connection.tested_at || ""}`;
 }
 
 // 定义Agent数据类型

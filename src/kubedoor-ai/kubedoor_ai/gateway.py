@@ -350,7 +350,7 @@ class Gateway:
             if operation in permissions.DATA_OPERATIONS:
                 # 数据查询：agent 在线且支持时从业务集群里发起，否则从 kubedoor-ai 发起（不需要 kubeconfig）
                 return "agent" if self.agent_data_tools(ctx) else "direct"
-            return "direct" if await self.store.connection(ctx.run["scope"]["env"]) else "agent"
+            return await self.k8s_source(ctx)
         if source not in ("kubedoor", "direct", "agent"):
             raise AIError("source 必须为 auto/kubedoor/direct/agent")
         if source == "kubedoor" and operation not in CATALOG:
@@ -364,6 +364,15 @@ class Gateway:
         """提问时的来源能力：agent 在线，而且是支持数据库 / Redis / ES 查询的新版本"""
         agent = (ctx.run.get("capabilities") or {}).get("agent") or {}
         return bool(agent.get("online") and agent.get("data_tools"))
+
+    @staticmethod
+    def agent_ai_tools(ctx):
+        """提问时的来源能力：agent 在线，而且支持通用 AI 工具；不知道（没有来源能力）时返回 None"""
+        capabilities = ctx.run.get("capabilities")
+        if not capabilities:
+            return None
+        agent = capabilities.get("agent") or {}
+        return bool(agent.get("online") and agent.get("ai_tools"))
 
     def validate_data_query(self, ctx, source, operation, args):
         """数据查询建动作之前的检查，不合格直接报错、不进审批：占位符只能填在凭证参数里（填进 SQL、命令、path 等
@@ -886,6 +895,11 @@ class Gateway:
         return result["data"]
 
     async def k8s_source(self, ctx):
+        """auto 的通用操作和网关自己发起的 K8S 调用走哪条路：Agent 优先。
+        agent 在线且支持时经 agent（master 复核、agent 二次校验，命令在业务集群里执行）；agent 不可用时有 kubeconfig
+        才由 kubedoor-ai 直连。不知道 agent 状态时沿用旧规则：有 kubeconfig 就直连"""
+        if self.agent_ai_tools(ctx):
+            return "agent"
         return "direct" if await self.store.connection(ctx.run["scope"]["env"]) else "agent"
 
     async def k8s_call(self, ctx, source, arguments, call_id, phase="execute", approved=False, timeout=60, expected=None, ops=None):
