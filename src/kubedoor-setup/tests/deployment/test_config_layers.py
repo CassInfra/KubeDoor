@@ -1,11 +1,16 @@
 """Published defaults work with compact configs and legacy per-install overrides."""
 
 import json
+import re
 
 import pytest
 import yaml
 
 from test_ai_render import ROOT, bash_path, run_bash, setup_config
+
+# 发布默认值以 deploy/install.sh 顶部的镜像配置区为准
+PUBLISHED_VMAGENT = re.search(r'^IMAGE_VMAGENT="([^"]+)"', (ROOT / "deploy/install.sh").read_text(encoding="utf-8"),
+                              re.M).group(1)
 
 
 def load_settings(fake_bin, config, defaults_root=None):
@@ -31,7 +36,7 @@ def test_defaults_and_user_overrides_are_loaded_in_order(tmp_path):
     config = tmp_path / "user.conf"
     config.write_text("# An empty user config uses published defaults.\n", encoding="utf-8")
     assert load_settings(fake_bin, config) == [
-        "kubedoor", "", "registry.cn-shenzhen.aliyuncs.com/starsl/vmagent:stable", "true", "",
+        "kubedoor", "", PUBLISHED_VMAGENT, "true", "",
     ]
     published = tmp_path / "published"
     for relative in ("deploy/install.sh", "src/kubedoor-setup/resources/kubedoor.defaults.conf"):
