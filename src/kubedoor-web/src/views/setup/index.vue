@@ -27,6 +27,7 @@ import {
   agentOutcome,
   agentPayload,
   agentStepStatus,
+  adminPasswordKey,
   autoPublicURL,
   checkTone,
   connectionPassed,
@@ -123,6 +124,8 @@ const basics = reactive({
 });
 /** 访问地址默认自动获取、只读，点「修改」后才能填写 */
 const editingURL = ref(false);
+/** 完成页的管理员密码默认显示成圆点，点眼睛图标才显示明文 */
+const passwordVisible = ref(false);
 const publicURLInput = ref<HTMLInputElement>();
 /** 第 4 步的告警通知（可选）：机器人地址只在这次输入时有值，已保存的不回传 */
 const notification = reactive<NotificationForm>(notificationFormFrom());
@@ -187,6 +190,26 @@ const agentResult = computed(() =>
     ? agentOutcome(completedMarker.value?.agent || task.value?.agent)
     : undefined
 );
+// 完成页的登录信息：访问地址（默认是 Web 的 NodePort 地址）、管理员账号和第 4 步设置的密码
+const accessURL = computed(
+  () =>
+    completedMarker.value?.public_url ||
+    task.value?.public_url ||
+    task.value?.config?.public_url ||
+    basics.public_url
+);
+const adminPassword = computed(() => {
+  const id =
+    completedMarker.value?.installation_id ||
+    completedMarker.value?.id ||
+    task.value?.id;
+  if (!completed.value || !id) return "";
+  try {
+    return sessionStorage.getItem(adminPasswordKey(id)) || "";
+  } catch {
+    return "";
+  }
+});
 const services = computed(
   () => completedMarker.value?.services || task.value?.services || []
 );
@@ -595,7 +618,10 @@ async function advance() {
         components: { alerting: basics.alerting },
         notification: notificationPayload(notification, savedNotification.value)
       };
+      // 完成页要显示管理员密码：保存成功后只记在当前标签页（sessionStorage），关掉标签页或进入控制台就清除
+      const typed = basics.admin.password;
       await perform(() => setupApi.configure(task.value.revision, data), 5);
+      if (typed && !error.value) rememberAdminPassword(task.value?.id, typed);
     } else if (!executing.value) {
       await perform(() => setupApi.start(task.value.revision));
     }
@@ -735,10 +761,32 @@ function editConnections() {
 
 function enterConsole(agent = false) {
   if (!completed.value) return;
+  forgetAdminPassword();
   router.push({
     path: "/login",
     query: agent ? { redirect: "/workbench/index" } : {}
   });
+}
+
+function rememberAdminPassword(id: string | undefined, password: string) {
+  if (!id) return;
+  try {
+    sessionStorage.setItem(adminPasswordKey(id), password);
+  } catch {
+    // 浏览器禁用存储时完成页只提示「第 4 步设置的密码」
+  }
+}
+
+function forgetAdminPassword() {
+  try {
+    const prefix = adminPasswordKey("");
+    for (let index = sessionStorage.length - 1; index >= 0; index--) {
+      const name = sessionStorage.key(index);
+      if (name?.startsWith(prefix)) sessionStorage.removeItem(name);
+    }
+  } catch {
+    // 同上
+  }
 }
 
 onMounted(initialize);
@@ -749,6 +797,8 @@ onBeforeUnmount(() => {
   postgres.password = metrics.password = basics.admin.password = "";
   notification.token = "";
   passwordConfirmation.value = "";
+  passwordVisible.value = false;
+  if (completed.value) forgetAdminPassword();
 });
 </script>
 
@@ -1504,19 +1554,25 @@ onBeforeUnmount(() => {
               </div>
             </template>
             <template v-else-if="agentPhase">
+              <div class="control-ready" role="status">
+                <span class="control-ready-mark" aria-hidden="true">✓</span>
+                <div>
+                  <b>KubeDoor 控制端组件安装完成</b>
+                  <p>全部服务与最终检查均已通过。</p>
+                </div>
+              </div>
               <h2>{{ agentTitle }}</h2>
               <p class="subtitle">
                 {{
                   agentChoosing
-                    ? "控制端已安装并通过检查。可以顺便把它所在的集群接入 KubeDoor，也可以跳过，稍后在控制台接入。"
+                    ? "可以顺便把控制端所在的集群接入 KubeDoor，也可以跳过，稍后在控制台接入。"
                     : "安装在后台进行，可以关闭页面，稍后回来查看结果。"
                 }}
               </p>
               <div v-if="connectionError" class="warning-message" role="status">
                 {{ connectionError }} 当前显示上次收到的状态，正在重新检查。
               </div>
-              <div class="environment-card">
-                <span class="cluster-mark">⬡</span>
+              <div class="environment-card cluster-info">
                 <div>
                   <b>本集群（控制端所在集群）</b>
                   <p>{{ environment?.server || "使用集群内安装身份" }}</p>
@@ -1839,6 +1895,57 @@ onBeforeUnmount(() => {
                       : "所有选定服务与最终检查均已通过。登录后接入第一个集群，即可查看资源和监控。"
                   }}
                 </p>
+                <dl class="access-info" aria-label="登录信息">
+                  <div>
+                    <dt>访问地址</dt>
+                    <dd>
+                      <a
+                        v-if="accessURL"
+                        :href="accessURL"
+                        target="_blank"
+                        rel="noopener"
+                        >{{ accessURL }}</a
+                      ><span v-else class="access-muted">未记录</span>
+                    </dd>
+                  </div>
+                  <div>
+                    <dt>管理员账号</dt>
+                    <dd>
+                      <code>{{ basics.admin.username || "kubedoor" }}</code>
+                    </dd>
+                  </div>
+                  <div>
+                    <dt>管理员密码</dt>
+                    <dd>
+                      <template v-if="adminPassword">
+                        <code class="access-password">{{
+                          passwordVisible ? adminPassword : "••••••••"
+                        }}</code
+                        ><button
+                          class="eye-button"
+                          type="button"
+                          :aria-label="
+                            passwordVisible ? '隐藏密码' : '查看密码'
+                          "
+                          :title="passwordVisible ? '隐藏密码' : '查看密码'"
+                          :aria-pressed="passwordVisible"
+                          @click="passwordVisible = !passwordVisible"
+                        >
+                          <svg viewBox="0 0 24 24" aria-hidden="true">
+                            <path
+                              d="M2 12s3.6-7 10-7 10 7 10 7-3.6 7-10 7S2 12 2 12z"
+                            />
+                            <circle cx="12" cy="12" r="3" />
+                            <path v-if="passwordVisible" d="M4 4l16 16" />
+                          </svg>
+                        </button>
+                      </template>
+                      <span v-else class="access-muted"
+                        >第 4 步设置的管理员密码</span
+                      >
+                    </dd>
+                  </div>
+                </dl>
                 <div v-if="agentResult?.installed" class="completion-actions">
                   <button
                     class="action-button"
@@ -2899,6 +3006,19 @@ code {
   background: #edf1ff;
   color: #4263ed;
 }
+/* 部署中、拉取镜像、启动中、检查中的服务：状态前加一个转圈 */
+.service-list li.active .status-badge::before {
+  display: inline-block;
+  width: 9px;
+  height: 9px;
+  margin-right: 5px;
+  vertical-align: -1px;
+  content: "";
+  border: 1.5px solid currentColor;
+  border-right-color: transparent;
+  border-radius: 50%;
+  animation: setup-spin 0.8s linear infinite;
+}
 .error p {
   color: #bb4534;
 }
@@ -2974,6 +3094,19 @@ code {
   color: var(--blue);
   background: #edf1ff;
 }
+/* 进行中的检查项和安装步骤：圆点换成转圈 */
+.checks-list li.active > .check-dot {
+  color: transparent;
+  background: none;
+  border: 2px solid #d5defb;
+  border-top-color: var(--blue);
+  animation: setup-spin 0.8s linear infinite;
+}
+@keyframes setup-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
 .agent-result.warning small {
   color: #927641;
 }
@@ -3045,6 +3178,100 @@ code {
   font-size: 12px;
   margin: 12px auto 22px;
   max-width: 430px;
+}
+/* 完成页的登录信息 */
+.access-info {
+  max-width: 460px;
+  margin: 0 auto 22px;
+  padding: 6px 18px;
+  text-align: left;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+}
+.access-info > div {
+  display: flex;
+  gap: 14px;
+  align-items: center;
+  justify-content: space-between;
+  min-height: 40px;
+  font-size: 12px;
+}
+.access-info > div + div {
+  border-top: 1px solid #f0f3f7;
+}
+.access-info dt {
+  flex-shrink: 0;
+  color: #8291a6;
+}
+.access-info dd {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  min-width: 0;
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+.access-info a {
+  color: var(--blue);
+}
+.access-password {
+  font-size: 12px;
+  letter-spacing: 1px;
+}
+.access-muted {
+  color: #8291a6;
+}
+.eye-button {
+  display: grid;
+  place-items: center;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  color: #6e8097;
+  background: #fff;
+  border: 1px solid #dfe5ef;
+  border-radius: 6px;
+}
+.eye-button svg {
+  width: 15px;
+  height: 15px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+/* 第 6 步顶部：控制端已经装好 */
+.control-ready {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  padding: 12px 16px;
+  margin: 0 0 18px;
+  color: #2d6a56;
+  background: #f0f9f5;
+  border: 1px solid #d9eee4;
+  border-radius: 10px;
+}
+.control-ready b {
+  font-size: 13px;
+  color: #1f7a5c;
+}
+.control-ready p {
+  margin: 2px 0 0;
+  font-size: 11px;
+  color: #568271;
+}
+.control-ready-mark {
+  display: grid;
+  flex-shrink: 0;
+  place-items: center;
+  width: 26px;
+  height: 26px;
+  font-size: 13px;
+  color: #fff;
+  background: #2b9e7d;
+  border-radius: 50%;
 }
 .completion-actions {
   display: flex;
@@ -3310,7 +3537,9 @@ code {
   * {
     transition: none !important;
   }
-  .arch-link {
+  .arch-link,
+  .checks-list li.active > .check-dot,
+  .service-list li.active .status-badge::before {
     animation: none;
   }
 }

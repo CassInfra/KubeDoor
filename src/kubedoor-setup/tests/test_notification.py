@@ -494,4 +494,4 @@ async def test_endpoint_check_result_mentions_saved_notification(monkeypatch, to
     runner = ObservedRunner(repo, RunnerKubernetes())
     await runner.run()
     assert runner.verified
-    assert check_row(repo, 'endpoints')['message'] == '对外入口、登录与所选指标链路验证通过' + suffix
+    assert check_row(repo, 'endpoints')['message'] == '对外入口、管理员登录和 Grafana 数据源验证通过' + suffix

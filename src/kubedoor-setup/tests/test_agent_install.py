@@ -684,6 +684,10 @@ class AgentRunner(ObservedRunner):
     async def agent_installer_available(self):
         return self.available
 
+    async def verify_metrics(self):
+        # 写入验证由 test_runner.py 的专门用例覆盖；这里只关心最终检查之后的 Agent 步骤
+        await self.update(check='write', status='success', message='时序库写入及查询验证通过')
+
 
 @pytest.mark.asyncio
 async def test_runner_asks_about_agent_after_final_checks(monkeypatch):

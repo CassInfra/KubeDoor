@@ -1888,3 +1888,107 @@ test("页面上的告警通知：IM 类型下拉、说明表、测试结果的�
     assert.equal(summary.textOf(row), `告警通知${expected}`);
   }
 });
+
+/* ---------- 完成页的登录信息、第 6 步提示 ---------- */
+
+/** 浏览器 Storage 的最小实现：length / key / getItem / setItem / removeItem */
+function mockStorage(map = new Map()) {
+  return {
+    get length() {
+      return map.size;
+    },
+    key: index => [...map.keys()][index] ?? null,
+    getItem: name => (map.has(name) ? map.get(name) : null),
+    setItem: (name, value) => map.set(name, String(value)),
+    removeItem: name => map.delete(name)
+  };
+}
+
+function useStorage(t, storage) {
+  const original = global.sessionStorage;
+  global.sessionStorage = storage;
+  t.after(() => (global.sessionStorage = original));
+  return storage;
+}
+
+test("第 4 步保存成功后在当前标签页记下管理员密码，进入控制台时清除", async t => {
+  const storage = useStorage(t, mockStorage());
+  const { vm } = await harness(t, { initial: state({ step: 4 }) });
+  vm.basics.admin.password = "Admin@2026!";
+  vm.passwordConfirmation = "Admin@2026!";
+  await vm.advance();
+  assert.equal(vm.step, 5);
+  assert.equal(
+    storage.getItem(utils.adminPasswordKey("install-1")),
+    "Admin@2026!"
+  );
+  vm.applyMarker({
+    phase: "succeeded",
+    installation_id: "install-1",
+    public_url: "http://192.0.2.20:30080"
+  });
+  assert.equal(vm.accessURL, "http://192.0.2.20:30080");
+  assert.equal(vm.adminPassword, "Admin@2026!");
+  vm.enterConsole();
+  assert.equal(storage.length, 0);
+});
+
+test("完成页显示访问地址、管理员账号和默认隐藏的密码，不装 Agent 也显示", async t => {
+  useStorage(
+    t,
+    mockStorage(new Map([[utils.adminPasswordKey("install-1"), "Admin@2026!"]]))
+  );
+  const page = await renderPage(t, {
+    phase: "succeeded",
+    installation_id: "install-1",
+    public_url: "http://192.0.2.20:30080",
+    services: [],
+    agent: { status: "skipped" }
+  });
+  const info = page.findAll(item => item.props["aria-label"] === "登录信息")[0];
+  assert.match(page.textOf(info), /访问地址http:\/\/192\.0\.2\.20:30080/);
+  assert.match(page.textOf(info), /管理员账号kubedoor/);
+  assert.match(page.textOf(info), /管理员密码••••••••/);
+  assert.doesNotMatch(page.textOf(info), /Admin@2026!/);
+  const eye = page.findAll(item => item.props.class === "eye-button")[0];
+  assert.equal(eye.props["aria-label"], "查看密码");
+  eye.props.onClick();
+  await settle();
+  assert.match(page.textOf(info), /管理员密码Admin@2026!/);
+});
+
+test("没记下密码时（例如换了标签页）提示是第 4 步设置的密码", async t => {
+  useStorage(t, mockStorage());
+  const page = await renderPage(t, {
+    phase: "succeeded",
+    installation_id: "install-1",
+    public_url: "http://192.0.2.20:30080",
+    services: []
+  });
+  const info = page.findAll(item => item.props["aria-label"] === "登录信息")[0];
+  assert.match(page.textOf(info), /管理员密码第 4 步设置的管理员密码/);
+  assert.deepEqual(
+    page.findAll(item => item.props.class === "eye-button"),
+    []
+  );
+});
+
+test("第 6 步先提示控制端组件已安装完成，集群卡片不带六边形图标", async t => {
+  const agentPhase = state({
+    phase: "agent",
+    step: 6,
+    agent: { status: "choice", defaults: { namespace: "kubedoor" } }
+  });
+  const page = await renderPage(t, null, {
+    status: async () => ({
+      phase: "agent",
+      authenticated: true,
+      installation_id: "install-1"
+    }),
+    state: async () => agentPhase
+  });
+  const text = page.textOf(page.root);
+  assert.match(text, /KubeDoor 控制端组件安装完成/);
+  assert.match(text, /本集群（控制端所在集群）/);
+  assert.doesNotMatch(text, /⬡/);
+});

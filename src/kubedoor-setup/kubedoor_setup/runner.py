@@ -268,35 +268,63 @@ class InstallRunner:
             for obj in self.objects:
                 if obj['kind'] == 'CronJob':
                     await self.apply_owned(obj)
-            await self.update(check='endpoints', status='running', message='验证对外入口、管理员登录和指标链路')
-            try:
-                await self.verify_endpoints()
-            except SetupError as error:
-                await self.update(check='endpoints', status='error', message=error.message)
-                await self.fail(error.message)
+            # 对外入口（登录、Grafana、保存通知）和时序库写入互不依赖，一起检查，各自出结果
+            problem = await self.final_checks()
+            if problem:
+                await self.fail(problem)
                 return
-            await self.update(check='endpoints', status='success', message='对外入口、登录与所选指标链路验证通过' +
-                              ('，告警通知已保存为全局配置' if self.notification_configured() else ''))
             # Recheck every current generation, including components that passed on a previous retry.
-            for sid, _, _ in SERVICES:
-                if not self.selected[sid]:
-                    continue
-                await self.update(service=sid, status='checking', message='复查当前副本与服务健康状态')
-                obj = self.deployment(sid)
-                if not workload_ready(await self.k8s.get(obj), obj):
-                    await self.update(service=sid, status='failed', message='最终复查时服务不再就绪',
-                                      details=await self.failure_details(sid))
-                    await self.fail('服务健康状态发生变化，请重试')
-                    return
-                try:
-                    await self.service_health(sid)
-                except SetupError as error:
-                    await self.update(service=sid, status='failed', message=error.message,
-                                      details=await self.failure_details(sid, error))
-                    await self.fail('服务健康复查未通过，请重试')
-                    return
-                await self.update(service=sid, status='ready', message='副本就绪及健康检查通过')
+            # 各服务一起复查；等全部复查结束再处理异常，不留下还在后台改状态的复查
+            outcomes = await asyncio.gather(*(self.recheck(sid) for sid, _, _ in SERVICES if self.selected[sid]),
+                                            return_exceptions=True)
+            for outcome in outcomes:
+                if isinstance(outcome, BaseException):
+                    raise outcome
+            problem = next((item for item in outcomes if item), '')
+            if problem:
+                await self.fail(problem)
+                return
             await self.conclude()
+
+    async def final_checks(self):
+        """并发执行对外入口验证和时序库写入验证；返回第一个失败原因，都通过返回空串。"""
+        await self.update(check='endpoints', status='running', message='验证对外入口、管理员登录和 Grafana 数据源')
+        checks = [self.check_endpoints()]
+        if self.config['metrics'].get('write_url'):
+            checks.append(self.verify_metrics())
+        else:
+            await self.update(check='write', status='skipped', message='使用已有采集链路，仅验证查询')
+        outcomes = await asyncio.gather(*checks, return_exceptions=True)
+        for outcome in outcomes:
+            if isinstance(outcome, BaseException) and not isinstance(outcome, SetupError):
+                raise outcome
+        return next((outcome.message for outcome in outcomes if isinstance(outcome, SetupError)), '')
+
+    async def check_endpoints(self):
+        try:
+            await self.verify_endpoints()
+        except SetupError as error:
+            await self.update(check='endpoints', status='error', message=error.message)
+            raise
+        await self.update(check='endpoints', status='success', message='对外入口、管理员登录和 Grafana 数据源验证通过' +
+                          ('，告警通知已保存为全局配置' if self.notification_configured() else ''))
+
+    async def recheck(self, sid):
+        """最终复查一个服务：副本仍就绪、健康接口仍通过；返回失败原因，通过返回空串。"""
+        await self.update(service=sid, status='checking', message='复查当前副本与服务健康状态')
+        obj = self.deployment(sid)
+        if not workload_ready(await self.k8s.get(obj), obj):
+            await self.update(service=sid, status='failed', message='最终复查时服务不再就绪',
+                              details=await self.failure_details(sid))
+            return '服务健康状态发生变化，请重试'
+        try:
+            await self.service_health(sid)
+        except SetupError as error:
+            await self.update(service=sid, status='failed', message=error.message,
+                              details=await self.failure_details(sid, error))
+            return '服务健康复查未通过，请重试'
+        await self.update(service=sid, status='ready', message='副本就绪及健康检查通过')
+        return ''
 
     async def agent_installer_available(self):
         return await installer_available(self.k8s)
@@ -572,10 +600,6 @@ class InstallRunner:
             await self.save_notification(base)
         finally:
             await self.request('POST', base + '/api/auth/logout', expected=(200, 204), json={})
-        if self.config['metrics'].get('write_url'):
-            await self.verify_metrics()
-        else:
-            await self.update(check='write', status='skipped', message='使用已有采集链路，仅验证查询')
 
     def notification_configured(self):
         return bool((self.config.get('notification') or {}).get('token'))
@@ -648,7 +672,8 @@ class InstallRunner:
         deadline = time.monotonic() + self.health_timeout
         while True:
             try:
-                data = await query_metrics(session, query_base, auth, query)
+                # nocache=1：不等 VictoriaMetrics 默认隐藏的最近 30 秒，写入后几秒内就能查到
+                data = await query_metrics(session, query_base, auth, query, {'nocache': '1'})
             except (aiohttp.ClientError, asyncio.TimeoutError):
                 raise SetupError('无法连接时序库远程读地址，请检查集群到时序库的网络和证书', 502) from None
             if probe_visible(data, timestamp):

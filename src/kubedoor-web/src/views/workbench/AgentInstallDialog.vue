@@ -666,7 +666,9 @@ onBeforeUnmount(() => {
             :loading="working"
             :disabled="loading || task?.retryable === false"
             @click="start(true)"
-            >核对状态并重试</el-button
+            >{{
+              task?.status === "partial" ? "重新验证指标采集" : "核对状态并重试"
+            }}</el-button
           >
           <el-button
             v-if="stage === 2 && retryable && task?.retryable !== false"

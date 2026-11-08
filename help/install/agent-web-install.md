@@ -45,7 +45,18 @@ Agent 管理页增加管理员可见的「安装 Agent」按钮，打开三步�
 
 成功后显示「Agent 已上线」并刷新当前管理列表。Agent 上线但采集失败时显示「Agent 已连接，指标采集异常」，保留可用的管理能力和具体失败原因。不能把 `kubectl apply` 成功或 Pod Ready 等同于完成接入。
 
+指标验证：Agent 上线后，master 每 3 秒查询一次时序库，要求 vmagent、kube-state-metrics、k8s-node-exporter、k8s-cadvisor 四个抓取任务在开始验证之后都有成功样本（`up == 1`，按集群标签和本次安装标识 `kubedoor_installation` 过滤），2 分钟内没齐就判定为部分成功（`partial`）。查询写成 `max by (job) (timestamp(up{…}) and (up{…} == 1))` 并带 `nocache=1`：
+
+- VictoriaMetrics 对比较运算的结果取 `timestamp()`，得到的是按 5 分钟对齐的计算时刻，不是样本时间，写成 `timestamp(up{…} == 1)` 会让刚上线的集群在下一个 5 分钟整点之前一直验证不过；
+- VictoriaMetrics 默认不返回最近 30 秒内写入的数据（`-search.latencyOffset`），`nocache=1` 让刚写入的样本马上可见。Prometheus 会忽略这个参数。
+
+部分成功时，失败原因列出没采到新指标的抓取任务及已正常的任务；还能连接目标集群时，经 API Server 读取 vmagent 的 `/api/v1/targets`，带上每个抓取任务的目标数和最近一次抓取报错。
+
 关闭弹窗或刷新网页不取消安装。再次打开时恢复任务进度；失败可查看错误步骤并重试，临时凭据过期后重新上传 kubeconfig。
+
+- 部分成功的重试按钮是「重新验证指标采集」：Agent 已经上线，前几步不再执行，只重新查询时序库，不连接目标集群，也不需要安装凭据。
+- 其他失败的重试按钮是「核对状态并重试」：用还没过期的临时凭据重新连接集群，复用同一个 Agent 账号。目标集群返回 401 时说明凭据已失效，提示重新上传 kubeconfig。
+- 安装向导第 6 步在本集群安装的记录（kubeconfig 的 context 为 `in-cluster`）用的是安装向导签发的临时令牌，安装收尾时安装账号 `kubedoor-agent-installer` 连同令牌一起撤销，不能再用这条记录连接集群（已安装的 Agent 不受影响）。要重装或调整本集群的 Agent，点「安装新集群」上传 kubeconfig。
 
 ## 2. 只填一个 master 地址
 

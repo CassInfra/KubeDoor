@@ -28,10 +28,36 @@ OWNER = 'kubedoor.io/installation'
 MANAGED = 'kubedoor.io/managed-by'
 MAX_CONFIG = 1024 * 1024
 STEP_NAMES = ['验证安装计划', '创建命名空间和凭据', '应用安装资源', '等待工作负载就绪', '等待 Agent 上线', '验证指标采集']
+METRICS_STEP = len(STEP_NAMES) - 1
+# 完整接入要验证的抓取任务：vmagent 自采集、对象状态、节点、容器，都要有 Agent 上线后的成功样本
+METRICS_JOBS = ('vmagent', 'kube-state-metrics', 'k8s-node-exporter', 'k8s-cadvisor')
+# 安装向导在本集群安装 Agent 时生成的 kubeconfig 的 context 名（kubedoor_setup.agent.CONTEXT）
+SETUP_CONTEXT = 'in-cluster'
 
 
 def utcnow():
     return datetime.now(timezone.utc)
+
+
+def metrics_query(label, env, installation):
+    """每个抓取任务最近一次成功抓取（up == 1）的样本时间。
+
+    timestamp() 要直接作用在原始序列上：VictoriaMetrics 对比较运算的结果取 timestamp()，得到的是按 5 分钟对齐的
+    计算点，不是样本时间，「上线后有新样本」要等到下一个 5 分钟整点才成立，验证常常超时。
+    """
+    selector = 'up{' + label + '=' + json.dumps(env) + ',kubedoor_installation=' + json.dumps(installation) + '}'
+    return f'max by (job) (timestamp({selector}) and ({selector} == 1))'
+
+
+def auth_hint(task, exc):
+    """连接目标集群返回 401 时，说明是哪份凭据失效、该怎么处理；其它错误原样返回。"""
+    if getattr(exc, 'http_status', None) != 401:
+        return exc
+    if task['payload'].get('context') == SETUP_CONTEXT:
+        return InstallError('这条安装记录来自安装向导：在本集群安装 Agent 用的是安装向导签发的临时令牌，安装完成后已撤销，'
+                            '不能再用它连接集群（已安装的 Agent 不受影响）。需要重新安装或调整配置时，请点「安装新集群」上传 kubeconfig',
+                            409, 401)
+    return InstallError('kubeconfig 认证失败（HTTP 401）：凭据无效或已过期，请重新上传 kubeconfig', 409, 401)
 
 
 def seal(value):
@@ -103,6 +129,9 @@ class Service:
         self.ready_timeout = 300
         self.online_timeout = 120
         self.metrics_timeout = 120
+        # 指标验证期间最近一次查询的结果（各任务里已有新样本的抓取任务 / 查询失败的原因），验证失败时用来说明原因
+        self.metrics_seen = {}
+        self.metrics_errors = {}
 
     async def open(self):
         await self.repo.expire()
@@ -138,8 +167,9 @@ class Service:
         for key in ('created_at', 'updated_at', 'expires_at'):
             value = task.get(key)
             payload[key] = value.isoformat() if isinstance(value, datetime) else value
-        payload['retryable'] = bool(task.get('encrypted') and task['expires_at'] > utcnow()
-                                    and task['status'] in ('failed', 'partial', 'interrupted'))
+        # 部分成功（只差指标验证）的重试只重新查询指标，不需要安装凭据；其余重试要用还没过期的凭据重新连接集群
+        payload['retryable'] = task['status'] == 'partial' or bool(
+            task.get('encrypted') and task['expires_at'] > utcnow() and task['status'] in ('failed', 'interrupted'))
         payload['target_locked'] = bool(payload.get('applied') or payload.get('target_reserved'))
         return payload
 
@@ -216,7 +246,7 @@ class Service:
                     task['payload']['plan_digest'] = fingerprint(resources)
                     task['status'] = 'ready'
             except Exception as exc:
-                checks.append({'name': '安装预检', 'status': 'error', 'message': error_message(exc)})
+                checks.append({'name': '安装预检', 'status': 'error', 'message': error_message(auth_hint(task, exc))})
             material['options'] = options
             task['encrypted'] = seal(material)
             task['expires_at'] = utcnow() + timedelta(minutes=30)
@@ -305,6 +335,8 @@ class Service:
             allowed = ('failed', 'partial', 'interrupted') if retry else ('ready',)
             if task['status'] not in allowed or (not retry and revision != task['revision']):
                 raise InstallError('安装计划已变化或尚未通过预检，请重新检测', 409)
+            if retry and task['status'] == 'partial':
+                return await self.start_reverify(task)
             unseal(task)
             task['status'] = 'running'
             task['payload']['error'] = ''
@@ -342,7 +374,10 @@ class Service:
                     raise InstallError('安装计划由旧版本创建，请重新检测后再安装')
                 parsed = await asyncio.to_thread(parse, material['kubeconfig'], task['payload']['context'])
                 async with self.kubernetes(parsed) as kube:
-                    identity = await kube.request('GET', '/api/v1/namespaces/kube-system')
+                    try:
+                        identity = await kube.request('GET', '/api/v1/namespaces/kube-system')
+                    except InstallError as exc:
+                        raise auth_hint(task, exc) from None
                     if identity['metadata']['uid'] != task['target_uid']:
                         raise InstallError('目标集群身份与预检不一致，安装已停止')
                     preview = render(options, username='preflight', password='preflight')
@@ -420,18 +455,14 @@ class Service:
                     index = 5
                     if options['mode'] == 'full':
                         await self.step(task, index, 'running')
-                        await self.wait_for(lambda: self.metrics_received(task, options), self.metrics_timeout,
-                                            'Agent 已上线，但尚未验证到新指标；请检查采集目标和指标写入地址')
+                        try:
+                            await self.wait_for(lambda: self.metrics_received(task, options), self.metrics_timeout, '')
+                        except InstallError:
+                            raise InstallError(await self.metrics_diagnosis(task, options, kube)) from None
                         await self.step(task, index, 'success')
                     else:
                         await self.step(task, index, 'skipped', '仅安装 Agent，使用既有监控采集')
-                    task['status'] = 'succeeded'
-                    for previous in await self.repo.same_cluster(task['env'], task['target_uid'], task['id']):
-                        old_user = previous['payload'].get('agent_user_id')
-                        if old_user and old_user != user['id']:
-                            await auth_store.update_user(old_user, enabled=False)
-                    task['encrypted'] = ''
-                    await self.repo.save(task)
+                    await self.finish_success(task)
         except asyncio.CancelledError:
             task['status'] = 'interrupted'
             task['payload']['error'] = '控制端退出，点击重试将核对已有资源后继续'
@@ -441,8 +472,8 @@ class Service:
                 pass
             raise
         except Exception as exc:
-            task['status'] = 'partial' if index == 5 else 'failed'
-            task['payload']['error'] = error_message(exc)
+            task['status'] = 'partial' if index == METRICS_STEP else 'failed'
+            task['payload']['error'] = error_message(auth_hint(task, exc))
             try:
                 await self.step(task, index, 'error', task['payload']['error'])
             except Exception as save_exc:
@@ -452,26 +483,141 @@ class Service:
             audit.record_bg(task['payload']['created_by'], 'agent.install.finish', env=task['env'],
                             target=task['id'], success=task['status'] == 'succeeded', detail={'status': task['status']})
 
-    async def metrics_received(self, task, options):
+    async def finish_success(self, task):
+        """安装成功：停用这个集群以前安装留下的 Agent 账号，销毁安装凭据。"""
+        task['status'] = 'succeeded'
+        user_id = task['payload'].get('agent_user_id')
+        for previous in await self.repo.same_cluster(task['env'], task['target_uid'], task['id']):
+            old_user = previous['payload'].get('agent_user_id')
+            if old_user and old_user != user_id:
+                await auth_store.update_user(old_user, enabled=False)
+        task['encrypted'] = ''
+        await self.repo.save(task)
+
+    async def start_reverify(self, task):
+        """部分成功（Agent 已上线，只差指标验证）的重试：只重新验证指标采集，不再连接目标集群。
+
+        前几步都已完成，不需要安装凭据。安装向导在本集群安装时用的是临时令牌，收尾时就撤销了，再连接只会 401。
+        调用方持有该任务的锁。
+        """
+        steps = task['payload'].get('steps') or []
+        if len(steps) != len(STEP_NAMES) or not task.get('env'):
+            raise InstallError('安装记录不完整，请重新安装', 409)
+        task['status'] = 'running'
+        task['payload']['error'] = ''
+        steps[METRICS_STEP].update(status='pending', message='')
+        await self.repo.save(task)
+        job = asyncio.create_task(self.reverify(task))
+        self.tasks[task['id']] = job
+        job.add_done_callback(lambda _: self.tasks.pop(task['id'], None))
+        audit.record_bg(task['payload']['created_by'], 'agent.install.start', env=task['env'], target=task['id'])
+        return task
+
+    async def reverify(self, task):
+        options = {'prom_k8s_tag_key': defaults()['prom_k8s_tag_key'], 'env': task['env']}
+        try:
+            async with self.slots:
+                await self.step(task, METRICS_STEP, 'running')
+                try:
+                    await self.wait_for(lambda: self.metrics_received(task, options), self.metrics_timeout, '')
+                except InstallError:
+                    raise InstallError(await self.metrics_diagnosis(task, options)) from None
+                await self.step(task, METRICS_STEP, 'success')
+                await self.finish_success(task)
+        except asyncio.CancelledError:
+            task['status'] = 'partial'
+            task['payload']['error'] = '控制端退出，可以重新验证指标采集'
+            try:
+                await self.step(task, METRICS_STEP, 'error', task['payload']['error'])
+            except Exception:
+                pass
+            raise
+        except Exception as exc:
+            task['status'] = 'partial'
+            task['payload']['error'] = error_message(exc)
+            try:
+                await self.step(task, METRICS_STEP, 'error', task['payload']['error'])
+            except Exception as save_exc:
+                logger.error(f'保存指标验证结果异常：{type(save_exc).__name__}')
+        finally:
+            audit.record_bg(task['payload']['created_by'], 'agent.install.finish', env=task['env'],
+                            target=task['id'], success=task['status'] == 'succeeded', detail={'status': task['status']})
+
+    async def metrics_fresh(self, task, options):
+        """Agent 上线后已有成功样本的抓取任务集合；查询不了时返回 (None, 原因)。
+
+        带 nocache=1：VictoriaMetrics 默认隐藏最近 30 秒的数据（-search.latencyOffset），也不读结果缓存；
+        Prometheus 会忽略这个参数。
+        """
         base = os.environ.get('PROM_URL', '')
         if not base:
-            return False
+            return None, '控制端没有配置时序库查询地址（PROM_URL）'
         parsed = urlsplit(base)
         auth = aiohttp.BasicAuth(unquote(parsed.username or ''), unquote(parsed.password or '')) if parsed.username else None
         url = address_without_auth(base) + '/api/v1/query'
-        label, env = options['prom_k8s_tag_key'], options['env']
-        query = ('max by (job) (timestamp(up{' + label + '=' + json.dumps(env)
-                 + ',kubedoor_installation=' + json.dumps(task['id']) + '} == 1))')
+        query = metrics_query(options['prom_k8s_tag_key'], options['env'], task['id'])
+        since = task['payload'].get('metrics_started_at', task['payload'].get('started_at', 0))
         try:
             async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10)) as session:
-                async with session.get(url, auth=auth, params={'query': query}, allow_redirects=False) as response:
+                async with session.get(url, auth=auth, params={'query': query, 'nocache': '1'}, allow_redirects=False) as response:
                     if response.status != 200:
-                        return False
+                        return None, f'查询时序库返回 HTTP {response.status}'
                     body = await response.json()
-                    rows = body.get('data', {}).get('result', [])
-                    fresh = {row.get('metric', {}).get('job') for row in rows
-                             if float(row['value'][1]) >= task['payload'].get('metrics_started_at', task['payload']['started_at'])}
-                    # 自采集、对象状态及节点/容器指标都要有新的成功样本。
-                    return {'vmagent', 'kube-state-metrics', 'k8s-node-exporter', 'k8s-cadvisor'} <= fresh
-        except (aiohttp.ClientError, ValueError, KeyError, TypeError, asyncio.TimeoutError):
+            rows = body.get('data', {}).get('result', [])
+            return {row.get('metric', {}).get('job') for row in rows if float(row['value'][1]) >= since}, ''
+        except (aiohttp.ClientError, asyncio.TimeoutError):
+            return None, '连不上时序库查询地址'
+        except (ValueError, KeyError, TypeError, IndexError):
+            return None, '时序库返回的查询结果格式不对'
+
+    async def metrics_received(self, task, options):
+        fresh, error = await self.metrics_fresh(task, options)
+        if fresh is None:
+            self.metrics_errors[task['id']] = error
             return False
+        self.metrics_errors.pop(task['id'], None)
+        self.metrics_seen[task['id']] = fresh
+        return set(METRICS_JOBS) <= fresh
+
+    async def metrics_diagnosis(self, task, options, kube=None):
+        """指标验证超时：说明哪些抓取任务没采到新指标；还能连接目标集群时，带上 vmagent 抓取目标的报错。"""
+        fresh = self.metrics_seen.pop(task['id'], None)
+        error = self.metrics_errors.pop(task['id'], '')
+        if fresh is None:
+            return f'Agent 已上线，但没能验证指标采集：{error or "查询时序库失败"}。可登录后在控制台查看监控，或稍后点「重新验证指标采集」'
+        missing = [job for job in METRICS_JOBS if job not in fresh]
+        reasons = await self.target_errors(kube, options.get('namespace') or 'kubedoor', missing) if kube else {}
+        items = '、'.join(f'{job}（{reasons[job]}）' if reasons.get(job) else job for job in missing)
+        message = f'Agent 已上线，但这些抓取任务在验证时间内没有采到新指标：{items}'
+        normal = [job for job in METRICS_JOBS if job in fresh]
+        if normal:
+            message += '；已正常：' + '、'.join(normal)
+        return message + '。可登录后在控制台查看监控，或稍后点「重新验证指标采集」'
+
+    async def target_errors(self, kube, namespace, jobs):
+        """经 apiserver 读 vmagent 的 /api/v1/targets，给没采到的抓取任务带上原因；读不到就不带。"""
+        if not jobs:
+            return {}
+        ns = quote(namespace, safe='')
+        try:
+            pods = await kube.list(f'/api/v1/namespaces/{ns}/pods', {'labelSelector': 'app=vmagent'})
+            pod = next((p for p in pods if p.get('status', {}).get('phase') == 'Running'), None)
+            if pod is None:
+                return {job: 'vmagent 没有运行中的 Pod' for job in jobs}
+            name = quote(pod['metadata']['name'], safe='')
+            data = await kube.request('GET', f'/api/v1/namespaces/{ns}/pods/{name}:8429/proxy/api/v1/targets')
+            targets = data['data']['activeTargets']
+        except Exception:
+            return {}
+        reasons = {}
+        for job in jobs:
+            mine = [t for t in targets if (t.get('labels') or {}).get('job') == job]
+            healthy = sum(1 for t in mine if t.get('health') == 'up')
+            if not mine:
+                reasons[job] = '没有发现抓取目标'
+            elif healthy:
+                reasons[job] = f'{healthy}/{len(mine)} 个目标抓取正常，数据可能还没写进时序库，请检查远程写地址'
+            else:
+                last = next((str(t['lastError']) for t in mine if t.get('lastError')), '')
+                reasons[job] = f'{len(mine)} 个目标都抓取失败' + (f'：{" ".join(last.split())[:200]}' if last else '')
+        return reasons

@@ -12,9 +12,11 @@ import aiohttp
 
 
 class InstallError(Exception):
-    def __init__(self, message, status=400):
+    def __init__(self, message, status=400, http_status=None):
         super().__init__(message)
         self.status = status
+        # 访问目标集群 API Server 时对方返回的 HTTP 状态（例如 401 表示 kubeconfig 凭据失效）
+        self.http_status = http_status
 
 
 # 安装器只接受发布包里的这些资源，不提供任意 Kubernetes API 转发。
@@ -115,7 +117,8 @@ class Kubernetes:
                     hints = {401: '认证失败', 403: '权限不足或准入策略拒绝', 404: '资源或命名空间不存在',
                              409: '资源字段由其它管理器拥有，请核对现有安装', 422: '资源校验或准入检查失败'}
                     # 不回显上游请求/响应体，其中可能含 Secret 或 token。
-                    raise InstallError(f'Kubernetes {method} {path}：{hints.get(response.status, "请求失败")}（HTTP {response.status}）')
+                    raise InstallError(f'Kubernetes {method} {path}：{hints.get(response.status, "请求失败")}（HTTP {response.status}）',
+                                       http_status=response.status)
                 return json.loads(raw) if raw else {}
         except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
             raise InstallError(f'无法连接 Kubernetes API Server（{type(exc).__name__}），请检查 master 到目标集群的网络和证书') from None

@@ -92,6 +92,8 @@ class FakeCluster:
         pass
 
     async def request(self, method, path, **kwargs):
+        if getattr(self, 'unauthorized', False):
+            raise InstallError(f'Kubernetes {method} {path}：认证失败（HTTP 401）', http_status=401)
         if path == '/version':
             return {'gitVersion': 'v1.30.1'}
         if path == '/api/v1/namespaces/kube-system':
@@ -232,7 +234,7 @@ async def test_wrong_online_account_does_not_count_as_install_success(environmen
 
 
 @pytest.mark.asyncio
-async def test_partial_metrics_failure_retries_same_account_and_keeps_agent(environment, monkeypatch):
+async def test_partial_metrics_failure_reverifies_only_metrics_without_credentials(environment, monkeypatch):
     service, cluster, repo = environment
     service.clients.clear()
     task = await plan(service, 'full')
@@ -241,16 +243,176 @@ async def test_partial_metrics_failure_retries_same_account_and_keeps_agent(envi
     await service.tasks[task['id']]
     failed = await repo.get(task['id'])
     assert failed['status'] == 'partial'
-    assert service.public(failed)['retryable']
+    assert failed['payload']['steps'][-1]['status'] == 'error'
+    # 安装凭据失效（例如安装向导的临时令牌收尾时已撤销）也能重试：只重新查指标，不再连接目标集群
+    repo.data[task['id']]['encrypted'] = ''
+    cluster.unauthorized = True
+    assert service.public(await repo.get(task['id']))['retryable']
+    applied = len(cluster.applied)
+    monkeypatch.setattr(module.auth_store, 'get_user_by_name', AsyncMock(side_effect=AssertionError('不应再取安装账号')))
+    monkeypatch.setattr(service, 'metrics_received', AsyncMock(return_value=True))
+    await service.start(task['id'], None, retry=True)
+    await service.tasks[task['id']]
+    done = await repo.get(task['id'])
+    assert done['status'] == 'succeeded', done['payload']
+    assert [step['status'] for step in done['payload']['steps']] == ['success'] * len(module.STEP_NAMES)
+    assert len(cluster.applied) == applied
+    assert done['encrypted'] == ''
+
+
+@pytest.mark.asyncio
+async def test_partial_reverify_keeps_partial_and_explains_when_metrics_still_missing(environment, monkeypatch):
+    service, _, repo = environment
+    service.clients.clear()
+    task = await plan(service, 'full')
+    monkeypatch.setattr(service, 'metrics_received', AsyncMock(return_value=False))
+    await service.start(task['id'], task['revision'])
+    await service.tasks[task['id']]
+
+    async def seen_some(task, options):
+        service.metrics_seen[task['id']] = {'vmagent', 'kube-state-metrics'}
+        return False
+
+    monkeypatch.setattr(service, 'metrics_received', seen_some)
+    await service.start(task['id'], None, retry=True)
+    await service.tasks[task['id']]
+    done = await repo.get(task['id'])
+    assert done['status'] == 'partial'
+    assert 'k8s-node-exporter、k8s-cadvisor' in done['payload']['error']
+    assert '已正常：vmagent、kube-state-metrics' in done['payload']['error']
+
+
+@pytest.mark.asyncio
+async def test_failed_retry_reuses_same_agent_account(environment, monkeypatch):
+    service, cluster, repo = environment
+    service.clients.clear()
+    task = await plan(service)
+    cluster.connection_user_id = 99
+    await service.start(task['id'], task['revision'])
+    await service.tasks[task['id']]
+    failed = await repo.get(task['id'])
+    assert failed['status'] == 'failed'
     credentials = module.unseal(failed)['credential']
+    cluster.connection_user_id = 100
     monkeypatch.setattr(module.auth_store, 'get_user_by_name', AsyncMock(return_value={'id': 100, 'role': 'agent'}))
     monkeypatch.setattr(module, 'verify_local', AsyncMock(return_value=True))
-    monkeypatch.setattr(service, 'metrics_received', AsyncMock(return_value=True))
     await service.start(task['id'], None, retry=True)
     await service.tasks[task['id']]
     assert (await repo.get(task['id']))['status'] == 'succeeded'
     assert module.auth_store.create_user.await_count == 1
     assert module.auth_store.get_user_by_name.call_args.args == (credentials['username'],)
+
+
+@pytest.mark.asyncio
+async def test_retry_with_expired_kubeconfig_says_to_upload_again(environment):
+    service, cluster, repo = environment
+    service.clients.clear()
+    task = await plan(service)
+    cluster.connection_user_id = 99
+    await service.start(task['id'], task['revision'])
+    await service.tasks[task['id']]
+    cluster.unauthorized = True
+    await service.start(task['id'], None, retry=True)
+    await service.tasks[task['id']]
+    done = await repo.get(task['id'])
+    assert done['status'] == 'failed'
+    assert 'kubeconfig 认证失败（HTTP 401）' in done['payload']['error']
+
+
+def test_auth_failure_says_which_credentials_expired():
+    exc = InstallError('Kubernetes GET /api/v1/namespaces/kube-system：认证失败（HTTP 401）', http_status=401)
+    wizard = str(module.auth_hint({'payload': {'context': module.SETUP_CONTEXT}}, exc))
+    assert '安装向导' in wizard and '临时令牌' in wizard and '安装新集群' in wizard
+    upload = str(module.auth_hint({'payload': {'context': 'production'}}, exc))
+    assert 'kubeconfig 认证失败（HTTP 401）' in upload
+    other = InstallError('Kubernetes GET /x：权限不足（HTTP 403）', http_status=403)
+    assert module.auth_hint({'payload': {'context': module.SETUP_CONTEXT}}, other) is other
+
+
+def test_metrics_query_takes_timestamps_from_raw_series():
+    # VictoriaMetrics 对比较运算的结果取 timestamp() 得到的是按 5 分钟对齐的计算点，不能写成 timestamp(up == 1)
+    selector = 'up{origin_prometheus="prod-k8s",kubedoor_installation="task-1"}'
+    assert module.metrics_query('origin_prometheus', 'prod-k8s', 'task-1') == (
+        f'max by (job) (timestamp({selector}) and ({selector} == 1))')
+
+
+@pytest.mark.asyncio
+async def test_metrics_fresh_queries_latest_samples_and_keeps_new_jobs(environment, monkeypatch):
+    from aiohttp import web
+    from aiohttp.test_utils import TestServer
+    service, _, _ = environment
+    seen = []
+    now = time.time()
+
+    async def handler(request):
+        seen.append(dict(request.query))
+        return web.json_response({'status': 'success', 'data': {'resultType': 'vector', 'result': [
+            {'metric': {'job': 'vmagent'}, 'value': [now, str(now - 5)]},
+            {'metric': {'job': 'k8s-cadvisor'}, 'value': [now, str(now - 3600)]}]}})
+
+    app = web.Application()
+    app.router.add_get('/select/0/prometheus/api/v1/query', handler)
+    server = TestServer(app)
+    await server.start_server()
+    try:
+        monkeypatch.setenv('PROM_URL', str(server.make_url('/select/0/prometheus')))
+        task = {'id': 'task-1', 'payload': {'metrics_started_at': now - 60}}
+        fresh, error = await service.metrics_fresh(task, {'prom_k8s_tag_key': 'origin_prometheus', 'env': 'prod-k8s'})
+    finally:
+        await server.close()
+    assert (fresh, error) == ({'vmagent'}, '')
+    # nocache=1：不让 VictoriaMetrics 隐藏最近 30 秒的数据
+    assert seen[0]['nocache'] == '1'
+    assert seen[0]['query'] == module.metrics_query('origin_prometheus', 'prod-k8s', 'task-1')
+
+
+@pytest.mark.asyncio
+async def test_metrics_query_failure_is_reported_instead_of_missing_jobs(environment, monkeypatch):
+    service, _, _ = environment
+    monkeypatch.delenv('PROM_URL', raising=False)
+    task = {'id': 'task-2', 'payload': {}}
+    assert await service.metrics_received(task, {'prom_k8s_tag_key': 'origin_prometheus', 'env': 'prod-k8s'}) is False
+    message = await service.metrics_diagnosis(task, {'namespace': 'kubedoor'})
+    assert 'PROM_URL' in message and '重新验证指标采集' in message
+
+
+@pytest.mark.asyncio
+async def test_metrics_timeout_names_missing_jobs_with_vmagent_target_errors(environment):
+    service, _, _ = environment
+
+    class Kube:
+        async def list(self, path, params=None):
+            assert path == '/api/v1/namespaces/kubedoor/pods' and params == {'labelSelector': 'app=vmagent'}
+            return [{'metadata': {'name': 'vmagent-1'}, 'status': {'phase': 'Running'}}]
+
+        async def request(self, method, path, **kwargs):
+            assert path == '/api/v1/namespaces/kubedoor/pods/vmagent-1:8429/proxy/api/v1/targets'
+            return {'data': {'activeTargets': [
+                {'labels': {'job': 'k8s-cadvisor'}, 'health': 'down', 'lastError': 'server returned\nHTTP status 403 Forbidden'},
+                {'labels': {'job': 'k8s-cadvisor'}, 'health': 'down', 'lastError': ''},
+                {'labels': {'job': 'k8s-node-exporter'}, 'health': 'up'}]}}
+
+    task = {'id': 'task-3', 'payload': {}}
+    service.metrics_seen['task-3'] = {'vmagent'}
+    message = await service.metrics_diagnosis(task, {'namespace': 'kubedoor'}, Kube())
+    assert 'k8s-cadvisor（2 个目标都抓取失败：server returned HTTP status 403 Forbidden）' in message
+    assert 'kube-state-metrics（没有发现抓取目标）' in message
+    assert 'k8s-node-exporter（1/1 个目标抓取正常' in message
+    assert '已正常：vmagent' in message
+    assert 'task-3' not in service.metrics_seen
+
+
+@pytest.mark.asyncio
+async def test_unreadable_vmagent_targets_still_name_missing_jobs(environment):
+    service, _, _ = environment
+
+    class Kube:
+        async def list(self, path, params=None):
+            raise InstallError('Kubernetes GET pods：权限不足（HTTP 403）', http_status=403)
+
+    service.metrics_seen['task-4'] = {'vmagent', 'kube-state-metrics', 'k8s-node-exporter'}
+    message = await service.metrics_diagnosis({'id': 'task-4', 'payload': {}}, {'namespace': 'kubedoor'}, Kube())
+    assert '没有采到新指标：k8s-cadvisor。' in message.replace('；已正常：vmagent、kube-state-metrics、k8s-node-exporter', '')
 
 
 @pytest.mark.asyncio

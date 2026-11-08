@@ -278,6 +278,11 @@ export function isLoopback(host: string): boolean {
   return /^(localhost|127(?:\.\d{1,3}){3}|0\.0\.0\.0|\[?::1\]?)$/i.test(host);
 }
 
+/** 完成页显示管理员密码用：第 4 步保存成功后记在当前标签页的 sessionStorage，按安装 id 区分 */
+export function adminPasswordKey(installationId: string): string {
+  return `kubedoor-setup-admin:${installationId}`;
+}
+
 export function suggestedPublicURL(origin: string): string {
   try {
     const url = new URL(origin);

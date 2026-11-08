@@ -270,6 +270,24 @@ Agent 安装后主动访问控制端，vmagent 直接写时序库；网页安装
 
 在「AI Kubeconfig」里上传了 kubeconfig 的集群，控制端的 kubedoor-ai 也会直接访问该集群的 API Server。
 
+### Q：网页安装 Agent 提示「Agent 已上线，但……没有采到新指标」，安装记录显示部分成功？
+
+Agent 已经能用，只是在 2 分钟的验证时间里，时序库还没查到 vmagent、kube-state-metrics、k8s-node-exporter、k8s-cadvisor 四个抓取任务的新样本。提示里会列出缺了哪些抓取任务；控制端还能连接目标集群时，会带上 vmagent 抓取目标的报错（例如「3 个目标都抓取失败：…」或「抓取正常，数据可能还没写进时序库，请检查远程写地址」）。
+
+- 抓取失败：按报错检查 kube-state-metrics、node-exporter 的 Pod 和端口，或 kubelet（cadvisor）的权限。
+- 抓取正常但查不到：检查 vmagent 日志里的远程写错误、远程写地址和账号，以及控制端的 `PROM_URL` 和远程写地址是不是同一个时序库。
+- 处理完后（或者只是数据到得晚），在「Agent管理」打开这条安装记录点「重新验证指标采集」：只重新查询时序库，不连接集群，也不需要重新上传 kubeconfig。
+
+旧版 master 按 `timestamp(up{…} == 1)` 判断新样本，在 VictoriaMetrics 上取到的是按 5 分钟对齐的计算时刻，刚装好的集群经常被误判为没通过；更新 master 镜像后点「重新验证指标采集」即可。
+
+### Q：在「Agent管理」核对或重试安装记录时提示「Kubernetes GET /api/v1/namespaces/kube-system：认证失败（HTTP 401）」？
+
+目标集群的 API Server 拒绝了这条记录保存的凭据，和已经安装好的 Agent 无关（Agent 用自己的 ServiceAccount）。
+
+- 记录来自安装向导第 6 步（在控制端所在集群安装 Agent）：用的是安装向导签发的临时令牌，安装收尾时专用账号 `kubedoor-agent-installer` 已删除，令牌随之失效。这条记录不能再用来连接集群；要重装或调整本集群的 Agent，点「安装新集群」上传 kubeconfig。
+- 记录来自上传的 kubeconfig：里面的令牌或客户端证书已过期、被吊销（例如在云厂商控制台重置了集群凭据、删掉了令牌所属的 ServiceAccount）。重新上传一份有效的 kubeconfig。
+- 只差指标验证的部分成功记录，重试只重新查询时序库，不会再连接集群，也就不会出现这个错误。
+
 ### Q：改了 `K8S_NAME` 或下线了集群，旧名字一直显示「离线」？
 
 集群在第一次连接时登记，Web 上目前没有删除入口，旧名字会一直显示为「离线」，资源页的集群下拉框里也还能看到它（选中后实时查询会失败）。

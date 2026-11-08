@@ -174,8 +174,9 @@ async def _api_data(session, url, params, auth):
         return payload.get('data')
 
 
-async def query_metrics(session, base, auth, query):
-    data = await _api_data(session, base + '/api/v1/query', {'query': query}, auth)
+async def query_metrics(session, base, auth, query, extra=None):
+    """extra 是附加的查询参数，例如 {'nocache': '1'}：VictoriaMetrics 默认隐藏最近 30 秒的数据，加上它才能马上查到刚写入的样本。"""
+    data = await _api_data(session, base + '/api/v1/query', {'query': query, **(extra or {})}, auth)
     if not isinstance(data, dict):
         raise SetupError('时序库没有返回有效的 Prometheus 查询结果，请检查远程读地址', 422)
     return data

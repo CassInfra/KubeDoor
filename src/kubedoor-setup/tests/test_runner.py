@@ -288,7 +288,7 @@ class FakeTimeSeries:
 
     def __init__(self, write_status=204, visible_after=1):
         self.write_status, self.visible_after = write_status, visible_after
-        self.writes, self.queries = [], []
+        self.writes, self.queries, self.params = [], [], []
 
     def app(self):
         app = web.Application()
@@ -304,6 +304,7 @@ class FakeTimeSeries:
 
     async def query(self, request):
         self.queries.append(request.query['query'])
+        self.params.append(dict(request.query))
         rows = []
         if self.writes and len(self.queries) >= self.visible_after:
             rows = [{'metric': {'installation_id': ID}, 'value': [1, str(self.writes[-1]['timestamp'])]}]
@@ -334,6 +335,8 @@ async def test_metrics_write_goes_straight_to_time_series_and_is_queried_back():
     assert tsdb.writes[0]['authorization'] == aiohttp.BasicAuth('monit', 'p@ss:w/rd').encode()
     assert tsdb.writes[0]['cookie'] is None and tsdb.writes[0]['encoding'] == 'snappy'
     assert tsdb.queries == ['kubedoor_install_probe{installation_id="' + ID + '"}'] * 2
+    # nocache=1：不等 VictoriaMetrics 默认隐藏的最近 30 秒
+    assert all(params.get('nocache') == '1' for params in tsdb.params)
     row = check_row(runner.repo, 'write')
     assert (row['status'], row['message']) == ('success', '时序库写入及查询验证通过')
     assert any(check['name'] == 'write' and check['status'] == 'running'
@@ -373,22 +376,45 @@ async def test_unreachable_time_series_is_reported():
 
 
 @pytest.mark.asyncio
-async def test_endpoint_check_logs_out_before_metrics_and_creates_no_probe_account():
+async def test_final_checks_run_endpoints_and_metrics_together_without_probe_account():
     runner = ObservedRunner(MemoryRepo(), FakeKubernetes())
     runner.config, runner.installation_id = runner.repo.private['config'], ID
     runner.config['metrics']['write_url'] = 'http://vm.example.invalid:8428/api/v1/write'
     calls = []
+    metrics_started = asyncio.Event()
 
     async def request(method, url, **kwargs):
         calls.append((method, url.removeprefix(runner.config['public_url'])))
         if url.endswith('/setup-status.json'):
+            # 写入验证在对外入口验证结束前就开始了：两项是一起跑的
+            await asyncio.wait_for(metrics_started.wait(), 1)
             return {'installation_id': ID}
         return {'success': True, 'status': 'ok'}
+
+    async def verify_metrics():
+        metrics_started.set()
+        calls.append(('verify_metrics', ''))
+
     runner.request = request
-    runner.verify_metrics = AsyncMock(side_effect=lambda: calls.append(('verify_metrics', '')))
-    await InstallRunner.verify_endpoints(runner)
-    assert calls[-2:] == [('POST', '/api/auth/logout'), ('verify_metrics', '')]
+    runner.verify_metrics = verify_metrics
+    # ObservedRunner 把 verify_endpoints 换成了桩，这里要测真实的入口验证
+    runner.verify_endpoints = lambda: InstallRunner.verify_endpoints(runner)
+    assert await InstallRunner.final_checks(runner) == ''
+    assert ('verify_metrics', '') in calls and ('POST', '/api/auth/logout') in calls
     assert not any('/api/admin/users' in url or 'metrics/write' in url for _, url in calls)
+    assert check_row(runner.repo, 'endpoints')['status'] == 'success'
+
+
+@pytest.mark.asyncio
+async def test_one_final_check_failing_does_not_hide_the_other_result():
+    runner = ObservedRunner(MemoryRepo(), FakeKubernetes())
+    runner.config, runner.installation_id = runner.repo.private['config'], ID
+    runner.config['metrics']['write_url'] = 'http://vm.example.invalid:8428/api/v1/write'
+    runner.request = AsyncMock(side_effect=lambda method, url, **kwargs:
+                               {'installation_id': ID} if url.endswith('/setup-status.json') else {'success': True, 'status': 'ok'})
+    runner.verify_metrics = AsyncMock(side_effect=SetupError('时序库拒绝写入（HTTP 401）', 502))
+    assert await InstallRunner.final_checks(runner) == '时序库拒绝写入（HTTP 401）'
+    assert check_row(runner.repo, 'endpoints')['status'] == 'success'
 
 
 @pytest.mark.asyncio
@@ -398,9 +424,31 @@ async def test_query_only_metrics_skip_write_check():
     runner.request = AsyncMock(side_effect=lambda method, url, **kwargs:
                                {'installation_id': ID} if url.endswith('/setup-status.json') else {'success': True, 'status': 'ok'})
     runner.verify_metrics = AsyncMock()
-    await InstallRunner.verify_endpoints(runner)
+    assert await InstallRunner.final_checks(runner) == ''
     runner.verify_metrics.assert_not_awaited()
     assert check_row(runner.repo, 'write')['status'] == 'skipped'
+    assert check_row(runner.repo, 'endpoints')['status'] == 'success'
+
+
+@pytest.mark.asyncio
+async def test_service_rechecks_all_finish_before_an_unexpected_error_is_raised(monkeypatch):
+    setup_probes(monkeypatch)
+    runner = ObservedRunner(MemoryRepo(), FakeKubernetes())
+    rechecked = []
+
+    async def recheck(sid):
+        if sid == 'master':
+            raise RuntimeError('boom')
+        await asyncio.sleep(.05)
+        rechecked.append(sid)
+        return ''
+
+    runner.recheck = recheck
+    with pytest.raises(RuntimeError, match='boom'):
+        await runner.run()
+    # 其他服务的复查都已结束，没有留在后台继续改安装状态
+    assert set(rechecked) == {sid for sid, _, _ in SERVICES if runner.selected[sid]} - {'master'}
+    assert not runner.finalized
 
 
 @pytest.mark.asyncio
