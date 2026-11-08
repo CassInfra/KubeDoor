@@ -17,7 +17,9 @@ PRIVATE_NAME = 'kubedoor-setup-config'
 LABELS = {'app.kubernetes.io/part-of': 'kubedoor', 'app.kubernetes.io/component': 'setup'}
 PHASES = ('draft', 'ready', 'running', 'failed', 'interrupted', 'agent', 'finalizing', 'succeeded')
 # state['agent'] 里可以给页面看的字段；attempt、started_at 等内部字段不返回
-AGENT_PUBLIC = ('status', 'deadline', 'defaults', 'options', 'steps', 'checks', 'message', 'error', 'task_id', 'updated_at')
+# takeover：预检发现本集群里已有 Agent 资源时的清单（类型、名称、原因），页面据此提供强制覆盖安装
+AGENT_PUBLIC = ('status', 'deadline', 'defaults', 'options', 'steps', 'checks', 'message', 'error', 'task_id', 'updated_at',
+                'takeover')
 
 
 def utcnow():

@@ -9,6 +9,7 @@ import {
 } from "vue";
 import { useRouter } from "vue-router";
 import { ElMessage } from "element-plus";
+import { copyText } from "@/utils/clipboard";
 import {
   getSetupMarker,
   setupApi,
@@ -86,6 +87,8 @@ let submissions = 0;
 let agentFilledFor = "";
 /** 等待选择是否安装 Agent 时慢速轮询，到点自动收尾或其他页面操作后能及时更新 */
 const AGENT_CHOICE_POLL = 15000;
+/** 第 6 步的标题和勾选项：在控制端所在的 K8S 同时安装 KubeDoor-agent */
+const AGENT_CHOICE_TITLE = "在 KubeDoor 控制端的 K8S 同时安装 KubeDoor-agent";
 
 const steps = [
   { title: "环境检查", note: "确认安装位置与环境" },
@@ -174,13 +177,21 @@ const agentDeadline = computed(() =>
 const agentTitle = computed(
   () =>
     ({
-      running: "正在本集群安装 Agent",
-      succeeded: "Agent 已上线，正在完成安装",
-      partial: "Agent 已上线，指标采集验证未通过",
-      failed: "本集群 Agent 安装未完成",
+      running: "正在控制端的 K8S 安装 KubeDoor-agent",
+      succeeded: "KubeDoor-agent 已上线，正在完成安装",
+      partial: "KubeDoor-agent 已上线，指标采集验证未通过",
+      failed: "KubeDoor-agent 安装未完成",
       skipped: "正在完成安装"
-    })[agentStatus.value] || "在本集群安装 Agent"
+    })[agentStatus.value] || AGENT_CHOICE_TITLE
 );
+// 预检报「本集群已有 Agent 资源」：确认要接管的资源后可以强制覆盖安装
+const agentForceable = computed(
+  () =>
+    agentStatus.value === "failed" &&
+    agentChecks.value.some(check => check.forceable)
+);
+const agentTakeover = computed(() => agent.value?.takeover || []);
+const takeoverConfirming = ref(false);
 // 收尾和完成页显示本集群 Agent 的结果（公开完成标记里也带 status 和 env）
 const finished = computed(() =>
   ["finalizing", "succeeded"].includes(phase.value)
@@ -704,9 +715,11 @@ async function testNotification() {
   }
 }
 
-/** 第 6 步：勾选时校验并在本集群安装 Agent；不勾选或选择跳过时直接完成安装 */
-async function submitAgent(skip = false) {
+/** 第 6 步：勾选时校验并在本集群安装 Agent；不勾选或选择跳过时直接完成安装。
+ * force：用户已在确认区看过要接管的已有资源，强制覆盖安装 */
+async function submitAgent(skip = false, force = false) {
   if (locked.value || !task.value || !agentChoosing.value) return;
+  takeoverConfirming.value = false;
   if (skip || !agentForm.install) {
     await perform(() => setupApi.skipAgent(task.value.revision));
     return;
@@ -718,7 +731,17 @@ async function submitAgent(skip = false) {
     error.value = errorText(reason);
     return;
   }
-  await perform(() => setupApi.installAgent(task.value.revision, options));
+  await perform(() =>
+    setupApi.installAgent(task.value.revision, options, force === true)
+  );
+}
+
+/** 完成页复制管理员密码：HTTP 访问时没有 Clipboard API，copyText 先用 execCommand 兜底 */
+async function copyAdminPassword() {
+  if (!adminPassword.value) return;
+  if (await copyText(adminPassword.value))
+    ElMessage.success("已复制管理员密码");
+  else ElMessage.error("复制失败，请点眼睛图标显示密码后手动复制");
 }
 
 function agentEdited() {
@@ -1572,27 +1595,6 @@ onBeforeUnmount(() => {
               <div v-if="connectionError" class="warning-message" role="status">
                 {{ connectionError }} 当前显示上次收到的状态，正在重新检查。
               </div>
-              <div class="environment-card cluster-info">
-                <div>
-                  <b>本集群（控制端所在集群）</b>
-                  <p>{{ environment?.server || "使用集群内安装身份" }}</p>
-                  <p v-if="!agentChoosing && agent?.options">
-                    集群名称 {{ agent.options.env }} · 命名空间
-                    {{ agent.options.namespace }} ·
-                    {{
-                      agent.options.mode === "full"
-                        ? "安装指标采集"
-                        : "只安装 Agent"
-                    }}
-                  </p>
-                  <p v-else>
-                    控制端命名空间 {{ environment?.namespace || "kubedoor"
-                    }}<template v-if="environment?.version">
-                      · {{ environment.version }}</template
-                    >
-                  </p>
-                </div>
-              </div>
               <template v-if="agentSteps.length">
                 <div class="service-progress">
                   <div>
@@ -1659,6 +1661,66 @@ onBeforeUnmount(() => {
               >
                 {{ agent.error || agent.message }}
               </div>
+              <div
+                v-if="agentForceable && agentForm.install"
+                class="takeover-panel"
+                :class="{ confirming: takeoverConfirming }"
+              >
+                <template v-if="!takeoverConfirming">
+                  <p>
+                    这些资源是之前的安装留下的（例如重装控制端前装的
+                    Agent）。确认可以接管后，可以强制覆盖安装。
+                  </p>
+                  <button
+                    class="takeover-button"
+                    type="button"
+                    :disabled="locked"
+                    @click="takeoverConfirming = true"
+                  >
+                    强制覆盖安装
+                  </button>
+                </template>
+                <template v-else>
+                  <b>确认强制覆盖安装？</b>
+                  <p>
+                    将接管本集群里已有的这些 Agent 资源，改成这次安装的配置：
+                  </p>
+                  <ul aria-label="要接管的已有资源">
+                    <li
+                      v-for="item in agentTakeover"
+                      :key="`${item.kind}/${item.namespace}/${item.name}`"
+                    >
+                      <code
+                        >{{ item.kind }}/{{ item.name
+                        }}<template v-if="item.namespace">
+                          （{{ item.namespace }}）</template
+                        ></code
+                      ><small>{{ item.reason }}</small>
+                    </li>
+                  </ul>
+                  <p>
+                    原来的 Agent 会改连当前控制端；如果另一套 KubeDoor
+                    还在使用它，那套会失去这个集群。
+                  </p>
+                  <div class="takeover-actions">
+                    <button
+                      class="takeover-button"
+                      type="button"
+                      :disabled="locked"
+                      @click="submitAgent(false, true)"
+                    >
+                      确认强制覆盖安装</button
+                    ><button
+                      class="secondary-button"
+                      type="button"
+                      :disabled="locked"
+                      @click="takeoverConfirming = false"
+                    >
+                      取消
+                    </button>
+                  </div>
+                </template>
+              </div>
               <template v-if="agentChoosing">
                 <div class="agent-card" :class="{ checked: agentForm.install }">
                   <label class="agent-choice"
@@ -1668,7 +1730,7 @@ onBeforeUnmount(() => {
                       :disabled="locked"
                       @change="agentEdited"
                     /><span
-                      ><b>在本集群安装 Agent</b
+                      ><b>{{ AGENT_CHOICE_TITLE }}</b
                       ><small
                         >接入后即可在 KubeDoor
                         中管理本集群的资源、日志、终端和监控。</small
@@ -1937,6 +1999,19 @@ onBeforeUnmount(() => {
                             />
                             <circle cx="12" cy="12" r="3" />
                             <path v-if="passwordVisible" d="M4 4l16 16" />
+                          </svg></button
+                        ><button
+                          class="copy-button"
+                          type="button"
+                          aria-label="复制密码"
+                          title="复制密码"
+                          @click="copyAdminPassword"
+                        >
+                          <svg viewBox="0 0 24 24" aria-hidden="true">
+                            <rect x="9" y="9" width="11" height="11" rx="2" />
+                            <path
+                              d="M5 15H4a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1h10a1 1 0 0 1 1 1v1"
+                            />
                           </svg>
                         </button>
                       </template>
@@ -3110,16 +3185,84 @@ code {
 .agent-result.warning small {
   color: #927641;
 }
+/* 没勾选是淡红色、勾选后淡绿色（和页面的失败 / 成功提示同一组颜色），一眼看出装不装 */
 .agent-card {
   margin-top: 18px;
-  background: #fbfcfe;
-  border: 1px solid var(--line);
+  background: #fff4f2;
+  border: 1px solid #f3d2cb;
   border-radius: 12px;
+  transition:
+    background 0.2s,
+    border-color 0.2s;
 }
 .agent-card.checked {
-  background: #fff;
-  border-color: #c7d2fb;
-  box-shadow: 0 8px 22px rgb(66 99 237 / 8%);
+  background: #f0f9f5;
+  border-color: #bfe3d1;
+  box-shadow: 0 8px 22px rgb(45 106 86 / 8%);
+}
+/* 预检报本集群已有 Agent 资源：强制覆盖安装的入口和确认区 */
+.takeover-panel {
+  padding: 12px 15px;
+  margin: -6px 0 18px;
+  font-size: 12px;
+  color: #8a3b2c;
+  background: #fff8f6;
+  border: 1px dashed #efc2b8;
+  border-radius: 9px;
+}
+.takeover-panel.confirming {
+  border-style: solid;
+}
+.takeover-panel p {
+  margin: 0 0 10px;
+  line-height: 1.6;
+}
+.takeover-panel b {
+  display: block;
+  margin-bottom: 6px;
+  font-size: 13px;
+}
+.takeover-panel ul {
+  display: grid;
+  gap: 6px;
+  padding: 0;
+  margin: 0 0 10px;
+  list-style: none;
+}
+.takeover-panel li {
+  display: grid;
+  gap: 2px;
+}
+.takeover-panel code {
+  font-size: 12px;
+  color: #6b2a1e;
+  overflow-wrap: anywhere;
+}
+.takeover-panel small {
+  color: #9a6457;
+}
+.takeover-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.takeover-button {
+  padding: 8px 15px;
+  font-size: 12px;
+  font-weight: 650;
+  color: #fff;
+  white-space: nowrap;
+  cursor: pointer;
+  background: #c4523d;
+  border: 0;
+  border-radius: 8px;
+}
+.takeover-button:hover:not(:disabled) {
+  background: #ad4431;
+}
+.takeover-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.6;
 }
 .agent-choice {
   display: flex;
@@ -3232,6 +3375,23 @@ code {
   border: 1px solid #dfe5ef;
   border-radius: 6px;
 }
+.copy-button {
+  display: grid;
+  place-items: center;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  color: #6e8097;
+  cursor: pointer;
+  background: #fff;
+  border: 1px solid #dfe5ef;
+  border-radius: 6px;
+}
+.copy-button:hover {
+  color: var(--blue);
+  border-color: #c7d2fb;
+}
+.copy-button svg,
 .eye-button svg {
   width: 15px;
   height: 15px;

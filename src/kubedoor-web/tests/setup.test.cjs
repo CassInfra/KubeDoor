@@ -321,6 +321,8 @@ async function harness(t, options = {}) {
     skipAgent: [],
     state: 0,
     success: [],
+    errors: [],
+    copied: [],
     push: []
   };
   let current = options.initial || state();
@@ -368,8 +370,12 @@ async function harness(t, options = {}) {
       calls.retry.push(revision);
       return { ...current, phase: "running", step: 5 };
     },
-    installAgent: async (revision, data) => {
-      calls.installAgent.push({ revision, options: data });
+    installAgent: async (revision, data, force) => {
+      calls.installAgent.push({
+        revision,
+        options: data,
+        ...(force ? { force } : {})
+      });
       current = {
         ...current,
         revision: revision + 1,
@@ -407,7 +413,16 @@ async function harness(t, options = {}) {
         useRouter: () => ({ push: value => calls.push.push(value) })
       },
       "element-plus": {
-        ElMessage: { success: value => calls.success.push(value) }
+        ElMessage: {
+          success: value => calls.success.push(value),
+          error: value => calls.errors.push(value)
+        }
+      },
+      "@/utils/clipboard": {
+        copyText: async value => {
+          calls.copied.push(value);
+          return options.copyResult ?? true;
+        }
       }
     },
     true
@@ -1354,6 +1369,8 @@ test("环境检查显示本集群 Agent 安装权限，最终检查列表不重�
  */
 async function renderPage(t, marker, api) {
   const originalWindow = global.window;
+  // 复制按钮交给的内容（真实的 copyText 在 HTTP 下先用 execCommand 兜底）
+  const copied = [];
   global.window = { location: { origin: "https://kubedoor.example.com" } };
   const component = compile(
     "../src/views/setup/index.vue",
@@ -1369,7 +1386,13 @@ async function renderPage(t, marker, api) {
       },
       "./setup-utils": utils,
       "vue-router": { useRouter: () => ({ push() {} }) },
-      "element-plus": { ElMessage: { success() {} } }
+      "element-plus": { ElMessage: { success() {}, error() {} } },
+      "@/utils/clipboard": {
+        copyText: async value => {
+          copied.push(value);
+          return true;
+        }
+      }
     },
     { inlineTemplate: true }
   ).default;
@@ -1434,7 +1457,7 @@ async function renderPage(t, marker, api) {
       ...(predicate(child) ? [child] : []),
       ...findAll(predicate, child)
     ]);
-  return { root, textOf, findAll };
+  return { root, textOf, findAll, copied };
 }
 
 test("安装结果列出每个服务的 Deployment 名，旧的完成标记没有名称时不显示", async t => {
@@ -1973,7 +1996,7 @@ test("没记下密码时（例如换了标签页）提示是第 4 步设置的�
   );
 });
 
-test("第 6 步先提示控制端组件已安装完成，集群卡片不带六边形图标", async t => {
+test("第 6 步先提示控制端组件已安装完成，不再显示本集群信息卡片", async t => {
   const agentPhase = state({
     phase: "agent",
     step: 6,
@@ -1989,6 +2012,89 @@ test("第 6 步先提示控制端组件已安装完成，集群卡片不带六�
   });
   const text = page.textOf(page.root);
   assert.match(text, /KubeDoor 控制端组件安装完成/);
-  assert.match(text, /本集群（控制端所在集群）/);
+  assert.match(text, /在 KubeDoor 控制端的 K8S 同时安装 KubeDoor-agent/);
+  assert.doesNotMatch(text, /本集群（控制端所在集群）/);
   assert.doesNotMatch(text, /⬡/);
+  // 安装 Agent 的勾选卡片：没勾选淡红色，勾选后淡绿色（checked 样式）
+  const card = page.findAll(item =>
+    /agent-card/.test(item.props.class || "")
+  )[0];
+  assert.ok(card);
+});
+
+test("完成页可以复制管理员密码", async t => {
+  useStorage(
+    t,
+    mockStorage(new Map([[utils.adminPasswordKey("install-1"), "Admin@2026!"]]))
+  );
+  const page = await renderPage(t, {
+    phase: "succeeded",
+    installation_id: "install-1",
+    public_url: "http://192.0.2.20:30080",
+    services: []
+  });
+  const copy = page.findAll(item => item.props.class === "copy-button")[0];
+  assert.equal(copy.props["aria-label"], "复制密码");
+  // 密码默认隐藏时也能直接复制
+  await copy.props.onClick();
+  assert.deepEqual(page.copied, ["Admin@2026!"]);
+});
+
+test("预检报本集群已有 Agent 资源时，确认后强制覆盖安装", async t => {
+  const takeover = [
+    {
+      kind: "Deployment",
+      name: "kubedoor-agent",
+      namespace: "kubedoor",
+      reason: "属于另一项安装：安装记录不在当前控制端，或集群名称不同"
+    }
+  ];
+  const installs = [];
+  const failed = agentState(
+    {
+      status: "failed",
+      options: agentOptions,
+      error: "安装预检未通过：目标集群已有 Agent 资源，不会直接覆盖",
+      checks: [
+        {
+          name: "安装预检",
+          status: "error",
+          message: "目标集群已有 Agent 资源",
+          forceable: true
+        }
+      ],
+      takeover
+    },
+    { revision: 7 }
+  );
+  const page = await renderPage(t, null, {
+    status: async () => ({
+      phase: "agent",
+      authenticated: true,
+      installation_id: "install-1"
+    }),
+    state: async () => failed,
+    installAgent: async (revision, options, force) => {
+      installs.push({ revision, options, force });
+      return failed;
+    }
+  });
+  const buttons = () =>
+    page.findAll(item => item.props.class === "takeover-button");
+  assert.equal(page.textOf(buttons()[0]).trim(), "强制覆盖安装");
+  buttons()[0].props.onClick();
+  await settle();
+  // 先列出要接管的资源，确认后才带 force 提交
+  const list = page.findAll(
+    item => item.props["aria-label"] === "要接管的已有资源"
+  )[0];
+  assert.match(page.textOf(list), /Deployment\/kubedoor-agent/);
+  assert.match(page.textOf(list), /属于另一项安装/);
+  assert.deepEqual(installs, []);
+  await buttons()[0].props.onClick();
+  await settle();
+  assert.deepEqual(
+    installs.map(item => [item.revision, item.force]),
+    [[7, true]]
+  );
 });

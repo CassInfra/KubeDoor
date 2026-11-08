@@ -139,9 +139,11 @@ class Kubernetes:
             if len(result) >= 20000:
                 raise InstallError('待检查的集群资源过多，请在高级设置中指定已有采集组件')
 
-    async def apply(self, resource, dry_run=False):
+    async def apply(self, resource, dry_run=False, force=False):
+        # force：管理员确认强制覆盖安装时，接管其他字段管理器（例如脚本安装用的 kubectl）拥有的字段，不再报冲突
         return await self.request('PATCH', resource_path(resource), body=resource, apply=True,
-                                  params={'fieldManager': 'kubedoor-installer', **({'dryRun': 'All'} if dry_run else {})})
+                                  params={'fieldManager': 'kubedoor-installer', **({'dryRun': 'All'} if dry_run else {}),
+                                          **({'force': 'true'} if force else {})})
 
     async def allowed(self, resource, verb):
         version, kind = resource['apiVersion'], resource['kind']

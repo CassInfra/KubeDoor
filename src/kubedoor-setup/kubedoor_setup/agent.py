@@ -46,9 +46,11 @@ class Superseded(Exception):
 
 
 class AgentFailure(Exception):
-    def __init__(self, message, *, steps=None, checks=None):
+    def __init__(self, message, *, steps=None, checks=None, takeover=None):
         super().__init__(message)
         self.message, self.steps, self.checks = message, steps, checks
+        # 预检发现本集群里已有 Agent 资源时的清单：页面据此提供「强制覆盖安装」
+        self.takeover = takeover
 
 
 class MasterError(SetupError):
@@ -87,12 +89,22 @@ def clean_text(value, limit=300):
 
 
 def clean_rows(rows, text=None, limit=20):
-    """master 任务的 steps / checks，只保留 name、status、message；message 经 text 处理（默认截断）。"""
+    """master 任务的 steps / checks，只保留 name、status、message（经 text 处理，默认截断）和 forceable 标记。"""
     if not isinstance(rows, list):
         return []
     text = text or (lambda value: clean_text(value, 500))
     return [{'name': clean_text(row.get('name'), 200), 'status': clean_text(row.get('status'), 40),
-             'message': text(row.get('message'))} for row in rows[:limit] if isinstance(row, dict)]
+             'message': text(row.get('message')), **({'forceable': True} if row.get('forceable') is True else {})}
+            for row in rows[:limit] if isinstance(row, dict)]
+
+
+def clean_takeover(items, text, limit=50):
+    """预检列出的、需要强制覆盖才能接管的已有资源"""
+    if not isinstance(items, list):
+        return []
+    return [{'kind': clean_text(item.get('kind'), 80), 'name': clean_text(item.get('name'), 200),
+             'namespace': clean_text(item.get('namespace'), 200), 'reason': text(item.get('reason'))}
+            for item in items[:limit] if isinstance(item, dict)]
 
 
 def write_url_of(config):
@@ -120,21 +132,26 @@ def unavailable_agent_state():
     return {'status': 'unavailable', 'steps': [], 'checks': [], 'message': UNAVAILABLE, 'updated_at': utcnow()}
 
 
-def start_attempt(state, options, attempt):
+def start_attempt(state, options, attempt, force=False):
+    """force：用户确认可以接管本集群里已有的 Agent 资源（强制覆盖安装）；记在状态里，安装服务重启后继续时也知道"""
     agent = state['agent']
     agent.update(status='running', options=options, attempt=attempt, started_at=utcnow(), steps=[], checks=[],
-                 message='正在准备在本集群安装 Agent', updated_at=utcnow())
-    for key in ('deadline', 'error', 'task_id'):
+                 force=bool(force), message='正在准备在本集群安装 Agent', updated_at=utcnow())
+    for key in ('deadline', 'error', 'task_id', 'takeover'):
         agent.pop(key, None)
     check_row(state, 'cleanup', 'pending', '等待本集群 Agent 安装完成')
 
 
-def mark_failed(state, message, *, steps=None, checks=None):
+def mark_failed(state, message, *, steps=None, checks=None, takeover=None):
     agent = state['agent']
     agent.update(status='failed', error=message or '在本集群安装 Agent 未成功', message=FAILED,
                  deadline=deadline_after(CHOICE_SECONDS), checks=checks or [], updated_at=utcnow())
     if steps is not None:
         agent['steps'] = steps
+    if takeover:
+        agent['takeover'] = takeover
+    else:
+        agent.pop('takeover', None)
     check_row(state, 'cleanup', 'pending', '等待重试或跳过本集群 Agent 安装')
 
 
@@ -266,10 +283,10 @@ class MasterClient:
     async def inspect(self, config):
         return await self.call('POST', '/inspect', {'kubeconfig': config})
 
-    async def preflight(self, task_id, options):
+    async def preflight(self, task_id, options, force=False):
         # master 的预检本身最长 100 秒
         return await self.call('POST', '/' + quote(task_id, safe='') + '/preflight',
-                               {'context': CONTEXT, 'options': options}, timeout=180)
+                               {'context': CONTEXT, 'options': options, 'force': bool(force)}, timeout=180)
 
     async def start(self, task_id, revision):
         return await self.call('POST', '/' + quote(task_id, safe='') + '/start', {'revision': revision})
@@ -315,7 +332,7 @@ class AgentInstall:
         except Superseded:
             return False
         except AgentFailure as failure:
-            await self.fail(failure.message, steps=failure.steps, checks=failure.checks)
+            await self.fail(failure.message, steps=failure.steps, checks=failure.checks, takeover=failure.takeover)
             return False
         except SetupError as error:
             await self.fail(error.message)
@@ -340,7 +357,7 @@ class AgentInstall:
         if not task_id:
             if resume:
                 raise AgentFailure('安装服务重启时本次安装尚未开始，请重试或跳过')
-            task_id = await self.begin(master, agent['options'], write_url)
+            task_id = await self.begin(master, agent['options'], write_url, agent.get('force') is True)
         return await self.follow(master, task_id, deadline)
 
     async def master_call(self, call, stage):
@@ -349,7 +366,7 @@ class AgentInstall:
         except MasterError as error:
             raise AgentFailure(stage + '：' + self.scrub(error.message)) from None
 
-    async def begin(self, master, options, write_url):
+    async def begin(self, master, options, write_url, force=False):
         await self.progress(message='正在签发临时安装令牌')
         try:
             token = await service_account_token(self.k8s, self.namespace, AGENT_INSTALLER, TOKEN_SECONDS)
@@ -369,12 +386,13 @@ class AgentInstall:
         except (TypeError, ValueError, AttributeError):
             raise AgentFailure('控制服务返回的安装任务无效') from None
         await self.progress(task_id=task_id, message='正在预检本集群的安装条件')
-        task = await self.master_call(master.preflight(task_id, master_options(options, self.namespace, write_url)),
+        task = await self.master_call(master.preflight(task_id, master_options(options, self.namespace, write_url), force),
                                       '安装预检未通过')
         if task.get('status') != 'ready':
             checks = [row for row in clean_rows(task.get('checks'), self.scrub) if row['status'] == 'error']
             reason = '；'.join(row['message'] for row in checks if row['message']) or '请检查安装选项后重试'
-            raise AgentFailure('安装预检未通过：' + reason, checks=checks)
+            takeover = clean_takeover(task.get('takeover'), self.scrub) if any(row.get('forceable') for row in checks) else []
+            raise AgentFailure('安装预检未通过：' + reason, checks=checks, takeover=takeover)
         task = await self.master_call(master.start(task_id, task.get('revision')), '启动安装失败')
         steps = clean_rows(task.get('steps'), self.scrub)
         await self.progress(steps=steps, checks=[], message=running_message(steps))
@@ -449,10 +467,10 @@ class AgentInstall:
             await self.repo.save(state)
             return True
 
-    async def fail(self, message, *, steps=None, checks=None):
+    async def fail(self, message, *, steps=None, checks=None, takeover=None):
         async with self.repo.lock:
             state = await self.repo.load()
             if not self.owns(state):
                 return
-            mark_failed(state, self.scrub(message), steps=steps, checks=checks)
+            mark_failed(state, self.scrub(message), steps=steps, checks=checks, takeover=takeover)
             await self.repo.save(state)

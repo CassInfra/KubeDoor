@@ -1,6 +1,6 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, reactive, ref, watch } from "vue";
-import { ElInputTag } from "element-plus";
+import { computed, h, onBeforeUnmount, reactive, ref, watch } from "vue";
+import { ElInputTag, ElMessageBox } from "element-plus";
 import {
   agentInstallApi,
   type AgentInstallDefaults,
@@ -255,7 +255,50 @@ function continueToOptions() {
   stage.value = 1;
 }
 
-async function preflight() {
+// 预检报「目标集群已有 Agent 资源」：确认要接管的资源后可以强制覆盖安装
+const forceable = computed(
+  () =>
+    task.value?.status === "draft" &&
+    (task.value.checks || []).some(
+      check => check.status === "error" && check.forceable
+    )
+);
+
+async function forcePreflight() {
+  if (!task.value || locked.value || !forceable.value) return;
+  const items = task.value.takeover || [];
+  try {
+    await ElMessageBox.confirm(
+      h("div", { class: "takeover-confirm" }, [
+        h("p", "将接管目标集群里已有的这些 Agent 资源，改成这次安装的配置："),
+        h(
+          "ul",
+          items.map(item =>
+            h(
+              "li",
+              `${item.kind}/${item.name}${item.namespace ? `（${item.namespace}）` : ""}：${item.reason}`
+            )
+          )
+        ),
+        h(
+          "p",
+          "原来的 Agent 会改连当前控制端；如果另一套 KubeDoor 还在使用它，那套会失去这个集群。"
+        )
+      ]),
+      "强制覆盖安装",
+      {
+        type: "warning",
+        confirmButtonText: "强制覆盖并重新检测",
+        cancelButtonText: "取消"
+      }
+    );
+  } catch {
+    return;
+  }
+  await preflight(true);
+}
+
+async function preflight(force = false) {
   if (!task.value || locked.value) return;
   const invalid = installValidation(options);
   if (invalid) {
@@ -271,7 +314,9 @@ async function preflight() {
     const next = await agentInstallApi.preflight(
       task.value.id,
       selectedContext.value,
-      { ...options, aliases: [...(options.aliases || [])] }
+      { ...options, aliases: [...(options.aliases || [])] },
+      // 只认确认框传来的 true：按钮的点击事件等其他值都不算强制覆盖
+      force === true
     );
     if (generation !== current || !visible.value) return;
     applyTask(next);
@@ -566,6 +611,20 @@ onBeforeUnmount(() => {
             }}</el-tag>
             <span>{{ check.message }}</span>
           </div>
+          <div v-if="forceable" class="takeover-row">
+            <span
+              >这些资源是之前的安装留下的（例如重装控制端前装的
+              Agent）。确认可以接管后，可以强制覆盖安装。</span
+            >
+            <el-button
+              type="danger"
+              plain
+              size="small"
+              :disabled="locked"
+              @click="forcePreflight"
+              >强制覆盖安装…</el-button
+            >
+          </div>
           <el-alert
             v-if="task.status === 'ready' && !canInstall"
             title="安装参数已修改，请重新检测。"
@@ -665,7 +724,10 @@ onBeforeUnmount(() => {
             >下一步</el-button
           >
           <template v-if="stage === 1">
-            <el-button :loading="working" :disabled="loading" @click="preflight"
+            <el-button
+              :loading="working"
+              :disabled="loading"
+              @click="preflight()"
               >检测连接与安装权限</el-button
             >
             <el-button
@@ -786,6 +848,26 @@ onBeforeUnmount(() => {
 }
 
 .check-row .el-tag {
+  flex-shrink: 0;
+}
+
+/* 预检报目标集群已有 Agent 资源：强制覆盖安装的入口 */
+.takeover-row {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 12px;
+  margin-top: 8px;
+  font-size: 12px;
+  line-height: 1.6;
+  color: #8a3b2c;
+  background: #fff8f6;
+  border: 1px dashed #efc2b8;
+  border-radius: 6px;
+}
+
+.takeover-row .el-button {
   flex-shrink: 0;
 }
 

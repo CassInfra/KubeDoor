@@ -33,6 +33,16 @@ export interface InstallCheck {
   name: string;
   status: "success" | "warning" | "error" | "pending" | "running" | "skipped";
   message?: string;
+  /** 预检失败是因为目标集群里已有 Agent 资源：确认后可以强制覆盖安装 */
+  forceable?: boolean;
+}
+
+/** 预检列出的、强制覆盖安装时要接管的已有资源 */
+export interface InstallTakeover {
+  kind: string;
+  name: string;
+  namespace?: string;
+  reason: string;
 }
 
 export interface AgentInstallTask {
@@ -52,6 +62,10 @@ export interface AgentInstallTask {
   expires_at?: string;
   retryable?: boolean;
   target_locked?: boolean;
+  /** 目标集群里已有、需要强制覆盖才能接管的资源 */
+  takeover?: InstallTakeover[];
+  /** 预检时已确认强制覆盖安装 */
+  force?: boolean;
   /** Agent 上线后自动配置 AI Kubeconfig 的结果（Agent 服务账号令牌）；失败不影响安装 */
   ai_connection?: {
     status: "saved" | "skipped" | "failed";
@@ -93,10 +107,17 @@ export const agentInstallApi = {
     request<AgentInstallTask>("get", `/${encodeURIComponent(id)}`),
   inspect: (kubeconfig: string) =>
     request<AgentInstallTask>("post", "/inspect", { kubeconfig }),
-  preflight: (id: string, context: string, options: AgentInstallOptions) =>
+  /** force：确认接管目标集群里已有的 Agent 资源（预检报「已有 Agent 资源」后的强制覆盖安装） */
+  preflight: (
+    id: string,
+    context: string,
+    options: AgentInstallOptions,
+    force = false
+  ) =>
     request<AgentInstallTask>("post", `/${encodeURIComponent(id)}/preflight`, {
       context,
-      options
+      options,
+      ...(force ? { force: true } : {})
     }),
   start: (id: string, revision: number) =>
     request<AgentInstallTask>("post", `/${encodeURIComponent(id)}/start`, {

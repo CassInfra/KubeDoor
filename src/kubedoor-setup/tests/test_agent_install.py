@@ -85,6 +85,8 @@ class FakeMaster:
         self.outcome, self.error, self.polls = 'succeeded', '', 1
         # master 自动配置 AI Kubeconfig 的结果；None 表示旧版 master 没有这项
         self.ai_connection = None
+        # 本集群里已有、需要强制覆盖才能接管的资源；不带 force 预检时报可强制覆盖的错误
+        self.takeover = None
         self.server = None
 
     async def __aenter__(self):
@@ -123,7 +125,7 @@ class FakeMaster:
         return self.ok(self.tasks[task_id])
 
     async def preflight(self, request):
-        await self.record(request)
+        body = await self.record(request)
         if self.reject:
             status, message = self.reject
             return web.json_response({'success': False, 'error': message, 'message': message}, status=status)
@@ -135,6 +137,10 @@ class FakeMaster:
             token = json.loads(self.named('/inspect')[-1]['body']['kubeconfig'])['users'][0]['user']['token']
             message = self.preflight_error.format(token=token, password=VM['password'], url=VM['write_url'])
             task.update(status='draft', checks=checks + [{'name': '安装预检', 'status': 'error', 'message': message}])
+        elif self.takeover and body.get('force') is not True:
+            task.update(status='draft', takeover=copy.deepcopy(self.takeover), checks=checks + [{
+                'name': '安装预检', 'status': 'error', 'forceable': True,
+                'message': '目标集群已有 Agent 资源，不会直接覆盖：Deployment/kubedoor-agent（属于另一项安装）。确认可以接管这些资源后，选择「强制覆盖安装」'}])
         else:
             task.update(status='ready', checks=checks + [{'name': '返回控制端的网络', 'status': 'warning', 'message': '安装后确认'}])
         return self.ok(task)
@@ -424,6 +430,45 @@ async def test_agent_result_mentions_the_ai_kubeconfig(tmp_path, ai_connection, 
             await client.post('/setup-api/agent/install', json={'revision': state['revision'], 'options': OPTIONS})
             final = await settle(repo, lambda s: s['phase'] == 'finalizing')
     assert final['agent']['message'] == 'Agent 已在本集群安装并上线，集群名称 prod-k8s' + note
+
+
+@pytest.mark.asyncio
+async def test_existing_agent_resources_can_be_taken_over_after_confirmation(tmp_path):
+    k8s = AgentKubernetes(tmp_path)
+    async with FakeMaster() as master:
+        master.takeover = [{'kind': 'Deployment', 'name': 'kubedoor-agent', 'namespace': 'kubedoor',
+                            'reason': '属于另一项安装：安装记录不在当前控制端，或集群名称不同'}]
+        client, repo, _ = await make_client(k8s, master)
+        async with client:
+            await enter_agent_phase(repo)
+            state = await current(client)
+            await client.post('/setup-api/agent/install', json={'revision': state['revision'], 'options': OPTIONS})
+            await settle(repo, lambda s: s['agent']['status'] == 'failed')
+            failed = await current(client)
+            # 页面拿到可强制覆盖的标记和要接管的资源清单
+            assert failed['agent']['error'].startswith('安装预检未通过：目标集群已有 Agent 资源')
+            assert failed['agent']['checks'][0]['forceable'] is True
+            assert failed['agent']['takeover'] == master.takeover
+            assert master.named('/preflight')[-1]['body']['force'] is False
+            # 确认强制覆盖后重试：预检带 force，这次安装成功
+            await client.post('/setup-api/agent/install',
+                              json={'revision': failed['revision'], 'options': OPTIONS, 'force': True})
+            final = await settle(repo, lambda s: s['phase'] == 'finalizing')
+    assert master.named('/preflight')[-1]['body']['force'] is True
+    assert final['agent']['status'] == 'succeeded' and 'takeover' not in final['agent']
+
+
+@pytest.mark.asyncio
+async def test_force_must_be_a_real_boolean(tmp_path):
+    k8s = AgentKubernetes(tmp_path)
+    async with FakeMaster() as master:
+        client, repo, _ = await make_client(k8s, master)
+        async with client:
+            await enter_agent_phase(repo)
+            state = await current(client)
+            await client.post('/setup-api/agent/install', json={'revision': state['revision'], 'options': OPTIONS, 'force': 'yes'})
+            await settle(repo, lambda s: s['phase'] == 'finalizing')
+    assert master.named('/preflight')[-1]['body']['force'] is False
 
 
 @pytest.mark.asyncio

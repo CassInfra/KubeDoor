@@ -46,6 +46,33 @@ def utcnow():
     return datetime.now(timezone.utc)
 
 
+def conflict(kind, name, namespace, reason):
+    """目标集群里已有、需要强制覆盖才能接管的资源"""
+    return {'kind': kind, 'name': name, 'namespace': namespace or '', 'reason': reason}
+
+
+def merge_conflicts(*groups):
+    """同一个资源只列一次，原因合并"""
+    merged = {}
+    for item in (item for group in groups for item in group):
+        key = (item['kind'], item['namespace'], item['name'])
+        if key not in merged:
+            merged[key] = dict(item)
+        elif item['reason'] not in merged[key]['reason']:
+            merged[key]['reason'] += '；' + item['reason']
+    return list(merged.values())
+
+
+class TakeoverRequired(InstallError):
+    """目标集群里已有 Agent 资源：管理员确认后可以强制覆盖安装（页面据 forceable 显示按钮）"""
+
+    def __init__(self, items):
+        listed = '、'.join(f'{item["kind"]}/{item["name"]}（{item["reason"]}）' for item in items[:6])
+        more = f' 等 {len(items)} 个资源' if len(items) > 6 else ''
+        super().__init__(f'目标集群已有 Agent 资源，不会直接覆盖：{listed}{more}。确认可以接管这些资源后，选择「强制覆盖安装」', 409)
+        self.items = items
+
+
 def ai_kubeconfig(parsed, token):
     """自动配置的 AI Kubeconfig：集群段（API Server 地址、CA、tls-server-name）沿用这次安装用的 kubeconfig，
     凭据换成 Agent 服务账号的令牌。上传的 kubeconfig 本身仍然用完即删，不长期保存。"""
@@ -220,7 +247,8 @@ class Service:
         audit.record_bg(username, 'agent.install.upload', target=task['id'])
         return task
 
-    async def preflight(self, task_id, context, raw_options):
+    async def preflight(self, task_id, context, raw_options, force=False):
+        """force：管理员已确认可以接管目标集群里已有的 Agent 资源（强制覆盖安装）"""
         async with self.locks.setdefault(task_id, asyncio.Lock()):
             task = await self.get(task_id)
             if task['status'] not in ('draft', 'ready', 'failed', 'partial', 'interrupted'):
@@ -243,7 +271,7 @@ class Service:
             options['installation_id'] = task['id']
             checks = []
             task['status'] = 'draft'
-            task['payload'].update(context=context, options=public_options(options), checks=checks, error='')
+            task['payload'].update(context=context, options=public_options(options), checks=checks, error='', takeover=[], force=False)
             try:
                 parsed = await asyncio.to_thread(parse, material['kubeconfig'], context)
                 async with asyncio.timeout(100), self.kubernetes(parsed) as kube:
@@ -252,18 +280,27 @@ class Service:
                     target_uid = identity['metadata']['uid']
                     checks.append({'name': '集群连接', 'status': 'success', 'message': version.get('gitVersion', '已连接')})
                     task['env'], task['target_uid'] = options['env'], target_uid
-                    await self.check_identity(task, options, kube)
+                    existing = await self.check_identity(task, options, kube)
                     await self.components(options, kube, checks)
                     resources = render(options, username='preflight', password='preflight')
                     task['payload']['resources'] = [summary(item) for item in resources]
-                    await self.check_resources(task, kube, resources)
+                    takeover = merge_conflicts(existing, await self.resource_conflicts(task, kube, resources))
+                    task['payload']['takeover'] = takeover
+                    if takeover and not force:
+                        raise TakeoverRequired(takeover)
+                    task['payload']['force'] = bool(takeover)
+                    await self.check_resources(kube, resources, force=bool(takeover))
                     checks.append({'name': '安装权限与资源', 'status': 'success', 'message': '权限、资源归属与可用的服务端预检通过'})
+                    if takeover:
+                        checks.append({'name': '强制覆盖', 'status': 'warning',
+                                       'message': f'将接管目标集群里已有的 {len(takeover)} 个 Agent 资源，原来的 Agent 会改连当前控制端'})
                     checks.append({'name': '返回控制端的网络', 'status': 'warning',
                                    'message': '安装后将从 Agent 实际连接确认，请确保目标集群可访问所填 KubeDoor 地址'})
                     task['payload']['plan_digest'] = fingerprint(resources)
                     task['status'] = 'ready'
             except Exception as exc:
-                checks.append({'name': '安装预检', 'status': 'error', 'message': error_message(auth_hint(task, exc))})
+                checks.append({'name': '安装预检', 'status': 'error', 'message': error_message(auth_hint(task, exc)),
+                               **({'forceable': True} if isinstance(exc, TakeoverRequired) else {})})
             material['options'] = options
             task['encrypted'] = seal(material)
             task['expires_at'] = utcnow() + timedelta(minutes=30)
@@ -272,6 +309,8 @@ class Service:
             return task
 
     async def check_identity(self, task, options, kube):
+        """核对集群标识和目标命名空间里已有的 Agent。控制端自己记录里的冲突直接报错；
+        目标集群里已有、不属于这次安装的 Agent 返回成「需要强制覆盖才能接管」的清单。"""
         if options.get('image_pull_secret'):
             existing_secret = await kube.request('GET', f'/api/v1/namespaces/{options["namespace"]}/secrets/{options["image_pull_secret"]}',
                                                  missing_ok=True)
@@ -284,13 +323,16 @@ class Service:
                 raise InstallError('目标集群已有安装任务正在执行', 409)
         cfg = await kube.request('GET', f'/api/v1/namespaces/{options["namespace"]}/configmaps/kubedoor-agent-config', missing_ok=True)
         if cfg:
-            data = cfg.get('data', {})
-            if data.get('PROM_K8S_TAG_VALUE') != options['env']:
-                raise InstallError('目标命名空间已有不同集群标识的 Agent，请核对现有安装', 409)
+            reasons = []
+            name = str(cfg.get('data', {}).get('PROM_K8S_TAG_VALUE') or '')
+            if name != options['env']:
+                reasons.append(f'现有 Agent 的集群名称是 {name[:64] or "（空）"}')
             if cfg['metadata'].get('labels', {}).get(MANAGED) != 'web-installer':
-                raise InstallError('目标已有脚本安装的 Agent，请通过现有管理页升级；网页安装不会直接接管旧资源', 409)
-        elif options['env'] in self.clients:
+                reasons.append('脚本安装的 Agent')
+            return [conflict('ConfigMap', 'kubedoor-agent-config', options['namespace'], '；'.join(reasons))] if reasons else []
+        if options['env'] in self.clients:
             raise InstallError('这个集群标识已有 Agent 登记，请选择其它标识或核对目标集群', 409)
+        return []
 
     async def components(self, options, kube, checks):
         if options['mode'] == 'agent':
@@ -317,21 +359,35 @@ class Service:
         checks.append({'name': '采集组件', 'status': 'success',
                        'message': f'kube-state-metrics：{options["ksm"]}；node-exporter：{options["node_exporter"]}；抓取结果将在安装后验证'})
 
-    async def check_resources(self, task, kube, resources):
+    async def resource_conflicts(self, task, kube, resources):
+        """目标集群里已有、但不属于这次安装的资源：没有确认强制覆盖时不能接管"""
+        found = []
+        for resource in resources:
+            if resource['kind'] == 'Namespace':
+                continue
+            current = await kube.get(resource)
+            if not current:
+                continue
+            labels = current['metadata'].get('labels', {})
+            if labels.get(MANAGED) != 'web-installer':
+                reason = '不是网页安装创建的：脚本安装或其他工具装的'
+            else:
+                owner = labels.get(OWNER)
+                if not owner or owner == task['id']:
+                    continue
+                previous = await self.repo.get(owner)
+                if previous and previous['target_uid'] == task['target_uid'] and previous['env'] == task['env']:
+                    continue    # 当前控制端以前给同一个集群装的：重装就是更新它
+                reason = '属于另一项安装：安装记录不在当前控制端，或集群名称不同'
+            found.append(conflict(resource['kind'], resource['metadata']['name'], resource['metadata'].get('namespace', ''), reason))
+        return found
+
+    async def check_resources(self, kube, resources, force=False):
+        """权限与服务端 dry-run；force 时服务端应用强制接管其他字段管理器的字段（已确认强制覆盖）"""
         namespace = next(r for r in resources if r['kind'] == 'Namespace')
         namespace_exists = await kube.get(namespace)
         permissions = set()
         for resource in resources:
-            current = await kube.get(resource) if resource['kind'] != 'Namespace' else namespace_exists
-            if current and resource['kind'] != 'Namespace':
-                labels = current['metadata'].get('labels', {})
-                if labels.get(MANAGED) != 'web-installer':
-                    raise InstallError(f'{resource["kind"]}/{resource["metadata"]["name"]} 已存在且不属于网页安装，停止以避免覆盖', 409)
-                owner = labels.get(OWNER)
-                if owner and owner != task['id']:
-                    previous = await self.repo.get(owner)
-                    if not previous or previous['target_uid'] != task['target_uid'] or previous['env'] != task['env']:
-                        raise InstallError('目标资源属于另一项安装，不能覆盖', 409)
             for verb in ('get', 'patch', 'create'):
                 key = (resource['apiVersion'], resource['kind'], resource['metadata'].get('namespace'), verb)
                 if key not in permissions:
@@ -342,7 +398,15 @@ class Service:
                 if not namespace_exists:
                     await kube.apply(resource, dry_run=True)
             elif 'namespace' not in resource['metadata'] or namespace_exists:
-                await kube.apply(resource, dry_run=True)
+                await kube.apply(resource, dry_run=True, force=force)
+
+    async def takeover_check(self, task, options, kube, resources, force):
+        """汇总需要强制覆盖的已有资源；没有确认强制覆盖就拒绝（列出全部资源），确认了就带着清单继续"""
+        found = merge_conflicts(await self.check_identity(task, options, kube),
+                                await self.resource_conflicts(task, kube, resources))
+        if found and not force:
+            raise TakeoverRequired(found)
+        return found
 
     async def start(self, task_id, revision, retry=False):
         async with self.locks.setdefault(task_id, asyncio.Lock()):
@@ -400,8 +464,10 @@ class Service:
                     preview = render(options, username='preflight', password='preflight')
                     if fingerprint(preview) != task['payload']['plan_digest']:
                         raise InstallError('安装模板已更新，请重新创建安装计划')
-                    await self.check_identity(task, options, kube)
-                    await self.check_resources(task, kube, preview)
+                    # 预检之后集群里可能又多了别人的资源：再核对一次；预检时确认过强制覆盖才接管
+                    force = bool(task['payload'].get('force'))
+                    takeover = await self.takeover_check(task, options, kube, preview, force)
+                    await self.check_resources(kube, preview, force=bool(takeover))
                     await self.step(task, 0, 'success')
                     index = 1
                     await self.step(task, index, 'running')
@@ -431,7 +497,7 @@ class Service:
                     # Namespace 预检不落盘；现在补齐 namespaced 资源的 dry-run。
                     for resource in resources:
                         if resource['kind'] != 'Namespace':
-                            await kube.apply(resource, dry_run=True)
+                            await kube.apply(resource, dry_run=True, force=force)
                     await self.step(task, index, 'success')
                     index = 2
                     await self.step(task, index, 'running')
@@ -440,7 +506,7 @@ class Service:
                     for resource in resources:
                         if resource['kind'] == 'Namespace':
                             continue
-                        await kube.apply(resource)
+                        await kube.apply(resource, force=force)
                         task['payload'].setdefault('applied', []).append(summary(resource))
                         await self.repo.save(task)
                     await self.step(task, index, 'success')

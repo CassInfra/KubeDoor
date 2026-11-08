@@ -52,7 +52,9 @@ async def inspect(request):
 async def preflight(request):
     service = request.app[KEY]
     payload = await body(request)
-    return service.public(await service.preflight(request.match_info['id'], payload.get('context'), payload.get('options', {})))
+    # force：确认接管目标集群里已有的 Agent 资源（强制覆盖安装）
+    return service.public(await service.preflight(request.match_info['id'], payload.get('context'), payload.get('options', {}),
+                                                  force=payload.get('force') is True))
 
 
 @endpoint

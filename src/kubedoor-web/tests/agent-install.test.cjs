@@ -69,7 +69,7 @@ async function flush() {
   }
 }
 
-async function harness(t, overrides = {}) {
+async function harness(t, overrides = {}, elementPlus = {}) {
   const oldStorage = global.localStorage;
   const saved = new Map();
   global.localStorage = {
@@ -104,7 +104,7 @@ async function harness(t, overrides = {}) {
         useUserStoreHook: () => ({ username: "alice" })
       },
       "./install-utils": utils,
-      "element-plus": { ElInputTag: {} }
+      "element-plus": { ElInputTag: {}, ...elementPlus }
     },
     true
   ).default;
@@ -198,6 +198,88 @@ test("向导必须先检测，修改参数后再次禁止安装", async t => {
   await vm.start(false);
   assert.equal(calls.start, 1);
   assert.equal(vm.task.status, "succeeded");
+});
+
+const TAKEOVER = [
+  {
+    kind: "Deployment",
+    name: "kubedoor-agent",
+    namespace: "kubedoor",
+    reason: "属于另一项安装：安装记录不在当前控制端，或集群名称不同"
+  }
+];
+
+function takeoverPreflight(preflights) {
+  return async (id, context, selected, force) => {
+    preflights.push(force);
+    return force
+      ? task({ id, context, options: selected, status: "ready", revision: 3 })
+      : task({
+          id,
+          context,
+          options: selected,
+          status: "draft",
+          revision: 2,
+          takeover: TAKEOVER,
+          checks: [
+            {
+              name: "安装预检",
+              status: "error",
+              message: "目标集群已有 Agent 资源，不会直接覆盖",
+              forceable: true
+            }
+          ]
+        });
+  };
+}
+
+test("预检报目标集群已有 Agent 资源时，确认后带 force 重新检测再安装", async t => {
+  const preflights = [];
+  const confirms = [];
+  const { vm, calls } = await harness(
+    t,
+    { list: async () => [task()], preflight: takeoverPreflight(preflights) },
+    {
+      ElMessageBox: {
+        confirm: async (...args) => {
+          confirms.push(args);
+          return "confirm";
+        }
+      }
+    }
+  );
+  await vm.preflight();
+  assert.equal(vm.forceable, true);
+  assert.equal(vm.canInstall, false);
+  await vm.forcePreflight();
+  assert.equal(confirms.length, 1);
+  assert.equal(confirms[0][1], "强制覆盖安装");
+  assert.deepEqual(preflights, [false, true]);
+  assert.equal(vm.forceable, false);
+  assert.equal(vm.canInstall, true);
+  await vm.start(false);
+  assert.equal(calls.start, 1);
+});
+
+test("强制覆盖的确认框点取消时不重新检测，普通检测不会带 force", async t => {
+  const preflights = [];
+  const { vm } = await harness(
+    t,
+    { list: async () => [task()], preflight: takeoverPreflight(preflights) },
+    {
+      ElMessageBox: {
+        confirm: async () => {
+          throw new Error("cancel");
+        }
+      }
+    }
+  );
+  await vm.preflight();
+  await vm.forcePreflight();
+  // 检测按钮的点击事件不会被当成 force 传进去
+  await vm.preflight({ type: "click" });
+  assert.deepEqual(preflights, [false, false]);
+  assert.equal(vm.canInstall, false);
 });
 
 test("向导只保存 task id，不将上传的 kubeconfig 写入浏览器存储", async t => {

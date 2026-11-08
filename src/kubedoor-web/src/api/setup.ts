@@ -17,6 +17,16 @@ export interface SetupCheck {
   message?: string;
   details?: string | string[];
   updated_at?: string;
+  /** 预检失败是因为本集群里已有 Agent 资源：确认后可以强制覆盖安装 */
+  forceable?: boolean;
+}
+
+/** 预检列出的、强制覆盖安装时要接管的已有资源 */
+export interface SetupTakeover {
+  kind: string;
+  name: string;
+  namespace?: string;
+  reason: string;
 }
 
 export interface SetupService extends SetupCheck {
@@ -146,6 +156,8 @@ export interface SetupAgent extends SetupAgentSummary {
   steps?: SetupAgentStep[];
   /** 安装前检查（预检失败项也可能放在 steps 里） */
   checks?: SetupCheck[];
+  /** 预检发现本集群里已有 Agent 资源时的清单，强制覆盖安装会接管它们 */
+  takeover?: SetupTakeover[];
   error?: string;
   task_id?: string;
 }
@@ -316,8 +328,14 @@ export const setupApi = {
   retry: (revision: number) =>
     request<SetupState>("/retry", "POST", { revision }),
   /** 用临时集群权限在本集群安装 Agent，受理后返回 202（agent.status 为 running） */
-  installAgent: (revision: number, options: SetupAgentOptions) =>
-    request<SetupState>("/agent/install", "POST", { revision, options }, 60000),
+  /** force：确认接管本集群里已有的 Agent 资源（预检报「已有 Agent 资源」后的强制覆盖安装） */
+  installAgent: (revision: number, options: SetupAgentOptions, force = false) =>
+    request<SetupState>(
+      "/agent/install",
+      "POST",
+      { revision, options, ...(force ? { force: true } : {}) },
+      60000
+    ),
   /** 不在本集群安装 Agent，直接进入收尾；安装服务会等收尾任务启动（最多十几秒）再返回 */
   skipAgent: (revision: number) =>
     request<SetupState>("/agent/skip", "POST", { revision }, 60000)

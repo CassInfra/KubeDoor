@@ -84,6 +84,8 @@ class FakeCluster:
         self.connection_user_id = 100
         # K8S 令牌控制器填进 Secret kubedoor-agent 的 Agent 服务账号令牌；空串表示还没填
         self.agent_token = 'agent-sa-token'
+        # 带 force（强制接管其他字段管理器的字段）应用过的资源：(kind, name, dry_run)
+        self.forced = []
 
     def __call__(self, parsed):
         assert parsed['config']['users'][0]['user']['token'] == 'private-kube-token'
@@ -119,10 +121,12 @@ class FakeCluster:
     async def get(self, resource):
         return copy.deepcopy(self.resources.get((resource['kind'], resource['metadata']['name'])))
 
-    async def apply(self, resource, dry_run=False):
+    async def apply(self, resource, dry_run=False, force=False):
         namespace = resource['metadata'].get('namespace')
         if namespace and ('Namespace', namespace) not in self.resources:
             raise InstallError('不存在的 Namespace')
+        if force:
+            self.forced.append((resource['kind'], resource['metadata']['name'], dry_run))
         if dry_run:
             self.dry_runs.append(copy.deepcopy(resource))
         else:
@@ -327,8 +331,75 @@ async def test_existing_foreign_resource_not_overwritten(environment):
     task = await service.inspect(CONFIG, 'admin')
     task = await service.preflight(task['id'], 'production', {**task['payload']['options'], 'mode': 'agent'})
     assert task['status'] == 'draft'
-    assert any('不属于网页安装' in c['message'] for c in task['payload']['checks'])
+    assert any('不是网页安装创建的' in c['message'] for c in task['payload']['checks'])
     assert not cluster.applied
+
+
+OTHER_INSTALL = '11111111-2222-3333-4444-555555555555'
+
+
+@pytest.mark.asyncio
+async def test_existing_agent_resources_are_listed_then_taken_over_after_confirmation(environment):
+    service, cluster, repo = environment
+    service.clients.clear()
+    # 脚本安装留下的 Service；另一套 KubeDoor（安装记录不在当前控制端）网页安装的 Deployment 和配置
+    cluster.resources['Service', 'kubedoor-agent'] = {'metadata': {'name': 'kubedoor-agent'}}
+    foreign = {module.MANAGED: 'web-installer', module.OWNER: OTHER_INSTALL}
+    cluster.resources['Deployment', 'kubedoor-agent'] = {'metadata': {'name': 'kubedoor-agent', 'labels': dict(foreign)}}
+    cluster.resources['ConfigMap', 'kubedoor-agent-config'] = {'metadata': {'name': 'kubedoor-agent-config', 'labels': dict(foreign)},
+                                                              'data': {'PROM_K8S_TAG_VALUE': 'old-name'}}
+    task = await service.inspect(CONFIG, 'admin')
+    options = {**task['payload']['options'], 'mode': 'agent'}
+    task = await service.preflight(task['id'], 'production', options)
+    assert task['status'] == 'draft' and task['payload']['force'] is False
+    [error] = [check for check in task['payload']['checks'] if check['status'] == 'error']
+    assert error['forceable'] is True and '强制覆盖安装' in error['message']
+    takeover = {(item['kind'], item['name']): item['reason'] for item in task['payload']['takeover']}
+    assert set(takeover) == {('Service', 'kubedoor-agent'), ('Deployment', 'kubedoor-agent'), ('ConfigMap', 'kubedoor-agent-config')}
+    assert takeover['Service', 'kubedoor-agent'].startswith('不是网页安装创建的')
+    assert takeover['Deployment', 'kubedoor-agent'].startswith('属于另一项安装')
+    # 同一个资源只列一次，原因合并
+    assert takeover['ConfigMap', 'kubedoor-agent-config'] == '现有 Agent 的集群名称是 old-name；属于另一项安装：安装记录不在当前控制端，或集群名称不同'
+    assert not cluster.applied and not cluster.forced
+
+    # 管理员确认后强制覆盖：预检通过并提示，安装时接管（服务端应用带 force，归属改成这次安装）
+    task = await service.preflight(task['id'], 'production', options, force=True)
+    assert task['status'] == 'ready' and task['payload']['force'] is True
+    assert any(check['name'] == '强制覆盖' and check['status'] == 'warning' for check in task['payload']['checks'])
+    await service.start(task['id'], task['revision'])
+    await service.tasks[task['id']]
+    done = await repo.get(task['id'])
+    assert done['status'] == 'succeeded', done['payload']
+    for kind, name in takeover:
+        assert cluster.resources[kind, name]['metadata']['labels'][module.OWNER] == task['id']
+        assert (kind, name, False) in cluster.forced
+    assert cluster.resources['ConfigMap', 'kubedoor-agent-config']['data']['PROM_K8S_TAG_VALUE'] == 'production'
+
+
+@pytest.mark.asyncio
+async def test_takeover_is_not_offered_for_conflicts_in_the_control_plane_records(environment):
+    service, cluster, _ = environment
+    # 这个集群名称已被另一个在线的集群使用（目标集群里没有 Agent 配置）：强制覆盖也不能解决
+    service.clients['production'] = {'online': True}
+    task = await service.inspect(CONFIG, 'admin')
+    task = await service.preflight(task['id'], 'production', {**task['payload']['options'], 'mode': 'agent'}, force=True)
+    assert task['status'] == 'draft' and task['payload']['force'] is False
+    [error] = [check for check in task['payload']['checks'] if check['status'] == 'error']
+    assert '已有 Agent 登记' in error['message'] and 'forceable' not in error
+
+
+@pytest.mark.asyncio
+async def test_resources_appearing_after_preflight_are_not_taken_over_silently(environment):
+    service, cluster, repo = environment
+    service.clients.clear()
+    task = await plan(service)
+    assert task['payload']['force'] is False
+    cluster.resources['Service', 'kubedoor-agent'] = {'metadata': {'name': 'kubedoor-agent'}}
+    await service.start(task['id'], task['revision'])
+    await service.tasks[task['id']]
+    failed = await repo.get(task['id'])
+    assert failed['status'] == 'failed' and '强制覆盖安装' in failed['payload']['error']
+    assert not cluster.applied and not cluster.forced
 
 
 @pytest.mark.asyncio
