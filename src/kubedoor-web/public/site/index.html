@@ -797,12 +797,12 @@ sql: SELECT status FROM orders WHERE id = 123</pre>
     <header class="section-head reveal">
       <p class="eyebrow">// 05 · 一键安装</p>
       <h2 id="deploy-title">一条命令，<span class="grad-text">网页向导装好全部</span></h2>
-      <p class="section-lead">不用 Helm，不用编辑配置文件，执行机器只要 <code>sh</code> 和 <code>kubectl</code>。一条命令启动安装向导，在浏览器里填好数据库、时序库和管理员密码，控制端各服务一起自动部署、逐项验证；其他集群在网页上传 kubeconfig 接入。</p>
+      <p class="section-lead">不用 Helm，不用编辑配置文件，执行机器只要 <code>sh</code> 和 <code>kubectl</code>，没有 kubectl 也能用脚本生成 YAML 部署。一条命令启动安装向导，在浏览器里填好数据库、时序库和管理员密码，控制端各服务一起自动部署、逐项验证；其他集群在网页上传 kubeconfig 接入。</p>
     </header>
     <ul class="prereq reveal" aria-label="前置条件">
       <li class="prereq-label">前置条件</li>
       <li><b>K8S</b> ≥ 1.21</li>
-      <li><b>sh</b>与 kubectl</li>
+      <li><b>sh</b>kubectl 可选，可导出 YAML</li>
       <li><b>PostgreSQL</b>已有或 Docker Compose</li>
       <li><b>VictoriaMetrics</b>单机版或集群版</li>
       <li><b>metrics-server</b>用量列、节点均衡</li>
@@ -811,9 +811,11 @@ sql: SELECT status FROM orders WHERE id = 123</pre>
 
     <ol class="steps">
       <li class="step reveal">
-        <div class="step-side"><span class="step-num">01</span><h3>一条命令启动向导</h3><p>把单文件 <code>install.sh</code> 放到能用 kubectl 连上集群的机器执行，不需要 Python 或完整源码。脚本在 <code>kubedoor</code> 命名空间启动 Web 和临时安装服务，打印访问地址和一次性安装密钥；镜像仓库和版本写在脚本顶部，内网可用 <code>--image-repo</code>、<code>--tag</code> 覆盖。</p></div>
+        <div class="step-side"><span class="step-num">01</span><h3>一条命令启动向导</h3><p>把单文件 <code>install.sh</code> 放到能用 kubectl 连上集群的机器执行，不需要 Python 或完整源码。脚本在 <code>kubedoor</code> 命名空间启动 Web 和临时安装服务，打印访问地址和一次性安装密钥；镜像仓库和版本写在脚本顶部，内网可用 <code>--image-repo</code>、<code>--tag</code> 覆盖。<b>没有 kubectl</b> 也能装：用 <code>--export</code> 生成 YAML，导入 K8S 管理平台或云控制台即可部署。</p></div>
         <div class="terminal">
-          <div class="terminal-bar"><span class="dots" aria-hidden="true"><i></i><i></i><i></i></span><span class="terminal-title">sh · 可执行 kubectl 的机器</span><button class="copy-btn" type="button" data-copy-target="cmd-1" aria-label="复制安装命令"><svg class="icon" aria-hidden="true"><use href="#i-copy"/></svg><span>复制</span></button></div>
+          <div class="terminal-bar"><span class="dots" aria-hidden="true"><i></i><i></i><i></i></span><div class="term-tabs" role="tablist" aria-label="安装方式"><button class="code-tab" type="button" role="tab" id="tab-kubectl" aria-controls="panel-kubectl" aria-selected="true">有 kubectl</button><button class="code-tab" type="button" role="tab" id="tab-export" aria-controls="panel-export" aria-selected="false" tabindex="-1">没有 kubectl：导出 YAML</button></div></div>
+          <div class="code-body" role="tabpanel" id="panel-kubectl" aria-labelledby="tab-kubectl">
+            <button class="copy-btn" type="button" data-copy-target="cmd-1" aria-label="复制安装命令"><svg class="icon" aria-hidden="true"><use href="#i-copy"/></svg><span>复制</span></button>
 <pre class="code"><code id="cmd-1"><span class="c-cmd">curl</span> -fsSLO \
   https://raw.githubusercontent.com/CassInfra/KubeDoor/main/deploy/install.sh
 <span class="c-cmd">sh</span> install.sh</code></pre>
@@ -821,6 +823,18 @@ sql: SELECT status FROM orders WHERE id = 123</pre>
 Web 入口：http://192.168.1.10:31080
 一次性安装密钥：<span class="c-s">********</span>
 打开网页，按向导填写数据库和管理员信息。</pre>
+          </div>
+          <div class="code-body" role="tabpanel" id="panel-export" aria-labelledby="tab-export" hidden>
+            <button class="copy-btn" type="button" data-copy-target="cmd-1b" aria-label="复制导出命令"><svg class="icon" aria-hidden="true"><use href="#i-copy"/></svg><span>复制</span></button>
+<pre class="code"><code id="cmd-1b"><span class="c-cmd">curl</span> -fsSLO \
+  https://raw.githubusercontent.com/CassInfra/KubeDoor/main/deploy/install.sh
+<span class="c-cmd">sh</span> install.sh --export kubedoor-install.yaml --nodeport 30080</code></pre>
+<pre class="code term-out" aria-label="导出后的部署步骤"><span class="c-c"># 导出不连接集群，任何有 sh 的机器都能执行；然后：</span>
+1. 把 kubedoor-install.yaml 导入目标集群
+   （管理平台 / 云控制台的 YAML 创建，或 kubectl apply -f）
+2. 打开 http://&lt;K8S 节点 IP&gt;:30080
+3. 安装密钥：Secret kubedoor-setup-auth 的 SETUP_KEY</pre>
+          </div>
         </div>
       </li>
       <li class="step reveal">
@@ -873,7 +887,7 @@ Web 入口：http://192.168.1.10:31080
       </div>
       <div class="note glass reveal" style="--d:1">
         <h3><svg class="icon" aria-hidden="true"><use href="#i-help"/></svg>内网与离线</h3>
-        <p><code>--image-repo</code>、<code>--tag</code>、<code>--image-pull-secret</code> 改用内网镜像；不方便直接连集群时，用 <code>sh install.sh --export kubedoor-install.yaml</code> 导出 YAML 再 <code>kubectl apply</code>。刷新或关闭网页不会中断安装，失败可修好后重试。</p>
+        <p><code>--image-repo</code>、<code>--tag</code>、<code>--image-pull-secret</code> 改用内网镜像，导出的 YAML 同样带上这些设置，可以拷进内网部署。刷新或关闭网页不会中断安装，失败可修好后重试。</p>
       </div>
       <div class="note note-warn glass reveal" style="--d:2">
         <h3><svg class="icon" aria-hidden="true"><use href="#i-book"/></svg>从旧版本升级</h3>

@@ -514,6 +514,11 @@ html.lb-open { overflow: hidden; }
 .terminal .code { padding: 16px 20px 18px; font-size: 13.5px; }
 .terminal .code::before { content: none; }
 .terminal .term-out { padding-top: 12px; border-top: 1px dashed var(--line); color: var(--text-3); font-size: 12.5px; }
+/* 第一步：「有 kubectl / 没有 kubectl」两个标签页放在终端标题栏，复制按钮在各自面板右上角 */
+.term-tabs { display: flex; align-self: stretch; gap: 2px; min-width: 0; }
+.term-tabs .code-tab { display: inline-flex; align-items: center; padding: 0 12px; border-radius: 0; font-size: 12.5px; white-space: nowrap; }
+/* 命令第一行很短，按钮放在它右边、不占第二行（长 URL）的位置 */
+.terminal .code-body .copy-btn { top: 10px; right: 12px; height: 28px; }
 .deploy-notes { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 18px; margin-top: 26px; }
 .prereq { display: flex; flex-wrap: wrap; justify-content: center; gap: 8px; max-width: 980px; margin: -26px auto 34px; }
 .prereq li { display: inline-flex; align-items: center; gap: 6px; padding: 5px 12px; border-radius: 999px; font-size: 13px; color: var(--text-2); background: rgba(255, 255, 255, 0.035); border: 1px solid var(--line); }
@@ -777,6 +782,8 @@ html.lb-open { overflow: hidden; }
   .shot-featured figcaption { flex-direction: column; }
   .step { padding: 20px 16px; }
   .step-side h3 { font-size: 20px; }
+  .terminal .code-body .code:not(.term-out) { padding: 50px 14px 14px; word-break: break-all; }
+  .term-tabs .code-tab { padding: 0 9px; font-size: 12px; }
   .wizard-body { grid-template-columns: minmax(0, 1fr); }
   .wizard-steps { grid-template-columns: repeat(3, minmax(0, 1fr)); padding: 10px; border-right: 0; border-bottom: 1px solid var(--line); }
   .wizard-steps li { gap: 6px; padding: 6px; font-size: 12px; }

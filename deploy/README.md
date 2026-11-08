@@ -57,7 +57,7 @@ sh install.sh --render     # 只预览引导资源，不连接集群、不生成
 
 ## 导出 YAML 后安装
 
-也可以先导出一个完整的引导文件，再交给目标集群执行 `kubectl apply`。导出不连接集群，不需要本机安装 Python 或 jq；支持 `sh`、`bash`，使用系统随机设备生成本次安装标识，文件中不包含安装密钥或数据库密码。
+也可以先导出一个完整的引导文件，再交给目标集群执行 `kubectl apply`。导出不连接集群，不需要本机安装 kubectl、Python 或 jq；支持 `sh`、`bash`，使用系统随机设备生成本次安装标识，文件中不包含安装密钥或数据库密码。
 
 ```sh
 sh install.sh --export kubedoor-install.yaml
@@ -84,6 +84,8 @@ kubectl -n kubedoor get service kubedoor-web -o 'jsonpath={.spec.ports[0].nodePo
 ```
 
 打开 `http://<K8S 节点地址>:<上一步的 NodePort>`，输入安装密钥进入向导。指定其他命名空间时，请替换上述命令中的 `kubedoor`。
+
+手边没有 kubectl 时，把导出的文件导入 K8S 管理平台或云厂商控制台的「YAML 创建」部署，在平台里查看 Secret `kubedoor-setup-auth` 的 `SETUP_KEY`（安装密钥）和 Service `kubedoor-web` 的 NodePort；导出时加 `--nodeport` 固定端口会更方便。
 
 导出文件用于首次安装。完成安装后不要用它升级或恢复：再次应用会把 Web 配置改回引导配置。已有安装的进度查看及恢复继续使用 `sh install.sh`，并指定原来的 namespace 和 context。
 

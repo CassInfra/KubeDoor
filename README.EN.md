@@ -449,13 +449,13 @@ Peak resource dashboard (Grafana): global peak-hour resource statistics with a T
 
 ## 🚀Quick Start
 
-**One command starts the Web wizard; click through six steps in the browser and the control plane is installed. Each cluster's Agent is also installed from the Web UI by uploading a kubeconfig.** No Helm and no config files to edit; the machine running it only needs `sh` and `kubectl`. See the [deployment guide](deploy/README.md) (Chinese) for full details.
+**One command starts the Web wizard; click through six steps in the browser and the control plane is installed. Each cluster's Agent is also installed from the Web UI by uploading a kubeconfig.** No Helm and no config files to edit; the machine running it only needs `sh` and `kubectl`, and without `kubectl` the script can still generate YAML for you to deploy. See the [deployment guide](deploy/README.md) (Chinese) for full details.
 
 #### Prerequisites
 
 | Item | Requirement |
 | --- | --- |
-| Installer machine | Only `sh` (or `bash`) and a `kubectl` that can reach the target cluster; no Python, jq or full source checkout needed |
+| Installer machine | Only `sh` (or `bash`) and a `kubectl` that can reach the target cluster; no Python, jq or full source checkout needed. Without `kubectl`, generate YAML with the script and deploy that instead (see step ②) |
 | Kubernetes | ≥ 1.21; running daily collection and scheduled/periodic tasks in Beijing time (`timeZone: Asia/Shanghai`) requires ≥ 1.25 (older clusters run them in the time zone of kube-controller-manager) |
 | metrics-server | Required: Pod/node CPU and memory usage and node balancing all depend on it |
 | PostgreSQL | An existing PostgreSQL (14+ recommended; no extensions or superuser required; if the database does not exist, the wizard creates it with that account), or a standalone PostgreSQL 18 started with the Docker Compose in `deploy/postgres` |
@@ -490,7 +490,15 @@ Copy [install.sh](deploy/install.sh) on its own to a machine that can reach the 
 sh install.sh        # bash install.sh also works
 ```
 
-The script starts the Web UI and a temporary setup service in the `kubedoor` namespace, and finally prints the 「Web 入口」 (Web entry point) address and a one-time setup key. Image repositories and versions are set at the top of the script; in private networks, override them with `--image-repo`, `--tag` and `--image-pull-secret`; if connecting to the cluster directly is inconvenient, export the YAML with `--export` and then `kubectl apply` it. See the [Web installation guide](deploy/README.md#网页向导安装推荐) (Chinese).
+The script starts the Web UI and a temporary setup service in the `kubedoor` namespace, and finally prints the 「Web 入口」 (Web entry point) address and a one-time setup key. Image repositories and versions are set at the top of the script; in private networks, override them with `--image-repo`, `--tag` and `--image-pull-secret`. See the [Web installation guide](deploy/README.md#网页向导安装推荐) (Chinese).
+
+**No `kubectl`? Generate YAML with the script and deploy it.** Exporting does not connect to any cluster, so it runs on any machine with `sh` (the image options above apply as well):
+
+```sh
+sh install.sh --export kubedoor-install.yaml --nodeport 30080    # pins the Web port; pick any free one
+```
+
+Import the generated `kubedoor-install.yaml` into the target cluster: the "create from YAML" feature of your K8S management platform or cloud console, or `kubectl apply -f` on another machine that has `kubectl`. Once `kubedoor-setup` and `kubedoor-web` are ready, open `http://<K8S node IP>:30080`; the setup key is `SETUP_KEY` in the Secret `kubedoor-setup-auth`, which you can view in the management platform. The exported file is for new installations only; see [Install from exported YAML](deploy/README.md#导出-yaml-后安装) (Chinese).
 
 **③ Click through the six steps in the browser**
 

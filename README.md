@@ -445,13 +445,13 @@ AI 助手：
 
 ## 🚀快速部署
 
-**一条命令启动网页向导，在浏览器里点完六步就装好控制端；各集群的Agent也在网页上传kubeconfig安装。** 不用Helm，不用编辑配置文件，执行机器只需要`sh`和`kubectl`。完整说明见[部署指南](deploy/README.md)。
+**一条命令启动网页向导，在浏览器里点完六步就装好控制端；各集群的Agent也在网页上传kubeconfig安装。** 不用Helm，不用编辑配置文件，执行机器只需要`sh`和`kubectl`；没有kubectl也能用脚本生成YAML部署。完整说明见[部署指南](deploy/README.md)。
 
 #### 前置条件
 
 | 项目 | 要求 |
 | --- | --- |
-| 执行机器 | 只需`sh`（或`bash`）和能连上目标集群的`kubectl`，不需要Python、jq或完整源码 |
+| 执行机器 | 只需`sh`（或`bash`）和能连上目标集群的`kubectl`，不需要Python、jq或完整源码；没有kubectl时用脚本生成YAML再部署（见第②步） |
 | Kubernetes | ≥ 1.21；每日采集与定时/周期任务按北京时间执行（`timeZone: Asia/Shanghai`），需要≥ 1.25，更老的集群按kube-controller-manager的时区执行 |
 | metrics-server | 需要：Pod/节点的CPU与内存用量、节点均衡都依赖它 |
 | PostgreSQL | 现成的PostgreSQL（建议14+，无需扩展和超级用户；库不存在时向导用该账号自动创建），或用`deploy/postgres`的Docker Compose单独起一个PostgreSQL 18 |
@@ -486,7 +486,15 @@ docker compose up -d
 sh install.sh        # 也支持 bash install.sh
 ```
 
-脚本在`kubedoor`命名空间启动Web和临时安装服务，最后打印「Web 入口」地址和一次性安装密钥。镜像仓库和版本写在脚本顶部，内网环境可用`--image-repo`、`--tag`、`--image-pull-secret`覆盖；不方便直接连集群时，可用`--export`导出YAML再`kubectl apply`，详见[网页安装说明](deploy/README.md#网页向导安装推荐)。
+脚本在`kubedoor`命名空间启动Web和临时安装服务，最后打印「Web 入口」地址和一次性安装密钥。镜像仓库和版本写在脚本顶部，内网环境可用`--image-repo`、`--tag`、`--image-pull-secret`覆盖，详见[网页安装说明](deploy/README.md#网页向导安装推荐)。
+
+**没有kubectl？用脚本生成YAML部署。** 导出不连接集群，任何有`sh`的机器都能执行（上面的镜像参数同样适用）：
+
+```sh
+sh install.sh --export kubedoor-install.yaml --nodeport 30080    # 固定Web端口，端口可换
+```
+
+把生成的`kubedoor-install.yaml`导入目标集群：K8S管理平台或云厂商控制台的「YAML创建」，或在其他能执行kubectl的机器上`kubectl apply -f`。等`kubedoor-setup`、`kubedoor-web`就绪后打开`http://<K8S节点IP>:30080`，安装密钥在Secret `kubedoor-setup-auth`的`SETUP_KEY`里，在管理平台查看即可。导出的文件只用于全新安装，详见[导出YAML后安装](deploy/README.md#导出-yaml-后安装)。
 
 **③ 在网页里点完六步**
 
