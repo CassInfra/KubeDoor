@@ -235,26 +235,16 @@ class InstallRunner:
                 if obj['kind'] not in ('Deployment', 'CronJob') and not self.is_web_config(obj):
                     await self.apply_owned(obj)
                     await self.update()
-            await self.deploy('master')
-            state = await self.repo.load()
-            if self.row(state, 'master')['status'] != 'ready':
-                for sid, _, _ in SERVICES:
-                    if sid != 'master' and self.selected[sid]:
-                        await self.update(service=sid, status='waiting', message='等待控制服务就绪')
-                await self.fail('控制服务未就绪，请修复后重试')
-                return
-            selected = [sid for sid, _, _ in SERVICES if sid not in ('web', 'master', 'vmalert') and self.selected[sid]]
-            await asyncio.gather(*(self.deploy(sid) for sid in selected))
-            if self.selected['vmalert']:
-                state = await self.repo.load()
-                if self.row(state, 'alertmanager')['status'] == 'ready':
-                    await self.deploy('vmalert')
-                else:
-                    await self.update(service='vmalert', status='waiting', message='等待 Alertmanager 就绪')
+            # 各服务之间没有启动依赖：都只连外部 PG / 时序库（AI 建自己的表，告警服务的健康检查只做 SELECT 1），
+            # vmalert 的通知地址是 Service 名、启动时不检查连通。所以一起部署，镜像拉取、调度、启动同时进行；
+            # 只有 Web 的正式配置要等全部就绪后最后切换
+            await self.update(service='web', status='waiting', message='引导入口可用，等待其他服务就绪后切换正式配置')
+            await self.all_done(self.deploy(sid) for sid, _, _ in SERVICES if sid != 'web' and self.selected[sid])
             state = await self.repo.load()
             if any(row['status'] not in ('ready', 'skipped') for row in state['services'] if row['id'] != 'web'):
                 await self.update(service='web', status='waiting', message='引导入口可用，等待全部控制端服务就绪后切换')
-                await self.fail('部分服务尚未就绪，请查看服务状态并重试')
+                await self.fail('控制服务未就绪，请修复后重试' if self.row(state, 'master')['status'] != 'ready'
+                                else '部分服务尚未就绪，请查看服务状态并重试')
                 return
             # Only switch the live nginx configuration once all its upstreams exist and are healthy.
             for obj in self.objects:
@@ -274,17 +264,21 @@ class InstallRunner:
                 await self.fail(problem)
                 return
             # Recheck every current generation, including components that passed on a previous retry.
-            # 各服务一起复查；等全部复查结束再处理异常，不留下还在后台改状态的复查
-            outcomes = await asyncio.gather(*(self.recheck(sid) for sid, _, _ in SERVICES if self.selected[sid]),
-                                            return_exceptions=True)
-            for outcome in outcomes:
-                if isinstance(outcome, BaseException):
-                    raise outcome
+            outcomes = await self.all_done(self.recheck(sid) for sid, _, _ in SERVICES if self.selected[sid])
             problem = next((item for item in outcomes if item), '')
             if problem:
                 await self.fail(problem)
                 return
             await self.conclude()
+
+    @staticmethod
+    async def all_done(coroutines):
+        """一起执行，等全部结束后再抛出第一个意外异常：不留下还在后台改安装状态的任务。"""
+        outcomes = await asyncio.gather(*coroutines, return_exceptions=True)
+        for outcome in outcomes:
+            if isinstance(outcome, BaseException):
+                raise outcome
+        return outcomes
 
     async def final_checks(self):
         """并发执行对外入口验证和时序库写入验证；返回第一个失败原因，都通过返回空串。"""

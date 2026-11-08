@@ -143,6 +143,41 @@ async def test_any_selected_service_failure_prevents_finalization(monkeypatch, b
 
 
 @pytest.mark.asyncio
+async def test_services_deploy_together_and_web_switches_last(monkeypatch):
+    setup_probes(monkeypatch)
+    runner = ObservedRunner(MemoryRepo(), FakeKubernetes())
+    started, others = [], asyncio.Event()
+    original = runner.deploy
+
+    async def deploy(sid):
+        started.append(sid)
+        if sid == 'master':
+            # master 还没部署完，其他服务已经开始部署：不再先等控制服务就绪
+            await asyncio.wait_for(others.wait(), 1)
+        elif sid != 'web':
+            others.set()
+        await original(sid)
+
+    runner.deploy = deploy
+    await runner.run()
+    assert runner.finalized
+    assert started[-1] == 'web' and set(started[:-1]) == {sid for sid, _, _ in SERVICES if sid != 'web'}
+
+
+@pytest.mark.asyncio
+async def test_master_failure_is_reported_while_other_services_still_get_ready(monkeypatch):
+    setup_probes(monkeypatch)
+    repo = MemoryRepo()
+    runner = ObservedRunner(repo, FakeKubernetes(), 'master')
+    await runner.run()
+    assert repo.state['phase'] == 'failed' and repo.state['error'] == '控制服务未就绪，请修复后重试'
+    rows = {row['id']: row['status'] for row in repo.state['services']}
+    assert rows['master'] == 'failed' and rows['web'] == 'waiting'
+    # 其他服务照常部署就绪，修好 master 重试时不用再等它们
+    assert all(rows[sid] == 'ready' for sid in ('ai', 'alarm', 'grafana', 'vmalert', 'alertmanager'))
+
+
+@pytest.mark.asyncio
 async def test_unselected_services_are_skipped_without_blocking(monkeypatch):
     setup_probes(monkeypatch)
     repo = MemoryRepo({'alerting': False})
