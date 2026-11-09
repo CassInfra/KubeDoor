@@ -1,8 +1,8 @@
 #!/bin/sh
-# KubeDoor 网页安装入口：单文件运行，仅需 POSIX sh 和 kubectl。
+# KubeDoor 安装及控制端升级入口：单文件运行，仅需 POSIX sh 和 kubectl。
 set -eu
 
-# 修改以下镜像后再首次安装；--tag 可覆盖 KubeDoor 组件版本。
+# 以下为本发布的镜像版本，用于首次安装及升级；--tag 可覆盖 KubeDoor 组件版本。
 # BEGIN KUBEDOOR IMAGE DEFAULTS
 IMAGE_REPO="swr.cn-south-1.myhuaweicloud.com/starsl.cn"
 TAG_MASTER="2.6.0"
@@ -20,6 +20,11 @@ IMAGE_NODE_EXPORTER="registry.cn-shenzhen.aliyuncs.com/starsl/node-exporter"
 IMAGE_BUSYBOX_CURL="registry.cn-shenzhen.aliyuncs.com/starsl/busybox-curl"
 # END KUBEDOOR IMAGE DEFAULTS
 
+ACTION=web
+DRY_RUN=false
+BACKUP_FILE=kubedoor-upgrade-backup.yaml
+BACKUP_OVERRIDE=false
+REPO_OVERRIDE=false
 NAMESPACE=kubedoor
 KUBE_CONTEXT=
 IMAGE_PULL_SECRET=
@@ -36,7 +41,10 @@ OWNER='setup.kubedoor.io/installation-id'
 die() { printf '%s\n' "$*" >&2; exit 1; }
 usage() {
     printf '%s\n' \
-        '用法：sh install.sh [web] [选项]（也支持 bash）' \
+        '用法：sh install.sh [web|upgrade] [选项]（也支持 bash）' \
+        '  upgrade                升级已有控制端，默认使用本脚本内的发布版本' \
+        '  --dry-run              查看版本和 Deployment 变更，不修改集群、不写备份' \
+        '  --backup FILE          升级前保存 Deployment 和 Nginx 配置，默认 kubedoor-upgrade-backup.yaml' \
         '  --namespace NAME       命名空间，默认 kubedoor' \
         '  --context NAME         kubectl context，默认当前 context' \
         '  --image-repo REPO      KubeDoor 镜像仓库' \
@@ -49,15 +57,19 @@ usage() {
         '  --render               仅预览模板；可安装文件请用 --export' \
         '  --export FILE          导出可直接 kubectl apply 的 YAML；- 表示标准输出' \
         '  -h, --help             显示帮助' \
-        '数据库及管理员信息在网页填写。重复运行保留原安装，不用于升级。'
+        '首次安装在网页填写数据库及管理员信息；重复运行保留原安装。' \
+        '升级示例：sh install.sh upgrade --dry-run；sh install.sh upgrade --tag 2.6.0' \
+        'upgrade 保留现有镜像仓库；--image-repo 可覆盖。请先备份 PostgreSQL。'
 }
 need_value() { [ "$#" -ge 2 ] && [ -n "$2" ] || die "参数 $1 缺少值"; }
 while [ "$#" -gt 0 ]; do
     case "$1" in
-        web) shift ;;
+        web|upgrade) ACTION=$1; shift ;;
+        --dry-run) DRY_RUN=true; shift ;;
+        --backup) need_value "$@"; BACKUP_FILE=$2; BACKUP_OVERRIDE=true; shift 2 ;;
         --namespace) need_value "$@"; NAMESPACE=$2; shift 2 ;;
         --context) need_value "$@"; KUBE_CONTEXT=$2; shift 2 ;;
-        --image-repo) need_value "$@"; IMAGE_REPO=$2; shift 2 ;;
+        --image-repo) need_value "$@"; IMAGE_REPO=$2; REPO_OVERRIDE=true; shift 2 ;;
         --tag) need_value "$@"; TAG_OVERRIDE=$2; shift 2 ;;
         --setup-tag) need_value "$@"; SETUP_TAG_OVERRIDE=$2; shift 2 ;;
         --web-tag) need_value "$@"; WEB_TAG_OVERRIDE=$2; shift 2 ;;
@@ -71,6 +83,14 @@ while [ "$#" -gt 0 ]; do
     esac
 done
 [ "$RENDER" != true ] || [ "$EXPORT_MODE" != true ] || die '--render 和 --export 不能同时使用'
+if [ "$ACTION" = upgrade ]; then
+    [ "$RENDER" = false ] && [ "$EXPORT_MODE" = false ] || die 'upgrade 请用 --dry-run 预览，不支持 --render/--export'
+    [ -z "$SETUP_TAG_OVERRIDE" ] && [ -z "$WEB_NODEPORT" ] && [ -z "$IMAGE_PULL_SECRET" ] ||
+        die 'upgrade 不修改 setup、NodePort 或拉取 Secret；请保留现有配置'
+    [ "$BACKUP_FILE" != - ] || die '升级备份必须保存到文件'
+else
+    [ "$DRY_RUN" = false ] && [ "$BACKUP_OVERRIDE" = false ] || die '--dry-run/--backup 仅用于 upgrade'
+fi
 
 validate_name() {
     case "$1" in ''|*[!a-z0-9-]*|-*|*-) die "无效的名称：$1" ;; esac
@@ -524,6 +544,311 @@ recover_finalizer() {
     finalizer_yaml | kc -n "$NAMESPACE" create -f -
     printf '%s\n' '已恢复收尾任务；请在网页等待全部检查完成。'
 }
+
+
+# 独立的升级路径：不应用首装模板，不创建 setup，不改数据库连接或密钥。
+# BEGIN GENERATED DEPLOYMENT UPGRADE PATCHES
+deployment_upgrade_patch() {
+    case "$1" in
+        kubedoor-master)
+            yaml <<EOF
+spec:
+  strategy:
+    type: Recreate
+    rollingUpdate: null
+  template:
+    spec:
+      containers:
+      - name: kubedoor-master
+        image: ${target}
+        imagePullPolicy: Always
+        ports:
+        - name: http
+          containerPort: 80
+        volumeMounts:
+        - name: kubedoor-master-file-cfg
+          mountPath: /k8s_event/rules
+        livenessProbe:
+          tcpSocket:
+            port: 80
+          initialDelaySeconds: 60
+          timeoutSeconds: 3
+          periodSeconds: 10
+          failureThreshold: 3
+        readinessProbe:
+          tcpSocket:
+            port: 80
+          initialDelaySeconds: 10
+          timeoutSeconds: 3
+          periodSeconds: 10
+          failureThreshold: 3
+      restartPolicy: Always
+      volumes:
+      - name: kubedoor-master-file-cfg
+        configMap:
+          name: kubedoor-master-file-cfg
+          items:
+          - key: alert_rules.json
+            path: alert_rules.json
+EOF
+            ;;
+        kubedoor-ai)
+            yaml <<EOF
+spec:
+  strategy:
+    type: Recreate
+    rollingUpdate: null
+  template:
+    spec:
+      containers:
+      - name: kubedoor-ai
+        image: ${target}
+        imagePullPolicy: Always
+        ports:
+        - name: http
+          containerPort: 8000
+        volumeMounts:
+        - name: code-cache
+          mountPath: /data/code-cache
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8000
+          initialDelaySeconds: 15
+          timeoutSeconds: 2
+          periodSeconds: 10
+          failureThreshold: 3
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 8000
+          initialDelaySeconds: 5
+          timeoutSeconds: 2
+          periodSeconds: 10
+          failureThreshold: 3
+      volumes:
+      - name: code-cache
+        emptyDir:
+          sizeLimit: 10Gi
+      restartPolicy: Always
+EOF
+            ;;
+        kubedoor-alarm)
+            yaml <<EOF
+spec:
+  template:
+    spec:
+      containers:
+      - name: kubedoor-alarm
+        image: ${target}
+        imagePullPolicy: Always
+        ports:
+        - name: http
+          containerPort: 80
+        livenessProbe:
+          tcpSocket:
+            port: 80
+          initialDelaySeconds: 15
+          timeoutSeconds: 2
+          periodSeconds: 10
+          failureThreshold: 3
+        readinessProbe:
+          tcpSocket:
+            port: 80
+          initialDelaySeconds: 5
+          timeoutSeconds: 2
+          periodSeconds: 10
+          failureThreshold: 3
+      restartPolicy: Always
+EOF
+            ;;
+        kubedoor-web)
+            yaml <<EOF
+spec:
+  template:
+    spec:
+      volumes:
+      - name: ai-security
+        secret:
+          secretName: kubedoor-ai-security
+          items:
+          - key: gateway.conf
+            path: gateway.conf
+      - name: nginx-config
+        configMap:
+          name: nginx-config
+      containers:
+      - name: kubedoor-web
+        image: ${target}
+        imagePullPolicy: Always
+        ports:
+        - name: http
+          containerPort: 80
+        volumeMounts:
+        - name: ai-security
+          mountPath: /etc/nginx/ai-security
+          readOnly: true
+        - name: nginx-config
+          mountPath: /etc/nginx/nginx.conf
+          subPath: nginx.conf
+        livenessProbe:
+          tcpSocket:
+            port: 80
+          timeoutSeconds: 2
+          periodSeconds: 10
+          failureThreshold: 3
+        readinessProbe:
+          tcpSocket:
+            port: 80
+          timeoutSeconds: 2
+          periodSeconds: 10
+          failureThreshold: 3
+      restartPolicy: Always
+EOF
+            ;;
+        *) die "未知升级组件：$1" ;;
+    esac
+}
+# END GENERATED DEPLOYMENT UPGRADE PATCHES
+
+upgrade_nginx_patch() {
+    printf 'data:\n  nginx.conf: |\n'
+    while IFS= read -r nginx_line || [ -n "$nginx_line" ]; do
+        case "$nginx_line" in
+            *'location ~ ^/(api|ws)(/|$) {'*)
+                # 2.3.0 的通用 API 日志包含 body；新 Agent 安装接口会接收 kubeconfig。
+                yaml <<'EOF'
+                location ^~ /api/admin/agent-installations {
+                    client_max_body_size 2m;
+                    access_log /var/log/nginx/access.log ai_safe;
+                    proxy_set_header X-Kubedoor-Token "";
+                    proxy_set_header X-Real-IP $remote_addr;
+                    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+                    proxy_set_header X-Forwarded-Proto $scheme;
+                    proxy_read_timeout 180;
+                    proxy_pass http://kubedoor_master;
+                }
+EOF
+                ;;
+        esac
+        printf '    %s\n' "$nginx_line"
+    done <<EOF
+$UPGRADE_NGINX
+EOF
+}
+upgrade_control() {
+    upgrade_state=$(field ConfigMap kubedoor-setup-state '{.metadata.uid}')
+    if [ -n "$upgrade_state" ]; then
+        read_phase
+        [ "$PHASE" = succeeded ] || die '网页安装尚未完成，请先完成安装及收尾再升级'
+    fi
+    context=$KUBE_CONTEXT
+    [ -n "$context" ] || context=$(kc config current-context)
+    printf '控制端升级：context=%s、namespace=%s\n' "$context" "$NAMESPACE"
+    printf '%s\n' '将保留数据库连接、账号、密钥、Service、第三方组件及业务集群 Agent。'
+    UPGRADE_PLAN=
+    UPGRADE_RESOURCES=
+    for component in master ai alarm web; do
+        deployment=kubedoor-$component
+        uid=$(field Deployment "$deployment" '{.metadata.uid}')
+        if [ -z "$uid" ]; then
+            case "$component" in
+                master|web) die "缺少 deployment/$deployment，请确认 context 和 namespace；upgrade 仅支持已有 Kubernetes 控制端" ;;
+                *) printf '跳过未安装组件：%s\n' "$deployment"; continue ;;
+            esac
+        fi
+        current=$(field Deployment "$deployment" "{.spec.template.spec.containers[?(@.name==\"$deployment\")].image}")
+        [ -n "$current" ] || die "$deployment 中找不到同名容器，无法自动升级，请检查自定义部署"
+        validate_image "$current"
+        case "$component" in
+            master) target_tag=$TAG_MASTER ;; ai) target_tag=$TAG_AI ;;
+            alarm) target_tag=$TAG_ALARM ;; web) target_tag=$TAG_WEB ;;
+        esac
+        # 逐组件保留实际仓库（包括私有镜像仓库和端口），去掉 digest / tag。
+        image_path=${current%@*}
+        case "${image_path##*/}" in *:*) image_path=${image_path%:*} ;; esac
+        [ "$REPO_OVERRIDE" != true ] || image_path=$IMAGE_REPO/$deployment
+        target=$image_path:$target_tag
+        validate_image "$target"
+        printf '  %s: %s -> %s（同步 Deployment 模板）\n' "$deployment" "$current" "$target"
+        UPGRADE_PLAN="$UPGRADE_PLAN $deployment=$target"
+        UPGRADE_RESOURCES="$UPGRADE_RESOURCES deployment/$deployment"
+    done
+    # 自定义 Nginx 配置无法识别时，在任何修改之前停止。
+    UPGRADE_NGINX=$(field ConfigMap nginx-config '{.data.nginx\.conf}')
+    [ -n "$UPGRADE_NGINX" ] || die '缺少 nginx-config/nginx.conf，无法核对升级兼容性'
+    NGINX_PATCH=false
+    case "$UPGRADE_NGINX" in
+        *'location ^~ /api/admin/agent-installations'*) ;;
+        *)
+            case "$UPGRADE_NGINX" in
+                *'location ~ ^/(api|ws)(/|$) {'*) ;;
+                *) die '无法识别自定义 Nginx 配置，请先手动配置 Agent 安装接口的安全日志及代理' ;;
+            esac
+            case "$UPGRADE_NGINX" in *'log_format ai_safe'*'upstream kubedoor_master'*) ;;
+                *) die 'Nginx 缺少 ai_safe 日志或 kubedoor_master upstream，请先人工核对配置' ;; esac
+            NGINX_PATCH=true
+            printf '%s\n' '  Nginx: 补充 Agent 安装接口代理及安全日志，保留其他现有配置'
+            ;;
+    esac
+    UPGRADE_RESOURCES="$UPGRADE_RESOURCES configmap/nginx-config"
+    printf '%s\n' '升级会重建相关 Pod，master 重启期间 Agent 会重连；请安排维护窗口并先备份 PostgreSQL。'
+    if [ "$DRY_RUN" = true ]; then
+        for entry in $UPGRADE_PLAN; do
+            deployment=${entry%%=*}
+            target=${entry#*=}
+            printf '\n# deployment/%s strategic merge patch\n' "$deployment"
+            deployment_upgrade_patch "$deployment"
+        done
+        printf '%s\n' '预览结束，未修改集群。目标版本来自当前脚本；升级到新发布版本请先下载新版脚本。'
+        return
+    fi
+    # 全部 Deployment 先交给 API Server 验证，发现卷/挂载冲突等问题时不改任何资源。
+    for entry in $UPGRADE_PLAN; do
+        deployment=${entry%%=*}
+        target=${entry#*=}
+        kc -n "$NAMESPACE" patch deployment "$deployment" --type=strategic \
+            --patch "$(deployment_upgrade_patch "$deployment")" --dry-run=server -o name >/dev/null ||
+            die "$deployment 新版 Deployment 校验失败，尚未修改集群"
+    done
+    if [ "$ASSUME_YES" != true ]; then
+        printf '%s' '已备份 PostgreSQL，继续升级？[y/N] '
+        answer=
+        read -r answer || :
+        case "$answer" in y|Y|yes|YES) ;; *) printf '%s\n' '已取消'; return ;; esac
+    fi
+    # 先完整读取，再用 noclobber 创建备份；权限/API/文件错误均不得修改集群。
+    backup_yaml=$(kc -n "$NAMESPACE" get $UPGRADE_RESOURCES -o yaml) || die '读取升级备份失败，尚未修改集群'
+    [ -n "$backup_yaml" ] || die '升级备份为空，尚未修改集群'
+    (umask 077; set -C; printf '%s\n' "$backup_yaml" > "$BACKUP_FILE") ||
+        die '无法创建升级备份（文件已存在或目录不可写），请用 --backup 指定新文件'
+    printf '已保存升级前资源：%s（不含数据库备份）\n' "$BACKUP_FILE"
+    if [ "$NGINX_PATCH" = true ]; then
+        kc -n "$NAMESPACE" patch configmap nginx-config --type=merge --patch "$(upgrade_nginx_patch)" ||
+            die '更新 Nginx 配置失败；已保留升级备份，请检查后重试'
+    fi
+    for entry in $UPGRADE_PLAN; do
+        deployment=${entry%%=*}
+        target=${entry#*=}
+        # 同版本重试也等待 rollout，避免把上次 ImagePullBackOff 当作成功。
+        if ! kc -n "$NAMESPACE" patch deployment "$deployment" --type=strategic \
+            --patch "$(deployment_upgrade_patch "$deployment")"; then
+            die "更新 $deployment Deployment 失败；升级可能部分完成。备份：$BACKUP_FILE；修复后用新的 --backup 文件重试"
+        fi
+        # 即使上次在更新 Nginx 后中断，同版本重试也必须让 Web 重新载入配置。
+        if [ "$deployment" = kubedoor-web ]; then
+            kc -n "$NAMESPACE" rollout restart deployment/kubedoor-web || die "重启 Web 失败；备份：$BACKUP_FILE"
+        fi
+        if ! kc -n "$NAMESPACE" rollout status "deployment/$deployment" --timeout=300s; then
+            die "$deployment 升级未就绪；检查 describe/logs。升级可能部分完成，备份：$BACKUP_FILE；修复后用新的 --backup 文件重试"
+        fi
+    done
+    printf '%s\n' '控制端镜像及 Deployment 升级完成，所有目标 Deployment 已就绪。请登录控制台核对功能；Agent 可在控制台按集群单独升级。'
+}
+if [ "$ACTION" = upgrade ]; then
+    upgrade_control
+    exit 0
+fi
 
 state_uid=$(field ConfigMap kubedoor-setup-state '{.metadata.uid}')
 if [ -z "$state_uid" ]; then

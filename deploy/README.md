@@ -1,10 +1,10 @@
 # KubeDoor 部署
 
-首次安装只需要一个 [install.sh](install.sh)。将它单独复制到能通过 `kubectl` 访问集群的机器，用 `sh` 或 `bash` 执行；数据库、时序库和管理员信息都在网页中填写。
+首次安装和控制端升级只需要一个 [install.sh](install.sh)。将它单独复制到能通过 `kubectl` 访问集群的机器，用 `sh` 或 `bash` 执行；数据库、时序库和管理员信息都在网页中填写。
 
 ```text
 deploy/
-├── install.sh                 # 内含镜像版本、引导 YAML 和安装逻辑
+├── install.sh                 # 内含镜像版本、安装 YAML 和控制端升级逻辑
 ├── postgres/                  # 可选：独立 PostgreSQL
 └── victoria-metrics/          # 可选：独立单机 VictoriaMetrics
 ```
@@ -53,7 +53,63 @@ sh install.sh --render     # 只预览引导资源，不连接集群、不生成
 
 `--tag` 覆盖 setup、web、master、agent、AI、alarm 的共同版本；第三方组件仍使用脚本中的版本。拉取 Secret 必须已存在于目标命名空间。版本必须已经构建并发布到对应仓库。
 
-首次启动会将版本配置传给 setup。`sh install.sh web` 也可使用，`web` 参数可以省略。**安装完成后修改脚本里的版本不会自动升级集群；当前向导用于首次安装，尚不提供网页升级。**
+首次启动会将版本配置传给 setup。`sh install.sh web` 也可使用，`web` 参数可以省略。安装完成后，普通重复运行保留原安装；更新控制端请显式使用下面的 `upgrade` 命令。
+
+## 更新已有控制端（包括 2.3.0）
+
+每次升级先取得目标发布版本对应的新版 `deploy/install.sh`，单独复制到能访问控制端集群的机器。脚本内的固定版本就是默认升级目标；当前为 **2.6.0**，不会在运行时查询远程版本或使用浮动 `latest` 镜像。
+
+先查看升级计划及实际使用的 Deployment 补丁：
+
+```sh
+sh install.sh upgrade --context production --namespace kubedoor --dry-run
+```
+
+备份 PostgreSQL 后，执行升级：
+
+```sh
+sh install.sh upgrade --context production --namespace kubedoor \
+  --backup kubedoor-before-2.6.0.yaml
+# 自动化执行时添加 --yes，表示已完成数据库备份并确认升级。
+```
+
+`--context` 可以省略，默认使用当前 context；命名空间默认 `kubedoor`。脚本会打印实际位置和组件版本供确认。升级适用于旧脚本和网页向导创建的 Kubernetes 控制端；网页安装必须已经完成收尾。Docker 或自行改名的控制端 Deployment 需要按原部署方式维护。
+
+升级同步更新已有的 `kubedoor-master`、`kubedoor-ai`、`kubedoor-alarm`、`kubedoor-web` 的**镜像和新版 Deployment 部署规范**，通过按名称合并的 strategic merge patch 加入卷、挂载、探针、更新策略等变更。例如从 2.3.0 升级后，AI 会新增：
+
+```yaml
+# kubedoor-ai 的 spec.template.spec
+volumes:
+  - name: code-cache
+    emptyDir:
+      sizeLimit: 10Gi
+containers:
+  - name: kubedoor-ai
+    volumeMounts:
+      - name: code-cache
+        mountPath: /data/code-cache
+```
+
+`emptyDir` 是 Pod 临时缓存，重建 Pod 后清空。master 和 AI 使用新版模板中的 `Recreate` 策略，先停止旧 Pod；升级期间会有服务短暂中断及 Agent 重连，请安排维护窗口。
+
+升级保留现有副本数、资源 requests/limits、环境变量和 `envFrom`、配置摘要、调度配置、拉取 Secret、自定义卷和 sidecar。数据库连接、账号密码、加密密钥、Service/NodePort 均沿用现有资源，不重新运行初始化。未安装的 AI / alarm 会跳过；master 和 web 必须存在。Grafana、监控/告警第三方服务及业务集群 Agent 不在此命令的升级范围内，Agent 可在控制台按集群单独升级。
+
+2.3.0 的 Nginx 配置会补充 Agent 安装接口专用代理和安全日志，避免新接口收到的 kubeconfig 被旧通用 API 日志记录；其他 Nginx 配置保留。无法识别的自定义 Nginx 配置会在修改前停止，需先人工核对。
+
+默认保留各组件当前的镜像仓库。使用镜像同步仓库或自定义构建 tag 时，可以显式指定：
+
+```sh
+sh install.sh upgrade --image-repo registry.example.com/kubedoor --tag 2.6.0 \
+  --backup kubedoor-before-upgrade.yaml
+```
+
+`--tag` 只覆盖镜像版本，Deployment 模板始终来自所执行的脚本；请使用同一发布版本的脚本和镜像，不用于降级。`--web-tag` 可以覆盖 Web 镜像；首装参数 `--setup-tag`、`--nodeport`、`--image-pull-secret`、`--render`、`--export` 不适用于升级。
+
+实际修改前，脚本先让 Kubernetes API Server 校验全部 Deployment 补丁，再保存所有目标 Deployment 和 Nginx ConfigMap。默认备份为当前目录的 `kubedoor-upgrade-backup.yaml`，已有文件绝不覆盖，可用 `--backup` 换一个文件名。资源备份可能包含原有内联配置，应妥善保管；它**不包含数据库备份**。
+
+每个组件更新后均等待 Deployment 就绪。失败时脚本返回非零状态并停止后续组件；已完成的组件不会自动回退。检查镜像、Pod 事件和日志，修复后使用新的 `--backup` 文件重新执行。相同版本重试也会核对 Deployment 并重新载入 Web 配置。恢复旧版前需同时核对资源备份和数据库迁移兼容性，不能仅凭旧镜像保证回退。
+
+开发者修改正式 Deployment 模板后，运行 `python tools/build-upgrade-patches.py` 同步单文件脚本中的升级模板；`python tools/build-upgrade-patches.py --check` 和部署测试会检查是否遗漏同步。生成工具需要 Python/PyYAML，生产升级仍只需要 sh 和 kubectl。
 
 ## 导出 YAML 后安装
 
@@ -123,7 +179,7 @@ docker compose up -d
 
 ## 旧部署与内部资源
 
-旧配置式安装、升级和卸载入口保存在 [tools/legacy-install](../tools/legacy-install/README.md)，供已有脚本部署继续维护；该兼容工具仍需要完整仓库、Bash、Python 和 PyYAML。请沿用原配置，并显式传入 `-c`；不要用全新网页安装覆盖旧部署。
+旧配置式安装、全量配置重部署和卸载入口保存在 [tools/legacy-install](../tools/legacy-install/README.md)，供已有脚本部署继续维护；该兼容工具仍需要完整仓库、Bash、Python 和 PyYAML。需要全量重部署配置时请沿用原配置，并显式传入 `-c`；已有 Kubernetes 控制端也可使用上面的单文件 `upgrade`。不要用全新网页安装覆盖旧部署。
 
 部署模板、看板及运行默认值已移至 `src/kubedoor-setup/resources/`，Agent 模板位于 `src/kubedoor-master/agent_install/manifests/`，随相应镜像发布。测试和构建工具也归入源码目录，无需用户配置。
 

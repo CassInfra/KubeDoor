@@ -101,7 +101,10 @@ class ShellCluster:
         })
 
     def mutations(self):
-        return [call for call in self.read()["calls"] if call["command"][0] in ("apply", "create", "delete", "annotate", "patch", "replace")]
+        return [call for call in self.read()["calls"]
+                if "--dry-run=server" not in call["command"] and
+                (call["command"][0] in ("apply", "create", "delete", "annotate", "patch", "replace")
+                 or call["command"][:2] == ["rollout", "restart"])]
 
 
 def state_object(phase, *, owner=INSTALL_ID):

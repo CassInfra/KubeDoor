@@ -35,6 +35,29 @@ def key(kind, name):
     return kind_name(kind) + "/" + name
 
 
+def strategic_merge(current, patch, field=""):
+    if isinstance(patch, dict):
+        result = dict(current or {})
+        for name, value in patch.items():
+            if value is None:
+                result.pop(name, None)
+            else:
+                result[name] = strategic_merge(result.get(name), value, name)
+        return result
+    if isinstance(patch, list):
+        merge_key = {"volumeMounts": "mountPath", "ports": "containerPort"}.get(field, "name")
+        if all(isinstance(item, dict) and merge_key in item for item in patch):
+            result = list(current or [])
+            for item in patch:
+                match = next((i for i, old in enumerate(result) if old.get(merge_key) == item[merge_key]), None)
+                if match is None:
+                    result.append(item)
+                else:
+                    result[match] = strategic_merge(result[match], item)
+            return result
+    return patch
+
+
 def parts(expression):
     result, current, escaped, brackets = [], "", False, 0
     for char in expression.lstrip("."):
@@ -148,7 +171,12 @@ if verb == "get":
     else:
         kind = resource
         name = args[2] if len(args) > 2 and not args[2].startswith("-") else ""
-    if kind_name(kind) == "node":
+    if len(args) > 2 and "/" in resource and "/" in args[2]:
+        requested = [name for name in args[1:] if "/" in name]
+        if cluster.get("backup_error"):
+            fail("simulated backup read failure")
+        obj = {"apiVersion": "v1", "kind": "List", "items": [objects[name] for name in requested]}
+    elif kind_name(kind) == "node":
         obj = {"items": [{"status": {"addresses": [
             {"type": "InternalIP", "address": "192.0.2.10"},
         ]}}]}
@@ -199,8 +227,20 @@ elif verb == "config" and args[1] == "current-context":
     print("test-context")
 elif verb == "version":
     print('{"serverVersion":{"gitVersion":"v1.32.0"}}')
+elif verb == "patch":
+    kind, name = args[1:3]
+    patch = yaml.safe_load(args[args.index("--patch") + 1])
+    call["patch"] = patch
+    if cluster.get("patch_error") == key(kind, name) or cluster.get("patch_error") is True:
+        fail("simulated patch failure")
+    if "--dry-run=server" in args:
+        if cluster.get("dry_run_error") == key(kind, name):
+            fail("simulated invalid Deployment")
+    else:
+        objects[key(kind, name)] = strategic_merge(objects[key(kind, name)], patch)
 elif verb in ("rollout", "wait"):
-    pass
+    if verb == "rollout" and args[1] == "status" and cluster.get("rollout_error") == args[2]:
+        fail("simulated ImagePullBackOff timeout")
 else:
     fail("Unexpected kubectl operation: " + " ".join(raw))
 save()
