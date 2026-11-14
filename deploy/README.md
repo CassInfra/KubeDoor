@@ -150,9 +150,9 @@ sh install.sh upgrade --image-repo registry.example.com/kubedoor --tag 2.6.0 \
 
 `--tag` 只覆盖镜像版本，Deployment 模板始终来自所执行的脚本；请使用同一发布版本的脚本和镜像，不用于降级。`--web-tag` 可以覆盖 Web 镜像；首装参数 `--setup-tag`、`--nodeport`、`--image-pull-secret`、`--render`、`--export` 不适用于升级。
 
-实际修改前，脚本先让 Kubernetes API Server 校验全部 Deployment 补丁，再保存所有目标 Deployment、Nginx ConfigMap 和上面列出的旧配置。默认备份为当前目录的 `kubedoor-upgrade-backup.yaml`，已有文件绝不覆盖，可用 `--backup` 换一个文件名。资源备份包含数据库连接等 Secret 和原有内联配置，应妥善保管；它**不包含数据库备份**。
+实际修改前，脚本先让 Kubernetes API Server 校验全部 Deployment 补丁，再保存所有目标 Deployment、Nginx ConfigMap 和上面列出的旧配置。默认备份为当前目录的 `kubedoor-upgrade-backup-<日期时间>.yaml`（机器上没有 `date` 命令时为 `kubedoor-upgrade-backup.yaml`）；同名文件已存在时自动加 `-2`、`-3` 等序号，绝不覆盖已有备份，也可以用 `--backup` 指定文件名。资源备份包含数据库连接等 Secret 和原有内联配置，应妥善保管；它**不包含数据库备份**。
 
-每个组件更新后均等待 Deployment 就绪。失败时脚本返回非零状态并停止后续组件；已完成的组件不会自动回退。检查镜像、Pod 事件和日志，修复后使用新的 `--backup` 文件重新执行。相同版本重试也会核对 Deployment 并重新载入 Web 配置。恢复旧版前需同时核对资源备份和数据库迁移兼容性，不能仅凭旧镜像保证回退。
+每个组件更新后均等待 Deployment 就绪。失败时脚本返回非零状态并停止后续组件；已完成的组件不会自动回退。检查镜像、Pod 事件和日志，修复后重新执行 `upgrade` 即可（备份会自动换一个新文件名）。相同版本重试也会核对 Deployment 并重新载入 Web 配置。恢复旧版前需同时核对资源备份和数据库迁移兼容性，不能仅凭旧镜像保证回退。
 
 开发者修改正式 Deployment 模板后，运行 `python tools/build-upgrade-patches.py` 同步单文件脚本中的升级模板；`python tools/build-upgrade-patches.py --check` 和部署测试会检查是否遗漏同步。生成工具需要 Python/PyYAML，生产升级仍只需要 sh 和 kubectl。
 

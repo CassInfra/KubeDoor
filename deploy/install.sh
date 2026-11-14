@@ -44,7 +44,7 @@ usage() {
         '用法：sh install.sh [web|upgrade] [选项]（也支持 bash）' \
         '  upgrade                升级已有控制端，默认使用本脚本内的发布版本' \
         '  --dry-run              查看版本、Deployment 变更及旧配置迁移和清理计划，不修改集群、不写备份' \
-        '  --backup FILE          升级前保存 Deployment、Nginx 及旧配置（含 Secret），默认 kubedoor-upgrade-backup.yaml' \
+        '  --backup FILE          升级前保存 Deployment、Nginx 及旧配置（含 Secret），默认 kubedoor-upgrade-backup-<日期时间>.yaml；同名文件已存在时自动加序号，不覆盖' \
         '  --namespace NAME       命名空间，默认 kubedoor' \
         '  --context NAME         kubectl context，默认当前 context' \
         '  --image-repo REPO      KubeDoor 镜像仓库' \
@@ -741,6 +741,27 @@ NL='
 '
 CR=$(printf '\r')
 warn() { printf '警告：%s\n' "$*" >&2; }
+# 升级备份的文件名：没指定 --backup 时带上日期时间；同名文件已存在时依次加 -2、-3……，从不覆盖已有备份
+backup_file_name() {
+    name=$BACKUP_FILE
+    if [ "$BACKUP_OVERRIDE" != true ]; then
+        stamp=$(date +%Y%m%d-%H%M%S 2>/dev/null) || stamp=
+        [ -z "$stamp" ] || name="kubedoor-upgrade-backup-$stamp.yaml"
+    fi
+    case "$name" in
+        *.yaml) stem=${name%.yaml}; suffix=.yaml ;;
+        *.yml) stem=${name%.yml}; suffix=.yml ;;
+        *) stem=$name; suffix= ;;
+    esac
+    candidate=$name
+    number=1
+    while [ -e "$candidate" ] || [ -L "$candidate" ]; do
+        number=$((number + 1))
+        [ "$number" -le 999 ] || return 1
+        candidate="$stem-$number$suffix"
+    done
+    printf '%s' "$candidate"
+}
 # master 去掉事件告警规则的卷和挂载：strategic merge 按名称 / 挂载路径删除列表项，已不存在时是空操作
 rules_volume_patch() {
     yaml <<'EOF'
@@ -832,9 +853,9 @@ cleanup_legacy_config() {
             return 0
         fi
         kc -n "$NAMESPACE" patch deployment kubedoor-master --type=strategic --patch "$(rules_volume_patch)" ||
-            die "去掉 kubedoor-master 事件告警规则挂载失败；升级已完成，旧配置尚未清理。备份：$BACKUP_FILE；修复后用新的 --backup 文件重试"
+            die "去掉 kubedoor-master 事件告警规则挂载失败；升级已完成，旧配置尚未清理。备份：$BACKUP_FILE；修复后重新执行 upgrade 即可"
         kc -n "$NAMESPACE" rollout status deployment/kubedoor-master --timeout=300s ||
-            die "kubedoor-master 去掉事件告警规则挂载后未就绪；检查 describe/logs。备份：$BACKUP_FILE；修复后用新的 --backup 文件重试"
+            die "kubedoor-master 去掉事件告警规则挂载后未就绪；检查 describe/logs。备份：$BACKUP_FILE；修复后重新执行 upgrade 即可"
         refs=$(rules_references) || refs=unknown
     fi
     if [ -n "$refs" ]; then
@@ -967,8 +988,9 @@ upgrade_control() {
     # 先完整读取，再用 noclobber 创建备份；权限/API/文件错误均不得修改集群。
     backup_yaml=$(kc -n "$NAMESPACE" get $UPGRADE_RESOURCES -o yaml) || die '读取升级备份失败，尚未修改集群'
     [ -n "$backup_yaml" ] || die '升级备份为空，尚未修改集群'
+    BACKUP_FILE=$(backup_file_name) || die "备份文件名 $BACKUP_FILE 及加序号的名字都已被占用，尚未修改集群；请用 --backup 指定新文件"
     (umask 077; set -C; printf '%s\n' "$backup_yaml" > "$BACKUP_FILE") ||
-        die '无法创建升级备份（文件已存在或目录不可写），请用 --backup 指定新文件'
+        die "无法创建升级备份 $BACKUP_FILE（目录不存在或不可写），尚未修改集群；请用 --backup 指定可写的位置"
     printf '已保存升级前资源：%s（含数据库连接等 Secret，请妥善保管；不含数据库备份）\n' "$BACKUP_FILE"
     if [ "$NGINX_PATCH" = true ]; then
         kc -n "$NAMESPACE" patch configmap nginx-config --type=merge --patch "$(upgrade_nginx_patch)" ||
@@ -984,7 +1006,7 @@ upgrade_control() {
         # 同版本重试也等待 rollout，避免把上次 ImagePullBackOff 当作成功。
         if ! kc -n "$NAMESPACE" patch deployment "$deployment" --type=strategic \
             --patch "$(deployment_upgrade_patch "$deployment")"; then
-            die "更新 $deployment Deployment 失败；升级可能部分完成。备份：$BACKUP_FILE；修复后用新的 --backup 文件重试"
+            die "更新 $deployment Deployment 失败；升级可能部分完成。备份：$BACKUP_FILE；修复后重新执行 upgrade 即可"
         fi
         if [ "$deployment" = kubedoor-web ]; then
             # 即使上次在更新 Nginx 后中断，同版本重试也必须让 Web 重新载入配置。
@@ -997,7 +1019,7 @@ upgrade_control() {
             kc -n "$NAMESPACE" rollout restart "deployment/$deployment" || die "重启 $deployment 失败；备份：$BACKUP_FILE"
         fi
         if ! kc -n "$NAMESPACE" rollout status "deployment/$deployment" --timeout=300s; then
-            die "$deployment 升级未就绪；检查 describe/logs。升级可能部分完成，备份：$BACKUP_FILE；修复后用新的 --backup 文件重试"
+            die "$deployment 升级未就绪；检查 describe/logs。升级可能部分完成，备份：$BACKUP_FILE；修复后重新执行 upgrade 即可"
         fi
         # 新 master 启动时会自己导入旧配置；这里再执行一遍确认结果，决定是否清理
         [ "$deployment" != kubedoor-master ] || run_migration

@@ -9,6 +9,21 @@ import pytest
 
 from bootstrap_shell import ROOT, SCRIPT, ShellCluster, documents, state_object
 
+# 默认备份名：有 date 命令时带日期时间，没有时不带；同名已存在时加序号
+DEFAULT_BACKUP = re.compile(r"kubedoor-upgrade-backup(-\d{8}-\d{6})?(-\d+)?\.yaml")
+
+
+def backups(directory):
+    """升级脚本按默认名写的备份文件，按修改时间排序"""
+    return sorted((path for path in directory.iterdir() if DEFAULT_BACKUP.fullmatch(path.name)),
+                  key=lambda path: path.stat().st_mtime_ns)
+
+
+def latest_backup(directory):
+    found = backups(directory)
+    assert found, "没有找到升级备份"
+    return found[-1]
+
 TARGET = re.search(r'^TAG_MASTER="([^"]+)"', SCRIPT.read_text(encoding="utf-8"), re.M).group(1)
 LEGACY_NGINX = """events {}
 http {
@@ -128,7 +143,7 @@ def test_upgrade_230_adds_cache_and_preserves_live_configuration(tmp_path, shell
     result = cluster.run("upgrade", "--yes", "--context", "production", "--namespace", "custom", shell=shell)
     assert result.returncode == 0, result.stderr
     after = cluster.read()["objects"]
-    backup = documents((tmp_path / "kubedoor-upgrade-backup.yaml").read_text(encoding="utf-8"))
+    backup = documents(latest_backup(tmp_path).read_text(encoding="utf-8"))
     # 4 个 Deployment + nginx-config + 旧配置 kubedoor-config 和规则 ConfigMap（旧脚本安装没有 kubedoor-connection）
     assert len(backup) == 7
     saved = {(obj["kind"], obj["metadata"]["name"]) for obj in backup}
@@ -200,7 +215,7 @@ def test_web_install_upgrade_backs_up_connection_and_empties_legacy_config(tmp_p
     result = cluster.run("upgrade", "--yes")
     assert result.returncode == 0, result.stderr
     after = cluster.read()["objects"]
-    backup = documents((tmp_path / "kubedoor-upgrade-backup.yaml").read_text(encoding="utf-8"))
+    backup = documents(latest_backup(tmp_path).read_text(encoding="utf-8"))
     saved = {(obj["kind"], obj["metadata"]["name"]) for obj in backup}
     assert len(backup) == 8
     assert {("ConfigMap", "kubedoor-config"), ("Secret", "kubedoor-connection"), ("ConfigMap", RULES)} <= saved
@@ -215,7 +230,7 @@ def test_already_migrated_install_has_nothing_to_clean(tmp_path):
     cluster = ShellCluster(tmp_path, legacy_objects(migrated=True))
     result = cluster.run("upgrade", "--yes")
     assert result.returncode == 0, result.stderr
-    backup = documents((tmp_path / "kubedoor-upgrade-backup.yaml").read_text(encoding="utf-8"))
+    backup = documents(latest_backup(tmp_path).read_text(encoding="utf-8"))
     assert {obj["metadata"]["name"] for obj in backup} == {
         "kubedoor-master", "kubedoor-ai", "kubedoor-alarm", "kubedoor-web", "nginx-config", "kubedoor-connection"}
     calls = cluster.read()["calls"]
@@ -328,7 +343,7 @@ def test_master_not_ready_after_removing_rules_mount_fails_and_rerun_finishes_cl
     before = cluster.read()["objects"]
     result = cluster.run("upgrade", "--yes")
     assert result.returncode != 0
-    assert "去掉事件告警规则挂载后未就绪" in result.stderr and "kubedoor-upgrade-backup.yaml" in result.stderr
+    assert "去掉事件告警规则挂载后未就绪" in result.stderr and latest_backup(tmp_path).name in result.stderr
     after = cluster.read()["objects"]
     assert all(volume["name"] != RULES for volume in master_pod(after)["volumes"])
     assert after["configmap/" + RULES] == before["configmap/" + RULES]
@@ -396,7 +411,7 @@ def test_preview_shows_cache_migration_and_cleanup_without_mutations(tmp_path):
     assert cluster.mutations() == []
     assert not any(call["command"][0] == "exec" for call in cluster.read()["calls"])
     assert cluster.read()["objects"] == before
-    assert not (tmp_path / "kubedoor-upgrade-backup.yaml").exists()
+    assert not backups(tmp_path)
 
 
 def test_upgrade_optional_components_absent_and_completed_web_install(tmp_path):
@@ -413,8 +428,9 @@ def test_upgrade_optional_components_absent_and_completed_web_install(tmp_path):
 def test_preflight_failures_never_modify_cluster(tmp_path, failure):
     objects = legacy_objects()
     options = {}
+    args = ("upgrade", "--yes")
     if failure == "backup":
-        (tmp_path / "kubedoor-upgrade-backup.yaml").write_text("keep-original")
+        args += ("--backup", "missing-dir/backup.yaml")  # 备份目录不存在：写不了备份就不能动集群
     elif failure == "api-read":
         options["get_error"] = "deployment/kubedoor-ai"
     elif failure == "unfinished":
@@ -424,12 +440,42 @@ def test_preflight_failures_never_modify_cluster(tmp_path, failure):
     else:
         options["dry_run_error"] = "deployment/kubedoor-ai"
     cluster = ShellCluster(tmp_path, objects, **options)
-    result = cluster.run("upgrade", "--yes")
+    result = cluster.run(*args)
     assert result.returncode != 0
     assert cluster.mutations() == []
     assert not any(call["command"][0] == "exec" for call in cluster.read()["calls"])
     if failure == "backup":
-        assert (tmp_path / "kubedoor-upgrade-backup.yaml").read_text() == "keep-original"
+        assert "无法创建升级备份 missing-dir/backup.yaml" in result.stderr and not (tmp_path / "missing-dir").exists()
+
+
+def test_existing_backups_are_kept_and_reruns_get_numbered_names(tmp_path):
+    """备份文件已存在（例如上次升级留下的）时自动加序号，旧备份原样保留，不用手动换 --backup"""
+    (tmp_path / "kubedoor-upgrade-backup.yaml").write_text("keep-original")
+    cluster = ShellCluster(tmp_path, legacy_objects())
+    first = cluster.run("upgrade", "--yes")
+    assert first.returncode == 0, first.stderr
+    assert (tmp_path / "kubedoor-upgrade-backup.yaml").read_text() == "keep-original"
+    created = [path for path in backups(tmp_path) if path.name != "kubedoor-upgrade-backup.yaml"]
+    assert len(created) == 1 and "已保存升级前资源：" + created[0].name in first.stdout
+    assert len(documents(created[0].read_text(encoding="utf-8"))) == 7
+    # 自己指定的文件名已存在：同样加序号，不覆盖
+    (tmp_path / "mine.yaml").write_text("mine")
+    for expected in ("mine-2.yaml", "mine-3.yaml"):
+        named = cluster.run("upgrade", "--yes", "--backup", "mine.yaml")
+        assert named.returncode == 0, named.stderr
+        assert "已保存升级前资源：" + expected in named.stdout and (tmp_path / expected).exists()
+    assert (tmp_path / "mine.yaml").read_text() == "mine"
+
+
+def test_default_backup_name_has_the_date_and_time(tmp_path):
+    """默认名带上日期时间（机器上没有 date 命令时不带），重复执行不会撞名"""
+    cluster = ShellCluster(tmp_path, legacy_objects())
+    for _ in range(2):
+        result = cluster.run("upgrade", "--yes")
+        assert result.returncode == 0, result.stderr
+    names = [path.name for path in backups(tmp_path)]
+    assert len(names) == 2 and len(set(names)) == 2
+    assert all(DEFAULT_BACKUP.fullmatch(name) for name in names)
 
 
 def test_rollout_failure_is_nonzero_and_retry_reloads_web(tmp_path):
@@ -437,7 +483,7 @@ def test_rollout_failure_is_nonzero_and_retry_reloads_web(tmp_path):
     before = cluster.read()["objects"]
     result = cluster.run("upgrade", "--yes")
     assert result.returncode != 0 and "升级未就绪" in result.stderr
-    assert (tmp_path / "kubedoor-upgrade-backup.yaml").exists()
+    assert backups(tmp_path)
     assert cluster.read()["objects"]["deployment/kubedoor-web"]["spec"]["template"]["spec"]["containers"][0]["image"].endswith(":2.3.0")
     # 升级中途失败：master 已迁移，但没等到全部组件就绪，不清理
     assert_legacy_kept(before, cluster.read()["objects"])
