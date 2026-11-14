@@ -563,11 +563,10 @@ def test_unexpected_send_error_does_not_stall_the_queue(sender, monkeypatch, log
 # 调用方:K8S 事件告警、管控表通知
 # ---------------------------------------------------------------------------
 class FakeMatcher:
-    def should_ignore_event(self, event):
-        return False
+    """代替读规则快照的匹配器:所有事件都命中「Pod重启」"""
 
-    def match_alert_rules(self, event):
-        return {'rule': {'name': 'Pod重启', 'severity': 'critical'}, 'event': event}
+    def evaluate(self, event):
+        return False, {'rule': {'name': 'Pod重启', 'severity': 'critical'}, 'event': event}
 
 
 def event(k8s='prod', uid='uid-1'):
@@ -577,24 +576,22 @@ def event(k8s='prod', uid='uid-1'):
 
 
 def test_event_alert_is_sent_to_the_cluster_of_the_event(monkeypatch):
+    import general_settings
     from k8s_event import event_alert_processor as module
 
     pool = SimpleNamespace(execute_command=Mock())
     monkeypatch.setattr(module, 'get_pg_event_client', lambda: SimpleNamespace(pool=pool))
+    monkeypatch.setattr(general_settings, 'value', lambda name: {'alert_dedup_window': 300}[name])
     sent = Mock(return_value=True)
     monkeypatch.setattr(module, 'notify', sent)
-    processor = module.EventAlertProcessor.__new__(module.EventAlertProcessor)  # 不读规则文件
-    processor.rule_matcher = FakeMatcher()
-    processor.stats = {key: 0 for key in ('total_events', 'ignored_events', 'matched_events', 'alerts_sent',
-                                          'errors', 'dedup_blocked')}
-    processor._alert_cache, processor._dedup_window = {}, 300
+    processor = module.EventAlertProcessor(rule_matcher=FakeMatcher())
 
     info = processor.process_event(event('prod'))
     message, = sent.call_args.args
     assert sent.call_args.kwargs == {'env': 'prod'}
     assert message == info['message'] and 'K8S事件告警: Pod重启' in message
     assert processor.stats['alerts_sent'] == 1
-    # 去重窗口内同一个事件不再发
+    # 去重窗口(通用配置 alert_dedup_window)内同一个事件不再发
     assert processor.process_event(event('prod')) is None and sent.call_count == 1
     # 没有配置通知(notify 返回 False):不算已发送
     sent.return_value = False
@@ -605,7 +602,7 @@ def test_event_alert_is_sent_to_the_cluster_of_the_event(monkeypatch):
 def test_event_processor_no_longer_passes_msg_token():
     from k8s_event.event_processor import K8SEventProcessor
 
-    processor = K8SEventProcessor.__new__(K8SEventProcessor)
+    processor = K8SEventProcessor.__new__(K8SEventProcessor)  # 不建数据库客户端
     processor.pg_client = SimpleNamespace(upsert_event=Mock())
     processor.alert_processor = SimpleNamespace(process_event=Mock(return_value=None))
     data = {**event(), 'firstTimestamp': '2026-11-07T01:00:00Z', 'lastTimestamp': '2026-11-07T01:05:00Z',

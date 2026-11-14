@@ -11,7 +11,7 @@ import yaml
 from bootstrap_shell import (ROOT, OWNER, INSTALL_ID, ShellCluster, documents, render_bootstrap, recovery_objects, state_object)
 
 sys.path.insert(0, str(ROOT / "src/kubedoor-setup"))
-from kubedoor_setup.render import load_defaults, render_master
+from kubedoor_setup.render import general_settings_values, load_defaults, render_master
 
 VM_PASSWORD = "vm-secret-'$&value"
 VM_AUTH = "monit:" + quote(VM_PASSWORD, safe="")
@@ -49,11 +49,12 @@ def test_metrics_endpoints_render_verbatim_and_grafana_gets_split_credentials(co
     connection = resources["Secret", "kubedoor-connection"]["stringData"]
     assert connection["PROM_URL"] == f"http://{VM_AUTH}@metrics.example.invalid:8428"
     assert connection["METRICS_WRITE_URL"] == f"http://{VM_AUTH}@metrics.example.invalid:8428/api/v1/write"
-    assert resources["ConfigMap", "kubedoor-config"]["data"]["PROM_TYPE"] == "Victoria-Metrics-Single"
-    # 写地址带账号密码：只在 Secret 里，master 经 envFrom 拿到后交给网页安装的 vmagent 直连；没有指标网关
-    assert "METRICS_WRITE_URL" not in resources["ConfigMap", "kubedoor-config"]["data"]
+    # 连接池参数也在 Secret 里：网页安装不再创建 kubedoor-config 和事件告警规则 ConfigMap，
+    # 时序库类型、写地址等在 master 就绪后写进数据库的通用配置；没有指标网关
+    assert {"PG_POOL_MIN", "PG_POOL_MAX", "PG_CMD_TIMEOUT"} <= set(connection)
+    assert ("ConfigMap", "kubedoor-config") not in resources and ("ConfigMap", "kubedoor-master-file-cfg") not in resources
     assert ("Secret", "kubedoor-metrics-gateway") not in resources
-    assert "metrics_available" not in json.loads(resources["ConfigMap", "kubedoor-config"]["data"]["AGENT_INSTALL_DEFAULTS"])
+    assert "AGENT_INSTALL_DEFAULTS" not in json.dumps(list(resources.values()))
     grafana, source = prometheus_source(resources)
     assert (grafana["metrics-url"], grafana["metrics-user"], grafana["metrics-password"]) == ("http://metrics.example.invalid:8428", "monit", VM_PASSWORD)
     assert source["basicAuth"] is True
@@ -69,7 +70,7 @@ def test_cluster_endpoints_without_account_render_without_basic_auth(config):
     connection = resources["Secret", "kubedoor-connection"]["stringData"]
     assert connection["PROM_URL"] == "https://vm.example.invalid:8481/select/3/prometheus"
     assert connection["METRICS_WRITE_URL"] == "https://vm.example.invalid:8480/insert/3/prometheus"
-    assert resources["ConfigMap", "kubedoor-config"]["data"]["PROM_TYPE"] == "Victoria-Metrics-Cluster"
+    assert general_settings_values(config, load_defaults())["prom_type"] == "Victoria-Metrics-Cluster"
     grafana, source = prometheus_source(resources)
     assert (grafana["metrics-url"], grafana["metrics-user"], grafana["metrics-password"]) == (connection["PROM_URL"], "", "")
     assert source["basicAuth"] is False
@@ -97,6 +98,10 @@ def test_render_preserves_credentials_without_yaml_or_shell_injection(config):
     for deployment in ("kubedoor-master", "kubedoor-alarm", "kubedoor-ai"):
         container = resources["Deployment", deployment]["spec"]["template"]["spec"]["containers"][0]
         assert {"secretRef": {"name": "kubedoor-connection"}} in container["envFrom"]
+        assert all("configMapRef" not in entry for entry in container["envFrom"])
+    # 事件告警规则改存数据库：master 不再挂载规则 ConfigMap
+    master = resources["Deployment", "kubedoor-master"]["spec"]["template"]["spec"]
+    assert "volumes" not in master and "volumeMounts" not in master["containers"][0]
     assert resources["Service", "kubedoor-web"]["spec"]["ports"][0]["nodePort"] == 31234
     assert "kubedoor-dash-k8s" in [obj["metadata"]["name"] for obj in objects]
     assert "datasources.yaml" not in resources["ConfigMap", "kubedoor-grafana-config"]["data"]
@@ -104,6 +109,31 @@ def test_render_preserves_credentials_without_yaml_or_shell_injection(config):
     assert "location = /setup-status.json" in nginx
     assert "proxy_pass http://kubedoor-setup:8080;" in nginx
     assert 'Cache-Control "no-store"' in nginx
+
+
+def test_general_settings_values_carry_wizard_settings_and_release_images(config):
+    config["oss_url"] = "https://ak:oss%40secret@oss.example.invalid/bucket"
+    defaults = load_defaults({"IMAGE_REPO": "registry.example.invalid/team", "IMAGE_VMAGENT": "registry.example.invalid/vmagent:pinned"})
+    # 控制服务就绪后安装服务 PUT 进「系统管理 → 通用配置」的值：地址带账号密码原样交给 master 加密保存
+    assert general_settings_values(config, defaults) == {
+        "prom_type": "Victoria-Metrics-Single",
+        "prom_url": f"http://{VM_AUTH}@metrics.example.invalid:8428",
+        "metrics_write_url": f"http://{VM_AUTH}@metrics.example.invalid:8428/api/v1/write",
+        "prom_k8s_tag_key": "cluster",
+        "kubedoor_exturl": "https://kubedoor.example.invalid",
+        "alertmanager_exturl": None,
+        "oss_url": "https://ak:oss%40secret@oss.example.invalid/bucket",
+        "image_repo": "registry.example.invalid/team",
+        "image_vmagent": "registry.example.invalid/vmagent:pinned",
+        "image_kube_state_metrics": defaults["IMAGE_KUBE_STATE_METRICS"],
+        "image_node_exporter": defaults["IMAGE_NODE_EXPORTER"],
+    }
+    # 第 4 步没填对象存储地址时不设置；旧版向导保存的配置没有这一项
+    config.pop("oss_url")
+    assert general_settings_values(config, defaults)["oss_url"] is None
+    # 这些值只经 HTTP 交给 master，不进任何渲染结果
+    assert "oss%40secret" not in json.dumps(render_master({**config, "oss_url": "https://ak:oss%40secret@oss.example.invalid/b"},
+                                                          SECRETS, "example"))
 
 
 def custom_alert_location(nginx):

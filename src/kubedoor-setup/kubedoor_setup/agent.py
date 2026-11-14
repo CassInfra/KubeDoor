@@ -201,12 +201,14 @@ def bootstrap_pull_secret():
     return value if isinstance(value, str) and PULL_SECRET.fullmatch(value) else ''
 
 
-def master_options(options, namespace, write_url):
-    """交给 master 预检的安装选项；镜像仓库、版本等其余参数沿用 master 的默认值。"""
+def master_options(options, namespace):
+    """交给 master 预检的安装选项。
+
+    时序库远程写地址、镜像仓库和采集组件镜像由 master 从通用配置读取（安装服务在控制服务就绪时已写入第 3 步的地址），
+    Agent 版本等其余参数沿用 master 的默认值；这里只带本集群直连 master 的集群内地址。
+    """
     result = {key: copy.deepcopy(options[key]) for key in ('env', 'aliases', 'namespace', 'mode', 'ksm', 'node_exporter')}
     result['master_url'] = master_url(namespace)
-    # vmagent 直连时序库，和控制台「接入集群」一样；这里明确带上第 3 步的远程写地址
-    result['remote_write_url'] = write_url if options['mode'] == 'full' else ''
     pull_secret = bootstrap_pull_secret()
     if pull_secret and options['namespace'] == namespace:
         result['image_pull_secret'] = pull_secret
@@ -357,7 +359,7 @@ class AgentInstall:
         if not task_id:
             if resume:
                 raise AgentFailure('安装服务重启时本次安装尚未开始，请重试或跳过')
-            task_id = await self.begin(master, agent['options'], write_url, agent.get('force') is True)
+            task_id = await self.begin(master, agent['options'], agent.get('force') is True)
         return await self.follow(master, task_id, deadline)
 
     async def master_call(self, call, stage):
@@ -366,7 +368,7 @@ class AgentInstall:
         except MasterError as error:
             raise AgentFailure(stage + '：' + self.scrub(error.message)) from None
 
-    async def begin(self, master, options, write_url, force=False):
+    async def begin(self, master, options, force=False):
         await self.progress(message='正在签发临时安装令牌')
         try:
             token = await service_account_token(self.k8s, self.namespace, AGENT_INSTALLER, TOKEN_SECONDS)
@@ -386,7 +388,7 @@ class AgentInstall:
         except (TypeError, ValueError, AttributeError):
             raise AgentFailure('控制服务返回的安装任务无效') from None
         await self.progress(task_id=task_id, message='正在预检本集群的安装条件')
-        task = await self.master_call(master.preflight(task_id, master_options(options, self.namespace, write_url), force),
+        task = await self.master_call(master.preflight(task_id, master_options(options, self.namespace), force),
                                       '安装预检未通过')
         if task.get('status') != 'ready':
             checks = [row for row in clean_rows(task.get('checks'), self.scrub) if row['status'] == 'error']

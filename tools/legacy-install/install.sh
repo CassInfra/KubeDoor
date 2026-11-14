@@ -211,13 +211,13 @@ validate_master() {
     [[ "$PROM_K8S_TAG_KEY" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] \
         || die "PROM_K8S_TAG_KEY 只能是字母数字下划线,当前值:$PROM_K8S_TAG_KEY"
 
+    # 渲染进 YAML 的值不能含单引号；写进数据库的配置（时序库类型、远程写地址等）经 JSON 交给 master，不受这个限制
     check_no_quote NAMESPACE IMAGE_REPO PROM_K8S_TAG_KEY \
         TAG_MASTER TAG_WEB TAG_ALARM TAG_AI \
         PG_HOST PG_PORT PG_USER PG_PASSWORD PG_DATABASE \
-        PROM_URL METRICS_WRITE_URL PROM_TYPE \
-        ALERTMANAGER_EXTURL KUBEDOOR_EXTURL \
+        PROM_URL \
         GRAFANA_ADMIN_USER GRAFANA_ADMIN_PASSWORD \
-        KUBEDOOR_INIT_ADMIN_PASSWORD KUBEDOOR_INIT_AGENT_PASSWORD AGENT_AUTH_REQUIRED \
+        KUBEDOOR_INIT_ADMIN_PASSWORD KUBEDOOR_INIT_AGENT_PASSWORD \
         IMAGE_GRAFANA IMAGE_VMALERT IMAGE_ALERTMANAGER IMAGE_BUSYBOX_CURL
 
     case "${AGENT_AUTH_REQUIRED:-true}" in
@@ -231,7 +231,14 @@ validate_master() {
 
     require_var PROM_URL "请填写独立部署的 VictoriaMetrics 或已有时序库的查询地址"
 
-    warn_legacy_notify
+    note_legacy_notify
+}
+
+# 控制端：旧配置里的 MSG_* 在 master 就绪后导入为消息通知的全局配置，只在控制台还没有配置时导入一次
+note_legacy_notify() {
+    if [[ -n "${MSG_TOKEN:-}" ]]; then
+        warn "MSG_TYPE / MSG_TOKEN / DEFAULT_AT 只在控制台还没有消息通知配置时导入一次(作为全局配置);之后请在控制台「系统管理 → 消息通知」修改(可以按集群单独配置),这里的值不再生效"
+    fi
 }
 
 # 通知改由 master 统一发送,IM 机器人在控制台「系统管理 → 消息通知」配置;旧配置里的 MSG_* / DEFAULT_AT 不再生效
@@ -358,21 +365,13 @@ build_master_vars() {
     VARS[PG_POOL_MAX]="${PG_POOL_MAX:-20}"
     VARS[PG_CMD_TIMEOUT]="${PG_CMD_TIMEOUT:-60}"
 
-    # 时序库独立部署，这里只消费连接地址。
+    # 时序库独立部署：Grafana 数据源和 vmalert 用查询地址。时序库类型、远程写地址、访问地址等其余配置
+    # 不渲染进 ConfigMap，master 就绪后写进数据库（见 migrate_general_settings），之后在控制台「系统管理 → 通用配置」修改
     VARS[PROM_URL]="${PROM_URL:-}"
-    VARS[PROM_TYPE]="${PROM_TYPE:-Victoria-Metrics-Single}"
-    # 网页安装 Agent 时各集群的 vmagent 默认直连的写入地址，须能从各业务集群访问；留空则只能仅安装 Agent
-    VARS[METRICS_WRITE_URL]="${METRICS_WRITE_URL:-}"
 
-    VARS[ALERTMANAGER_EXTURL]="${ALERTMANAGER_EXTURL:-}"
-    VARS[KUBEDOOR_EXTURL]="${KUBEDOOR_EXTURL:-}"
-    VARS[ALERT_DEDUP_WINDOW]="${ALERT_DEDUP_WINDOW:-300}"
-    VARS[SILENCE_CACHE_TTL]="${SILENCE_CACHE_TTL:-15}"
-
-    # 登录与权限:内置账号的初始口令(只在首次建账号时用,留空=出厂口令)、agent 是否必须认证
+    # 内置账号的初始口令(只在首次建账号时用,留空=出厂口令)
     VARS[KUBEDOOR_INIT_ADMIN_PASSWORD]="${KUBEDOOR_INIT_ADMIN_PASSWORD:-}"
     VARS[KUBEDOOR_INIT_AGENT_PASSWORD]="${KUBEDOOR_INIT_AGENT_PASSWORD:-}"
-    VARS[AGENT_AUTH_REQUIRED]="${AGENT_AUTH_REQUIRED:-true}"
 
     if [[ -n "${WEB_NODEPORT:-}" ]]; then
         VARS[WEB_NODEPORT_LINE]="      nodePort: ${WEB_NODEPORT}"
@@ -394,13 +393,7 @@ build_master_vars() {
     VARS[IMAGE_ALERTMANAGER]="${IMAGE_ALERTMANAGER:-}"
     VARS[IMAGE_BUSYBOX_CURL]="${IMAGE_BUSYBOX_CURL:-}"
 
-    # 同一份 Agent 渲染器用于网页和命令行。默认值随 master 配置下发，凭据只留在 Secret。
-    VARS[TAG_AGENT]="${TAG_AGENT:-2.3.0}"
-    VARS[IMAGE_VMAGENT]="${IMAGE_VMAGENT:-}"
-    VARS[IMAGE_KUBE_STATE_METRICS]="${IMAGE_KUBE_STATE_METRICS:-}"
-    VARS[IMAGE_NODE_EXPORTER]="${IMAGE_NODE_EXPORTER:-}"
-    VARS[OSS_URL]="${OSS_URL:-}"
-    VARS[AGENT_INSTALL_DEFAULTS]="$(bundle_vars | "$PYTHON_BIN" "$REPO_ROOT/src/kubedoor-master/agent_install/bundle.py" metadata --field defaults)"
+    # 网页安装 Agent 的镜像仓库和采集组件镜像同样写进数据库的通用配置（见 general_settings_payload）
 
     # 看板 ConfigMap 的 projected sources 列表,按 dashboards/ 下的文件动态生成
     local src="" f
@@ -413,11 +406,11 @@ build_master_vars() {
     VARS[GRAFANA_DASH_SOURCES]="$(indent_block '              ' "${src%$'\n'}")"
 
     # 配置摘要,写进 Pod 模板的 checksum/config 注解:配置变了,重跑安装脚本时对应组件自动滚动更新。
-    # subPath 挂载的配置文件不会随 ConfigMap 更新,envFrom 的环境变量和启动时加载的告警规则也要重启才生效。
-    # 必须放在最后算:用到的占位符都要先有值
+    # subPath 挂载的配置文件不会随 ConfigMap 更新,envFrom 的环境变量(数据库连接)也要重启才生效;
+    # 写进数据库的配置和事件告警规则保存后马上生效,不在摘要里。必须放在最后算:用到的占位符都要先有值
     local d="$MANIFEST_DIR/master"
     VARS[CONFIG_HASH_ENV]="$(render_file "$d/10-config.yaml" | content_hash)"
-    VARS[CONFIG_HASH_MASTER]="$({ render_file "$d/10-config.yaml"; render_file "$d/alert_rules.json"; } | content_hash)"
+    VARS[CONFIG_HASH_MASTER]="${VARS[CONFIG_HASH_ENV]}"
     VARS[CONFIG_HASH_WEB]="$(render_file "$d/40-web.yaml" | content_hash)"
     VARS[CONFIG_HASH_GRAFANA]="$(render_file "$d/35-grafana.yaml" | content_hash)"
 }
@@ -611,6 +604,112 @@ complete_image_settings_migration() {
     "$PYTHON_BIN" "$SCRIPT_DIR/image-settings-migration.py" cleanup --config "$CONFIG_FILE"
 }
 
+# 写进数据库「通用配置」和「消息通知」的旧配置项（键名同 master 以前的环境变量）。master 就绪后经
+# python3 -m general_settings migrate --env-json - 导入：只导入数据库里还没有的项，控制台改过的以控制台为准，重复执行安全
+GENERAL_SETTINGS_VARS=(PROM_TYPE PROM_URL METRICS_WRITE_URL PROM_K8S_TAG_KEY KUBEDOOR_EXTURL ALERTMANAGER_EXTURL OSS_URL
+    NODE_SHELL_IMAGE RETENTION_EVENTS_DAYS RETENTION_ALERTS_DAYS RETENTION_RESOURCES_DAYS RETENTION_AUDIT_DAYS
+    RETENTION_AI_CHECKPOINT_DAYS AUTH_SESSION_HOURS AUTH_IDLE_HOURS AUTH_REMEMBER_DAYS AUTH_LOGIN_MAX_FAILURES
+    AUTH_LOCK_MINUTES AUTH_COOKIE_SECURE AGENT_AUTH_REQUIRED ALERT_DEDUP_WINDOW SILENCE_CACHE_TTL ADMIS_CACHE_TTL
+    MSG_TYPE MSG_TOKEN DEFAULT_AT)
+
+# 迁移命令的 stdin：JSON 对象，只带有值的项；网页安装 Agent 的镜像仓库和采集组件镜像
+# 按旧格式放进 AGENT_INSTALL_DEFAULTS（JSON 字符串）。值不经 shell 再次解释，也不出现在命令行参数里
+general_settings_payload() {
+    local key
+    {
+        for key in "${GENERAL_SETTINGS_VARS[@]}"; do
+            if [[ -n "${!key:-}" ]]; then printf '%s\0%s\0' "$key" "${!key}"; fi
+        done
+        for key in IMAGE_REPO IMAGE_VMAGENT IMAGE_KUBE_STATE_METRICS IMAGE_NODE_EXPORTER; do
+            if [[ -n "${!key:-}" ]]; then printf 'AGENT_INSTALL_DEFAULTS.%s\0%s\0' "$key" "${!key}"; fi
+        done
+    } | "$PYTHON_BIN" -c '
+import json, sys
+fields = sys.stdin.buffer.read().decode("utf-8").split("\0")
+values, images = {}, {}
+for name, value in zip(fields[0::2], fields[1::2]):
+    if name.startswith("AGENT_INSTALL_DEFAULTS."):
+        images[name.split(".", 1)[1].lower()] = value
+    else:
+        values[name] = value
+if images:
+    values["AGENT_INSTALL_DEFAULTS"] = json.dumps(images, ensure_ascii=False)
+print(json.dumps(values, ensure_ascii=False))
+'
+}
+
+# 迁移汇总（stdout 最后一行 JSON，只有配置项名称和状态，不含配置值）里没能写进数据库的项
+general_settings_problems() {
+    "$PYTHON_BIN" -c '
+import json, sys
+try:
+    summary = json.loads(sys.argv[1])
+except ValueError:
+    summary = None
+if not isinstance(summary, dict):
+    print(sys.argv[1] or "没有输出汇总")
+    raise SystemExit
+items = []
+invalid = (summary.get("general_settings") or {}).get("invalid") or []
+if invalid:
+    items.append("通用配置 " + "、".join(map(str, invalid)))
+if summary.get("notification") == "invalid":
+    items.append("消息通知(MSG_TYPE / MSG_TOKEN / DEFAULT_AT)")
+images = summary.get("image_settings") or {}
+if images.get("rules") == "invalid":
+    items.append("镜像更新规则")
+if images.get("registries") == "invalid":
+    items.append("镜像仓库凭据")
+if summary.get("event_rules") == "invalid":
+    items.append("事件告警规则")
+print("；".join(items) or json.dumps(summary, ensure_ascii=False))
+' "$1"
+}
+
+# 旧版本把 K8S 事件告警规则放在 ConfigMap kubedoor-master-file-cfg 挂给 master，新模板不再挂载。
+# 部署前先读出来（没有就是全新安装），新 master 就绪后交给它导入数据库（数据库里已有规则时不覆盖）
+read_legacy_rules() {
+    LEGACY_RULES_JSON=""
+    if ! LEGACY_RULES_JSON="$(kc -n "$NAMESPACE" get configmap kubedoor-master-file-cfg --ignore-not-found -o 'jsonpath={.data.alert_rules\.json}')"; then
+        die "无法读取旧的事件告警规则(ConfigMap kubedoor-master-file-cfg),尚未修改集群。请确认可以读取该 ConfigMap 后重试"
+    fi
+}
+
+# master 就绪后：先把旧的事件告警规则放回容器里原来的路径，再把配置写进数据库（同一个迁移命令导入规则）
+migrate_general_settings() {
+    if [[ -n "${LEGACY_RULES_JSON:-}" ]]; then
+        info "将旧的事件告警规则交给 kubedoor-master 导入数据库"
+        printf '%s' "$LEGACY_RULES_JSON" | kc -n "$NAMESPACE" exec -i deploy/kubedoor-master -c kubedoor-master -- \
+            sh -c 'mkdir -p /k8s_event/rules && cat > /k8s_event/rules/alert_rules.json' \
+            || die "无法把旧的事件告警规则交给 kubedoor-master,已保留 ConfigMap kubedoor-master-file-cfg。修复问题后重新执行安装即可继续"
+    fi
+    info "将配置写入数据库(数据库里已有的不覆盖)"
+    local output status=0 summary
+    output="$(general_settings_payload | kc -n "$NAMESPACE" exec -i deploy/kubedoor-master -c kubedoor-master -- \
+        python3 -m general_settings migrate --env-json -)" || status=$?
+    summary="${output##*$'\n'}"
+    summary="${summary%$'\r'}"
+    case "$status" in
+        0)
+            ok "配置已写入数据库,之后在控制台「系统管理 → 通用配置」修改,保存后生效"
+            if [[ -n "${LEGACY_RULES_JSON:-}" ]]; then
+                if kc -n "$NAMESPACE" delete configmap kubedoor-master-file-cfg --ignore-not-found >/dev/null; then
+                    ok "旧的事件告警规则已导入数据库,已删除 ConfigMap kubedoor-master-file-cfg"
+                else
+                    warn "删除旧的 ConfigMap kubedoor-master-file-cfg 失败,规则已在数据库里,可以手动删除"
+                fi
+            fi
+            ;;
+        3)
+            warn "以下配置格式不对,没有写入数据库:$(general_settings_problems "$summary")"
+            warn "    请在控制台「系统管理 → 通用配置 / 消息通知 / 事件告警规则」填写;填好后重新执行安装会清理旧的规则 ConfigMap"
+            ;;
+        *)
+            die "配置写入数据库失败(退出码 ${status})。确认 kubedoor-master 正常运行、kubectl 有 pods/exec 权限后重新执行安装即可继续(数据库里已有的配置不会被覆盖)"
+            ;;
+    esac
+}
+
 install_master() {
     validate_master
     check_k8s
@@ -628,18 +727,19 @@ install_master() {
     [[ "${ENABLE_ALERTMANAGER:-true}"     == "true" ]] && printf ', alertmanager'
     printf '\n'
     printf '  外部时序库    : 已配置 PROM_URL\n'
+    printf '  其余配置      : master 就绪后写入数据库,之后在控制台「系统管理 → 通用配置」修改\n'
     printf '\n'
     confirm
 
     build_master_vars
     prepare_image_settings_migration
+    read_legacy_rules
 
     title "部署中"
     # 命名空间要先建好,后面的 ConfigMap 才有地方放
     render_file "$MANIFEST_DIR/master/00-namespace.yaml" | kc apply -f - | sed 's/^/    /'
 
-    # K8S 事件告警规则
-    apply_file_configmap kubedoor-master-file-cfg "$MANIFEST_DIR/master/alert_rules.json"
+    # K8S 事件告警规则不再放 ConfigMap:master 内置默认规则,在控制台「系统管理 → 事件告警规则」修改
 
     # Grafana 看板:一个文件一个 ConfigMap
     if [[ "${ENABLE_GRAFANA:-true}" == "true" ]]; then
@@ -656,6 +756,7 @@ install_master() {
     title "等待组件就绪"
     wait_rollout deploy/kubedoor-master 240s
     complete_image_settings_migration
+    migrate_general_settings
     wait_rollout deploy/kubedoor-alarm
     wait_rollout deploy/kubedoor-ai
     [[ "${ENABLE_GRAFANA:-true}"          == "true" ]] && wait_rollout deploy/kubedoor-dash
@@ -773,10 +874,6 @@ do_render() {
             [[ -n "$f" ]] || continue
             render_file "$f" > "$OUTPUT_DIR/$(basename "$f")"
         done <<< "$list"
-        # 从文件建的 ConfigMap 也一并渲染出来,方便检查
-        if [[ "$role" == "master" ]]; then
-            render_file "$MANIFEST_DIR/master/alert_rules.json" > "$OUTPUT_DIR/alert_rules.json"
-        fi
         ok "已渲染到:$OUTPUT_DIR"
     else
         while IFS= read -r f; do
@@ -816,6 +913,7 @@ do_uninstall() {
             [[ -n "$f" ]] || continue
             render_file "$f" | kc delete -f - --ignore-not-found 2>/dev/null | sed 's/^/    /' || true
         done
+        # kubedoor-master-file-cfg 是旧版本的事件告警规则,可能已在升级时删除
         local cms=(kubedoor-master-file-cfg)
         if [[ "${ENABLE_GRAFANA:-true}" == "true" ]]; then
             for f in "${DASHBOARD_FILES[@]}"; do cms+=("$(dashboard_cm_name "$f")"); done

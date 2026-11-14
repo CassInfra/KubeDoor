@@ -32,6 +32,8 @@ def default_private():
             'public_url': '',
             'components': {'alerting': True},
             'notification': dict(DEFAULT_NOTIFICATION),
+            # 第 4 步的对象存储上传地址（可选），可带账号密码；空表示不配置
+            'oss_url': '',
         },
         'secrets': {},
     }
@@ -244,6 +246,21 @@ def endpoint_url(value, title, user, password, previous=''):
     return urlunsplit((parsed.scheme, netloc, parsed.path.rstrip('/'), '', ''))
 
 
+def oss_url_config(value, existing=''):
+    """第 4 步的对象存储上传地址（可选）：完整 http(s) 地址，可带“账号:密码@”，不含查询参数和锚点，去掉末尾的 /。
+
+    留空表示不配置；密码写成 ****** 表示沿用上次保存的同一账号的密码。安装时写进控制端的通用配置，
+    各集群的 Agent 上传 jstack / jmap 等诊断文件时使用。
+    """
+    if value is None:
+        value = ''
+    if not isinstance(value, str):
+        raise SetupError('对象存储上传地址格式不正确', 422)
+    if not value.strip():
+        return ''
+    return endpoint_url(value, '对象存储上传地址', '', '', existing or '')
+
+
 def metrics_config(raw, existing):
     if not isinstance(raw, dict):
         raise SetupError('时序库参数必须为对象', 422)
@@ -360,11 +377,15 @@ def final_config(raw, existing):
         notification = notification_config(raw['notification'], saved)
     else:
         notification = {**DEFAULT_NOTIFICATION, **saved} if isinstance(saved, dict) else dict(DEFAULT_NOTIFICATION)
+    # 旧版页面不提交这一项时沿用已保存的
+    previous_oss = existing.get('oss_url') or ''
+    oss_url = oss_url_config(raw['oss_url'], previous_oss) if 'oss_url' in raw else previous_oss
     return {
         'admin': {'username': username, 'password': password},
         'public_url': clean_url(raw.get('public_url', ''), 'KubeDoor 访问地址', base=True),
         'components': {'alerting': alerting},
         'notification': notification,
+        'oss_url': oss_url,
     }
 
 
@@ -397,4 +418,6 @@ def public_config(config):
             metrics[key] = mask_url_password(metrics[key])
     result['components'] = {'alerting': alerting_choice(config.get('components'))}
     result['notification'] = public_notification(config.get('notification'))
+    # 对象存储地址里的密码不回传，显示成 ******，原样提交表示沿用
+    result['oss_url'] = mask_url_password(config.get('oss_url') or '')
     return result

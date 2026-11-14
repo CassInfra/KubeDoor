@@ -17,7 +17,7 @@ from .config import metrics_endpoints, redact_token, selected_components, url_cr
 from .errors import SetupError
 from .kubernetes import OWNER, resource, resource_path, workload_ready
 from .probes import check_postgres, check_metrics, metrics_query_base, query_metrics, reserve_database
-from .render import render_master, load_defaults
+from .render import general_settings_values, render_master, load_defaults
 from .repository import utcnow
 
 SERVICES = (
@@ -38,15 +38,20 @@ HEALTH_ENDPOINTS = {
     'alarm': ('kubedoor-alarm', 80, '/internal/setup-health'),
 }
 HEALTH_DEPENDS = {'master': '数据库或时序库', 'ai': '数据库', 'alarm': '数据库'}
+# master 的通用配置接口：控制服务就绪后、健康检查之前，安装服务把时序库、访问地址等写进数据库
+GENERAL_SETTINGS_PATH = '/api/admin/general-settings'
 # 失败详情里最多列出的 Pod 数
 DETAIL_PODS = 5
 
 
 class ServiceCheckError(SetupError):
-    """服务接口检查失败：http_status 是对方返回的 HTTP 状态（连不上时为空），probe 记下请求和结果，放进失败详情。"""
+    """服务接口检查失败：http_status 是对方返回的 HTTP 状态（连不上时为空），probe 记下请求和结果，放进失败详情。
 
-    def __init__(self, message, *, http_status=None, probe=''):
-        super().__init__(message, 502)
+    status 为 422 表示对方明确拒绝了提交的内容，重试没有用，不再等到超时。
+    """
+
+    def __init__(self, message, *, http_status=None, probe='', status=502):
+        super().__init__(message, status)
         self.http_status, self.probe = http_status, probe
 
 
@@ -168,6 +173,8 @@ class InstallRunner:
         self.health_timeout = 60
         self.http = None
         self.objects = []
+        # 发布默认值（含 install.sh 传来的镜像仓库和采集组件镜像），run() 里加载
+        self.defaults = {}
 
     async def update(self, *, service=None, check=None, status=None, message=None, details=None, **fields):
         async with self.repo.lock:
@@ -218,7 +225,7 @@ class InstallRunner:
             await self.update(check='metrics', status='running', message='复查时序库查询连接')
             await check_metrics(self.config['metrics'])
             await self.update(check='metrics', status='success', message='时序库查询验证通过')
-            defaults = load_defaults(json.loads(os.environ.get('SETUP_DEFAULTS', '{}')))
+            defaults = self.defaults = load_defaults(json.loads(os.environ.get('SETUP_DEFAULTS', '{}')))
             web_service = await self.k8s.get(resource('Service', 'kubedoor-web', self.namespace))
             if web_service:
                 defaults['WEB_NODEPORT'] = str(web_service['spec']['ports'][0].get('nodePort', ''))
@@ -424,16 +431,20 @@ class InstallRunner:
                 raise SetupError('等待副本就绪超时：' + message, 504)
             deadline = time.monotonic() + self.health_timeout
             # 刚就绪时依赖可能还没连上（滚动更新时旧副本也可能还在响应），在 health_timeout 内重试；
-            # 重试期间把上次没通过的原因显示出来，不用等到超时才知道卡在哪
+            # 重试期间把上次没通过的原因显示出来，不用等到超时才知道卡在哪。
+            # 控制服务先写通用配置再做健康检查：健康检查要用到时序库地址，重试时重新写一遍（幂等）
+            action = '写入通用配置并验证服务接口和依赖连接' if sid == 'master' else '验证服务接口和依赖连接'
             last = ''
             while True:
                 await self.update(service=sid, status='checking',
-                                  message='副本已就绪，正在验证服务接口和依赖连接' + (f'；上次未通过：{last}' if last else ''))
+                                  message=f'副本已就绪，正在{action}' + (f'；上次未通过：{last}' if last else ''))
                 try:
+                    if sid == 'master':
+                        await self.save_general_settings()
                     await self.service_health(sid)
                     break
                 except SetupError as error:
-                    if time.monotonic() >= deadline:
+                    if error.status == 422 or time.monotonic() >= deadline:
                         raise
                     last = error.message
                     await asyncio.sleep(self.poll_interval)
@@ -463,7 +474,7 @@ class InstallRunner:
         except (StopIteration, KeyError, TypeError, AttributeError):
             return []
         if getattr(error, 'probe', ''):
-            lines.append(f'健康检查：{error.probe}')
+            lines.append(f"{'写入通用配置' if error.probe.startswith('PUT ') else '健康检查'}：{error.probe}")
         try:
             pods = await self.k8s.list('/api/v1/namespaces/' + quote(self.namespace, safe='') + '/pods', {'labelSelector': selector})
             lines += [pod_summary(pod) for pod in pods[:DETAIL_PODS]] or [f'Pod：没有找到（{selector}）']
@@ -571,6 +582,59 @@ class InstallRunner:
             if data.get('installation_id') != self.installation_id:
                 raise SetupError('Web 入口未返回本次安装标识', 502)
             await self.request('GET', self.url('kubedoor-web') + '/')
+
+    def settings_scrub(self, text, values, limit=300):
+        """去掉文字里的地址和其中的账号密码、令牌，再截短：写进安装状态的内容所有人都能读到。"""
+        text = str(text or '')
+        hidden = [self.secrets.get('internal_token', '')]
+        for value in values.values():
+            if isinstance(value, str) and '://' in value:
+                password = url_credentials(value)[2]
+                hidden += [value, password, quote(password, safe='')]
+        for secret in sorted({item for item in hidden if item and len(item) >= 4}, key=len, reverse=True):
+            text = text.replace(secret, '***')
+        text = ' '.join(text.split())
+        return text if len(text) <= limit else text[:limit - 1] + '…'
+
+    async def save_general_settings(self):
+        """以内置管理员身份（内部令牌 + X-User-Name: kubedoor）调用集群内 master 的 PUT /api/admin/general-settings，
+        把第 3、4 步的时序库、访问地址、对象存储和发布默认的 Agent 镜像写进「系统管理 → 通用配置」。
+
+        幂等：重试时重新写一遍。失败原因里不带地址、密码和令牌；配置被拒绝（HTTP 400 / 422）时不再重试。
+        """
+        values = general_settings_values(self.config, self.defaults)
+        url = self.url('kubedoor-master') + GENERAL_SETTINGS_PATH
+        probe = f'PUT {url}'
+        headers = {'X-Kubedoor-Token': self.secrets['internal_token'], 'X-User-Name': 'kubedoor'}
+        try:
+            async with self.http.request('PUT', url, json={'values': values}, headers=headers,
+                                         allow_redirects=False) as response:
+                status = response.status
+                raw = await response.content.read(256 * 1024)
+        except (aiohttp.ClientError, asyncio.TimeoutError):
+            raise ServiceCheckError('无法连接 kubedoor-master 写入通用配置，请检查服务状态和 kubedoor-master 日志',
+                                    probe=f'{probe} → 连接失败或超时') from None
+        try:
+            data = json.loads(raw) if raw else {}
+        except (ValueError, UnicodeError):
+            data = {}
+        data = data if isinstance(data, dict) else {}
+        if status == 200 and data.get('success') is True:
+            return
+        reason = self.settings_scrub(data.get('message') or data.get('error') or '', values)
+        probe = f'{probe} → HTTP {status}'
+        if status == 404:
+            raise ServiceCheckError(f'kubedoor-master 镜像 {self.image_of("master")} 没有通用配置接口'
+                                    f'（{GENERAL_SETTINGS_PATH} 返回 HTTP 404），镜像版本过旧；请换用新版镜像后重试',
+                                    http_status=status, probe=probe)
+        if status in (401, 403):
+            raise ServiceCheckError(f'kubedoor-master 拒绝了安装服务的内部令牌（HTTP {status}），'
+                                    '请确认 Secret kubedoor-ai-security 没有被手动修改后重试', http_status=status, probe=probe)
+        if status in (400, 422):
+            raise ServiceCheckError(f'kubedoor-master 没有接受通用配置（HTTP {status}）：{reason or "没有给出原因"}；'
+                                    '请回到第 3、4 步检查时序库和对象存储地址后重试', http_status=status, probe=probe, status=422)
+        raise ServiceCheckError(f'kubedoor-master 暂时无法保存通用配置（HTTP {status}）'
+                                + (f'：{reason}' if reason else '，请查看 kubedoor-master 日志'), http_status=status, probe=probe)
 
     async def verify_endpoints(self):
         base = self.config['public_url']

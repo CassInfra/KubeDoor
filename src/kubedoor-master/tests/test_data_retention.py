@@ -13,6 +13,7 @@ import pytest
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 
+import general_settings  # noqa: E402
 from func_manager import data_retention  # noqa: E402
 
 
@@ -67,11 +68,13 @@ def test_purge_expired_skips_disabled_tables_and_survives_errors(monkeypatch):
             raise RuntimeError('connection lost')
         return 5
 
+    settings = {'days_broken': 30, 'days_disabled': 0, 'days_ok': 10}
     monkeypatch.setattr(data_retention, 'purge_table', fake_purge)
+    monkeypatch.setattr(general_settings, 'value', lambda name: settings[name])
     monkeypatch.setattr(data_retention, 'RETENTION_RULES', [
-        ('broken', 'ts', 30),
-        ('disabled', 'ts', 0),
-        ('ok', 'ts', 10),
+        ('broken', 'ts', 'days_broken'),
+        ('disabled', 'ts', 'days_disabled'),
+        ('ok', 'ts', 'days_ok'),
     ])
 
     asyncio.run(data_retention.purge_expired())
@@ -79,9 +82,18 @@ def test_purge_expired_skips_disabled_tables_and_survives_errors(monkeypatch):
     # 保留天数为 0 的表不清理;前一张表报错不影响后面的表
     assert called == [('broken', 30), ('ok', 10)]
 
+    # 保留天数每一轮重新取通用配置:页面上改了,下一轮就按新值清理
+    settings.update(days_disabled=7, days_ok=0)
+    called.clear()
+    asyncio.run(data_retention.purge_expired())
+    assert called == [('broken', 30), ('disabled', 7)]
+
 
 def test_default_retention_rules():
-    rules = {table: (column, days) for table, column, days in data_retention.RETENTION_RULES}
-    assert rules['k8s_events'][0] == 'lasttimestamp'
-    assert rules['k8s_pod_alert_days'][0] == 'start_time'
-    assert rules['k8s_resources'][0] == 'date'
+    rules = {table: (column, setting) for table, column, setting in data_retention.RETENTION_RULES}
+    assert rules == {
+        'k8s_events': ('lasttimestamp', 'retention_events_days'),
+        'k8s_pod_alert_days': ('start_time', 'retention_alerts_days'),
+        'k8s_resources': ('date', 'retention_resources_days'),
+        'audit_logs': ('ts', 'retention_audit_days'),
+    }

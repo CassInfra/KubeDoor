@@ -36,7 +36,8 @@ spec:
       labels:
         app: kubedoor-master
       annotations:
-        # 安装脚本算的配置摘要(kubedoor-config + 告警规则):配置一变就重启,环境变量和告警规则都只在启动时读取
+        # 安装脚本算的配置摘要(数据库连接):配置一变就重启,环境变量只在启动时读取。
+        # 其余配置和事件告警规则存在数据库里,在控制台「系统管理」修改,保存后生效
         checksum/config: '__CONFIG_HASH_MASTER__'
     spec:
       containers:
@@ -65,9 +66,6 @@ spec:
           ports:
             - name: http
               containerPort: 80
-          volumeMounts:
-            - name: kubedoor-master-file-cfg
-              mountPath: /k8s_event/rules
           resources:
             limits:
               cpu: "2"
@@ -91,13 +89,6 @@ spec:
             periodSeconds: 10
             failureThreshold: 3
       restartPolicy: Always
-      volumes:
-        - name: kubedoor-master-file-cfg
-          configMap:
-            name: kubedoor-master-file-cfg
-            items:
-              - key: alert_rules.json
-                path: alert_rules.json
 
 ---
 apiVersion: v1

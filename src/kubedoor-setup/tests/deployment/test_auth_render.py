@@ -81,8 +81,13 @@ def test_config_changes_roll_only_the_affected_pods(tmp_path):
     assert all(re.fullmatch(r"[0-9a-f]{16}", value) for value in base.values())
     # 同样的配置再渲染一次(AI 密钥是另一套随机值)摘要不变:重跑安装脚本不会无谓地重启
     assert config_hashes(render_master(tmp_path / "again")[0]) == base
-    env = config_hashes(render_master(tmp_path / "env", ("ALERT_DEDUP_WINDOW=600",))[0])
+    env = config_hashes(render_master(tmp_path / "env", ("PG_POOL_MAX=30",))[0])
     assert {name for name in base if env[name] != base[name]} == {"kubedoor-master", "kubedoor-alarm", "kubedoor-ai"}
+    # 写进数据库的配置（去重窗口、远程写地址、访问地址等）保存后马上生效，改了不重启任何组件
+    settings = config_hashes(render_master(tmp_path / "settings", (
+        "ALERT_DEDUP_WINDOW=600", "METRICS_WRITE_URL=http://metrics.example.invalid:8428/api/v1/write",
+        "KUBEDOOR_EXTURL=https://kd.example.invalid", "AGENT_AUTH_REQUIRED=false"))[0])
+    assert settings == base
     nginx = config_hashes(render_master(tmp_path / "nginx", ("ENABLE_MCP=false",))[0])
     assert {name for name in base if nginx[name] != base[name]} == {"kubedoor-web"}
 
@@ -105,7 +110,8 @@ def test_master_gets_encryption_key_init_passwords_and_cron_token(tmp_path):
     assert {"secretRef": {"name": "kubedoor-auth-init"}} in container["envFrom"]
     keys = {item["valueFrom"]["secretKeyRef"]["key"] for item in container["env"] if "valueFrom" in item}
     assert keys == {"AI_INTERNAL_TOKEN", "AI_ENCRYPTION_KEY"}
-    assert docs[("ConfigMap", "kubedoor-config")]["data"]["AGENT_AUTH_REQUIRED"] == "false"
+    # Agent 连接是否必须带账号写进数据库的通用配置，不再放进 ConfigMap（只剩数据库连接）
+    assert all(key.startswith("PG_") for key in docs[("ConfigMap", "kubedoor-config")]["data"])
     cron = docs[("CronJob", "kubedoor-collect")]["spec"]["jobTemplate"]["spec"]["template"]["spec"]["containers"][0]
     assert 'X-Kubedoor-Token: ${AI_INTERNAL_TOKEN}' in cron["command"][-1]
     assert cron["env"][0]["valueFrom"]["secretKeyRef"] == {"name": "kubedoor-ai-security", "key": "AI_INTERNAL_TOKEN"}

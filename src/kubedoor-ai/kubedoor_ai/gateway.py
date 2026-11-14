@@ -69,6 +69,8 @@ DEPLOYMENT_SCHEDULES = {
 DEPLOYMENT_CHANGES = {"restart_deployment", "scale_deployment", *DEPLOYMENT_SCHEDULES}
 # 取「权限与审批」配置的超时（秒）：master 卡住时不能一直挂着工具调用
 POLICY_FETCH_TIMEOUT = 10
+# 取通用配置（GET /api/internal/settings）的超时（秒）
+SETTINGS_FETCH_TIMEOUT = 10
 # 源码缓存的定时清理间隔（秒）；每次下载完也会清理一次
 CODE_CLEANUP_INTERVAL = 3600
 # 数据查询从 kubedoor-ai 本地发起（source=direct）时的整体超时（秒）；参数里的 timeout 是连接、读写各自的
@@ -314,6 +316,22 @@ class Gateway:
         if isinstance(result, dict) and (result.get("success") is False or result.get("error")):
             raise AIError(str(redact(result.get("error") or result.get("message") or "操作失败")), 502, "operation_failed")
         return result
+
+    async def master_settings(self):
+        """master 的通用配置（GET /api/internal/settings），返回 data。以系统身份调用：只带内部令牌、
+        不带 X-User-Name（master 只对系统身份开放这个接口）。取不到或格式不对抛 AIError"""
+        try:
+            response = await self.http.get(self.master_url + "/api/internal/settings",
+                                           headers={"X-Kubedoor-Token": self.token}, timeout=SETTINGS_FETCH_TIMEOUT)
+            response.raise_for_status()
+            result = response.json()
+        except httpx.HTTPStatusError as exc:
+            raise AIError(f"KubeDoor 接口返回 HTTP {exc.response.status_code}", exc.response.status_code, "upstream_error") from None
+        except (httpx.HTTPError, ValueError):
+            raise AIError("KubeDoor 接口暂不可用", 502, "upstream_error") from None
+        if not isinstance(result, dict) or result.get("success") is not True or not isinstance(result.get("data"), dict):
+            raise AIError("KubeDoor 通用配置的格式无效", 502, "upstream_error")
+        return result["data"]
 
     async def executor_binding(self, ctx, source, expected_fingerprint=None, expected_revision=None):
         from kubedoor_tools import KubernetesExecutor

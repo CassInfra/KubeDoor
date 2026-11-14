@@ -1,21 +1,22 @@
 # K8S 事件告警规则配置说明
 
-> 适用于 KubeDoor 2.x。规则随安装器模板下发，修改后必须重启 master（不支持热重载）；事件存 PostgreSQL。文中 `./install.sh master` 指 `tools/legacy-install/install.sh`，只用于维护原配置式部署。网页安装完成后的规则调整可直接修改下文的 ConfigMap。
+> 适用于 KubeDoor 2.x。规则在 Web「系统管理 → 事件告警规则」页面配置（界面配置 / JSON 两种模式），存 PostgreSQL，保存后马上生效，不用重启 master；只有系统管理员能查看和修改。
 
 ## 概述
 
-KubeDoor 会持续采集每个被纳管集群的全部 K8S 事件（Event）并写入 PostgreSQL，同时按一份 JSON 规则文件判断哪些事件需要告警：命中规则的事件由 kubedoor-master 直接推送到 IM 机器人（企业微信、钉钉、飞书、Slack），并在「K8S事件详情」页标记为「已告警」。
+KubeDoor 会持续采集每个被纳管集群的全部 K8S 事件（Event）并写入 PostgreSQL，同时按事件告警规则判断哪些事件需要告警：命中规则的事件由 kubedoor-master 直接推送到 IM 机器人（企业微信、钉钉、飞书、Slack），并在「K8S事件详情」页标记为「已告警」。
 
 K8S 事件告警与 Prometheus 指标告警（vmalert → Alertmanager → kubedoor-alarm）是两条独立的链路：事件告警不经过 Alertmanager 和 kubedoor-alarm，不会出现在「告警面板」「K8S告警详情」里，也不受「告警屏蔽」影响。
 
 ## 功能特性
 
-- **规则驱动**：一份 JSON 规则文件作用于所有集群，用 `k8s` 字段区分集群。
+- **规则驱动**：一份规则作用于所有集群，用 `k8s` 字段区分集群。
 - **两级过滤**：先过忽略规则（任一命中即忽略），再按顺序匹配告警规则（第一条命中的生效）；`DELETED` 事件固定不告警。
-- **多条件匹配**：包含 / 不包含、开头 / 结尾、等于 / 不等于、次数比较，共 12 种条件，字符串比较不区分大小写。
-- **告警去重**：同一个事件在 `ALERT_DEDUP_WINDOW`（默认 300 秒）内只通知一次。
-- **可追溯**：事件全部入库（默认保留 90 天），命中告警规则的事件标记为「已告警」。
-- **按集群分群通知**：通知发往事件所在集群 agent 配置的机器人。
+- **多条件匹配**：包含 / 不包含、开头 / 结尾、等于 / 不等于、次数比较（大于 / 小于 / 大于等于 / 小于等于），共 12 种条件，字符串比较不区分大小写。
+- **页面配置，马上生效**：界面配置和 JSON 两种模式随时切换；保存前可以先「试运行」，看最近一段时间的真实事件会被怎么处理。
+- **告警去重**：同一个事件在去重窗口（「系统管理 → 通用配置」的「事件告警去重窗口」，默认 300 秒）内只通知一次。
+- **可追溯**：事件全部入库（默认保留 90 天），命中告警规则的事件标记为「已告警」；每次保存规则都记审计。
+- **按集群分群通知**：通知发往「系统管理 → 消息通知」里该集群单独配置的群，没有单独配置时用全局配置。
 
 ## 事件采集与入库链路
 
@@ -26,74 +27,55 @@ K8S 事件告警与 Prometheus 指标告警（vmalert → Alertmanager → kubed
   ▼
 kubedoor-master
   ├─ 校验后写入 PostgreSQL（k8s_events 表，同一个事件始终只有一行）
-  └─ 规则匹配 → 标记「已告警」→ 去重 → 直接调用 IM 机器人发送通知
+  └─ 规则匹配 → 标记「已告警」→ 去重 → 放进该集群通知群的发送队列
 ```
 
 - agent 每次连上 master 都会先分页 list 一遍集群里的事件，再 watch 后续变化；断线重连或 watch 过期（HTTP 410）后重新 list，只补发 master 还没收到的新增或变化的事件，不会把整个集群的事件重推一遍。agent 自身重启后不知道哪些已经发过，会把集群里现存的事件全部重新上报一次。
 - master 按「事件 UID + 集群」写库：同一个事件再次发生时，原地更新次数和最后时间。
 - 事件要先成功写库才会进入告警流程：PostgreSQL 不可用时，事件既不入库也不告警。
 
-## 规则文件与生效方式
+## 在哪里配置、什么时候生效
 
-### 1. 规则文件在哪里
+### 1. 规则存在哪里
 
-| 环节 | 位置 |
+| 情况 | 生效的规则 |
 | --- | --- |
-| 规则模板（唯一来源） | 仓库中的 [`src/kubedoor-setup/resources/manifests/master/alert_rules.json`](../src/kubedoor-setup/resources/manifests/master/alert_rules.json) |
-| 集群中 | 网页安装器或旧脚本把模板做成 ConfigMap `kubedoor-master-file-cfg`（key 为 `alert_rules.json`） |
-| master 容器内 | ConfigMap 挂载到 `/k8s_event/rules/`，master 读取 `/k8s_event/rules/alert_rules.json` |
+| 还没在页面上保存过 | 内置默认规则（master 镜像里的 [`k8s_event/default_alert_rules.json`](../src/kubedoor-master/k8s_event/default_alert_rules.json)，随版本更新），不写数据库。页面上显示「当前使用内置默认规则」 |
+| 在页面上保存过 | 数据库里保存的规则（`auth_settings` 表，key 为 `event_alert_rules`） |
+| 从旧版本升级 | 旧版本挂载的规则文件（ConfigMap `kubedoor-master-file-cfg`）在升级时原样导入数据库，只导入一次，之后以页面上保存的为准 |
 
-- master 镜像不自带规则文件，规则只能来自这个 ConfigMap。不用 install.sh、自行部署 master 时也必须按同样的路径挂载；不挂载时规则为空，事件照常入库，但**不会发出任何事件告警**。
-- 没有 Web 页面或接口可以修改规则，只能改文件或 ConfigMap。
-- 从 1.x 升级时，如果改过事件告警规则，请先把自定义内容合并进模板再安装，否则生效的是出厂规则。
+- 以前的 ConfigMap `kubedoor-master-file-cfg` 和它的挂载已经不用了：`install.sh upgrade` 迁移成功后会删掉它们（见 [部署文档](../deploy/README.md) 的升级章节）。
+- 导入旧规则时不做严格校验：原来的规则怎么匹配，导入后还怎么匹配（见下文「从旧规则文件导入的规则」）；在页面上保存时才按「保存时的校验」检查。
+- 数据库里一旦有了规则，就不会再从旧文件导入。页面上的「恢复默认」也是把默认规则载入编辑区、保存进数据库，不会删掉库里的规则。
 
 ### 2. 修改规则
 
-> **规则不支持热重载。** 每个 master 进程只加载一次规则（启动后收到第一条事件时）。ConfigMap 更新后，容器里的文件会被 kubelet 同步，但 master 不会重新读取，**改完必须重启 master**。
+打开「系统管理 → 事件告警规则」：
 
-**方式一：旧配置式部署修改模板后重新下发**
+- **界面配置**：「忽略规则」「告警规则」两组卡片，每条规则有启用开关、名称、级别（只有告警规则有）。条件按行填「字段 / 运算符 / 值」：字段和运算符都用下拉，只列合法的组合；「包含任一」这类可以填多个值的，输入后按回车（集群名、级别、常见原因等有候选项）。告警规则可以上移、下移，顺序就是优先级。
+- **JSON**：直接编辑规则的 JSON（结构见下文「规则的 JSON 结构」）。语法错误和不符合规则的地方标在出错的行上，下方列出原因，点一下跳到那一行；Ctrl+S 保存。
+- 两种模式随时切换。从 JSON 切回界面配置时，如果 JSON 里有界面表示不了的内容（比如不认识的字段、一个字段写了多个运算符），会列出来让你确认；选「留在 JSON」可以先改好。
+- **试运行**：用编辑区里的规则（还没保存的也算）对最近的真实事件跑一遍，见下文「试运行」。
+- **恢复默认**：把内置默认规则载入编辑区，检查、试运行后点「保存」才生效；保存前点「重新加载」可以放弃。
+- **保存**：先在页面上校验，有问题时标出来、不保存；保存成功提示「已保存，马上生效」，下一个事件就按新规则处理，不用重启 master 或 agent。已有的告警去重记录不受影响。
+- 有没保存的修改时页面上显示「未保存」，离开页面会提醒。
+- 每次保存记审计「修改事件告警规则」（只记规则条数和名称）。
 
-```bash
-cd tools/legacy-install
-vi ../../src/kubedoor-setup/resources/manifests/master/alert_rules.json
-python3 -m json.tool ../../src/kubedoor-setup/resources/manifests/master/alert_rules.json > /dev/null && echo "JSON OK"
-./install.sh master -c /path/to/original/kubedoor.conf                                    # 更新 ConfigMap
-kubectl -n kubedoor rollout restart deploy/kubedoor-master
-```
-
-- `./install.sh master` 会按 `kubedoor.conf` 重新下发控制端的全部配置，请使用安装时的那份配置文件（安装时用 `-c` 指定过的，这里也要带上）。
-- 脚本只更新 ConfigMap，不会因为规则变化而重启 master，最后一步不能省。
-
-**方式二：直接改集群里的 ConfigMap（立即修改）**
+### 3. 确认规则已生效
 
 ```bash
-kubectl -n kubedoor edit configmap kubedoor-master-file-cfg
-kubectl -n kubedoor rollout restart deploy/kubedoor-master
-```
-
-- 下次执行 `./install.sh master` 时，ConfigMap 会被模板覆盖，手工修改会丢失；需要保留的修改请同步到模板。
-- ConfigMap 里的 JSON 不会被校验，保存后可以导出检查：
-
-  ```bash
-  kubectl -n kubedoor get configmap kubedoor-master-file-cfg \
-    -o jsonpath='{.data.alert_rules\.json}' | python3 -m json.tool > /dev/null && echo "JSON OK"
-  ```
-
-master 采用 Recreate 方式重启，期间 Web 的数据接口会短暂不可用；agent 会自动重连，并补发这段时间的事件。
-
-### 3. 确认规则已加载
-
-```bash
-kubectl -n kubedoor logs deploy/kubedoor-master | grep 告警规则
+kubectl -n kubedoor logs deploy/kubedoor-master | grep 事件告警规则
 ```
 
 | 日志 | 含义 |
 | --- | --- |
-| `加载了 N 条告警规则` | 加载成功。N 只统计 `alert_rules`（含 `"enabled": false` 的，不含忽略规则），出厂文件为 7 |
-| `加载告警规则失败(规则文件需由 ConfigMap kubedoor-master-file-cfg 挂载到 k8s_event/rules/alert_rules.json): …` | 文件不存在（没有挂载），或 JSON 不合法（冒号后面是具体原因和行列号）。此时**所有事件告警都不会发出**，事件照常入库 |
+| `事件告警规则已加载:忽略规则 2 条(启用 2 条),告警规则 7 条(启用 7 条),来源:内置默认规则` | master 启动时打印一次，之后规则有变化（保存、直接改库）时再打印。来源是「数据库」或「内置默认规则」 |
+| `读取事件告警规则失败,继续使用上次加载的规则: …` | 读数据库失败（只在第一次失败时打印），继续用上一份规则，每 10 秒重试；恢复后打印「读取事件告警规则已恢复」 |
+| `…有 N 处格式不对的内容匹配时跳过…` | 从旧文件导入的规则里有不是对象的规则、不是数组的分组，匹配时跳过；在页面上改好后保存 |
+| `已把旧的事件告警规则文件 … 导入数据库` | 升级时导入了旧规则 |
+| `旧的事件告警规则文件 … 不是有效的规则 JSON,没有导入` | 旧文件不是合法的 JSON 或结构不对（以前这种情况也发不出任何事件告警），现在用的是内置默认规则，请在页面上重新配置 |
 
-- 这行日志在 master 重启后**收到第一条事件时**才打印，不是启动瞬间；集群暂时没有新事件时会晚一些出现。
-- 规则文件必须是严格的 JSON：不能写 `//` 注释，不能有尾逗号，引号必须是英文双引号。
+- master 每 10 秒从数据库刷新一次规则，直接改了数据库也能跟上；页面保存后立即生效，不用等刷新。
 
 ## 规则说明
 
@@ -106,21 +88,21 @@ kubectl -n kubedoor logs deploy/kubedoor-master | grep 告警规则
   ├─ 按数组顺序找第一条命中的告警规则      没有 → 结束
   ├─ 把该事件的「级别」改为「已告警」
   ├─ 同一事件在去重窗口内已通知过？        是 → 结束（日志「告警被去重阻止」）
-  └─ 发送 IM 通知，记录本次发送时间
+  └─ 记下本次时间，放进该集群通知群的发送队列
 ```
 
 - `global_ignore_rules`（忽略规则）：多条之间是 **OR** 关系，任意一条命中即忽略，不再看告警规则。
 - `alert_rules`（告警规则）：按数组顺序匹配，**第一条命中的规则生效**，后面的不再看。一条事件每次最多产生一条通知，所以**规则顺序就是优先级**，严重的放前面。
-- `"enabled": false` 的规则直接跳过；不写 `enabled` 视为启用。
-- 「已告警」标记在去重之前：被去重拦下或发送失败的事件，同样会标记为「已告警」。
+- 停用（`"enabled": false`）的规则直接跳过；JSON 里不写 `enabled` 视为启用，保存时补上 `true`。
+- 「已告警」标记在去重之前：被去重拦下的事件，同样会标记为「已告警」。
 
 ### 2. DELETED 事件说明
 
 `eventStatus=DELETED` 表示 K8S 删除了这个事件对象，通常是事件超过保留时间（kube-apiserver 的 `--event-ttl`，默认 1 小时）没有再次发生而被清理，并不是又发生了一次。所以 DELETED 事件不会进入任何规则、不会告警，但状态会更新到数据库，「K8S事件详情」的「状态」列显示「删除」。
 
-### 3. 规则文件结构
+### 3. 规则的 JSON 结构
 
-一个最小但完整的规则文件：
+JSON 模式里编辑的就是这个结构（和以前的规则文件 `alert_rules.json` 一样）。一份最小但完整的规则：
 
 ```json
 {
@@ -151,12 +133,13 @@ kubectl -n kubedoor logs deploy/kubedoor-master | grep 告警规则
 | --- | --- |
 | `global_ignore_rules` | 忽略规则数组 |
 | `alert_rules` | 告警规则数组 |
-| `name` | 规则名。告警规则的名字会出现在通知标题「K8S事件告警: 规则名」中 |
-| `enabled` | 是否启用，默认 `true` |
-| `severity` | 只对告警规则有意义：`critical` / `warning` / `info`，默认 `warning`。只决定通知里的图标和「级别」文字，不影响匹配、去重和发送目标 |
-| `conditions` | 条件：键是事件字段名（见「支持的事件字段」），值是 `{"条件类型": 值}`。写成空对象 `{}` 时匹配所有事件 |
+| `name` | 规则名，必填，最长 100 个字符。告警规则的名字会出现在通知标题「K8S事件告警: 规则名」中 |
+| `enabled` | 是否启用：`true` / `false`，不写视为 `true` |
+| `severity` | 只有告警规则有：`critical` / `warning` / `info`，不写视为 `warning`。只决定通知里的图标和「级别」文字，不影响匹配、去重和发送目标 |
+| `conditions` | 条件：键是事件字段名（见「支持的事件字段」），值是 `{"条件类型": 值}`，至少要有一个条件 |
 
-顶层键名必须是 `global_ignore_rules`、`alert_rules`，写错不会报错，只是那一组规则为空。
+- 顶层只能有 `global_ignore_rules`、`alert_rules` 两个键，两个都要写（没有规则时写成空数组 `[]`）。
+- JSON 必须严格合法：不能写 `//` 注释，不能有尾逗号，引号必须是英文双引号。页面会指出出错的行和原因。
 
 ### 4. 条件之间的关系
 
@@ -209,43 +192,60 @@ kubectl -n kubedoor logs deploy/kubedoor-master | grep 告警规则
 
 建议：
 
-- 写完后拿几个真实的集群名代入，按上面的表推一遍。
+- 写完后点「试运行」，看「被忽略规则忽略」的数量和例子；也可以拿几个真实的集群名代入，按上面的表推一遍。
 - `contains` / `not_contains` 是子串匹配，`preprod` 也「含 prod」。需要更精确时，统一集群命名后改用 `starts_with` / `not_starts_with`（例如生产集群都以 `prod-` 开头，见「常用写法示例」）。
 - 只想限制某一条告警规则的集群范围时，把 `k8s` 条件直接写进那条告警规则。告警规则是正向逻辑（条件成立才告警），不存在双重否定。
 
 ## 支持的条件类型
 
-| 条件类型 | 值的写法 | 多个值的关系 | 说明 | 示例 |
-| --- | --- | --- | --- | --- |
-| `contains` | 数组或单个字符串 | OR | 字段包含任一值 | `{"reason": {"contains": ["OOM", "Failed"]}}` |
-| `not_contains` | 数组或单个字符串 | AND | 字段不包含其中任何一个值 | `{"namespace": {"not_contains": ["test", "dev"]}}` |
-| `starts_with` | 数组或单个字符串 | OR | 字段以任一值开头 | `{"name": {"starts_with": ["deploy-"]}}` |
-| `not_starts_with` | 数组或单个字符串 | AND | 字段不以其中任何一个值开头 | `{"name": {"not_starts_with": ["test-"]}}` |
-| `ends_with` | 数组或单个字符串 | OR | 字段以任一值结尾 | `{"name": {"ends_with": ["-service", "-pod"]}}` |
-| `not_ends_with` | 数组或单个字符串 | AND | 字段不以其中任何一个值结尾 | `{"name": {"not_ends_with": ["-test", "-debug"]}}` |
-| `equals` | 单个值 | — | 字段等于该值 | `{"level": {"equals": "Warning"}}` |
-| `not_equals` | 单个值 | — | 字段不等于该值 | `{"kind": {"not_equals": "Node"}}` |
-| `greater_than` | 数字 | — | 次数大于该值（仅 `count` 字段） | `{"count": {"greater_than": 3}}` |
-| `less_than` | 数字 | — | 次数小于该值（仅 `count` 字段） | `{"count": {"less_than": 10}}` |
-| `greater_equal` | 数字 | — | 次数大于等于该值（仅 `count` 字段） | `{"count": {"greater_equal": 3}}` |
-| `less_equal` | 数字 | — | 次数小于等于该值（仅 `count` 字段） | `{"count": {"less_equal": 10}}` |
+| 条件类型 | 界面上的名称 | 值的写法 | 多个值的关系 | 说明 | 示例 |
+| --- | --- | --- | --- | --- | --- |
+| `contains` | 包含任一 | 字符串数组 | OR | 字段包含任一值 | `{"reason": {"contains": ["OOM", "Failed"]}}` |
+| `not_contains` | 不包含任何 | 字符串数组 | AND | 字段不包含其中任何一个值 | `{"namespace": {"not_contains": ["test", "dev"]}}` |
+| `starts_with` | 开头是任一 | 字符串数组 | OR | 字段以任一值开头 | `{"name": {"starts_with": ["deploy-"]}}` |
+| `not_starts_with` | 开头不是任何 | 字符串数组 | AND | 字段不以其中任何一个值开头 | `{"name": {"not_starts_with": ["test-"]}}` |
+| `ends_with` | 结尾是任一 | 字符串数组 | OR | 字段以任一值结尾 | `{"name": {"ends_with": ["-service", "-pod"]}}` |
+| `not_ends_with` | 结尾不是任何 | 字符串数组 | AND | 字段不以其中任何一个值结尾 | `{"name": {"not_ends_with": ["-test", "-debug"]}}` |
+| `equals` | 等于 | 单个字符串或数字 | — | 整个值相等；`""` 表示字段为空 | `{"level": {"equals": "Warning"}}` |
+| `not_equals` | 不等于 | 单个字符串或数字 | — | 整个值不相等 | `{"kind": {"not_equals": "Node"}}` |
+| `greater_than` | 大于 | 数字 | — | 次数大于该值（只能用于 `count`） | `{"count": {"greater_than": 3}}` |
+| `less_than` | 小于 | 数字 | — | 次数小于该值（只能用于 `count`） | `{"count": {"less_than": 10}}` |
+| `greater_equal` | 大于等于 | 数字 | — | 次数大于等于该值（只能用于 `count`） | `{"count": {"greater_equal": 3}}` |
+| `less_equal` | 小于等于 | 数字 | — | 次数小于等于该值（只能用于 `count`） | `{"count": {"less_equal": 10}}` |
 
-值写成单个字符串时，等同于只有一个元素的数组。
+### 保存时的校验
 
-### 注意事项
+页面保存（和试运行）前会严格检查，有问题时指出位置，例如「告警规则第 3 条「重启事件告警」的条件 count：greater_than 的值必须是数字」。master 也按同样的规则再检查一遍：
 
-1. **一个字段只认一个条件类型**：同一字段写了多个条件类型时，只按以下顺序取第一个，其余忽略：`contains` → `not_contains` → `starts_with` → `not_starts_with` → `ends_with` → `not_ends_with` → `equals` → `not_equals` → `greater_than` → `less_than` → `greater_equal` → `less_equal`。例如 `"count": {"greater_than": 1, "less_than": 10}` 只按 `greater_than` 判断。同一条规则里同一个字段名也只能出现一次（重复时只有最后一个生效）。需要「或」时拆成多条告警规则；需要「且」（如次数区间、包含 A 但不含 B）时只能借助忽略规则（忽略规则对所有告警规则生效）。
-2. **条件类型拼错不会报错，而是恒成立**：例如把 `contains` 写成 `contain`，该条件永远满足。写在告警规则里会误报，写在忽略规则里可能把事件全部忽略。
-3. **数值条件只对 `count` 生效**：写在其它字段上同样恒成立。数值要写成 JSON 数字（`1`）；写成字符串（`"1"`）时该条件不成立，master 日志提示「无法将count字段转换为数值」。
-4. **字段名写错或大小写不对**（如 `Reason`）：`not_contains`、`not_starts_with`、`not_ends_with` 视为成立，其它条件视为不成立。字段名请严格按「支持的事件字段」书写。
-5. **`equals` / `not_equals` 只接受单个值**：写成数组不会报错，但永远不相等。需要多个值时用 `contains`、`starts_with` 等。
-6. **会匹配所有事件的写法**：空条件 `{}`；`contains` / `starts_with` / `ends_with` 的值里有空字符串 `""`；`not_contains` / `not_starts_with` / `not_ends_with` 的值是空数组 `[]`。想停用一条规则请设 `"enabled": false`，不要只清空值列表。
+- 顶层只能有 `global_ignore_rules`、`alert_rules` 两个键，两个都是数组；每组最多 200 条。
+- 每条规则是对象，只能有 `name`、`enabled`、`severity`（只有告警规则）、`conditions`；名称必填，最长 100 个字符；`enabled` 只能是 `true` / `false`；`severity` 只能是 `critical`、`warning`、`info`。
+- 至少要有一个条件（没有条件会匹配所有事件）。
+- 字段只能是「支持的事件字段」里的 14 个，区分大小写（写成 `Reason` 会提示应为 `reason`）。
+- 每个字段**恰好一个**条件类型，而且只能是上表的 12 种。需要「或」时拆成多条告警规则；需要「且」（如次数区间、包含 A 但不含 B）时可以借助忽略规则（忽略规则对所有告警规则生效）。
+- 列表型条件（前 6 种）的值是非空的字符串数组：不能写成单个字符串，不能有空字符串或只有空格的值；最多 200 个值，每个最长 1000 个字符。
+- `equals` / `not_equals` 的值是一个字符串或数字（不能是数组）。
+- 数值条件只能用在 `count` 上，值必须是数字（写成 `"1"` 不行）。
+- JSON 模式里同一个对象里的键不能重复（例如同一条规则写了两个 `"reason"`）。
+
+### 从旧规则文件导入的规则
+
+升级时导入的规则原样保存，不做严格校验。在页面上保存之前，匹配时仍按以前的宽松方式处理，和升级前的效果完全一样：
+
+1. **一个字段写了多个条件类型时只认一个**：按 `contains` → `not_contains` → `starts_with` → `not_starts_with` → `ends_with` → `not_ends_with` → `equals` → `not_equals` → `greater_than` → `less_than` → `greater_equal` → `less_equal` 的顺序取第一个，其余忽略。例如 `"count": {"greater_than": 1, "less_than": 10}` 只按 `greater_than` 判断。
+2. **条件类型拼错不会报错，而是恒成立**：例如把 `contains` 写成 `contain`，该条件永远满足。写在告警规则里会误报，写在忽略规则里可能把事件全部忽略。数值条件写在 `count` 以外的字段上也恒成立。
+3. **数值写成字符串**（`"1"`）时该条件不成立，master 日志提示「无法将count字段转换为数值」。
+4. **字段名写错或大小写不对**（如 `Reason`）：`not_contains`、`not_starts_with`、`not_ends_with` 视为成立，其它条件视为不成立。
+5. **`equals` / `not_equals` 写成数组**不会报错，但永远不相等。
+6. **列表型条件的值写成单个字符串**时，等同于只有一个元素的数组。
+7. **会匹配所有事件的写法**：空条件 `{}`；`contains` / `starts_with` / `ends_with` 的值里有空字符串 `""`；`not_contains` / `not_starts_with` / `not_ends_with` 的值是空数组 `[]`。
+
+打开页面时，如果导入的规则里有界面配置表示不了的内容，页面会用 JSON 模式打开并列出来；按「保存时的校验」改好后保存。改好后可以用「试运行」对比改之前和改之后的效果。
 
 ## 支持的事件字段
 
 | 字段名 | 含义 | 来源（K8S Event） | 「K8S事件详情」中 | 说明 |
 | --- | --- | --- | --- | --- |
-| `k8s` | 集群名 | 该集群 agent 的 `K8S_NAME` | 筛选项「K8S」 | 按集群区分规则只能用它 |
+| `k8s` | 集群名 | 该集群 Agent 的集群名 | 筛选项「K8S」 | 按集群区分规则只能用它 |
 | `namespace` | 命名空间 | `involvedObject.namespace` | 命名空间 | 集群级对象（如 Node）为空 |
 | `kind` | 对象类型 | `involvedObject.kind` | 类型 | Pod、Node、Deployment 等 |
 | `name` | 对象名称 | `involvedObject.name` | 名称 | 如 Pod 名 `deploy-demo-7f7d9bc955-6z2m4` |
@@ -260,13 +260,13 @@ kubectl -n kubedoor logs deploy/kubedoor-master | grep 告警规则
 | `lastTimestamp` | 最后发生时间 | `lastTimestamp` | 最后时间 | 同上 |
 | `eventUid` | 事件唯一 ID | `metadata.uid` | — | 去重依据，一般不用于规则 |
 
-- 字段名区分大小写，必须按上表书写。
-- 一份规则作用于所有集群。`k8s` 的值是安装该集群 agent 时 `kubedoor.conf` 里的 `K8S_NAME`，也就是 Web 上显示的集群名。
+- 字段名区分大小写，必须按上表书写；界面配置里从下拉选择。
+- 一份规则作用于所有集群。`k8s` 的值是安装该集群 Agent 时填写的集群名，也就是 Web 上显示的集群名（界面配置里有已注册集群的候选项）。
 - 部分事件（例如调度器上报的 FailedScheduling）可能不带次数和来源：「次数」为 0、「来源」为空，不要对这类事件依赖 `count` 条件。
 
 ## 出厂默认规则
 
-`./install.sh master` 默认下发 [`src/kubedoor-setup/resources/manifests/master/alert_rules.json`](../src/kubedoor-setup/resources/manifests/master/alert_rules.json)：2 条忽略规则 + 7 条告警规则。
+内置在 master 镜像里：[`src/kubedoor-master/k8s_event/default_alert_rules.json`](../src/kubedoor-master/k8s_event/default_alert_rules.json)，2 条忽略规则 + 7 条告警规则。还没在页面上保存过时用它（随版本更新）；页面上的「恢复默认」也是载入它。
 
 忽略规则（`global_ignore_rules`，任一命中即忽略）：
 
@@ -296,7 +296,7 @@ kubectl -n kubedoor logs deploy/kubedoor-master | grep 告警规则
 
 ## 常用写法示例
 
-以下每段都是一条完整的规则，放进对应数组即可（注意数组元素之间的逗号）。
+以下每段都是一条完整的规则：JSON 模式里放进对应的数组即可（注意数组元素之间的逗号）；界面配置里照着填字段、运算符和值。
 
 **只告警生产集群**（集群名统一以 `prod-` 开头时），放进 `global_ignore_rules`：
 
@@ -349,6 +349,20 @@ kubectl -n kubedoor logs deploy/kubedoor-master | grep 告警规则
 }
 ```
 
+## 试运行
+
+页面上的「试运行」用编辑区里的规则（还没保存的也算，先过「保存时的校验」）对数据库里最近一段时间的事件跑一遍匹配，和实时处理用的是同一套匹配代码：
+
+- 时间范围可选最近 1 小时 ~ 7 天，也可以只看某个集群；最多取最近的 10000 条事件，超出时页面上会说明。
+- 结果：参与的事件数、被忽略规则忽略的、命中告警规则的、没有命中的；每条忽略规则忽略了多少、每条告警规则命中了多少，以及「被前面的规则先命中」的数量（这条规则也能命中，但排在前面的规则先命中了）。展开可以看例子，每条规则最多 5 个。
+- 只统计，不发通知，也不改事件。
+
+数据库里每个事件只有一行、只保存最新的状态，所以试运行和实际发送会有这些差别：
+
+- 每个事件只算一次；实际发不发、发几次还要看去重窗口和事件更新的次数。
+- 已经是「删除」状态的事件（K8S 清理了事件对象）按删除前的状态参与匹配：次数大于 1 当成 MODIFIED，否则当成 ADDED。
+- 级别已经被改成「已告警」的事件，原来的级别没有记录，按 Warning 参与匹配。
+
 ## 告警通知
 
 ### 1. 发到哪里
@@ -365,6 +379,7 @@ K8S 事件告警由 master 直接调用 IM 机器人的 Webhook 发送，发到�
 - 机器人地址可以直接粘贴整条 Webhook 地址，也可以只填密钥部分：企业微信是 `key=` 后面的值，钉钉是 `access_token=` 后面的值，飞书是 `/hook/` 后面的值，Slack 是 `/services/` 后面的路径。
 - 钉钉机器人的安全设置请把「自定义关键词」设为「告警」。
 - 修改后马上生效，不用重启 master 或 agent；页面上的「发送测试消息」可以先验证机器人是否可用。
+- 发送在后台按机器人排队、限速（群机器人大约每分钟只收 20 条），不会拖慢事件处理。
 
 ### 2. 消息格式
 
@@ -381,7 +396,7 @@ K8S 事件告警由 master 直接调用 IM 机器人的 Webhook 发送，发到�
 • 来源: kubelet/node-01
 ```
 
-- 第一行的图标由 `severity` 决定：`critical` 为 🚨，`warning` 为 ⚠️，`info` 为 ℹ️，其它值按 ⚠️ 显示；后面是规则名。
+- 第一行的图标由 `severity` 决定：`critical` 为 🚨，`warning` 为 ⚠️，`info` 为 ℹ️；后面是规则名。
 - 「级别」是 `severity` 的大写；「时间」是事件的首次 ~ 最后发生时间（北京时间）；「原因」后面是累计次数；「来源」是 `reportingComponent/reportingInstance`。
 - 消息会 @「消息通知」里配置的默认 @ 人（该集群单独配置的优先）。
 
@@ -389,14 +404,13 @@ K8S 事件告警由 master 直接调用 IM 机器人的 Webhook 发送，发到�
 
 | 项目 | 说明 |
 | --- | --- |
-| 参数 | `ALERT_DEDUP_WINDOW`，单位秒，默认 `300` |
-| 配置位置 | `kubedoor.conf` → ConfigMap `kubedoor-config` → master 的环境变量 |
-| 修改 | 改 `kubedoor.conf` 后执行 `./install.sh master`，或 `kubectl -n kubedoor edit configmap kubedoor-config`；两种方式都要再执行 `kubectl -n kubedoor rollout restart deploy/kubedoor-master` |
+| 参数 | 「系统管理 → 通用配置」的「事件告警去重窗口（秒）」，默认 `300`，`0` 表示不去重 |
+| 修改 | 在页面上修改，保存后马上生效（每次判断去重时都取最新的值），不用重启 |
 | 去重对象 | 同一个 K8S 事件对象（事件 UID）。同一 Pod 的不同原因、不同 Pod 的同类事件都算不同事件，各自通知 |
 | 效果 | 事件在窗口内持续更新（次数增加）时只通知一次；窗口过后再次更新会再通知，相当于每个窗口最多一条 |
-| 与规则的关系 | 只看事件，不看命中的规则：同一事件在窗口内即使改为命中另一条规则，也不会再发 |
+| 与规则的关系 | 只看事件，不看命中的规则：同一事件在窗口内即使改为命中另一条规则，也不会再发；修改、保存规则不会清掉去重记录 |
 | 存储 | master 进程内存，master 重启后清空 |
-| 记录时机 | 发送没有报错才记录；网络异常等导致发送失败时，事件下次更新会再次尝试 |
+| 记录时机 | 放进发送队列时记录；同一个事件同时到达多次也只发一条。发送在后台进行，IM 返回失败只记日志，不会重发 |
 | 作用范围 | 只用于 K8S 事件告警。Prometheus 指标告警的重复通知由 Alertmanager 控制，与这个参数无关 |
 
 ## 查看事件与告警记录
@@ -406,12 +420,12 @@ K8S 事件告警由 master 直接调用 IM 机器人的 Webhook 发送，发到�
 - 「状态」列显示新增 / 更新 / 删除（删除的含义见「DELETED 事件说明」）。
 - 筛选条件会同步到浏览器地址栏，复制链接即可分享。
 - 「资源管理 → Pod」页每行的「事件」按钮，会在新标签页打开该 Pod 最近 7 天的事件。
-- 事件默认保留 90 天，由 `RETENTION_EVENTS_DAYS` 控制（定义在 [`src/kubedoor-setup/resources/manifests/master/10-config.yaml`](../src/kubedoor-setup/resources/manifests/master/10-config.yaml)，`0` 表示不清理），master 每天清理一次。
+- 事件默认保留 90 天，在「系统管理 → 通用配置」的「K8S 事件保留天数」修改（`0` 表示不清理），master 每天清理一次。
 
 ## 与告警屏蔽的关系
 
 - 「监控告警 → 告警屏蔽」只作用于经过 kubedoor-alarm 的告警（Prometheus 指标告警，以及 `/api/custom_alert` 写入的自定义告警；屏蔽判断在 kubedoor-alarm 中进行，见 [告警屏蔽说明](../docs/alert-silence.md)）。K8S 事件告警由 master 直接发出，**不受屏蔽规则影响**。
-- 想停掉某类事件告警：加一条忽略规则，或把对应的告警规则设为 `"enabled": false`，然后重启 master。事件告警没有到期自动解除的屏蔽，临时加的忽略规则用完记得删掉。
+- 想停掉某类事件告警：加一条忽略规则，或把对应的告警规则停用，保存后马上生效。事件告警没有到期自动解除的屏蔽，临时加的忽略规则用完记得删掉。
 
 ## 排查清单
 
@@ -419,26 +433,26 @@ K8S 事件告警由 master 直接调用 IM 机器人的 Webhook 发送，发到�
 
 ```bash
 # master：规则加载、命中、去重、发送
-kubectl -n kubedoor logs deploy/kubedoor-master | grep -E '告警规则|事件匹配规则|告警被去重阻止|告警已发送|发送告警失败'
+kubectl -n kubedoor logs deploy/kubedoor-master | grep -E '事件告警规则|事件匹配规则|告警被去重阻止|告警已提交发送|发送告警失败|消息通知'
 
 # agent：事件采集（在对应的业务集群执行）
 kubectl -n kubedoor logs deploy/kubedoor-agent | grep 'K8S事件'
 ```
 
-master 日志里带 `【wecom】`、`【dingding】`、`【feishu】`、`【slack】` 的行是机器人接口的返回内容；「告警已发送」只表示已经调用发送，是否被 IM 接受要看这一行。
+「告警已提交发送」只表示放进了发送队列；IM 是否接受看后面的「消息通知已发送(集群 xx,企业微信)」或「消息通知发送失败(…):原因」。
 
 | 现象 | 可能原因 | 处理 |
 | --- | --- | --- |
-| 改了规则不生效 | master 没有重启；或重跑 `./install.sh master` 后，ConfigMap 被模板覆盖 | `kubectl -n kubedoor rollout restart deploy/kubedoor-master`，确认日志「加载了 N 条告警规则」；长期修改写进模板 |
-| 完全没有事件告警，日志有「加载告警规则失败」 | JSON 不合法（注释、尾逗号、中文引号），或 ConfigMap 没有挂载 | 按报错的行列号修正，重启 master |
-| 日志是「加载了 0 条告警规则」 | `alert_rules` 为空或键名写错 | 检查顶层键名 |
+| 改了规则不生效 | 没有点「保存」（页面上有「未保存」标记）；事件先被忽略规则或排在前面的告警规则命中 | 保存后日志会打印「事件告警规则已加载」；用「试运行」看事件被哪条规则处理 |
+| 日志「读取事件告警规则失败」 | 连不上 PostgreSQL | 恢复数据库；期间继续用上一次加载的规则 |
+| 完全没有事件告警 | 告警规则都停用了，或忽略规则太宽（例如 `not_contains` 写反）；或全局和该集群都没有配置通知 | 用「试运行」看「被忽略规则忽略」的数量和例子；在「系统管理 → 消息通知」检查配置并发送测试消息 |
 | 某些集群完全没有事件告警 | 忽略规则里的 `k8s` 条件写反（`not_contains` 双重否定）；或全局和该集群都没有配置通知 | 按「忽略规则里的双重否定」中的表自查；在「系统管理 → 消息通知」检查配置并发送测试消息 |
 | 「K8S事件详情」查不到某集群的事件 | agent 不在线或采集出错，与规则无关 | 在「Agent管理」页确认「状态」为「在线」；agent 日志里应有「K8S事件监控已启动」，不应反复出现「K8S事件 list/watch 失败」 |
-| 事件存在，但「级别」不是「已告警」 | 被忽略规则吞掉、条件不满足、被 `DELETED` 跳过、字段名或条件类型写错 | 拿事件的各字段值逐条对照规则，注意子串匹配和大小写不敏感 |
-| 已标记「已告警」，但没收到通知 | 处于去重窗口内；「消息通知」里该集群（或全局）的机器人没配置或填错；钉钉关键词不是「告警」 | 看 master 日志「告警被去重阻止」「发送告警失败」以及机器人返回内容 |
-| 告警发到了另一个群 | 事件告警用的是事件所在集群 agent 的机器人，不是 master 的 | 修改该集群的 `kubedoor-agent-config` 并重启 agent |
-| 同一个问题收到多条通知 | 不同 Pod 或不同事件对象各算一条；master 重启后去重记录清空；agent 重启后会把集群里仍存在的事件重新上报，超过去重窗口的可能再通知一次 | 调大 `ALERT_DEDUP_WINDOW`，或给规则加 `count` 条件 |
+| 事件存在，但「级别」不是「已告警」 | 被忽略规则吞掉、条件不满足、被 `DELETED` 跳过 | 用「试运行」选上这个集群和时间段，看事件被哪条规则处理；注意子串匹配和大小写不敏感 |
+| 已标记「已告警」，但没收到通知 | 处于去重窗口内；「消息通知」里该集群（或全局）的机器人没配置或填错；钉钉关键词不是「告警」 | 看 master 日志「告警被去重阻止」「消息通知发送失败」以及 IM 返回的错误 |
+| 告警发到了另一个群 | 该集群在「消息通知」里没有单独配置，用的是全局配置 | 在「系统管理 → 消息通知」给该集群单独配置 |
+| 同一个问题收到多条通知 | 不同 Pod 或不同事件对象各算一条；master 重启后去重记录清空；agent 重启后会把集群里仍存在的事件重新上报，超过去重窗口的可能再通知一次 | 调大通用配置里的「事件告警去重窗口」，或给规则加 `count` 条件 |
 | 日志「更新事件数据失败」 | 写 PostgreSQL 失败，这些事件不会告警 | 检查数据库连接 |
-| 日志「无法将count字段转换为数值」 | 数值条件写成了字符串 | 改成 JSON 数字 |
+| 日志「无法将count字段转换为数值」 | 从旧规则文件导入、还没在页面上保存过的规则里，数值条件写成了字符串 | 在页面上改成数字后保存（页面保存时会检查） |
 
 更多部署与配置修改方法见 [部署文档](../deploy/README.md)。

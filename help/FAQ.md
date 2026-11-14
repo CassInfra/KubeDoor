@@ -10,7 +10,7 @@ kubectl -n kubedoor logs deploy/kubedoor-master --tail=100   # 控制端
 kubectl -n kubedoor logs deploy/kubedoor-agent --tail=100    # 集群端，在对应的业务集群执行
 ```
 
-文中尖括号里的内容（如 `<K8S_NAME>`、`<PG_HOST>`、`<控制端节点IP>`、`<Web NodePort>`）请换成自己的值；`origin_prometheus` 是 `PROM_K8S_TAG_KEY` 的出厂值，改过的请换成自己的。
+文中尖括号里的内容（如 `<K8S_NAME>`、`<PG_HOST>`、`<控制端节点IP>`、`<Web NodePort>`）请换成自己的值；`origin_prometheus` 是集群指标标签 key（「系统管理 → 通用配置 · 时序数据库」）的出厂值，改过的请换成自己的。
 
 ---
 
@@ -18,7 +18,7 @@ kubectl -n kubedoor logs deploy/kubedoor-agent --tail=100    # 集群端，在�
 
 ### Q：Java 服务的 Dump、Jstack、JFR 文件上传到哪里？对象存储要怎么配置？
 
-对 Java Pod 执行「Dump」「Jstack」「JFR」时，KubeDoor 会在**业务 Pod 的容器里**用 `curl -T` 把生成的文件直接上传到对象存储，地址为 `<OSS_URL>/<K8S_NAME>/<dump|jstack|jfr>/<文件名>`，上传成功后把这个地址作为下载链接推送到 IM。
+对 Java Pod 执行「Dump」「Jstack」「JFR」时，KubeDoor 会在**业务 Pod 的容器里**用 `curl -T` 把生成的文件直接上传到对象存储，地址为 `<对象存储上传地址>/<K8S_NAME>/<dump|jstack|jfr>/<文件名>`（上传地址在「系统管理 → 通用配置 · 对象存储」配置），上传成功后把这个地址作为下载链接推送到 IM。
 
 Dump、Jstack 的执行结果会显示在页面弹窗里，末尾就是文件的下载地址：
 
@@ -37,7 +37,7 @@ Jstack：先显示线程栈，下载地址在最末尾（截图未滚动到底�
 
 目前上传**不带账号密码**，对象存储需要允许 Pod 所在的内网免认证直接上传。以华为云 OBS 为例：
 
-1. 创建一个桶，`kubedoor.conf` 里的 `OSS_URL` 填桶的访问域名，如 `https://<桶名>.obs.<区域>.myhuaweicloud.com`（装完后再改的话，修改 `kubedoor-agent-config` 这个 ConfigMap 并重启 `deploy/kubedoor-agent`）。
+1. 创建一个桶，在「系统管理 → 通用配置 · 对象存储」把上传地址填成桶的访问域名，如 `https://<桶名>.obs.<区域>.myhuaweicloud.com`（网页安装时也可以在安装向导第 4 步填）。改了马上对新版 Agent 生效；旧版 Agent 仍用安装时写进去的地址，升级 Agent 镜像后改用通用配置。
 2. 给桶加一条内网读写、外网只读的桶策略：点击「编辑桶策略」，选择「JSON视图」，输入以下内容（把 `<桶名>` 换成你的桶名）：
 
 ```json
@@ -88,7 +88,7 @@ Jstack：先显示线程栈，下载地址在最末尾（截图未滚动到底�
 - `SourceIp` 是允许免认证读写的内网网段，示例为 `10.0.0.0/8` 和 `100.0.0.0/8`，请按集群节点 / Pod 访问 OBS 时的实际出口网段调整。
 - 这条策略只对 `SourceIp` 里的网段生效。下载链接如果要在这些网段之外（如办公网、公网）打开，还需要给桶额外开放外网只读（匿名读取对象），不要开放外网写入。
 - 业务容器里需要有 `curl`：没有时只会在 Alpine 镜像里自动执行 `apk add curl`，其它镜像需要自带 `curl`，否则这几个操作会直接失败。
-- `OSS_URL` 为空时，这几个功能无法上传文件。dump 文件通常较大，建议给桶配置生命周期规则定期清理。
+- 没有配置对象存储上传地址时，Dump、JFR 会直接提示去通用配置填写，Jstack 仍显示线程栈但不上传文件。dump 文件通常较大，建议给桶配置生命周期规则定期清理。
 
 ---
 
@@ -177,13 +177,12 @@ Web 里的 nginx 启动时要解析配置中引用的 Service（`kubedoor-master
 
 | 改了什么 | 执行 `kubectl -n kubedoor rollout restart …` |
 |---|---|
-| `kubedoor-config`（数据库、时序库等；通知在「系统管理 → 消息通知」配置，不在这里） | `deploy/kubedoor-master deploy/kubedoor-alarm`；改了 `PG_*` 再加 `deploy/kubedoor-ai` |
-| `kubedoor-master-file-cfg`（K8S 事件告警规则） | `deploy/kubedoor-master` |
+| `kubedoor-config` / Secret `kubedoor-connection`（只有数据库连接；时序库、访问地址、数据保留等在「系统管理 → 通用配置」，通知、事件告警规则也在「系统管理」里，改了马上生效，不用重启） | `deploy/kubedoor-master deploy/kubedoor-alarm deploy/kubedoor-ai` |
 | `vmalert-config`（指标告警规则和阈值） | `deploy/vmalert` |
 | `alertmanager-config`（告警路由、通知地址） | `deploy/alertmanager` |
 | `nginx-config` | `deploy/kubedoor-web` |
 | `kubedoor-grafana-config`（看板数据源的数据库、时序库地址） | `deploy/kubedoor-dash` |
-| 集群端 `kubedoor-agent-config`（`PROM_K8S_TAG_VALUE`、`OSS_URL` 等；连接 master 的地址和账号在 Secret `kubedoor-agent-credentials`） | `deploy/kubedoor-agent`（在该业务集群执行） |
+| 集群端 `kubedoor-agent-config`（`PROM_K8S_TAG_VALUE` 等；连接 master 的地址和账号在 Secret `kubedoor-agent-credentials`） | `deploy/kubedoor-agent`（在该业务集群执行） |
 | 集群端 `vmagent-config`（抓取任务） | `deploy/vmagent`（在该业务集群执行） |
 
 - 重跑 `./install.sh` 会用模板覆盖手工 `kubectl edit` 过的 ConfigMap，想长期保留的修改请写进 `kubedoor.conf` 或 `src/kubedoor-setup/resources/manifests/` 下的模板。
@@ -207,7 +206,7 @@ Web 里的 nginx 启动时要解析配置中引用的 Service（`kubedoor-master
 2. 用 `helm list -A` 找到旧版的 release，`helm uninstall` 卸载。
 3. 按[部署文档](../deploy/README.md)起 PostgreSQL，再安装控制端和集群端。
 
-自定义过的 K8S 事件告警规则，先合并进 `src/kubedoor-setup/resources/manifests/master/alert_rules.json` 再安装。镜像更新规则和仓库凭据改在「系统管理 → 镜像管理」中维护；运行 `./install.sh master` 会将旧配置一次性迁入数据库，确认成功后清理本地旧赋值，已有数据库配置不会被覆盖。详见[镜像更新配置说明](K8S微服务镜像更新配置说明.md#从旧配置升级)。
+自定义过的 K8S 事件告警规则，装好后在「系统管理 → 事件告警规则」里重新配置（JSON 模式可以直接粘贴原来的规则）。镜像更新规则和仓库凭据改在「系统管理 → 镜像管理」中维护；运行 `./install.sh master` 会将旧配置一次性迁入数据库，确认成功后清理本地旧赋值，已有数据库配置不会被覆盖。详见[镜像更新配置说明](K8S微服务镜像更新配置说明.md#从旧配置升级)。
 
 ### Q：卸载要注意什么？
 
@@ -243,7 +242,7 @@ kubectl -n kubedoor logs deploy/kubedoor-agent --tail=50
 | Web 前加了 HTTPS | `wss://<Agent账号>:<口令>@<域名>`（agent 不校验证书） |
 
 - agent 一律要带账号口令（同集群也一样），由 master 校验。内置 Agent 账号是 `Up4biLko1dNh`（出厂口令 `qCa22jDkfc9y`），也可以在「系统管理 → 用户与权限」里另建全局权限为「Agent 账号」的本地账号，给不同集群用不同口令。普通 Web 账号不能注册 agent。
-- 从旧版升级、同集群 agent 还没改地址时，可以临时在 `kubedoor.conf` 设 `AGENT_AUTH_REQUIRED="false"`（或改 `kubedoor-config` 后重启 master）过渡。
+- 从旧版升级、同集群 agent 还没改地址时，可以临时在「系统管理 → 通用配置 · 登录与安全」关掉「Agent 连接必须带账号」过渡（马上生效），改完记得打开。
 - 地址后面不要带 `/ws` 之类的路径，agent 会自己拼上 `/ws?env=…`。口令里有 `@`、`:`、`/` 等 URL 特殊字符时要做 URL 编码（如 `@` 写成 `%40`）。
 - 口令错误时 master 日志里有 `[鉴权] 拒绝 agent 连接 …`；连续输错 5 次会锁 15 分钟。
 - 在业务集群的任一节点上用 curl 验证网络和账号：返回 `400` 表示网络和账号都没问题，`401` 是没带账号或口令错误，`403` 是这个账号不是 Agent 账号，`429` 是输错太多次被临时锁定，超时或拒绝连接说明网络、NodePort 不通。
@@ -413,6 +412,8 @@ KubeDoor 自带的 vmagent 用 `role: node` 发现节点，直接按 HTTP 抓每
 
 ### Q：已经有 Prometheus / VictoriaMetrics，怎么接入？
 
+网页安装在向导第 3 步填已有时序库的读写地址；装好后在「系统管理 → 通用配置 · 时序数据库」修改（类型选 Prometheus 时 AI 的指标查询不可用）。下面是旧配置式部署（`tools/legacy-install`）的写法：
+
 ```bash
 # 控制端
 PROM_URL="http://<用户>:<密码>@<时序库地址>:<端口>"   # 读地址；VM 集群版填 vmselect 的 .../select/0/prometheus
@@ -426,8 +427,8 @@ ENABLE_KUBE_STATE_METRICS="false"
 ENABLE_NODE_EXPORTER="false"
 ```
 
-- master 只有一个 `PROM_URL`：所有集群的数据都要能在这一个地址查到，并且每条序列都带 `<PROM_K8S_TAG_KEY>="<K8S_NAME>"` 标签（key 所有集群相同，value 等于该集群 agent 的 `K8S_NAME`）。
-- `METRICS_WRITE_URL` 与查询地址分开配置，单机 VM 的写入路径是 `/api/v1/write`，账号和口令中的特殊字符需 URL 编码。网页安装 Agent 会自动使用统一网关，脚本安装启用 vmagent 时则需显式填写 `REMOTE_WRITE_URL`。
+- master 只有一个查询地址：所有集群的数据都要能在这一个地址查到，并且每条序列都带 `<PROM_K8S_TAG_KEY>="<K8S_NAME>"` 标签（key 所有集群相同，value 等于该集群 agent 的 `K8S_NAME`）。
+- `METRICS_WRITE_URL` 与查询地址分开配置，单机 VM 的写入路径是 `/api/v1/write`，账号和口令中的特殊字符需 URL 编码。网页安装 Agent 时 vmagent 直连通用配置里的远程写地址，脚本安装启用 vmagent 时则需显式填写 `REMOTE_WRITE_URL`。
 - Prometheus 的 `external_labels` 只在远程写、联邦和发送告警时附加，直接查询那台 Prometheus 时看不到。`PROM_URL` 直接指向某个集群自己的 Prometheus 时，要用 relabel 把集群标签打到序列上，或者改为指向汇聚了各集群远程写数据的存储。
 - 抓取任务可以参考 `src/kubedoor-master/agent_install/manifests/20-vmagent.yaml`（node-exporter、kubelet、cAdvisor、kube-state-metrics、JVM）；cAdvisor 序列的 `instance` 需要是节点名，否则节点排行等数据为空。
 - 内置 vmalert 规则用了 VictoriaMetrics 的专有函数，时序库是 Prometheus 时请设 `ENABLE_VMALERT="false"`，改用自己的告警规则。
@@ -686,7 +687,7 @@ KubeDoor 不提供 Ingress 模板，请在 `kubedoor-web` 这个 Service 前放�
 
 - 要支持 WebSocket 升级：`/ws`（agent 连接）、`/ws/pod-logs`、`/ws/workload-status`、`/grafana/api/live/`。
 - AI 对话（`/api/ai/`）和 MCP（`/mcp`、`/sse`）是流式长连接：关闭响应缓冲，把读超时调长（Web 自带的 nginx 分别是 1 小时和 24 小时）。
-- 换成 HTTPS 地址后：跨集群 agent 的 `MASTER_WS` 改为 `wss://<Agent账号>:<口令>@<域名>`；`KUBEDOOR_EXTURL`（IM 告警里【屏蔽】链接的地址）也改成 HTTPS 地址。
+- 换成 HTTPS 地址后：跨集群 agent 的 `MASTER_WS` 改为 `wss://<Agent账号>:<口令>@<域名>`；「系统管理 → 通用配置」里的 KubeDoor 访问地址（IM 告警里【屏蔽】链接的地址）也改成 HTTPS 地址。
 - vmagent 直连时序库，不经过 KubeDoor 入口：时序库的写入地址要单独配置各业务集群可达的网络；需要加密时给时序库（或它前面的 vmauth、反向代理）配 HTTPS，写入地址用 `https://`。
 
 ---
@@ -695,17 +696,10 @@ KubeDoor 不提供 Ingress 模板，请在 `kubedoor-web` 这个 Service 前放�
 
 ### Q：修改了 K8S 事件告警规则，没有生效？
 
-- 规则只来自 ConfigMap `kubedoor-master-file-cfg`（模板是 `src/kubedoor-setup/resources/manifests/master/alert_rules.json`），挂载到 master 的 `/k8s_event/rules/`。master 镜像不自带规则文件，没有挂载时事件照常入库，但不会发出任何事件告警。
-- **规则不支持热重载**，改完必须重启 master：
-
-  ```bash
-  kubectl -n kubedoor edit configmap kubedoor-master-file-cfg
-  kubectl -n kubedoor rollout restart deploy/kubedoor-master
-  kubectl -n kubedoor logs deploy/kubedoor-master | grep 告警规则
-  ```
-
-- 日志出现「加载了 N 条告警规则」表示加载成功（重启后收到第一条事件时才打印）；出现「加载告警规则失败(…)」说明文件没有挂载或 JSON 不合法（不能写注释、不能有尾逗号）。
-- 重跑 `./install.sh master` 会用模板覆盖 ConfigMap，长期修改请改 `src/kubedoor-setup/resources/manifests/master/alert_rules.json`，重跑脚本后同样要重启 master。
+- 规则在「系统管理 → 事件告警规则」配置（界面配置 / JSON 两种模式），存数据库，**保存后马上生效**，不用重启 master。
+- 保存前可以点「试运行」，用最近的真实事件看会忽略多少条、每条规则命中多少条。
+- 还没保存过时用的是内置默认规则（页面上有提示）；从旧版本升级时，原来 ConfigMap `kubedoor-master-file-cfg` 里的规则会自动导入（见[部署文档](../deploy/README.md)的升级说明）。
+- 保存时会严格校验，写错时会指出是第几条规则的哪个条件；JSON 模式不能写注释、不能有尾逗号。
 - 「告警屏蔽」对 K8S 事件告警不起作用，想停掉某类事件告警请改规则。
 
 规则语法见 [K8S事件告警规则配置说明](K8S事件告警规则配置说明.md)。
@@ -769,14 +763,9 @@ kubectl -n kubedoor rollout restart deploy/vmalert
 
 ### Q：IM 告警里的【屏蔽】链接打不开？
 
-链接地址按顺序取：配置了 `KUBEDOOR_EXTURL` 时打开 KubeDoor 的「告警屏蔽」页并预填条件；否则用 `ALERTMANAGER_EXTURL`（Alertmanager 页面）；两者都没配时是相对地址，在 IM 里打不开。在 `kubedoor.conf` 里设 `KUBEDOOR_EXTURL="http://<节点IP>:<Web NodePort>"`（加了 HTTPS 就填 HTTPS 地址），然后：
+链接地址按顺序取：「系统管理 → 通用配置 · 访问地址」里填了 KubeDoor 访问地址时，打开 KubeDoor 的「告警屏蔽」页并预填条件；否则用 Alertmanager 外部地址（Alertmanager 页面）；两者都没填时是相对地址，在 IM 里打不开。在通用配置里填上 KubeDoor 访问地址（如 `http://<节点IP>:<Web NodePort>`，加了 HTTPS 就填 HTTPS 地址），保存后不用重启，十几秒内生效。
 
-```bash
-./install.sh master
-kubectl -n kubedoor rollout restart deploy/kubedoor-alarm
-```
-
-新建或解除屏蔽规则最长 `SILENCE_CACHE_TTL` 秒（默认 15 秒）后生效。规则写法见 [告警屏蔽说明](../docs/alert-silence.md)。
+新建或解除屏蔽规则，最长要等「告警屏蔽规则缓存」的秒数（通用配置 · 高级，默认 15 秒）才生效。规则写法见 [告警屏蔽说明](../docs/alert-silence.md)。
 
 ---
 

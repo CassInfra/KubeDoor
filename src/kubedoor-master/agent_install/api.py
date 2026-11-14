@@ -4,9 +4,8 @@ import functools
 from aiohttp import web
 from auth import principal_of
 
-from .bundle import defaults, public_options
 from .kubernetes import InstallError
-from .service import Service
+from .service import Service, public_defaults
 
 KEY = web.AppKey('agent_install', Service)
 
@@ -38,7 +37,8 @@ async def body(request):
 
 @endpoint
 async def get_defaults(request):
-    return public_options(defaults())
+    # 安装参数默认值 + 正在使用的通用配置（settings：远程写地址、对象存储地址脱敏，镜像仓库、KubeDoor 访问地址）
+    return public_defaults()
 
 
 @endpoint

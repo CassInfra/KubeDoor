@@ -1,4 +1,5 @@
 import { http } from "@/utils/http";
+import type { NotifyChannelInput, NotifyType } from "@/api/notification";
 
 export type InstallStatus =
   | "draft"
@@ -10,21 +11,44 @@ export type InstallStatus =
   | "interrupted"
   | "expired";
 
-/** 网页「安装 Agent」提交的参数；镜像仓库用控制端配置，集群别名装好后在 Agent 列表里编辑 */
+/**
+ * 网页「安装 Agent」对话框能修改的参数。镜像仓库、时序库远程写地址、对象存储上传地址用通用配置，
+ * 集群别名装好后在 Agent 列表里编辑
+ */
 export interface AgentInstallOptions {
   env: string;
   namespace: string;
   master_url: string;
   mode: "full" | "agent";
   agent_tag: string;
-  oss_url: string;
   ksm: "auto" | "install" | "reuse";
   node_exporter: "auto" | "install" | "reuse";
-  remote_write_url: string;
+}
+
+/** 检测时提交的参数：notification 为 null 表示不配置通知；机器人地址留空表示沿用这次安装上次检测时填的 */
+export interface AgentInstallRequest extends AgentInstallOptions {
+  notification: NotifyChannelInput | null;
+}
+
+/** 安装任务里的通知配置：机器人地址只在服务端加密保存，这里只有是否已填写 */
+export interface AgentInstallNotification {
+  type: NotifyType;
+  at: string;
+  configured: boolean;
+}
+
+/** 正在使用的通用配置：地址里的密码换成了 ******，没配置为空串 */
+export interface AgentInstallSettings {
+  metrics_write_url: string;
+  oss_url: string;
+  image_repo: string;
+  kubedoor_exturl: string;
 }
 
 export interface AgentInstallDefaults extends Partial<AgentInstallOptions> {
+  /** 通用配置里有时序库远程写地址，可以完整接入 */
   metrics_available: boolean;
+  settings?: AgentInstallSettings;
 }
 
 export interface InstallCheck {
@@ -49,7 +73,9 @@ export interface AgentInstallTask {
   revision: number;
   context: string;
   contexts?: Array<{ name: string; cluster?: string; server?: string }>;
-  options: AgentInstallOptions;
+  options: AgentInstallOptions & {
+    notification?: AgentInstallNotification | null;
+  };
   checks?: InstallCheck[];
   steps?: InstallCheck[];
   resources?: Array<{ kind: string; name: string; namespace?: string }>;
@@ -67,6 +93,11 @@ export interface AgentInstallTask {
   /** Agent 上线后自动配置 AI Kubeconfig 的结果（Agent 服务账号令牌）；失败不影响安装 */
   ai_connection?: {
     status: "saved" | "skipped" | "failed";
+    message: string;
+  };
+  /** Agent 上线后把填写的通知配置写进「消息通知 → 按集群单独配置」的结果；没填通知时没有，失败不影响安装 */
+  notification_result?: {
+    status: "saved" | "failed";
     message: string;
   };
 }
@@ -109,7 +140,7 @@ export const agentInstallApi = {
   preflight: (
     id: string,
     context: string,
-    options: AgentInstallOptions,
+    options: AgentInstallRequest,
     force = false
   ) =>
     request<AgentInstallTask>("post", `/${encodeURIComponent(id)}/preflight`, {

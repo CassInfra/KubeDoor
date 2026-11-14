@@ -12,9 +12,15 @@ from aiohttp.test_utils import TestClient, TestServer
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 
+import general_settings  # noqa: E402
 from func_manager import pod_exec_relay as relay_module  # noqa: E402
 
 URL = "/ws/pod-exec?env=prod&namespace=ns&pod_name=web-1"
+
+
+def use_node_shell_image(monkeypatch, image):
+    """通用配置的节点终端镜像(node_shell_image)"""
+    monkeypatch.setattr(general_settings, "value", {"node_shell_image": image}.__getitem__)
 
 
 @pytest.fixture(autouse=True)
@@ -239,7 +245,7 @@ async def test_browser_websocket_rejections(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_node_exec_start_payload_and_audit(no_audit, monkeypatch):
-    monkeypatch.delenv("NODE_SHELL_IMAGE", raising=False)  # 没配镜像:start 里不带 image,agent 用内置默认
+    use_node_shell_image(monkeypatch, "")  # 没配镜像:start 里不带 image,agent 用内置默认
     ws = agent_ws()
     relay = relay_module.PodExecRelay({"prod": {"ws": ws}})
     app = web.Application()
@@ -270,7 +276,7 @@ async def test_node_exec_start_payload_and_audit(no_audit, monkeypatch):
     ("", None), ("   ", None),  # 留空 = 不下发,agent 用内置默认
 ])
 async def test_node_exec_passes_configured_image(monkeypatch, configured, expected):
-    monkeypatch.setenv("NODE_SHELL_IMAGE", configured)
+    use_node_shell_image(monkeypatch, configured)  # 每次开终端时取通用配置的当前值
     ws = agent_ws()
     relay = relay_module.PodExecRelay({"prod": {"ws": ws}})
     app = web.Application()

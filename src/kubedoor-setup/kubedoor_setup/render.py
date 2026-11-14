@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import copy
 import hashlib
-import importlib.util
 import json
 import os
 from pathlib import Path
@@ -50,13 +49,27 @@ def load_defaults(overrides: dict | None = None) -> dict:
     return values
 
 
-def _agent_metadata(values: dict) -> dict:
-    """master 网页安装 Agent 的默认值（不含凭据）；时序库写入地址由 master 从 Secret kubedoor-connection 读取。"""
-    path = ROOT / "src/kubedoor-master/agent_install/bundle.py"
-    spec = importlib.util.spec_from_file_location("kubedoor_setup_agent_bundle", path)
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module.master_metadata(values)
+def general_settings_values(config: dict, defaults: dict) -> dict:
+    """网页安装写进控制端「通用配置」的值，即 PUT /api/admin/general-settings 请求体里的 values。
+
+    defaults 是 load_defaults 的结果（含 install.sh 传给安装服务的镜像仓库和采集组件镜像）。
+    地址带账号密码原样交给 master，由 master 加密保存；值为 None 表示不设置（master 用默认值或视为未配置）。
+    """
+    metrics = config["metrics"]
+    query, write = metrics_endpoints(metrics)
+    return {
+        "prom_type": metrics["type"],
+        "prom_url": query,
+        "metrics_write_url": write or None,
+        "prom_k8s_tag_key": metrics["tag_key"],
+        "kubedoor_exturl": config["public_url"],
+        "alertmanager_exturl": defaults.get("ALERTMANAGER_EXTURL") or None,
+        "oss_url": config.get("oss_url") or None,
+        "image_repo": defaults.get("IMAGE_REPO") or None,
+        "image_vmagent": defaults.get("IMAGE_VMAGENT") or None,
+        "image_kube_state_metrics": defaults.get("IMAGE_KUBE_STATE_METRICS") or None,
+        "image_node_exporter": defaults.get("IMAGE_NODE_EXPORTER") or None,
+    }
 
 
 def _replace(value, values):
@@ -137,14 +150,14 @@ def render_master(config: dict, secrets: dict, namespace: str, defaults: dict | 
     values = load_defaults(defaults)
     pg, metrics, admin = config["postgres"], config["metrics"], config["admin"]
     components = selected_components(config.get("components"))
-    # 远程读、写地址都带着账号密码，原样写进 PROM_URL / METRICS_WRITE_URL
+    # 远程读、写地址都带着账号密码，原样写进 Secret kubedoor-connection 的 PROM_URL / METRICS_WRITE_URL（vmalert、Grafana 用）。
+    # master、alarm、ai 的其余配置在 master 就绪后写进数据库的「通用配置」，见 general_settings_values
     query, write = metrics_endpoints(metrics)
     values.update({
         "NAMESPACE": namespace, "PG_HOST": pg["host"], "PG_PORT": str(pg.get("port", 5432)),
         "PG_USER": pg["user"], "PG_DATABASE": pg["database"], "PG_PASSWORD": pg["password"],
         "PG_SSLMODE": pg.get("sslmode", "disable"), "PROM_URL": query,
-        "PROM_TYPE": metrics["type"], "PROM_K8S_TAG_KEY": metrics["tag_key"],
-        "METRICS_WRITE_URL": write, "KUBEDOOR_EXTURL": config["public_url"],
+        "PROM_K8S_TAG_KEY": metrics["tag_key"],
         "KUBEDOOR_INIT_ADMIN_PASSWORD": admin["password"],
         "KUBEDOOR_INIT_AGENT_PASSWORD": secrets["agent_password"],
         "AI_INTERNAL_TOKEN": secrets["internal_token"], "AI_ENCRYPTION_KEY": secrets["encryption_key"],
@@ -152,8 +165,9 @@ def render_master(config: dict, secrets: dict, namespace: str, defaults: dict | 
         "WEB_NODEPORT_LINE": "", "ALERTMANAGER_NODEPORT_LINE": "",
         "CONFIG_HASH_ENV": "pending", "CONFIG_HASH_MASTER": "pending", "CONFIG_HASH_GRAFANA": "pending", "CONFIG_HASH_WEB": "pending",
     })
-    values["AGENT_INSTALL_DEFAULTS"] = json.dumps(_agent_metadata(values), ensure_ascii=False)
-    files = ["05-ai-security.yaml", "10-config.yaml", "20-master.yaml"]
+    # 不创建 ConfigMap kubedoor-config（10-config.yaml 只给旧版配置式安装脚本放数据库连接）：
+    # 数据库连接在 Secret kubedoor-connection，其余配置在数据库，事件告警规则用 master 内置的默认规则
+    files = ["05-ai-security.yaml", "20-master.yaml"]
     files += ["25-alarm.yaml"] if components["alarm"] else []
     files += ["30-ai.yaml", "40-web.yaml"]
     files += [filename for flag, filename in (("grafana", "35-grafana.yaml"), ("vmalert", "71-vmalert.yaml"), ("alertmanager", "72-alertmanager.yaml")) if components[flag]]
@@ -164,12 +178,6 @@ def render_master(config: dict, secrets: dict, namespace: str, defaults: dict | 
     connection.update(PROM_URL=query, METRICS_WRITE_URL=write)
     objects.append({"apiVersion": "v1", "kind": "Secret", "metadata": _meta("kubedoor-connection", namespace),
                     "type": "Opaque", "stringData": connection})
-    env_data = by_name["ConfigMap", "kubedoor-config"]["data"]
-    for key in connection:
-        env_data.pop(key, None)
-    rules = (folder / "alert_rules.json").read_text(encoding="utf-8")
-    objects.append({"apiVersion": "v1", "kind": "ConfigMap", "metadata": _meta("kubedoor-master-file-cfg", namespace),
-                    "data": {"alert_rules.json": _replace(rules, values)}})
     if components["grafana"]:
         grafana_config = by_name["ConfigMap", "kubedoor-grafana-config"]["data"]
         grafana_config.pop("datasources.yaml", None)
@@ -242,6 +250,9 @@ def render_master(config: dict, secrets: dict, namespace: str, defaults: dict | 
         if values.get("IMAGE_PULL_SECRET"):
             pod["imagePullSecrets"] = [{"name": values["IMAGE_PULL_SECRET"]}]
         for container in pod.get("containers", []):
-            if any(entry.get("configMapRef", {}).get("name") == "kubedoor-config" for entry in container.get("envFrom", [])):
-                container["envFrom"].append({"secretRef": {"name": "kubedoor-connection"}})
+            # 共享模板里 master、alarm、ai 从 kubedoor-config 取数据库连接，网页安装改从 Secret kubedoor-connection 取
+            if "envFrom" in container:
+                container["envFrom"] = [{"secretRef": {"name": "kubedoor-connection"}}
+                                        if entry.get("configMapRef", {}).get("name") == "kubedoor-config" else entry
+                                        for entry in container["envFrom"]]
     return objects

@@ -83,12 +83,12 @@ export interface NoticeRow {
   when: string;
 }
 
-/** 说明表(安装向导第 4 步和控制台消息通知页共用,文字保持一致) */
+/** 说明表(安装向导第 4 步 setup-utils.ts 里有同样的一份,文字保持一致) */
 export const NOTICE_ROWS: NoticeRow[] = [
   {
     name: "K8S 事件告警",
     sender: "控制服务 kubedoor-master",
-    when: "K8S 事件命中「事件告警规则」时，例如重启、健康检查失败、挂载失败、调度失败、资源压力；不受告警屏蔽影响"
+    when: "K8S 事件命中事件告警规则（在系统管理 → 事件告警规则配置）时，例如重启、健康检查失败、挂载失败、调度失败、资源压力；不受告警屏蔽影响"
   },
   {
     name: "运维操作通知",
@@ -183,6 +183,16 @@ export function tokenPlaceholder(
   if (saved?.configured)
     return `换了 IM 类型，请重新填写${TYPE_LABELS[type]}机器人地址`;
   return typeHint(type).token;
+}
+
+/** 安装 Agent 对话框:这个集群在消息通知里已有单独配置时的说明;没有时为空串 */
+export function existingClusterText(
+  saved: NotifyChannel | null | undefined
+): string {
+  if (!saved?.configured) return "";
+  const label = TYPE_LABELS[saved.type] ?? saved.type;
+  const hint = (saved.token_hint || "").trim();
+  return `该集群已有单独配置：${label}${hint ? `（${hint}）` : ""}，留空保持不变，填写则覆盖`;
 }
 
 /**

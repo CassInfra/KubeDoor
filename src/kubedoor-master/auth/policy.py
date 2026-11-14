@@ -340,6 +340,8 @@ RULES = (
     _rule('GET', '/api/internal/setup-health', 'internal'),
     # kubedoor-alarm 取消息通知的通道(返回明文 token,handler 只认不带用户名的内部 token)
     _rule('GET', '/api/internal/notification', 'internal'),
+    # kubedoor-alarm、kubedoor-ai 取通用配置里的几项(不含密码,handler 只认不带用户名的内部 token)
+    _rule('GET', '/api/internal/settings', 'internal'),
     # ---- 登录 / 账号自助 ----
     _rule('POST', '/api/auth/login', 'public'),
     _rule('', '/api/auth/verify', 'public'),

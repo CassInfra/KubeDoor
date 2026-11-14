@@ -15,11 +15,14 @@ from urllib.parse import quote, unquote, urlsplit, urlunsplit
 
 import aiohttp
 import db
+import general_settings
 from auth import audit
 from auth.crypto import decrypt_secret, encrypt_secret
 from auth.store import hash_password, store as auth_store, verify_local
 from kubedoor_tools.config import parse_kubeconfig
 from loguru import logger
+from notify import api as notify_api
+from notify import channels
 
 from .bundle import WRITE_KEY, defaults, normalize_options, public_options, render_agent
 from .kubernetes import InstallError, Kubernetes
@@ -40,10 +43,66 @@ AGENT_TOKEN_SECRET = 'kubedoor-agent'
 AI_CONTEXT = 'kubedoor-agent'
 AI_URL = 'http://kubedoor-ai:8000'
 AI_MANUAL_HINT = 'AI 仍可经 Agent 执行，需要时可在 Agent 管理的「AI Kubeconfig」列手动上传'
+NOTIFY_MANUAL_HINT = '可以在系统管理 → 消息通知手动配置'
+NO_WRITE_URL = '通用配置里还没有时序库远程写地址，请在系统管理 → 通用配置填写，或选择仅安装 Agent'
 
 
 def utcnow():
     return datetime.now(timezone.utc)
+
+
+def install_defaults():
+    """网页安装的默认参数：控制端设置都从通用配置取（每次用的时候取，改了通用配置下一次检测就用新的）"""
+    return defaults({
+        'master_url': general_settings.value('kubedoor_exturl'),
+        'prom_k8s_tag_key': general_settings.value('prom_k8s_tag_key'),
+        'image_repo': general_settings.value('image_repo'),
+        'image_vmagent': general_settings.value('image_vmagent'),
+        'image_kube_state_metrics': general_settings.value('image_kube_state_metrics'),
+        'image_node_exporter': general_settings.value('image_node_exporter'),
+        WRITE_KEY: general_settings.value('metrics_write_url'),
+    })
+
+
+def public_defaults():
+    """GET defaults 的返回：安装参数的默认值，加上正在使用的通用配置（地址里的密码换成 ******，没配置为空串）"""
+    result = public_options(install_defaults())
+    result['settings'] = {
+        'metrics_write_url': general_settings.masked(general_settings.value('metrics_write_url')),
+        'oss_url': general_settings.masked(general_settings.value('oss_url')),
+        'image_repo': general_settings.value('image_repo'),
+        'kubedoor_exturl': general_settings.value('kubedoor_exturl'),
+    }
+    return result
+
+
+def check_notification(raw, previous=None):
+    """页面提交的通知配置 → 加密的安装材料里保存的 {type, token（明文）, at}；没填（没有这个键或为 null）返回 None。
+
+    和消息通知页一样用 notify/channels.py 校验；机器人地址留空时沿用上次检测保存的（IM 类型不能变）。
+    不合法抛 InstallError，说明是哪一项（不带机器人地址本身）。
+    """
+    if raw is None:
+        return None
+    if not isinstance(raw, dict):
+        raise InstallError('通知配置的格式不正确')
+    kind = raw.get('type')
+    if kind not in channels.TYPES:
+        raise InstallError(f'通知配置：请选择 IM 类型（{"、".join(channels.TYPE_LABELS.values())}）')
+    try:
+        at = channels.normalize_at(raw.get('at'))
+    except ValueError as exc:
+        raise InstallError(f'通知配置：{exc}') from None
+    token = raw.get('token')
+    blank = token is None or (isinstance(token, str) and not token.strip())
+    if blank and isinstance(previous, dict) and previous.get('token'):
+        if previous.get('type') != kind:
+            raise InstallError('通知配置：换了 IM 类型，请重新填写机器人地址')
+        return {'type': kind, 'token': previous['token'], 'at': at}
+    try:
+        return {'type': kind, 'token': channels.normalize_token(kind, token), 'at': at}
+    except ValueError as exc:
+        raise InstallError(f'通知配置：{exc}') from None
 
 
 def conflict(kind, name, namespace, reason):
@@ -145,7 +204,8 @@ def error_message(exc):
     return str(exc) if isinstance(exc, InstallError) else f'安装服务执行失败（{type(exc).__name__}），请查看对应步骤后重试'
 
 
-def normalize(raw, default=None):
+def normalize(raw, default):
+    """校验页面提交的安装参数；default 是 install_defaults()（通用配置里的控制端设置都在它里面）"""
     try:
         return normalize_options(raw, default)
     except ValueError as exc:
@@ -232,11 +292,9 @@ class Service:
             raise InstallError('请上传不超过 1 MiB 的 kubeconfig YAML / JSON 文件')
         parsed = await asyncio.to_thread(parse, raw)
         selected = parsed['context'] or parsed['contexts'][0]['name']
-        options = defaults()
-        options['env'] = re.sub(r'[^A-Za-z0-9_-]', '-', selected).strip('-')[:63] or 'cluster'
-        if not options.get('metrics_available'):
-            options['mode'] = 'agent'
-        options = normalize(options)
+        base = install_defaults()
+        env = re.sub(r'[^A-Za-z0-9_-]', '-', selected).strip('-')[:63] or 'cluster'
+        options = normalize({'env': env, 'mode': 'full' if base['metrics_available'] else 'agent'}, base)
         now = utcnow()
         task = {'id': str(uuid.uuid4()), 'status': 'draft', 'revision': 0, 'env': '', 'target_uid': '',
                 'encrypted': seal({'kubeconfig': raw, 'options': options}),
@@ -254,20 +312,17 @@ class Service:
             if task['status'] not in ('draft', 'ready', 'failed', 'partial', 'interrupted'):
                 raise InstallError('当前任务不能修改安装计划，请创建新的安装任务', 409)
             material = unseal(task)
-            options = normalize(raw_options, defaults())
+            options = normalize(raw_options, install_defaults())
             previous = material['options']
-            # 界面只收到脱敏地址。没改过该地址时保留密文里的认证信息及查询参数。
-            safe_previous = public_options(previous)
-            for key in ('remote_write_url', 'oss_url'):
-                if options.get(key) and options[key] == safe_previous.get(key):
-                    options[key] = previous[key]
             if (task['payload'].get('applied') or task['payload'].get('target_reserved')) and (
                     context != task['payload']['context'] or any(options[k] != previous[k] for k in ('env', 'namespace'))):
                 raise InstallError('任务已开始安装，不能更换目标 context、集群标识或命名空间；请新建安装任务', 409)
             if not options.get('env') or not options.get('master_url'):
                 raise InstallError('请填写集群唯一标识和目标集群可访问的 KubeDoor 地址')
-            if options['mode'] == 'full' and not (options.get('metrics_write_url') or options.get('remote_write_url')):
-                raise InstallError('控制端没有配置时序库写入地址，请在高级设置中填写指标写入地址，或选择仅安装 Agent')
+            if options['mode'] == 'full' and not options.get(WRITE_KEY):
+                raise InstallError(NO_WRITE_URL)
+            # 机器人地址只放进加密的安装材料：页面只看到 IM 类型、@ 人和「已填写」，留空表示沿用上次检测填的
+            options['notification'] = check_notification(options.get('notification'), previous.get('notification'))
             options['installation_id'] = task['id']
             checks = []
             task['status'] = 'draft'
@@ -537,6 +592,10 @@ class Service:
                     # 重装时保留在 Agent 列表里编辑过的别名
                     if options.get('aliases'):
                         await db.pg_execute('UPDATE k8s_agent_status SET aliases=$2 WHERE env=$1', task['env'], options['aliases'])
+                    # 安装时填了通知配置：写进「消息通知 → 按集群单独配置」；失败只记结果，不影响安装
+                    if options.get('notification'):
+                        task['payload']['notification_result'] = await self.save_notification(task, options['notification'])
+                        await self.repo.save(task)
                     # 顺带配置该集群的 AI Kubeconfig（Agent 服务账号令牌）；失败只记结果，不影响安装
                     task['payload']['ai_connection'] = await self.configure_ai_connection(task, options, parsed, kube)
                     await self.repo.save(task)
@@ -627,6 +686,20 @@ class Service:
             reason = f'kubedoor-ai 用它连接集群的测试没有通过：{reason}'
         return {'status': 'failed', 'message': f'没有自动配置 AI Kubeconfig（{reason}）。{AI_MANUAL_HINT}'}
 
+    async def save_notification(self, task, entry):
+        """Agent 上线后把安装时填的通知配置写进消息通知的 clusters[集群]（已有该集群的单独配置就覆盖，
+        全局配置和其他集群不动），返回 {status: saved / failed, message}。失败只记结果，不影响安装。"""
+        label = channels.TYPE_LABELS.get(entry.get('type'), 'IM')
+        try:
+            await notify_api.save_cluster_channel(task['env'], entry, task['payload'].get('created_by') or 'kubedoor')
+        except ValueError as exc:  # 校验不过（说明里没有机器人地址）
+            return {'status': 'failed', 'message': f'没有写入消息通知配置（{exc}），{NOTIFY_MANUAL_HINT}'}
+        except Exception as exc:
+            # 只记异常类型：数据库报错里可能带着要保存的内容
+            logger.warning(f'安装 Agent 后保存集群 {task["env"]} 的消息通知配置失败：{type(exc).__name__}')
+            return {'status': 'failed', 'message': f'没有写入消息通知配置（保存失败：{type(exc).__name__}），{NOTIFY_MANUAL_HINT}'}
+        return {'status': 'saved', 'message': f'已在消息通知里为集群 {task["env"]} 单独配置{label}机器人'}
+
     async def finish_success(self, task):
         """安装成功：停用这个集群以前安装留下的 Agent 账号，销毁安装凭据。"""
         task['status'] = 'succeeded'
@@ -658,7 +731,7 @@ class Service:
         return task
 
     async def reverify(self, task):
-        options = {'prom_k8s_tag_key': defaults()['prom_k8s_tag_key'], 'env': task['env']}
+        options = {'prom_k8s_tag_key': general_settings.value('prom_k8s_tag_key'), 'env': task['env']}
         try:
             async with self.slots:
                 await self.step(task, METRICS_STEP, 'running')
@@ -693,9 +766,9 @@ class Service:
         带 nocache=1：VictoriaMetrics 默认隐藏最近 30 秒的数据（-search.latencyOffset），也不读结果缓存；
         Prometheus 会忽略这个参数。
         """
-        base = os.environ.get('PROM_URL', '')
+        base = general_settings.value('prom_url')
         if not base:
-            return None, '控制端没有配置时序库查询地址（PROM_URL）'
+            return None, '通用配置里还没有时序库查询地址'
         parsed = urlsplit(base)
         auth = aiohttp.BasicAuth(unquote(parsed.username or ''), unquote(parsed.password or '')) if parsed.username else None
         url = address_without_auth(base) + '/api/v1/query'

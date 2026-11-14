@@ -65,48 +65,13 @@
         class="channel-form"
         :disabled="!loaded || busy"
       >
-        <el-form-item label="IM 类型">
-          <el-select v-model="globalForm.type" class="type-select">
-            <el-option
-              v-for="item in TYPE_OPTIONS"
-              :key="item.value"
-              :label="item.label"
-              :value="item.value"
-            />
-          </el-select>
-        </el-form-item>
-        <el-form-item label="机器人地址">
-          <el-input
-            v-model="globalForm.token"
-            type="password"
-            show-password
-            autocomplete="new-password"
-            :placeholder="tokenPlaceholder(globalForm.type, globalSaved)"
-          />
-          <div class="hint">{{ typeHint(globalForm.type).tokenHelp }}</div>
-        </el-form-item>
-        <el-form-item label="默认 @ 人">
-          <el-input
-            v-model="globalForm.at"
-            clearable
-            :placeholder="typeHint(globalForm.type).at"
-          />
-          <div class="hint">
-            通知里 @ 这个人，只能填一个；指标告警规则的 annotations 里写了 at
-            的，以规则为准
-          </div>
-        </el-form-item>
-        <el-form-item>
-          <el-button :loading="globalTest.testing" @click="testGlobal">
-            发送测试消息
-          </el-button>
-          <span
-            v-if="globalTest.result"
-            :class="['test-result', globalTest.result.type]"
-          >
-            {{ globalTest.result.text }}
-          </span>
-        </el-form-item>
+        <NotifyChannelFields
+          v-model:form="globalForm"
+          :saved="globalSaved"
+          :testing="globalTest.testing"
+          :result="globalTest.result"
+          @test="testGlobal"
+        />
       </el-form>
 
       <!-- 按集群单独配置 -->
@@ -275,6 +240,7 @@ import {
   typeHint,
   withoutDefault
 } from "./notification-utils";
+import NotifyChannelFields from "./NotifyChannelFields.vue";
 
 defineOptions({ name: "SystemNotification" });
 
@@ -548,10 +514,6 @@ onMounted(load);
 
 .channel-form {
   max-width: 760px;
-}
-
-.type-select {
-  width: 200px;
 }
 
 .toolbar {

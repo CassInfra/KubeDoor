@@ -1196,6 +1196,12 @@ const handleCopyAndClose = () => {
   resultDialogVisible.value = false;
 };
 
+// 失败时显示服务端给的原因（例如控制端没有配置对象存储上传地址），没有原因才显示「操作失败」
+const failText = (res: { message?: unknown }) =>
+  typeof res.message === "string" && res.message.trim()
+    ? res.message
+    : "操作失败";
+
 const handleModifyPod = async (
   env: string,
   namespace: string,
@@ -1614,7 +1620,7 @@ const handleModifyPod = async (
       showResultDialog(res.message, "modify");
       await refreshPods(namespace);
     } else {
-      ElMessage.error("操作失败");
+      ElMessage.error(failText(res));
     }
   } catch (error) {
     console.error(error);
@@ -1690,7 +1696,7 @@ const handleDeletePod = async (env: string, namespace: string, pod: string) => {
       ElMessage.success("操作成功");
       await refreshPods(namespace);
     } else {
-      ElMessage.error("操作失败");
+      ElMessage.error(failText(res));
     }
   } catch (error) {
     console.error(error);
@@ -1713,7 +1719,7 @@ const handleAutoDump = async (env: string, namespace: string, pod: string) => {
       showResultDialog(res.message, "dump");
       ElMessage.success("操作成功");
     } else {
-      ElMessage.error("操作失败");
+      ElMessage.error(failText(res));
     }
   } catch (error) {
     console.error(error);
@@ -1740,7 +1746,7 @@ const handleAutoJstack = async (
       showResultDialog(res.message, "jstack");
       ElMessage.success("操作成功");
     } else {
-      ElMessage.error("操作失败");
+      ElMessage.error(failText(res));
     }
   } catch (error) {
     console.error(error);
@@ -1763,7 +1769,7 @@ const handleAutoJfr = async (env: string, namespace: string, pod: string) => {
       showResultDialog(res.message, "jfr");
       ElMessage.success("操作成功");
     } else {
-      ElMessage.error("操作失败");
+      ElMessage.error(failText(res));
     }
   } catch (error) {
     console.error(error);
@@ -1790,7 +1796,7 @@ const handleAutoJvmMem = async (
       showResultDialog(res.message, "jvm");
       ElMessage.success("操作成功");
     } else {
-      ElMessage.error("操作失败");
+      ElMessage.error(failText(res));
     }
   } catch (error) {
     console.error(error);

@@ -2,6 +2,7 @@
 
 - 所有用例都不会真的发网络请求:requests 的底层发送被换成直接报错,用例用 fake_http 模拟 master 和 IM。
 - kubedoor-alarm.py 在 import 时会建 PostgreSQL 连接池,alarm_app 用假的 psycopg 模块加载它,不连数据库。
+- 通用配置默认不经过 master(alarm_settings);要测向 master 取配置的流程时用 settings_resolver。
 """
 import contextlib
 import importlib.util
@@ -17,6 +18,7 @@ ALARM_DIR = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ALARM_DIR))
 
 import notify_client  # noqa: E402
+import settings_client  # noqa: E402
 
 
 class FakeResponse:
@@ -36,6 +38,16 @@ class FakeResponse:
 def master_ok(data):
     """master 内部接口的成功返回;data 为 None 表示没有配置。"""
     return FakeResponse(200, {'success': True, 'data': data})
+
+
+# master /api/internal/settings 返回的通用配置(alarm 只用前四项)
+MASTER_SETTINGS = {
+    'prom_k8s_tag_key': 'k8s',
+    'kubedoor_exturl': 'https://kubedoor.example.com',
+    'alertmanager_exturl': 'http://alertmanager.example.com',
+    'silence_cache_ttl': 15,
+    'retention_ai_checkpoint_days': 7,
+}
 
 
 class FakeHTTP:
@@ -121,6 +133,35 @@ def internal_env(monkeypatch):
     monkeypatch.delenv('MASTER_INTERNAL_URL', raising=False)
 
 
+class StaticSettings:
+    """代替 settings_client 的配置缓存:不经过 master,用例改 values 后下一次取配置就生效。"""
+
+    def __init__(self, values):
+        self.values = values
+
+    def current(self):
+        return dict(self.values)
+
+
+@pytest.fixture(autouse=True)
+def alarm_settings(monkeypatch):
+    """通用配置默认不经过 master:集群标签名是 k8s,配置了 KubeDoor 和 Alertmanager 地址。
+
+    autouse:模块级的配置缓存不会在用例之间串值,也不会去请求 master。返回的 dict 可以直接改。
+    """
+    values = {key: MASTER_SETTINGS[key] for key in settings_client.DEFAULTS}
+    monkeypatch.setattr(settings_client, '_resolver', StaticSettings(values))
+    return values
+
+
+@pytest.fixture
+def settings_resolver(monkeypatch, clock, alarm_settings):
+    """换成真实的通用配置缓存:从空缓存开始,时间由 clock 控制,向 master 取配置走 fake_http。"""
+    fresh = settings_client.SettingsResolver(clock=clock)
+    monkeypatch.setattr(settings_client, '_resolver', fresh)
+    return fresh
+
+
 # ---------------------------------------------------------------------------
 # 加载 kubedoor-alarm.py(假的 PostgreSQL 连接池)
 # ---------------------------------------------------------------------------
@@ -187,16 +228,12 @@ def _fake_psycopg_modules():
 
 
 @pytest.fixture
-def alarm_app(monkeypatch, resolver, internal_env):
-    """加载 kubedoor-alarm.py,返回模块;集群标签名是 k8s,配置了 KUBEDOOR_EXTURL。"""
+def alarm_app(monkeypatch, resolver, internal_env, alarm_settings):
+    """加载 kubedoor-alarm.py,返回模块;通用配置见 alarm_settings(集群标签名 k8s,配置了 KubeDoor 地址)。"""
     for name, module in _fake_psycopg_modules().items():
         monkeypatch.setitem(sys.modules, name, module)
-    import utils
     import silence
 
-    monkeypatch.setattr(utils, 'PROM_K8S_TAG_KEY', 'k8s')
-    monkeypatch.setattr(utils, 'KUBEDOOR_EXTURL', 'https://kubedoor.example.com')
-    monkeypatch.setattr(utils, 'ALERTMANAGER_EXTURL', 'http://alertmanager.example.com')
     spec = importlib.util.spec_from_file_location('kubedoor_alarm_under_test', ALARM_DIR / 'kubedoor-alarm.py')
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)

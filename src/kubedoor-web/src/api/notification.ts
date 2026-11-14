@@ -61,8 +61,14 @@ export interface NotifyTestResult {
 
 type Result<T> = { success: boolean; data: T; message?: string };
 
-export const getNotificationSettings = () =>
-  http.request<Result<NotificationSettings>>("get", "/api/admin/notification");
+/** silent:出错不弹提示,交给调用方处理(安装 Agent 对话框读不到就不显示已有的单独配置) */
+export const getNotificationSettings = (silent = false) =>
+  http.request<Result<NotificationSettings>>(
+    "get",
+    "/api/admin/notification",
+    undefined,
+    silent ? { silent: true } : undefined
+  );
 
 /** 保存全局配置和按集群的配置(整体替换);返回内容同 GET */
 export const saveNotificationSettings = (data: NotificationInput) =>

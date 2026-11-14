@@ -10,7 +10,7 @@ from datetime import UTC, datetime, timedelta
 import pytest
 import requests
 
-from conftest import FakeResponse, master_ok
+from conftest import MASTER_SETTINGS, FakeResponse, master_ok
 
 WECOM = {'type': 'wecom', 'token': 'wecom-key', 'at': 'zhangsan'}
 SILENCE_RESTART = (7, [{'key': 'alertname', 'op': '=', 'value': 'K8S_Pod_Restart'}], None, None)
@@ -219,14 +219,56 @@ def test_legacy_notification_env_vars_are_gone(alarm_app):
         assert not hasattr(utils, name) and not hasattr(alarm_app, name)
 
 
-def test_silence_link(alarm_app, monkeypatch):
+def test_general_settings_are_not_copied_at_import(alarm_app):
+    """迁到「通用配置」的几项处理告警时才取,不再是 import 时拷贝的模块常量"""
+    import silence
+    import utils
+
+    for name in ('PROM_K8S_TAG_KEY', 'KUBEDOOR_EXTURL', 'ALERTMANAGER_EXTURL', 'SILENCE_CACHE_TTL'):
+        assert not hasattr(utils, name) and not hasattr(alarm_app, name) and not hasattr(silence, name)
+
+
+def test_silence_link(alarm_app, alarm_settings):
     labels = make_alert()['labels']
     url = alarm_app.build_silence_url(labels)
     prefill = json.loads(urllib.parse.unquote(url.split('prefill=', 1)[1]))
     assert prefill == {'alertname': 'K8S_Pod_Restart', 'env': 'prod-k8s', 'namespace': 'default',
                        'pod': 'web-6d4cf56db6-abcde'}
-    # 没配 KUBEDOOR_EXTURL 时退回 Alertmanager 页面
-    monkeypatch.setattr(alarm_app, 'KUBEDOOR_EXTURL', '')
+    # 没有 KubeDoor 访问地址时退回 Alertmanager 页面
+    alarm_settings['kubedoor_exturl'] = ''
     assert alarm_app.build_silence_url(labels) == (
         'http://alertmanager.example.com/#/alerts?silenced=false&inhibited=false&active=true&filter='
         + urllib.parse.quote('{alertname="K8S_Pod_Restart"}'))
+
+
+def test_settings_changes_apply_without_restart(alarm_app, fake_http, alarm_settings):
+    """通用配置里改了集群标签名和 KubeDoor 地址,下一批告警就按新的处理"""
+    alarm_settings.update(prom_k8s_tag_key='cluster', kubedoor_exturl='https://kd.example.com/')
+    fake_http.master = [master_ok(WECOM)]
+    alert = make_alert()
+    alert['labels']['cluster'] = 'prod-b'
+    assert post(alarm_app, make_payload([alert], common={'cluster': 'prod-b'})).status_code == 200
+    assert fake_http.gets[0]['params'] == {'env': 'prod-b'}
+    url = alarm_app.build_silence_url(alert['labels'])
+    assert url.startswith('https://kd.example.com/#/alarm/silence?prefill=')
+    assert json.loads(urllib.parse.unquote(url.split('prefill=', 1)[1]))['env'] == 'prod-b'
+    assert f'[【屏蔽】]({url})' in wecom_content(fake_http)
+
+
+def test_settings_come_from_master_and_are_cached(alarm_app, fake_http, settings_resolver, clock):
+    """真实的取配置流程:先向 master 取通用配置(系统身份),再按集群取通知配置;两者都缓存 15 秒"""
+    changed = {**MASTER_SETTINGS, 'kubedoor_exturl': 'https://kd-new.example.com'}
+    fake_http.master = [master_ok(MASTER_SETTINGS), master_ok(WECOM), master_ok(changed), master_ok(WECOM)]
+    payload = make_payload([make_alert()])
+    assert post(alarm_app, payload).status_code == 200
+    assert post(alarm_app, payload).status_code == 200
+    settings_get, channel_get = fake_http.gets
+    assert settings_get == {'url': 'http://kubedoor-master/api/internal/settings', 'params': None,
+                            'headers': {'X-Kubedoor-Token': 'internal-secret'}, 'timeout': 5}
+    assert channel_get['params'] == {'env': 'prod-k8s'}
+    first, second = (post_['json']['markdown']['content'] for post_ in fake_http.posts)
+    assert '(https://kubedoor.example.com/#/alarm/silence?prefill=' in first and first == second
+    clock.now += 15
+    assert post(alarm_app, payload).status_code == 200
+    assert [get['url'].rsplit('/', 1)[1] for get in fake_http.gets] == ['settings', 'notification'] * 2
+    assert '(https://kd-new.example.com/#/alarm/silence?prefill=' in fake_http.posts[2]['json']['markdown']['content']

@@ -11,6 +11,7 @@ from aiohttp import web, WSMsgType
 from loguru import logger
 import utils, prom_real_time_data
 import db
+import general_settings
 import auth
 from auth import principal_of
 from agent_install import api as agent_install_api
@@ -35,6 +36,7 @@ import image_tags_fetcher
 import image_settings
 import installation_health
 from k8s_event import process_k8s_event_async, init_pg_tables_async
+from k8s_event import rules_api as event_rules_api
 from k8s_event.event_query_api import query_k8s_events_handler, get_k8s_events_menu_options
 from promql import deployment_node
 from load_balance import get_service as get_lb_service
@@ -352,6 +354,10 @@ async def http_handler(request):
         "query": query_params,
         "body": body,
     }
+    if path.startswith("/api/pod/"):
+        # 对象存储上传地址(通用配置,没配置为空串)随每次请求带给 agent,新版 agent 转给 pod-mgr 用,
+        # 改了配置所有集群马上生效;旧版 agent 不认识这个字段,继续用安装时写入的地址
+        message["oss_url"] = general_settings.value("oss_url")
     response_queue = clients[env].setdefault("response_queue", {})
     response_events = clients[env].setdefault("response_events", {})
     # 先注册等待再发送:agent 的快速响应不能早于等待器创建(否则回包会被丢掉)
@@ -360,7 +366,9 @@ async def http_handler(request):
 
     try:
         await clients[env]["ws"].send_json(message)  # 使用 send_json 发送 JSON 数据
-        logger.info(f"[请求]客户端 env={env}: {message}")
+        # 对象存储地址可能带账号密码,日志里换成 ***
+        logged = {**message, "oss_url": "***"} if message.get("oss_url") else message
+        logger.info(f"[请求]客户端 env={env}: {logged}")
         # 使用 Event 等待响应，超时300秒（支持大文件下载）
         await asyncio.wait_for(response_event.wait(), timeout=300)
 
@@ -469,7 +477,7 @@ async def prom_ns_handler(request):
         namespaces = await utils.run_blocking(utils.fetch_prom_namespaces, env_value)
         return web.json_response({'success': True, 'data': namespaces})
     except Exception as e:
-        return web.json_response({'message': str(e)}, status=500)
+        return web.json_response({'message': utils.redact_credentials(e)}, status=500)
 
 
 async def prom_services_handler(request):
@@ -533,7 +541,7 @@ async def prom_node_rank_handler(request):
 
         return web.json_response({'success': True, 'data': node_rank_data})
     except Exception as e:
-        return web.json_response({'message': str(e)}, status=500)
+        return web.json_response({'message': utils.redact_credentials(e)}, status=500)
 
 
 async def prom_overview_handler(request):
@@ -544,7 +552,7 @@ async def prom_overview_handler(request):
         data = await prom_overview.get_overview_counts_async(env, key_filter=key_filter)
         return web.json_response({'success': True, 'data': data})
     except Exception as e:
-        return web.json_response({'message': str(e)}, status=500)
+        return web.json_response({'message': utils.redact_credentials(e)}, status=500)
 
 
 async def agent_names(request):
@@ -593,7 +601,7 @@ async def cron_peak_data(request):
 async def init_peak_data(request):
     """初始化/更新原始资源表k8s_resources，初始化/更新资源管控表k8s_res_control"""
     try:
-        env_key = utils.PROM_K8S_TAG_KEY
+        env_key = utils.tag_key()  # 集群标签 key(通用配置)，每轮采集取一次
         env_value = request.query.get("env")
         days = int(request.query.get("days", 2))  # 不传则采集昨天+今天
         peak_hours = request.query.get("peak_hours", "10:00:00-11:30:00")
@@ -1030,6 +1038,8 @@ async def lb_check_pods_handler(request):
 app = web.Application(client_max_size=2 * 1024 * 1024)
 # 认证鉴权中间件 + /api/auth/*、/api/admin/* 接口,必须在下面的 /api/{tail} 兜底转发之前注册
 auth.setup(app, clients)
+# 通用配置(系统管理 → 通用配置 /api/admin/general-settings;kubedoor-alarm / kubedoor-ai 取配置 /api/internal/settings)
+general_settings.register_routes(app)
 image_settings.register_routes(app)
 app.router.add_get('/api/internal/setup-health', installation_health.check)
 app.router.add_get("/ws", websocket_handler)
@@ -1073,6 +1083,9 @@ agent_install_api.register_routes(app, clients)
 # ==================== 消息通知(系统管理 → 消息通知 /api/admin/notification;kubedoor-alarm 取通道 /api/internal/notification) ====================
 notify_api.register_routes(app)
 
+# ==================== K8S 事件告警规则(系统管理 → 事件告警规则 /api/admin/event-alert-rules,保存后马上生效) ====================
+event_rules_api.register_routes(app)
+
 
 # ==================== 负载均衡路由注册 ====================
 app.router.add_get("/api/load-balance/config", lb_get_config_handler)
@@ -1092,8 +1105,11 @@ app.router.add_post("/api/load-balance/check-pods", lb_check_pods_handler)
 ai_api.register_routes(app, clients, utils)
 app.router.add_route('*', "/api/{tail:.*}", http_handler)
 
-# 数据库初始化必须最先执行(建池 + 建表),再建内置账号、启动依赖 DB 的后台任务
+# 数据库初始化必须最先执行(建池 + 建表);接着加载通用配置(其他模块都从它取值)和事件告警规则
+# (启动时先导入旧环境变量 / 旧规则文件),再建内置账号、启动依赖 DB 的后台任务
 app.on_startup.append(init_db_and_schema)
+app.on_startup.append(general_settings.on_startup)  # 导入旧配置 + 加载快照,启动每 10 秒的后台刷新
+app.on_startup.append(event_rules_api.on_startup)  # 导入旧规则文件 + 加载规则快照,启动每 10 秒的后台刷新
 app.on_startup.append(auth.on_startup)
 app.on_startup.append(notify_api.on_startup)  # 加载消息通知配置,启动每 10 秒的后台刷新
 app.on_startup.append(image_settings.on_startup)
@@ -1102,6 +1118,8 @@ app.on_startup.append(start_background_tasks)
 app.on_cleanup.append(cleanup_background_tasks)
 app.on_cleanup.append(notify_api.on_cleanup)
 app.on_cleanup.append(agent_install_api.on_cleanup)
+app.on_cleanup.append(event_rules_api.on_cleanup)
+app.on_cleanup.append(general_settings.on_cleanup)
 app.on_cleanup.append(close_db)
 
 if __name__ == '__main__':

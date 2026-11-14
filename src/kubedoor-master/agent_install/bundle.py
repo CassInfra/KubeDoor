@@ -1,4 +1,8 @@
-"""网页与命令行共用的 Agent 安装定义；渲染本身不连接 Kubernetes。"""
+"""网页与命令行共用的 Agent 安装定义；渲染本身不连接 Kubernetes。
+
+安装向导（kubedoor-setup）和旧脚本按文件路径加载这个文件：不能 import master 的其他模块，
+网页安装要用的控制端设置（通用配置）由 master 的调用方传进 defaults。
+"""
 from __future__ import annotations
 
 import argparse
@@ -21,31 +25,39 @@ BASE = {
     "agent_tag": "2.6.0", "oss_url": "", "remote_write_url": "",
     "ksm": "auto", "node_exporter": "auto", "image_pull_secret": "",
     "prom_k8s_tag_key": "origin_prometheus",
-    "image_vmagent": "registry.cn-shenzhen.aliyuncs.com/starsl/vmagent:stable",
+    # 与 deploy/install.sh 的 IMAGE_VMAGENT 一致（网页安装用的就是它；不一致时安装向导会把它当成改过的值存进通用配置）
+    "image_vmagent": "registry.cn-shenzhen.aliyuncs.com/starsl/vmagent",
     "image_kube_state_metrics": "registry.cn-shenzhen.aliyuncs.com/starsl/kube-state-metrics:v2.14.0",
     "image_node_exporter": "registry.cn-shenzhen.aliyuncs.com/starsl/node-exporter",
     "metrics_available": False,
 }
-FIELDS = {"namespace", "master_url", "env", "aliases", "mode", "image_repo", "agent_tag",
-          "oss_url", "remote_write_url", "ksm", "node_exporter", "image_pull_secret"}
-FILES = ("00-namespace.yaml", "10-agent.yaml", "20-vmagent.yaml", "21-kube-state-metrics.yaml", "22-node-exporter.yaml")
-# 控制端配置的时序库写入地址（带账号密码），vmagent 默认直连它。只在 master 内部和加密的安装任务里使用：
+# 控制端的时序库远程写地址（带账号密码），vmagent 默认直连它。只在 master 内部和加密的安装任务里使用：
 # 不在 FIELDS 里，页面提交不了，public_options 也不返回
 WRITE_KEY = "metrics_write_url"
+# 页面（安装 Agent 对话框、安装向导第 6 步）能提交的参数；notification 是可选的通知配置（master 校验，见 service.py）。
+# 镜像仓库、对象存储地址、指标写入地址覆盖不在这里：网页安装用通用配置（镜像仓库经 defaults 传入，对象存储地址
+# 由 master 每次转发 /api/pod/* 时带给 Agent，不写进 Agent 的 Secret），旧脚本命令行从变量取（_from_vars）
+FIELDS = {"namespace", "master_url", "env", "aliases", "mode", "agent_tag", "ksm", "node_exporter",
+          "image_pull_secret", "notification"}
+# 必须是字符串、去掉首尾空白的参数
+STRINGS = (FIELDS - {"aliases", "notification"}) | {"image_repo", "oss_url", "remote_write_url"}
+# master 从通用配置取来传给 defaults 的控制端设置（master_url 是通用配置的 KubeDoor 访问地址）
+SETTINGS = ("master_url", "prom_k8s_tag_key", "image_repo", "image_vmagent", "image_kube_state_metrics",
+            "image_node_exporter", WRITE_KEY)
+FILES = ("00-namespace.yaml", "10-agent.yaml", "20-vmagent.yaml", "21-kube-state-metrics.yaml", "22-node-exporter.yaml")
 
 
-def defaults() -> dict:
+def defaults(settings: dict | None = None) -> dict:
+    """网页安装的默认参数：BASE 加上 master 从通用配置取来的控制端设置（键见 SETTINGS，空值沿用 BASE）。
+
+    能否完整接入（metrics_available）按有没有远程写地址判断。不读环境变量：控制端的配置都在通用配置里。
+    """
     result = copy.deepcopy(BASE)
-    raw = os.environ.get("AGENT_INSTALL_DEFAULTS", "")
-    if raw:
-        parsed = json.loads(raw)
-        if not isinstance(parsed, dict):
-            raise ValueError("Agent 安装默认配置必须为 JSON 对象")
-        result.update({k: v for k, v in parsed.items() if k in BASE})
-    result["master_url"] = result["master_url"] or os.environ.get("KUBEDOOR_EXTURL", "")
-    result["prom_k8s_tag_key"] = os.environ.get("PROM_K8S_TAG_KEY", result["prom_k8s_tag_key"])
-    # 网页安装第 3 步的远程写地址（旧脚本的 METRICS_WRITE_URL），master 经环境变量拿到
-    result[WRITE_KEY] = os.environ.get("METRICS_WRITE_URL", "").strip()
+    result[WRITE_KEY] = ""
+    for key in SETTINGS:
+        value = (settings or {}).get(key)
+        if isinstance(value, str) and value.strip():
+            result[key] = value.strip()
     result["metrics_available"] = bool(result[WRITE_KEY])
     return result
 
@@ -76,10 +88,13 @@ def normalize_options(raw: dict, default: dict | None = None) -> dict:
         raise ValueError("安装参数必须为对象")
     result = copy.deepcopy(default if default is not None else defaults())
     result.update({k: v for k, v in raw.items() if k in FIELDS})
-    for key in FIELDS - {"aliases"}:
+    for key in STRINGS:
         if not isinstance(result.get(key, ""), str):
             raise ValueError(f"安装参数 {key} 必须为字符串")
         result[key] = result.get(key, "").strip()
+    # 通知配置的内容由 master 用 notify/channels.py 校验（这里不能 import master 的模块），只检查类型
+    if result.get("notification") is not None and not isinstance(result["notification"], dict):
+        raise ValueError("通知配置的格式不正确")
     if result["env"] and not re.fullmatch(r"[A-Za-z0-9_-]{1,100}", result["env"]):
         raise ValueError("集群标识需要 1 至 100 个字母、数字、下划线或中划线")
     if not re.fullmatch(r"[a-z0-9](?:[-a-z0-9]{0,61}[a-z0-9])?", result["namespace"]):
@@ -109,7 +124,7 @@ def normalize_options(raw: dict, default: dict | None = None) -> dict:
             result[WRITE_KEY] = clean_url(result[WRITE_KEY], credentials=True)
         except ValueError:
             # 不带出地址本身：里面有时序库账号密码
-            raise ValueError("控制端配置的时序库写入地址（METRICS_WRITE_URL）无效，请检查控制端配置") from None
+            raise ValueError("通用配置里的时序库远程写地址无效，请在系统管理 → 通用配置检查") from None
     if result["oss_url"]:
         result["oss_url"] = clean_url(result["oss_url"], credentials=True)
     if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", result["prom_k8s_tag_key"]):
@@ -117,18 +132,17 @@ def normalize_options(raw: dict, default: dict | None = None) -> dict:
     return result
 
 
-def without_credentials(value: str) -> str:
-    p = urlsplit(value)
-    return urlunsplit((p.scheme, p.netloc.rsplit("@", 1)[-1], p.path, "", ""))
-
-
 def public_options(options: dict) -> dict:
+    """给页面看的安装参数：只有 FIELDS 和能否完整接入；通知配置只给 IM 类型、@ 人和是否填了机器人地址"""
     result = {k: copy.deepcopy(v) for k, v in options.items() if k in FIELDS}
     if "metrics_available" in options:
         result["metrics_available"] = bool(options["metrics_available"])
-    for name in ("remote_write_url", "oss_url"):
-        if result.get(name):
-            result[name] = without_credentials(result[name])
+    if "notification" in result:
+        notification = result["notification"]
+        result["notification"] = {
+            "type": str(notification.get("type") or ""), "at": str(notification.get("at") or ""),
+            "configured": bool(notification.get("token")),
+        } if isinstance(notification, dict) else None
     return result
 
 
@@ -163,11 +177,11 @@ def render_agent(options: dict, *, username: str, password: str) -> list[dict]:
     p = urlsplit(options["master_url"])
     ws = urlunsplit(("wss" if p.scheme == "https" else "ws",
                     f"{quote(username, safe='')}:{quote(password, safe='')}@{p.netloc}", "", "", ""))
-    # vmagent 直连时序库：高级设置里填了写入地址覆盖就用它，否则用控制端配置的时序库写入地址。
+    # vmagent 直连时序库：旧脚本填了 REMOTE_WRITE_URL 就用它，网页安装用通用配置里的远程写地址（WRITE_KEY）。
     # 账号密码从地址里拆出来放进 Secret，不出现在 vmagent 的启动参数里
     rw = options["remote_write_url"] or options.get(WRITE_KEY, "")
     if options["mode"] == "full" and not rw:
-        raise ValueError("控制端没有配置时序库写入地址，请在高级设置中填写指标写入地址，或选择仅安装 Agent")
+        raise ValueError("没有时序库写入地址：完整接入请先在系统管理 → 通用配置填写远程写地址，或选择仅安装 Agent")
     rp = urlsplit(rw)
     rw_user = unquote(rp.username or "")
     rw_pass = unquote(rp.password or "")
@@ -195,7 +209,8 @@ def render_agent(options: dict, *, username: str, password: str) -> list[dict]:
     if options.get("_legacy_components"):
         selected = list(FILES[:2]) + options["_legacy_components"]
     resources = [obj for filename in selected for obj in _load_file(filename, variables, options["ksm"] != "reuse")]
-    # 通知不再由 agent 直接发送（经 master 统一发送），agent 里不保存机器人 token
+    # 通知不再由 agent 直接发送（经 master 统一发送），agent 里不保存机器人 token。
+    # 对象存储地址：网页安装为空串（master 每次转发 /api/pod/* 时带上通用配置里的地址），旧脚本照旧写入 OSS_URL
     secret_data = {"KUBEDOOR_MASTER": ws, "OSS_URL": options.get("oss_url", "")}
     secret = {"apiVersion": "v1", "kind": "Secret", "metadata": {"name": "kubedoor-agent-credentials", "namespace": options["namespace"]}, "type": "Opaque", "data": {k: base64.b64encode(v.encode()).decode() for k, v in secret_data.items()}}
     resources.insert(1, secret)
@@ -232,7 +247,9 @@ def render_agent(options: dict, *, username: str, password: str) -> list[dict]:
                 container["args"] += [f"-remoteWrite.basicAuth.username={rw_user}", "-remoteWrite.basicAuth.passwordFile=/etc/kubedoor-metrics/password"]
                 container["volumeMounts"].append({"name": "metrics-credentials", "mountPath": "/etc/kubedoor-metrics", "readOnly": True})
                 spec["volumes"].append({"name": "metrics-credentials", "secret": {"secretName": "kubedoor-metrics-credentials"}})
-        digest = hashlib.sha256(json.dumps({"options": options, "credentials": secret_data, "rw_pass": rw_pass}, sort_keys=True).encode()).hexdigest()[:16]
+        # 通知配置写进控制端的消息通知，不进目标集群：不算进配置摘要（只改通知不用滚动重启）
+        rendered = {k: v for k, v in options.items() if k != "notification"}
+        digest = hashlib.sha256(json.dumps({"options": rendered, "credentials": secret_data, "rw_pass": rw_pass}, sort_keys=True).encode()).hexdigest()[:16]
         pod.setdefault("metadata", {}).setdefault("annotations", {})["checksum/config"] = digest
     return resources
 
@@ -252,33 +269,13 @@ def _from_vars(variables: dict) -> tuple[dict, str, str]:
     return d, unquote(p.username or "anonymous-agent"), unquote(p.password or "legacy-anonymous")
 
 
-def master_metadata(variables: dict) -> dict:
-    """随控制端配置下发的网页安装 Agent 默认值（AGENT_INSTALL_DEFAULTS，明文 ConfigMap，不含凭据）。
-
-    vmagent 默认直连的时序库写入地址带账号密码，master 运行时从环境变量 METRICS_WRITE_URL 读取（见 defaults）；
-    能否完整接入（metrics_available）也按它实时判断，这里不再给出。
-    """
-    d = copy.deepcopy(BASE)
-    mapping = {"NAMESPACE": "namespace", "IMAGE_REPO": "image_repo", "TAG_AGENT": "agent_tag", "OSS_URL": "oss_url", "PROM_K8S_TAG_KEY": "prom_k8s_tag_key", "IMAGE_VMAGENT": "image_vmagent", "IMAGE_KUBE_STATE_METRICS": "image_kube_state_metrics", "IMAGE_NODE_EXPORTER": "image_node_exporter"}
-    for old, new in mapping.items():
-        if variables.get(old):
-            d[new] = variables[old]
-    d["master_url"] = variables.get("KUBEDOOR_EXTURL", "")
-    d.pop("metrics_available", None)
-    return d
-
-
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("command", choices=("agent", "metadata"))
+    parser.add_argument("command", choices=("agent",))
     parser.add_argument("--file")
-    parser.add_argument("--field", choices=("defaults",), default="defaults")
     args = parser.parse_args()
     fields = sys.stdin.buffer.read().decode().split("\0")
     variables = dict(zip(fields[::2], fields[1::2]))
-    if args.command == "metadata":
-        print(json.dumps(master_metadata(variables), ensure_ascii=True).replace("'", "\\u0027"))
-        return
     options, username, password = _from_vars(variables)
     resources = render_agent(options, username=username, password=password)
     # 不改变旧部署在 AGENT_AUTH_REQUIRED=false 时使用的不带口令连接地址。

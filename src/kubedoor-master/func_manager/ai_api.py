@@ -159,7 +159,8 @@ def register_routes(app, clients, utils):
                           "permission": principal.permission(env),
                           "aliases": aliases.get(env, [])}
                          for env in envs if principal.can_read(env)],
-            "prom_type": utils.PROM_TYPE, "prom_label_key": utils.PROM_K8S_TAG_KEY,
+            # 时序库类型和集群标签 key 取通用配置的当前值
+            "prom_type": utils.prom_type(), "prom_label_key": utils.tag_key(),
         })
 
     async def identity(request):
@@ -263,15 +264,17 @@ def register_routes(app, clients, utils):
         if body.get("env") not in envs:
             raise web.HTTPBadRequest(text="未知 K8S 集群")
         require_cluster(principal, body["env"])
-        if "victoria" not in (utils.PROM_TYPE or "").lower():
+        # 时序库配置(通用配置)每次请求取一次,改了马上生效
+        prom_type, prom_url = utils.prom_type(), utils.prom_url()
+        if "victoria" not in (prom_type or "").lower():
             raise web.HTTPNotImplemented(text="自由指标查询需要 VictoriaMetrics；现有 Prometheus 指标接口仍可使用")
-        if not utils.PROM_URL:
+        if not prom_url:
             raise web.HTTPServiceUnavailable(text="未配置 VictoriaMetrics 查询地址")
         try:
-            suffix, params = metrics_parameters(body, utils.PROM_K8S_TAG_KEY, int(os.environ.get("AI_METRICS_MAX_RANGE_DAYS", "30")))
+            suffix, params = metrics_parameters(body, utils.tag_key(), int(os.environ.get("AI_METRICS_MAX_RANGE_DAYS", "30")))
         except (ValueError, TypeError) as exc:
             raise web.HTTPBadRequest(text=str(exc))
-        upstream = urlsplit(utils.PROM_URL)
+        upstream = urlsplit(prom_url)
         auth = aiohttp.BasicAuth(unquote(upstream.username), unquote(upstream.password or "")) if upstream.username else None
         host = upstream.hostname or ""
         if ":" in host:

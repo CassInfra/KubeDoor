@@ -25,11 +25,11 @@ sh install.sh
 1. **环境检查**：核对目标集群及部署权限。
 2. **PostgreSQL**：填写地址、库名和凭据，点“测试连接”检查真实连接、认证及建表权限（库不存在时用该账号自动创建），结果显示在本页，通过后再点“继续”。SSL 默认禁用，需要加密连接时改选 SSL 模式。
 3. **时序库**：选择 VictoriaMetrics 单机版或集群版，连接地址只填主机名或 IP（不填端口），自动生成可修改的远程读 / 写地址；“测试连接”检查查询，并查找带集群标签的数据，通过后再点“继续”。
-4. **基础设置**：设置 `kubedoor` 管理员密码；KubeDoor 访问地址自动获取（当前打开页面的地址，端口转发打开时用 Web 的 NodePort 地址），有域名或负载均衡时可修改；选择是否安装告警组件（vmalert、Alertmanager、kubedoor-alarm，默认安装）。Grafana 看板固定安装。
-5. **自动安装**：分别显示 Web、控制服务、AI、Grafana 和告警组件的实际状态。
-6. **安装 Agent（可选）**：控制端全部就绪后，可以直接在本集群安装 Agent（填写集群名称，选择是否安装 vmagent、kube-state-metrics、node-exporter），也可以跳过直接完成。本集群的 Agent 直连控制服务，vmagent 直接写入第 3 步的远程写地址。
+4. **基础设置**：设置 `kubedoor` 管理员密码；KubeDoor 访问地址自动获取（当前打开页面的地址，端口转发打开时用 Web 的 NodePort 地址），有域名或负载均衡时可修改；按需填写对象存储上传地址（可选，各集群的 Agent 上传 jstack / jmap 等诊断文件用，可以带“账号:密码@”）；选择是否安装告警组件（vmalert、Alertmanager、kubedoor-alarm，默认安装）。Grafana 看板固定安装。
+5. **自动安装**：分别显示 Web、控制服务、AI、Grafana 和告警组件的实际状态。控制服务就绪后，安装服务把时序库类型和地址、集群标签名、访问地址、对象存储地址、网页安装 Agent 用的镜像写进控制台的「系统管理 → 通用配置」，再做健康检查。
+6. **安装 Agent（可选）**：控制端全部就绪后，可以直接在本集群安装 Agent（填写集群名称，选择是否安装 vmagent、kube-state-metrics、node-exporter），也可以跳过直接完成。本集群的 Agent 直连控制服务，vmagent 直接写入通用配置里的远程写地址（即第 3 步填写的地址）。
 
-全部所选服务就绪、最终连接检查及安装收尾通过后，才会通知成功。数据库与时序库凭据存放在 K8S Secret 中。完成后临时安装服务停用并撤销部署权限；其他集群通过“接入第一个集群”进入 Agent 管理页，上传 kubeconfig 安装 Agent。
+全部所选服务就绪、最终连接检查及安装收尾通过后，才会通知成功。数据库凭据和时序库地址存放在 K8S Secret 中（vmalert、Grafana 使用）；其余配置在数据库里，见下面的[控制端配置](#控制端配置通用配置)。网页安装不再创建 ConfigMap `kubedoor-config` 和事件告警规则 ConfigMap。完成后临时安装服务停用并撤销部署权限；其他集群通过“接入第一个集群”进入 Agent 管理页，上传 kubeconfig 安装 Agent。
 
 **第 6 步用到的临时集群权限**：Agent 需要集群管理员级别的权限，安装方也必须有同等权限。因此引导资源里额外创建专用账号 `kubedoor-agent-installer` 并绑定 `cluster-admin`；安装服务平时不持有它，只有在第 6 步选择安装 Agent 时才签发一小时有效的令牌使用。Agent 装完、选择不装、或 2 小时内没有选择（自动按不装处理），收尾时都会删除这个绑定和账号。
 
@@ -39,6 +39,26 @@ sh install.sh
 - 用 `--export` 导出的引导文件同样包含这个绑定，重新 `kubectl apply` 会重新授予该权限，只用于全新安装。
 
 **集群指标标签名必须与现有监控一致。** 全新部署可以保持 `origin_prometheus`；例如指标为 `cluster="prod-k8s"`，向导填写 `cluster`，接入 Agent 时集群标识填写 `prod-k8s`。新装 Agent 自动继承该标签名。远程读 / 写地址按类型自动生成（单机版 8428，集群版读 8481、写 8480）。各集群的 vmagent 直连第 3 步的远程写地址（账号口令放进目标集群的 Secret），这个地址需要能从各业务集群访问。
+
+## 控制端配置（通用配置）
+
+安装完成后，时序库类型和地址、集群标签名、KubeDoor 访问地址、对象存储上传地址、网页安装 Agent 用的镜像仓库和采集组件镜像、节点终端镜像、数据保留天数、登录与安全等，都在控制台「系统管理 → 通用配置」修改，保存后生效，不用重启；K8S 事件告警规则在「系统管理 → 事件告警规则」修改，保存后马上生效。消息通知在「系统管理 → 消息通知」配置。
+
+通用配置只管 KubeDoor 自己（master、alarm、ai 和之后安装的 Agent）。下面这些仍使用安装时写进 Secret 的地址，**改了时序库地址后要手动同步**：
+
+- **vmalert 和 Grafana 数据源**（网页安装）：vmalert 从 Secret `kubedoor-connection` 读 `PROM_URL`、`METRICS_WRITE_URL`（账号密码按 URL 编码写在地址里）；Grafana 从 Secret `kubedoor-grafana-datasources` 读不带账号的地址和分开的账号、密码。
+
+  ```sh
+  NS=kubedoor
+  kubectl -n $NS patch secret kubedoor-connection --type=merge -p \
+    '{"stringData":{"PROM_URL":"http://monit:<URL编码的密码>@<新地址>:8428","METRICS_WRITE_URL":"http://monit:<URL编码的密码>@<新地址>:8428/api/v1/write"}}'
+  kubectl -n $NS patch secret kubedoor-grafana-datasources --type=merge -p \
+    '{"stringData":{"metrics-url":"http://<新地址>:8428","metrics-user":"monit","metrics-password":"<密码>"}}'
+  kubectl -n $NS rollout restart deployment/vmalert deployment/kubedoor-dash
+  ```
+
+  地址按实际类型填写（集群版读 `:8481/select/<租户>/prometheus`、写 `:8480/insert/<租户>/prometheus`）。原来没有账号、现在要加账号（或反过来）时，还要把同一个 Secret 里 `datasources.yaml` 的 `basicAuth` 改成 `true`（或 `false`）。旧脚本安装的控制端改 `kubedoor.conf` 的 `PROM_URL` 后重新执行 `./install.sh master` 即可。
+- **已安装 Agent 的集群里的 vmagent**：用的是安装时写进该集群的远程写地址，不随通用配置变化。在控制台对该集群重新安装 Agent（使用通用配置里的新地址），或手动修改该集群 Agent 命名空间里的 Secret `kubedoor-metrics-credentials` 和 Deployment `vmagent` 的 `-remoteWrite.url`。
 
 ## 镜像版本与启动参数
 
@@ -59,7 +79,7 @@ sh install.sh --render     # 只预览引导资源，不连接集群、不生成
 
 每次升级先取得目标发布版本对应的新版 `deploy/install.sh`，单独复制到能访问控制端集群的机器。脚本内的固定版本就是默认升级目标；当前为 **2.6.0**，不会在运行时查询远程版本或使用浮动 `latest` 镜像。
 
-先查看升级计划及实际使用的 Deployment 补丁：
+先查看升级计划、实际使用的 Deployment 补丁，以及旧配置的迁移和清理步骤：
 
 ```sh
 sh install.sh upgrade --context production --namespace kubedoor --dry-run
@@ -96,6 +116,31 @@ containers:
 
 2.3.0 的 Nginx 配置会补充 Agent 安装接口专用代理和安全日志，避免新接口收到的 kubeconfig 被旧通用 API 日志记录；其他 Nginx 配置保留。无法识别的自定义 Nginx 配置会在修改前停止，需先人工核对。
 
+### 旧配置迁入数据库（升级到 2.6.0）
+
+2.6.0 起，master、alarm、ai 的配置存在数据库，在控制台「系统管理 → 通用配置」修改；K8S 事件告警规则在「系统管理 → 事件告警规则」修改（见[控制端配置](#控制端配置通用配置)）。`upgrade` 会自动迁移旧配置，按下面的顺序进行：
+
+1. 备份时额外保存 ConfigMap `kubedoor-config`、Secret `kubedoor-connection`（网页安装才有）和事件告警规则 ConfigMap `kubedoor-master-file-cfg`（存在才保存）。
+2. 升级 master 并等待就绪。新模板不再挂载规则 ConfigMap，但补丁按名称合并，旧 Deployment 上的规则挂载这时还在，新 master 启动时会读到旧规则文件。
+3. 在 master 容器里执行迁移命令，执行 `upgrade` 的身份需要 `pods/exec` 权限：
+
+   ```sh
+   kubectl -n kubedoor exec deploy/kubedoor-master -c kubedoor-master -- python3 -m general_settings migrate
+   ```
+
+   它把 `kubedoor-config` 里的旧配置导入通用配置，把旧的 `MSG_TYPE` / `MSG_TOKEN` / `DEFAULT_AT` 导入为消息通知的全局配置，把 `UPDATE_IMAGE` / `REGISTRY_SECRET` 导入镜像管理，把规则文件导入事件告警规则。只导入数据库里还没有的项（控制台改过的以控制台为准），可以重复执行。输出最后一行是只有配置项名称和状态的汇总，不含配置值。
+4. 照常升级 AI、alarm、Web。
+5. 全部组件就绪且第 3 步成功（退出码 0）后清理：去掉 master 的规则卷和挂载并等待就绪，删除 ConfigMap `kubedoor-master-file-cfg`，`kubedoor-config` 删除已迁移的配置项、只保留数据库连接 `PG_*`（ConfigMap 本身保留，工作负载还从它取数据库连接）。Secret `kubedoor-connection` 不动（vmalert、Grafana 还在用）。删除补丁和 ConfigMap 补丁都先由 API Server 试运行，试运行不通过时跳过清理并提示。
+
+因此升级期间 **master 会重启两次**（换镜像一次、去掉规则挂载一次），Agent 各重连一次。`--dry-run` 会打印迁移命令和清理用的补丁。
+
+迁移没有成功时，升级照常完成，旧配置保留不动，也不清理：
+
+- **退出码 3**：有旧配置格式不对、导入不了，脚本列出是哪几项（例如“通用配置 prom_url”“消息通知”“事件告警规则”）。到控制台对应页面填好后再执行一次 `upgrade`（填好的项下次算已迁移），迁移成功后自动清理。
+- **其他失败**（没有 `pods/exec` 权限、master 连不上数据库、镜像不是 2.6.0 等）：处理后再执行一次 `upgrade`，也可以手动执行上面的命令看输出。
+
+不清理时旧值留在 ConfigMap 里也没有副作用：配置以数据库为准，在控制台清空的项不会被旧值导回来。中途失败重跑是安全的：补丁可以重复打，迁移只导入还没有的项，清理时键或资源已经不存在也不报错。
+
 默认保留各组件当前的镜像仓库。使用镜像同步仓库或自定义构建 tag 时，可以显式指定：
 
 ```sh
@@ -105,7 +150,7 @@ sh install.sh upgrade --image-repo registry.example.com/kubedoor --tag 2.6.0 \
 
 `--tag` 只覆盖镜像版本，Deployment 模板始终来自所执行的脚本；请使用同一发布版本的脚本和镜像，不用于降级。`--web-tag` 可以覆盖 Web 镜像；首装参数 `--setup-tag`、`--nodeport`、`--image-pull-secret`、`--render`、`--export` 不适用于升级。
 
-实际修改前，脚本先让 Kubernetes API Server 校验全部 Deployment 补丁，再保存所有目标 Deployment 和 Nginx ConfigMap。默认备份为当前目录的 `kubedoor-upgrade-backup.yaml`，已有文件绝不覆盖，可用 `--backup` 换一个文件名。资源备份可能包含原有内联配置，应妥善保管；它**不包含数据库备份**。
+实际修改前，脚本先让 Kubernetes API Server 校验全部 Deployment 补丁，再保存所有目标 Deployment、Nginx ConfigMap 和上面列出的旧配置。默认备份为当前目录的 `kubedoor-upgrade-backup.yaml`，已有文件绝不覆盖，可用 `--backup` 换一个文件名。资源备份包含数据库连接等 Secret 和原有内联配置，应妥善保管；它**不包含数据库备份**。
 
 每个组件更新后均等待 Deployment 就绪。失败时脚本返回非零状态并停止后续组件；已完成的组件不会自动回退。检查镜像、Pod 事件和日志，修复后使用新的 `--backup` 文件重新执行。相同版本重试也会核对 Deployment 并重新载入 Web 配置。恢复旧版前需同时核对资源备份和数据库迁移兼容性，不能仅凭旧镜像保证回退。
 

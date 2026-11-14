@@ -13,6 +13,10 @@ OWNER = "setup.kubedoor.io/installation-id"
 ID = "718df732-9671-4144-8033-1c531ee41813"
 STATE_FILE = Path(os.environ["KUBEDOOR_FAKE_CLUSTER"])
 cluster = json.loads(STATE_FILE.read_text(encoding="utf-8"))
+# master 容器里 python3 -m general_settings migrate 成功时 stdout 最后一行的汇总（只有配置项名称和状态）
+MIGRATE_OK = {"ok": True, "general_settings": {"imported": ["prom_url", "kubedoor_exturl"], "present": [], "invalid": []},
+              "notification": "absent", "image_settings": {"rules": "imported", "registries": "absent"},
+              "event_rules": "imported"}
 
 
 def save():
@@ -50,7 +54,11 @@ def strategic_merge(current, patch, field=""):
             result = list(current or [])
             for item in patch:
                 match = next((i for i, old in enumerate(result) if old.get(merge_key) == item[merge_key]), None)
-                if match is None:
+                if item.get("$patch") == "delete":
+                    # strategic merge 的删除指令：按合并键删除列表项，不存在时是空操作
+                    if match is not None:
+                        result.pop(match)
+                elif match is None:
                     result.append(item)
                 else:
                     result[match] = strategic_merge(result[match], item)
@@ -234,13 +242,32 @@ elif verb == "patch":
     if cluster.get("patch_error") == key(kind, name) or cluster.get("patch_error") is True:
         fail("simulated patch failure")
     if "--dry-run=server" in args:
-        if cluster.get("dry_run_error") == key(kind, name):
+        # "deployment/x $patch" 只让带删除指令的补丁（升级后的清理）试运行失败
+        error = cluster.get("dry_run_error")
+        if error == key(kind, name) or (error == key(kind, name) + " $patch" and "$patch" in json.dumps(patch)):
             fail("simulated invalid Deployment")
     else:
         objects[key(kind, name)] = strategic_merge(objects[key(kind, name)], patch)
+elif verb == "exec":
+    # 容器里的命令：exec_result 注入退出码和输出，默认是迁移成功（日志一行 + 汇总一行）
+    call["exec"] = raw[raw.index("--") + 1:] if "--" in raw else []
+    if "-i" in args or "--stdin" in args:
+        call["stdin"] = sys.stdin.read()
+    result = cluster.get("exec_result") or {}
+    stdout = result.get("stdout", "general_settings: done\n" + json.dumps(MIGRATE_OK))
+    if stdout:
+        print(stdout)
+    if result.get("stderr"):
+        print(result["stderr"], file=sys.stderr)
+    save()
+    raise SystemExit(result.get("code", 0))
 elif verb in ("rollout", "wait"):
-    if verb == "rollout" and args[1] == "status" and cluster.get("rollout_error") == args[2]:
-        fail("simulated ImagePullBackOff timeout")
+    if verb == "rollout" and args[1] == "status":
+        # "deployment/x#2" 只让这个 Deployment 的第 2 次 rollout status 失败
+        seen = cluster.setdefault("rollout_seen", {})
+        seen[args[2]] = seen.get(args[2], 0) + 1
+        if cluster.get("rollout_error") in (args[2], f"{args[2]}#{seen[args[2]]}"):
+            fail("simulated ImagePullBackOff timeout")
 else:
     fail("Unexpected kubectl operation: " + " ".join(raw))
 save()

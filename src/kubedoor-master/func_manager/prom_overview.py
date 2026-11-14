@@ -16,7 +16,7 @@ def _promql_regex(values):
 
 def scope_key_filter(principal):
     """不指定集群时,按当前用户能看到的集群拼标签过滤;全部可见返回 None(用默认的 key!="")。"""
-    key = utils.PROM_K8S_TAG_KEY
+    key = utils.tag_key()
     mode, envs = principal.env_scope()
     if mode == 'all':
         return None
@@ -27,8 +27,9 @@ def scope_key_filter(principal):
     return f'{key}=~"{_promql_regex(envs)}"'
 
 
-def build_queries(env=None, key_filter=None):
-    key = utils.PROM_K8S_TAG_KEY
+def build_queries(env=None, key_filter=None, key=None):
+    """key 是集群标签 key,不传就取通用配置的当前值"""
+    key = key or utils.tag_key()
     if key_filter is None:
         key_filter = f'{key}="{env}"' if env else f'{key}!=""'
     return {
@@ -104,11 +105,11 @@ def build_queries(env=None, key_filter=None):
           ))''',
         "max_pod_usage_percent": f'''topk(1, (
             count by ({key}, node) (
-              kube_pod_info{{origin_prometheus!="", {key_filter}, created_by_kind!~"<none>|Job",node!~"bursting-node|virtual-kubelet"}}
+              kube_pod_info{{{key}!="", {key_filter}, created_by_kind!~"<none>|Job",node!~"bursting-node|virtual-kubelet"}}
             )
             /
             sum by ({key}, node) (
-              kube_node_status_allocatable{{origin_prometheus!="", {key_filter}, resource="pods",node!~"bursting-node|virtual-kubelet"}}
+              kube_node_status_allocatable{{{key}!="", {key_filter}, resource="pods",node!~"bursting-node|virtual-kubelet"}}
             )
             * 100
           ))''',
@@ -123,7 +124,8 @@ async def _fetch(session, url, name, q):
             data = await resp.json()
             return data.get("data", {}).get("result", [])
     except Exception as exc:
-        logger.exception("prom_overview query [{}] failed: {}", name, exc)
+        # 不用 logger.exception:堆栈里的报错原文带完整查询地址(可能有账号密码)
+        logger.error("prom_overview query [{}] failed: {}", name, utils.redact_credentials(exc))
         return []
 
 
@@ -138,12 +140,11 @@ def _aggregate(items):
     return total
 
 
-def _format_max_metric(items):
+def _format_max_metric(items, key):
     if not items:
         return ["", 0.0]
     item = items[0]
     labels = item.get("metric", {})
-    key = utils.PROM_K8S_TAG_KEY
     key_value = labels.pop(key, "")
     other_values = [str(v) for v in labels.values()]
     label_str = "：".join([key_value] + other_values) if key_value else "：".join(other_values)
@@ -156,7 +157,8 @@ def _format_max_metric(items):
 
 
 async def get_overview_counts_async(env=None, key_filter=None):
-    queries = build_queries(env, key_filter)
+    key = utils.tag_key()  # 一次请求只取一次,各条查询和结果解析用同一个标签 key
+    queries = build_queries(env, key_filter, key)
     url = utils.get_prom_url()
     async with aiohttp.ClientSession() as session:
         tasks = [_fetch(session, url, name, q) for name, q in queries.items()]
@@ -172,7 +174,7 @@ async def get_overview_counts_async(env=None, key_filter=None):
     }
     for (name, _), result in zip(queries.items(), results):
         if name in max_metrics:
-            final[name] = _format_max_metric(result)
+            final[name] = _format_max_metric(result, key)
         else:
             final[name] = _aggregate(result)
     return final

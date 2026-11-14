@@ -1,30 +1,53 @@
 """登录失败限流(内存,master 单实例)。
 
-同一账号 + 同一来源 IP 在窗口内连续失败 MAX_FAILURES 次锁 LOCK_SECONDS;
-同一账号不分来源失败 USER_MAX_FAILURES 次也锁(防分布式撞库),上限放宽一些,降低被恶意锁号的影响。
+同一账号 + 同一来源 IP 在窗口内连续失败 N 次锁 M 分钟;同一账号不分来源失败 4N 次也锁(防分布式撞库),
+上限放宽一些,降低被恶意锁号的影响。N(登录失败锁定次数)、M(锁定时长)在「系统管理 → 通用配置 →
+登录与安全」设置,每次用时再取,改了马上生效(已经锁上的按锁定时的时长解锁)。
 """
 
-import os
 import time
 from collections import deque
 
-MAX_FAILURES = int(os.environ.get('AUTH_LOGIN_MAX_FAILURES', '5'))
-LOCK_SECONDS = int(os.environ.get('AUTH_LOCK_MINUTES', '15')) * 60
-USER_MAX_FAILURES = MAX_FAILURES * 4
-WINDOW_SECONDS = LOCK_SECONDS
+import general_settings
+
+USER_FAILURES_FACTOR = 4  # 同一账号不分来源的失败上限 = 单来源上限 × 4
 _MAX_KEYS = 20000
 
 
 class LoginLimiter:
-    def __init__(self, max_failures=MAX_FAILURES, user_max_failures=USER_MAX_FAILURES,
-                 window=WINDOW_SECONDS, lock_seconds=LOCK_SECONDS, clock=time.monotonic):
-        self.max_failures = max_failures
-        self.user_max_failures = user_max_failures
-        self.window = window
-        self.lock_seconds = lock_seconds
+    """参数不传(None)时每次用时取通用配置;测试可以传固定值。窗口默认等于锁定时长。"""
+
+    def __init__(self, max_failures=None, user_max_failures=None, window=None, lock_seconds=None,
+                 clock=time.monotonic):
+        self._max_failures = max_failures
+        self._user_max_failures = user_max_failures
+        self._window = window
+        self._lock_seconds = lock_seconds
         self.clock = clock
         self._failures = {}  # key -> deque[时间]
         self._locked = {}  # key -> 解锁时间
+
+    @property
+    def max_failures(self):
+        if self._max_failures is not None:
+            return self._max_failures
+        return int(general_settings.value('auth_login_max_failures'))
+
+    @property
+    def user_max_failures(self):
+        if self._user_max_failures is not None:
+            return self._user_max_failures
+        return self.max_failures * USER_FAILURES_FACTOR
+
+    @property
+    def lock_seconds(self):
+        if self._lock_seconds is not None:
+            return self._lock_seconds
+        return int(general_settings.value('auth_lock_minutes')) * 60
+
+    @property
+    def window(self):
+        return self._window if self._window is not None else self.lock_seconds
 
     @staticmethod
     def _keys(username, ip):
@@ -47,15 +70,16 @@ class LoginLimiter:
 
     def failure(self, username, ip):
         now = self.clock()
+        window, lock_seconds = self.window, self.lock_seconds
         if len(self._failures) > _MAX_KEYS:
-            self._prune(now)
+            self._prune(now, window)
         for key, limit in zip(self._keys(username, ip), (self.user_max_failures, self.max_failures)):
             items = self._failures.setdefault(key, deque())
             items.append(now)
-            while items and items[0] <= now - self.window:
+            while items and items[0] <= now - window:
                 items.popleft()
             if len(items) >= limit:
-                self._locked[key] = now + self.lock_seconds
+                self._locked[key] = now + lock_seconds
                 items.clear()
 
     def success(self, username, ip):
@@ -71,8 +95,8 @@ class LoginLimiter:
             for key in [k for k in store if k[1] == name]:
                 store.pop(key, None)
 
-    def _prune(self, now):
-        for key in [k for k, items in self._failures.items() if not items or items[-1] <= now - self.window]:
+    def _prune(self, now, window):
+        for key in [k for k, items in self._failures.items() if not items or items[-1] <= now - window]:
             self._failures.pop(key, None)
         for key in [k for k, until in self._locked.items() if until <= now]:
             self._locked.pop(key, None)

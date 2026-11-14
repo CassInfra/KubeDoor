@@ -1,10 +1,14 @@
 import type {
   AgentInstallOptions,
+  AgentInstallSettings,
   AgentInstallTask,
   InstallStatus
 } from "@/api/agent-install";
 
 export const MAX_KUBECONFIG_BYTES = 1024 * 1024;
+
+/** 通用配置页（新标签页打开），填完回到对话框点「重新读取」 */
+export const GENERAL_SETTINGS_URL = "#/system/general-settings";
 
 export const INSTALL_STATUS_TEXT: Record<InstallStatus, string> = {
   draft: "等待检测",
@@ -25,8 +29,8 @@ export function suggestedClusterName(context: string): string {
 }
 
 /**
- * 安装对话框能修改的参数及默认值。集群别名、镜像仓库、镜像拉取 Secret 不在对话框里：
- * 别名装好后在 Agent 列表里编辑，镜像仓库用控制端的配置。
+ * 安装对话框能修改的参数及默认值。集群别名、镜像仓库、镜像拉取 Secret、远程写地址、对象存储地址都不在对话框里：
+ * 别名装好后在 Agent 列表里编辑，其余用通用配置。
  */
 export function emptyInstallOptions(): AgentInstallOptions {
   return {
@@ -35,10 +39,8 @@ export function emptyInstallOptions(): AgentInstallOptions {
     master_url: "",
     mode: "full",
     agent_tag: "",
-    oss_url: "",
     ksm: "auto",
-    node_exporter: "auto",
-    remote_write_url: ""
+    node_exporter: "auto"
   };
 }
 
@@ -56,11 +58,16 @@ export function pickInstallOptions(
   return result;
 }
 
+/**
+ * 已检测的计划对应的参数指纹：切换 context、编辑任意安装参数都要重新检测。
+ * extra 是参数以外也要重新检测的内容（通知配置、重新读取到的通用配置）
+ */
 export function installFingerprint(
   context: string,
-  options: AgentInstallOptions
+  options: AgentInstallOptions,
+  extra: unknown = null
 ): string {
-  // 逐项固定字段顺序，切换 context 或编辑任意安装参数都要重新检测。
+  // 逐项固定字段顺序
   return JSON.stringify([
     context,
     options.env,
@@ -68,11 +75,30 @@ export function installFingerprint(
     options.master_url,
     options.mode,
     options.agent_tag,
-    options.oss_url,
     options.ksm,
     options.node_exporter,
-    options.remote_write_url
+    extra ?? null
   ]);
+}
+
+/** 安装要用、通用配置里还没有的项（中文名称与通用配置页一致）；required 为 true 的缺了不能完整接入 */
+export function missingSettings(
+  settings: AgentInstallSettings | null | undefined
+): Array<{
+  key: "metrics_write_url" | "oss_url";
+  label: string;
+  required: boolean;
+}> {
+  const items = [
+    { key: "metrics_write_url" as const, label: "远程写地址", required: true },
+    { key: "oss_url" as const, label: "对象存储上传地址", required: false }
+  ];
+  return items.filter(item => !(settings?.[item.key] || "").trim());
+}
+
+/** 通用配置里没有某一项时的提醒 */
+export function settingsReminder(label: string): string {
+  return `通用配置里还没有${label}。在系统管理 → 通用配置填写一次，以后安装 Agent 自动使用`;
 }
 
 export function installValidation(options: AgentInstallOptions): string {

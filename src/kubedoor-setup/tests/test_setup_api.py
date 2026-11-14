@@ -331,6 +331,40 @@ async def test_started_install_keeps_alerting_choice_including_older_saved_selec
         assert (await response.json())['data']['config']['components'] == {'alerting': True}
 
 
+@pytest.mark.asyncio
+async def test_oss_url_is_optional_saved_masked_and_keeps_saved_password():
+    client, repo = await make_client()
+    async with client:
+        state = await config_ready(client)
+        # 没提交这一项（旧版页面）：不配置
+        assert state['config']['oss_url'] == ''
+        response = await client.put('/setup-api/configuration', json={
+            'revision': state['revision'], **FINAL, 'oss_url': ' https://ak:oss-secret@oss.example.com/bucket/ '})
+        assert response.status == 200
+        saved = (await response.json())['data']
+        # 页面只拿到打码的地址（第 5 步摘要也显示它），去掉了末尾的 /
+        assert saved['config']['oss_url'] == 'https://ak:******@oss.example.com/bucket'
+        assert 'oss-secret' not in json.dumps(saved)
+        stored = 'https://ak:oss-secret@oss.example.com/bucket'
+        assert (await repo.load_private(await repo.load()))['config']['oss_url'] == stored
+        # 原样提交打码的地址表示沿用已保存的密码；不提交这一项也沿用
+        for body in ({'oss_url': saved['config']['oss_url']}, {}):
+            response = await client.put('/setup-api/configuration', json={'revision': saved['revision'], **FINAL, **body})
+            assert response.status == 200
+            saved = (await response.json())['data']
+            assert (await repo.load_private(await repo.load()))['config']['oss_url'] == stored
+        # 换了账号要重新填密码；查询参数、本机地址不接受
+        for bad, reason in (('https://other:******@oss.example.com/bucket', '密码需要重新填写'),
+                            ('https://oss.example.com/upload?token=x', '不含查询参数'),
+                            ('http://127.0.0.1:9000', '不能使用本机'), (7, '格式不正确')):
+            response = await client.put('/setup-api/configuration', json={'revision': saved['revision'], **FINAL, 'oss_url': bad})
+            assert response.status == 422 and reason in (await response.json())['message']
+        # 清空表示不配置
+        response = await client.put('/setup-api/configuration', json={'revision': saved['revision'], **FINAL, 'oss_url': ''})
+        assert response.status == 200 and (await response.json())['data']['config']['oss_url'] == ''
+        assert (await repo.load_private(await repo.load()))['config']['oss_url'] == ''
+
+
 def test_component_selection_keeps_grafana_and_ties_alerting_services():
     assert selected_components({'alerting': False}) == {'grafana': True, 'alarm': False, 'vmalert': False, 'alertmanager': False}
     assert selected_components({'alerting': True}) == {'grafana': True, 'alarm': True, 'vmalert': True, 'alertmanager': True}

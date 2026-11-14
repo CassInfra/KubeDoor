@@ -5,6 +5,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 import db
+import general_settings
 import installation_health
 from auth import policy
 from auth.principal import Principal
@@ -36,7 +37,8 @@ class Session(Response):
 
 @pytest.mark.asyncio
 async def test_health_reports_this_installation_only_after_dependency_checks(monkeypatch):
-    monkeypatch.setenv('PROM_URL', 'http://vm.example.com/prefix')
+    # 查询地址取通用配置(安装向导调这个接口之前已经写好);末尾的 / 去掉
+    monkeypatch.setattr(general_settings, 'value', {'prom_url': 'http://vm.example.com/prefix/'}.__getitem__)
     monkeypatch.setenv('KUBEDOOR_SETUP_ID', 'install-one')
     monkeypatch.setattr(db, 'pg_fetchval', AsyncMock(return_value=1))
     monkeypatch.setattr(installation_health.aiohttp, 'ClientSession', Session)
@@ -51,6 +53,15 @@ async def test_database_failure_is_not_ready_and_does_not_leak_secret(monkeypatc
     response = await installation_health.check(None)
     assert response.status == 503
     assert 'secret-password' not in response.text
+
+
+@pytest.mark.asyncio
+async def test_unconfigured_metrics_url_is_not_ready(monkeypatch):
+    monkeypatch.setattr(general_settings, 'value', {'prom_url': ''}.__getitem__)
+    monkeypatch.setattr(db, 'pg_fetchval', AsyncMock(return_value=1))
+    response = await installation_health.check(None)
+    assert response.status == 503
+    assert json.loads(response.text)['ok'] is False
 
 
 @pytest.mark.asyncio

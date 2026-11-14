@@ -6,6 +6,8 @@
 - POST /api/admin/notification/test:发一条测试消息(token 留空用已保存的),同一账号 3 秒一次,记审计 notification.test
 - GET /api/internal/notification?env=:kubedoor-alarm 带内部 token 取该集群的通道(token 明文):env 为空或不认识时
   按 resolve 的规则用全局配置,都没有时 data 为 null
+- save_cluster_channel(env, entry, updated_by):网页安装 Agent 上线后,把安装时填的通知配置写进 clusters[env]
+  (和 PUT 共用一把锁,校验 / 加密规则相同,保留全局配置和其他集群)
 
 /api/admin/.+ 已在 auth/policy.py 统一要求系统管理员;内部接口在 policy 登记为 internal,这里再限定为
 不带用户名的内部服务身份(AI 服务代表某个用户的调用拿不到明文 token)。
@@ -38,6 +40,8 @@ AUDIT_TEST = 'notification.test'
 REFRESH_TASK = web.AppKey('notify_refresh_task', asyncio.Task)
 
 _last_test = {}  # 账号(小写) -> 上次测试的时间(monotonic)
+# 保存配置是「读出整行 → 合并 → 写回」:页面保存(PUT)和安装 Agent 写入集群配置共用这把锁,互相不覆盖
+_save_lock = asyncio.Lock()
 
 
 def _fail(status, message, code='bad_request', retry_after=0):
@@ -257,23 +261,46 @@ async def put_config(request):
     body = await _read_body(request)
     if body is None:
         return _fail(400, '请求体必须是 JSON 对象')
-    row, error = await _load_row()
-    if error is not None:
-        return error
-    existing = row['value'] if row and isinstance(row['value'], dict) else {}
-    try:
-        cfg = normalize_config(body, existing)
-    except ValueError as exc:
-        return _fail(422, str(exc), 'invalid_config')
-    changes = diff_scopes(existing, cfg)
-    try:
-        saved = await store.put_setting_row(SETTING_KEY, cfg, principal.username)
-    except Exception as exc:
-        logger.error(f'保存消息通知配置失败: {exc}')
-        return _fail(503, '保存消息通知配置失败,请稍后重试', 'db_unavailable')
-    service.apply(saved['value'])  # 保存后立即生效,不等后台刷新
+    async with _save_lock:
+        row, error = await _load_row()
+        if error is not None:
+            return error
+        existing = row['value'] if row and isinstance(row['value'], dict) else {}
+        try:
+            cfg = normalize_config(body, existing)
+        except ValueError as exc:
+            return _fail(422, str(exc), 'invalid_config')
+        changes = diff_scopes(existing, cfg)
+        try:
+            saved = await store.put_setting_row(SETTING_KEY, cfg, principal.username)
+        except Exception as exc:
+            logger.error(f'保存消息通知配置失败: {exc}')
+            return _fail(503, '保存消息通知配置失败,请稍后重试', 'db_unavailable')
+        service.apply(saved['value'])  # 保存后立即生效,不等后台刷新
     audit.record_bg(principal.username, AUDIT_UPDATE, ip=client_ip(request), detail=changes)
     return web.json_response({'success': True, 'data': await _payload(saved)})
+
+
+async def save_cluster_channel(env, entry, updated_by):
+    """网页安装 Agent 上线后,把安装时填的通知配置写进 clusters[env]:已有该集群的单独配置就覆盖,
+    全局配置和其他集群原样保留。entry 是 {type, token, at}(token 明文;留空沿用该集群已保存的,规则同 PUT)。
+
+    校验 / 加密和 PUT 一样,与 PUT 共用一把锁;写完立即生效,记审计 notification.update(detail 带 source: agent-install)。
+    不合法抛 ValueError(中文说明,不含 token),读写库失败抛原来的异常。"""
+    env = check_env(env)
+    async with _save_lock:
+        row = await store.get_setting_row(SETTING_KEY)
+        existing = row['value'] if row and isinstance(row['value'], dict) else {}
+        clusters = dict(_saved_clusters(existing))
+        if env not in clusters and len(clusters) >= MAX_CLUSTERS:
+            raise ValueError(f'按集群单独配置最多 {MAX_CLUSTERS} 个')
+        clusters[env] = normalize_entry(entry, clusters.get(env), _scope(env))
+        cfg = {'default': existing['default']} if isinstance(existing.get('default'), dict) else {}
+        cfg['clusters'] = clusters
+        changes = diff_scopes(existing, cfg)
+        saved = await store.put_setting_row(SETTING_KEY, cfg, updated_by)
+        service.apply(saved['value'])
+    audit.record_bg(updated_by, AUDIT_UPDATE, env=env, detail={**changes, 'source': 'agent-install'})
 
 
 def _test_wait(username):

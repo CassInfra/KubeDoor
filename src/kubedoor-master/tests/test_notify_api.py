@@ -1,4 +1,5 @@
 """消息通知的接口(notify/api.py):GET / PUT / 测试 / 内部接口,以及 policy 登记和启停。"""
+import asyncio
 import json
 import threading
 from datetime import datetime, timezone
@@ -86,6 +87,8 @@ def fresh_state(monkeypatch):
     monkeypatch.setattr(service, '_refresh_failed', False)
     monkeypatch.setattr(service, '_undecryptable', set())
     monkeypatch.setattr(notify_api, '_last_test', {})
+    # 每个用例一把新锁:锁在有人等待时会绑定当时的事件循环
+    monkeypatch.setattr(notify_api, '_save_lock', asyncio.Lock())
     monkeypatch.setattr(db, 'pg_fetch', AsyncMock(return_value=[{'env': 'test-k8s'}, {'env': 'prod-k8s'}, {'env': ''}]))
 
 
@@ -650,6 +653,117 @@ async def test_internal_through_auth_middleware(monkeypatch):
     assert ok.status == 200 and data['data'] == {'type': 'dingding', 'token': DING, 'at': '13800000000'}
     assert admin_page.status == 200  # 系统身份是管理员,页面接口照常(没有明文 token)
     assert admin_data['success'] is True and no_secret(admin_data)
+
+
+# ---------------------------------------------------------------------------
+# 安装 Agent 写入集群配置(save_cluster_channel)
+# ---------------------------------------------------------------------------
+@pytest.mark.asyncio
+async def test_cluster_channel_is_added_and_keeps_default_and_other_clusters(monkeypatch, audits):
+    store = FakeStore(saved_config())
+    before = json.loads(json.dumps(store.row['value']))
+    make_app(monkeypatch, store)
+    await notify_api.save_cluster_channel(' new-k8s ', {'type': 'feishu', 'token': f' https://open.feishu.cn/open-apis/bot/v2/hook/{FEISHU} ',
+                                                        'at': ' ou_1 '}, 'installer')
+    saved = store.row['value']
+    assert saved['default'] == before['default'] and saved['clusters']['prod-k8s'] == before['clusters']['prod-k8s']
+    entry = saved['clusters']['new-k8s']
+    assert entry['type'] == 'feishu' and entry['at'] == 'ou_1' and entry['token'].startswith('v1:')
+    assert decrypt_secret(entry['token']) == FEISHU and store.row['updated_by'] == 'installer'
+    # 马上生效
+    assert service.resolve('new-k8s') == {'type': 'feishu', 'token': FEISHU, 'at': 'ou_1'}
+    assert service.resolve('prod-k8s')['token'] == DING and service.resolve('other-k8s')['token'] == WECOM
+    [record] = audits
+    assert record['action'] == 'notification.update' and record['username'] == 'installer' and record['env'] == 'new-k8s'
+    assert record['detail'] == {'default': 'unchanged', 'clusters': {'added': ['new-k8s'], 'updated': [], 'removed': []},
+                                'source': 'agent-install'}
+    assert no_secret(saved, audits)
+
+
+@pytest.mark.asyncio
+async def test_cluster_channel_overwrites_the_existing_cluster_config(monkeypatch, audits):
+    store = FakeStore(saved_config())
+    make_app(monkeypatch, store)
+    await notify_api.save_cluster_channel('prod-k8s', {'type': 'wecom', 'token': WECOM_URL, 'at': ''}, 'installer')
+    entry = store.row['value']['clusters']['prod-k8s']
+    assert entry['type'] == 'wecom' and entry['at'] == '' and decrypt_secret(entry['token']) == WECOM
+    assert audits[0]['detail']['clusters'] == {'added': [], 'updated': ['prod-k8s'], 'removed': []}
+    # 没有全局配置时也不凭空加一个
+    store = FakeStore()
+    make_app(monkeypatch, store)
+    await notify_api.save_cluster_channel('prod-k8s', {'type': 'dingding', 'token': DING}, 'installer')
+    assert store.row['value'] == {'clusters': {'prod-k8s': {'type': 'dingding', 'token': store.row['value']['clusters']['prod-k8s']['token'],
+                                                            'at': ''}}}
+    assert service.resolve('other-k8s') is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('env, entry, message', [
+    ('prod-k8s', {'type': 'qq', 'token': WECOM}, '集群 prod-k8s:请选择 IM 类型'),
+    ('prod-k8s', {'type': 'wecom', 'token': 'https://example.com/hook'}, '集群 prod-k8s:不认识的机器人地址'),
+    ('prod-k8s', {'type': 'wecom', 'token': ''}, '集群 prod-k8s:IM 类型从钉钉改成了企业微信'),
+    ('new-k8s', {'type': 'wecom', 'token': ''}, '集群 new-k8s:请填写企业微信机器人地址'),
+    ('bad env', {'type': 'wecom', 'token': WECOM}, '集群名称不正确'),
+    ('', {'type': 'wecom', 'token': WECOM}, '集群名称不正确'),
+])
+async def test_cluster_channel_is_validated_like_put(monkeypatch, audits, env, entry, message):
+    store = FakeStore(saved_config())
+    before = store._copy()
+    make_app(monkeypatch, store)
+    with pytest.raises(ValueError) as error:
+        await notify_api.save_cluster_channel(env, entry, 'installer')
+    assert str(error.value).startswith(message), str(error.value)
+    assert store.puts == [] and store._copy() == before and audits == [] and not service.is_loaded()
+
+
+@pytest.mark.asyncio
+async def test_cluster_channel_blank_token_keeps_the_saved_one_and_limit_applies(monkeypatch, audits):
+    store = FakeStore(saved_config())
+    make_app(monkeypatch, store)
+    await notify_api.save_cluster_channel('prod-k8s', {'type': 'dingding', 'token': '', 'at': '13900000000'}, 'installer')
+    entry = store.row['value']['clusters']['prod-k8s']
+    assert entry['at'] == '13900000000' and decrypt_secret(entry['token']) == DING
+    monkeypatch.setattr(notify_api, 'MAX_CLUSTERS', 1)
+    with pytest.raises(ValueError, match='按集群单独配置最多 1 个'):
+        await notify_api.save_cluster_channel('new-k8s', {'type': 'wecom', 'token': WECOM}, 'installer')
+    # 已有的集群照样能覆盖
+    await notify_api.save_cluster_channel('prod-k8s', {'type': 'wecom', 'token': WECOM}, 'installer')
+    assert list(store.row['value']['clusters']) == ['prod-k8s']
+
+
+@pytest.mark.asyncio
+async def test_cluster_channel_database_failure_raises_and_changes_nothing(monkeypatch, audits):
+    store = FakeStore(saved_config())
+    store.put_error = RuntimeError('db down')
+    make_app(monkeypatch, store)
+    with pytest.raises(RuntimeError):
+        await notify_api.save_cluster_channel('new-k8s', {'type': 'wecom', 'token': WECOM}, 'installer')
+    assert audits == [] and service.resolve('new-k8s') is None
+    store.put_error, store.error = None, RuntimeError('db down')
+    with pytest.raises(RuntimeError):
+        await notify_api.save_cluster_channel('new-k8s', {'type': 'wecom', 'token': WECOM}, 'installer')
+
+
+@pytest.mark.asyncio
+async def test_cluster_channel_and_put_share_one_lock(monkeypatch, audits):
+    """两边都是「读出整行 → 合并 → 写回」:共用一把锁,页面保存不会冲掉安装 Agent 刚写入的集群配置"""
+    store = FakeStore(saved_config())
+    app, _ = make_app(monkeypatch, store)
+    async with TestClient(TestServer(app)) as client:
+        async with notify_api._save_lock:  # 另一次保存正在进行
+            installing = asyncio.create_task(
+                notify_api.save_cluster_channel('new-k8s', {'type': 'feishu', 'token': FEISHU}, 'installer'))
+            saving = asyncio.create_task(client.put('/api/admin/notification',
+                                                    json={'default': {'type': 'wecom', 'token': '', 'at': 'lisi'}}))
+            await asyncio.sleep(0.05)
+            assert not installing.done() and not saving.done() and store.puts == []
+        await installing
+        response = await saving
+        assert response.status == 200
+    # 先进先出:安装 Agent 先写,页面保存读到的是写入之后的配置
+    assert [sorted(put['clusters']) for put in store.puts] == [['new-k8s', 'prod-k8s'], ['new-k8s', 'prod-k8s']]
+    assert store.row['value']['default']['at'] == 'lisi' and 'new-k8s' in store.row['value']['clusters']
+    assert service.resolve('new-k8s')['token'] == FEISHU
 
 
 # ---------------------------------------------------------------------------

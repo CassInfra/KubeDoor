@@ -1,0 +1,2105 @@
+{
+  "_说明": "事件告警规则严格校验的用例：master tests/test_event_rules_schema.py 和 web tests/event-alert-rules.test.cjs 共用，错误信息两边必须逐字一致。改校验时用 rules_schema.check 重新生成 errors / normalized 并逐条核对",
+  "cases": [
+    {
+      "name": "出厂默认规则合法，规范化后不变",
+      "rules": {
+        "global_ignore_rules": [
+          {
+            "name": "环境过滤规则(排除非生产环境的K8S)",
+            "enabled": true,
+            "conditions": {
+              "k8s": {
+                "contains": [
+                  "cassmall-hwbeta-kunlun",
+                  "cassmall-hwbeta-penglai"
+                ]
+              }
+            }
+          },
+          {
+            "name": "常见忽略事件[示例:防止告警规则中有正常事件被匹配到,可以加到忽略规则中]",
+            "enabled": true,
+            "conditions": {
+              "reason": {
+                "contains": [
+                  "BackOffStart",
+                  "SuccessfulCreate",
+                  "SuccessfulMountVolume"
+                ]
+              }
+            }
+          }
+        ],
+        "alert_rules": [
+          {
+            "name": "关键事件告警",
+            "enabled": true,
+            "severity": "critical",
+            "conditions": {
+              "reason": {
+                "contains": [
+                  "OOMKilling",
+                  "NodeNotReady",
+                  "SystemOOM",
+                  "Unreachable"
+                ]
+              },
+              "level": {
+                "contains": [
+                  "Warning"
+                ]
+              }
+            }
+          },
+          {
+            "name": "重启事件告警",
+            "enabled": true,
+            "severity": "warning",
+            "conditions": {
+              "message": {
+                "contains": [
+                  "restart"
+                ]
+              }
+            }
+          },
+          {
+            "name": "健康检查失败告警",
+            "enabled": true,
+            "severity": "warning",
+            "conditions": {
+              "reason": {
+                "contains": [
+                  "Unhealthy"
+                ]
+              },
+              "name": {
+                "not_starts_with": [
+                  "deploy-micro-service-",
+                  "deploy-integration-changyuan-",
+                  "deploy-datax-cloud-"
+                ]
+              },
+              "count": {
+                "greater_than": 1
+              }
+            }
+          },
+          {
+            "name": "挂载失败告警",
+            "enabled": true,
+            "severity": "warning",
+            "conditions": {
+              "reason": {
+                "contains": [
+                  "FailedMount",
+                  "FailedAttachVolume"
+                ]
+              }
+            }
+          },
+          {
+            "name": "调度失败告警",
+            "enabled": true,
+            "severity": "warning",
+            "conditions": {
+              "reason": {
+                "contains": [
+                  "FailedScheduling",
+                  "Insufficient"
+                ]
+              }
+            }
+          },
+          {
+            "name": "资源压力告警",
+            "enabled": true,
+            "severity": "warning",
+            "conditions": {
+              "reason": {
+                "contains": [
+                  "Pressure",
+                  "OutOf",
+                  "Evict"
+                ]
+              }
+            }
+          },
+          {
+            "name": "僵尸进程告警",
+            "enabled": true,
+            "severity": "warning",
+            "conditions": {
+              "reason": {
+                "contains": [
+                  "ProcessZ"
+                ]
+              }
+            }
+          }
+        ]
+      },
+      "normalized": {
+        "global_ignore_rules": [
+          {
+            "name": "环境过滤规则(排除非生产环境的K8S)",
+            "enabled": true,
+            "conditions": {
+              "k8s": {
+                "contains": [
+                  "cassmall-hwbeta-kunlun",
+                  "cassmall-hwbeta-penglai"
+                ]
+              }
+            }
+          },
+          {
+            "name": "常见忽略事件[示例:防止告警规则中有正常事件被匹配到,可以加到忽略规则中]",
+            "enabled": true,
+            "conditions": {
+              "reason": {
+                "contains": [
+                  "BackOffStart",
+                  "SuccessfulCreate",
+                  "SuccessfulMountVolume"
+                ]
+              }
+            }
+          }
+        ],
+        "alert_rules": [
+          {
+            "name": "关键事件告警",
+            "enabled": true,
+            "severity": "critical",
+            "conditions": {
+              "reason": {
+                "contains": [
+                  "OOMKilling",
+                  "NodeNotReady",
+                  "SystemOOM",
+                  "Unreachable"
+                ]
+              },
+              "level": {
+                "contains": [
+                  "Warning"
+                ]
+              }
+            }
+          },
+          {
+            "name": "重启事件告警",
+            "enabled": true,
+            "severity": "warning",
+            "conditions": {
+              "message": {
+                "contains": [
+                  "restart"
+                ]
+              }
+            }
+          },
+          {
+            "name": "健康检查失败告警",
+            "enabled": true,
+            "severity": "warning",
+            "conditions": {
+              "reason": {
+                "contains": [
+                  "Unhealthy"
+                ]
+              },
+              "name": {
+                "not_starts_with": [
+                  "deploy-micro-service-",
+                  "deploy-integration-changyuan-",
+                  "deploy-datax-cloud-"
+                ]
+              },
+              "count": {
+                "greater_than": 1
+              }
+            }
+          },
+          {
+            "name": "挂载失败告警",
+            "enabled": true,
+            "severity": "warning",
+            "conditions": {
+              "reason": {
+                "contains": [
+                  "FailedMount",
+                  "FailedAttachVolume"
+                ]
+              }
+            }
+          },
+          {
+            "name": "调度失败告警",
+            "enabled": true,
+            "severity": "warning",
+            "conditions": {
+              "reason": {
+                "contains": [
+                  "FailedScheduling",
+                  "Insufficient"
+                ]
+              }
+            }
+          },
+          {
+            "name": "资源压力告警",
+            "enabled": true,
+            "severity": "warning",
+            "conditions": {
+              "reason": {
+                "contains": [
+                  "Pressure",
+                  "OutOf",
+                  "Evict"
+                ]
+              }
+            }
+          },
+          {
+            "name": "僵尸进程告警",
+            "enabled": true,
+            "severity": "warning",
+            "conditions": {
+              "reason": {
+                "contains": [
+                  "ProcessZ"
+                ]
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "两组都可以是空数组",
+      "rules": {
+        "global_ignore_rules": [],
+        "alert_rules": []
+      },
+      "normalized": {
+        "global_ignore_rules": [],
+        "alert_rules": []
+      }
+    },
+    {
+      "name": "不写 enabled / severity 时补默认值，名称去掉首尾空白",
+      "rules": {
+        "global_ignore_rules": [
+          {
+            "name": " 忽略测试集群 ",
+            "conditions": {
+              "k8s": {
+                "starts_with": [
+                  "test-"
+                ]
+              }
+            }
+          }
+        ],
+        "alert_rules": [
+          {
+            "name": "健康检查",
+            "conditions": {
+              "reason": {
+                "contains": [
+                  "Unhealthy"
+                ]
+              },
+              "count": {
+                "greater_than": 1
+              }
+            }
+          }
+        ]
+      },
+      "normalized": {
+        "global_ignore_rules": [
+          {
+            "name": "忽略测试集群",
+            "enabled": true,
+            "conditions": {
+              "k8s": {
+                "starts_with": [
+                  "test-"
+                ]
+              }
+            }
+          }
+        ],
+        "alert_rules": [
+          {
+            "name": "健康检查",
+            "enabled": true,
+            "severity": "warning",
+            "conditions": {
+              "reason": {
+                "contains": [
+                  "Unhealthy"
+                ]
+              },
+              "count": {
+                "greater_than": 1
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "equals 可以是空串或数字，数值运算符可以是小数",
+      "rules": {
+        "global_ignore_rules": [
+          {
+            "name": "I",
+            "enabled": true,
+            "conditions": {
+              "k8s": {
+                "contains": [
+                  "test"
+                ]
+              }
+            }
+          }
+        ],
+        "alert_rules": [
+          {
+            "name": "A",
+            "enabled": true,
+            "severity": "warning",
+            "conditions": {
+              "namespace": {
+                "equals": ""
+              },
+              "count": {
+                "less_equal": 2.5
+              }
+            }
+          },
+          {
+            "name": "B",
+            "enabled": true,
+            "severity": "warning",
+            "conditions": {
+              "count": {
+                "equals": 3
+              },
+              "name": {
+                "not_equals": "x"
+              }
+            }
+          },
+          {
+            "name": "C",
+            "enabled": true,
+            "severity": "critical",
+            "conditions": {
+              "count": {
+                "greater_equal": 0
+              },
+              "kind": {
+                "not_ends_with": [
+                  "Set"
+                ]
+              }
+            }
+          },
+          {
+            "name": "D",
+            "enabled": false,
+            "severity": "info",
+            "conditions": {
+              "count": {
+                "contains": [
+                  "1"
+                ]
+              },
+              "eventStatus": {
+                "equals": "ADDED"
+              }
+            }
+          }
+        ]
+      },
+      "normalized": {
+        "global_ignore_rules": [
+          {
+            "name": "I",
+            "enabled": true,
+            "conditions": {
+              "k8s": {
+                "contains": [
+                  "test"
+                ]
+              }
+            }
+          }
+        ],
+        "alert_rules": [
+          {
+            "name": "A",
+            "enabled": true,
+            "severity": "warning",
+            "conditions": {
+              "namespace": {
+                "equals": ""
+              },
+              "count": {
+                "less_equal": 2.5
+              }
+            }
+          },
+          {
+            "name": "B",
+            "enabled": true,
+            "severity": "warning",
+            "conditions": {
+              "count": {
+                "equals": 3
+              },
+              "name": {
+                "not_equals": "x"
+              }
+            }
+          },
+          {
+            "name": "C",
+            "enabled": true,
+            "severity": "critical",
+            "conditions": {
+              "count": {
+                "greater_equal": 0
+              },
+              "kind": {
+                "not_ends_with": [
+                  "Set"
+                ]
+              }
+            }
+          },
+          {
+            "name": "D",
+            "enabled": false,
+            "severity": "info",
+            "conditions": {
+              "count": {
+                "contains": [
+                  "1"
+                ]
+              },
+              "eventStatus": {
+                "equals": "ADDED"
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "顶层不是对象",
+      "rules": [],
+      "errors": [
+        {
+          "path": [],
+          "message": "规则必须是一个 JSON 对象，包含 global_ignore_rules 和 alert_rules 两个数组"
+        }
+      ]
+    },
+    {
+      "name": "顶层是 null",
+      "rules": null,
+      "errors": [
+        {
+          "path": [],
+          "message": "规则必须是一个 JSON 对象，包含 global_ignore_rules 和 alert_rules 两个数组"
+        }
+      ]
+    },
+    {
+      "name": "顶层多了键、少了键",
+      "rules": {
+        "alert_rules": [],
+        "rules": []
+      },
+      "errors": [
+        {
+          "path": [
+            "rules"
+          ],
+          "message": "顶层不能有 rules：只能有 global_ignore_rules 和 alert_rules"
+        },
+        {
+          "path": [],
+          "message": "缺少 global_ignore_rules（忽略规则）：没有规则时写成空数组 []"
+        }
+      ]
+    },
+    {
+      "name": "分组不是数组",
+      "rules": {
+        "global_ignore_rules": {},
+        "alert_rules": "x"
+      },
+      "errors": [
+        {
+          "path": [
+            "global_ignore_rules"
+          ],
+          "message": "global_ignore_rules（忽略规则）必须是数组"
+        },
+        {
+          "path": [
+            "alert_rules"
+          ],
+          "message": "alert_rules（告警规则）必须是数组"
+        }
+      ]
+    },
+    {
+      "name": "规则不是对象",
+      "rules": {
+        "global_ignore_rules": [
+          "y"
+        ],
+        "alert_rules": [
+          "x"
+        ]
+      },
+      "errors": [
+        {
+          "path": [
+            "global_ignore_rules",
+            0
+          ],
+          "message": "忽略规则第 1 条必须是对象（包含 name、enabled、conditions）"
+        },
+        {
+          "path": [
+            "alert_rules",
+            0
+          ],
+          "message": "告警规则第 1 条必须是对象（包含 name、enabled、severity、conditions）"
+        }
+      ]
+    },
+    {
+      "name": "规则有不认识的键",
+      "rules": {
+        "global_ignore_rules": [
+          {
+            "name": "I",
+            "enabled": true,
+            "conditions": {
+              "k8s": {
+                "contains": [
+                  "test"
+                ]
+              }
+            }
+          }
+        ],
+        "alert_rules": [
+          {
+            "name": "A",
+            "enabled": true,
+            "severity": "warning",
+            "conditions": {
+              "reason": {
+                "contains": [
+                  "OOM"
+                ]
+              }
+            },
+            "description": "说明"
+          }
+        ]
+      },
+      "errors": [
+        {
+          "path": [
+            "alert_rules",
+            0,
+            "description"
+          ],
+          "message": "告警规则第 1 条「A」不能有 description：只能有 name、enabled、severity、conditions"
+        }
+      ]
+    },
+    {
+      "name": "忽略规则不能有 severity",
+      "rules": {
+        "global_ignore_rules": [
+          {
+            "name": "I",
+            "enabled": true,
+            "conditions": {
+              "k8s": {
+                "contains": [
+                  "test"
+                ]
+              }
+            },
+            "severity": "warning"
+          }
+        ],
+        "alert_rules": [
+          {
+            "name": "A",
+            "enabled": true,
+            "severity": "warning",
+            "conditions": {
+              "reason": {
+                "contains": [
+                  "OOM"
+                ]
+              }
+            }
+          }
+        ]
+      },
+      "errors": [
+        {
+          "path": [
+            "global_ignore_rules",
+            0,
+            "severity"
+          ],
+          "message": "忽略规则第 1 条「I」不能有 severity：级别只对告警规则有用"
+        }
+      ]
+    },
+    {
+      "name": "缺少名称",
+      "rules": {
+        "global_ignore_rules": [
+          {
+            "name": "I",
+            "enabled": true,
+            "conditions": {
+              "k8s": {
+                "contains": [
+                  "test"
+                ]
+              }
+            }
+          }
+        ],
+        "alert_rules": [
+          {
+            "enabled": true,
+            "conditions": {
+              "reason": {
+                "contains": [
+                  "x"
+                ]
+              }
+            }
+          }
+        ]
+      },
+      "errors": [
+        {
+          "path": [
+            "alert_rules",
+            0
+          ],
+          "message": "告警规则第 1 条缺少名称 name"
+        }
+      ]
+    },
+    {
+      "name": "名称是空白",
+      "rules": {
+        "global_ignore_rules": [
+          {
+            "name": "I",
+            "enabled": true,
+            "conditions": {
+              "k8s": {
+                "contains": [
+                  "test"
+                ]
+              }
+            }
+          }
+        ],
+        "alert_rules": [
+          {
+            "name": "   ",
+            "enabled": true,
+            "severity": "warning",
+            "conditions": {
+              "reason": {
+                "contains": [
+                  "OOM"
+                ]
+              }
+            }
+          }
+        ]
+      },
+      "errors": [
+        {
+          "path": [
+            "alert_rules",
+            0,
+            "name"
+          ],
+          "message": "告警规则第 1 条缺少名称 name"
+        }
+      ]
+    },
+    {
+      "name": "名称不是字符串",
+      "rules": {
+        "global_ignore_rules": [
+          {
+            "name": "I",
+            "enabled": true,
+            "conditions": {
+              "k8s": {
+                "contains": [
+                  "test"
+                ]
+              }
+            }
+          }
+        ],
+        "alert_rules": [
+          {
+            "name": 123,
+            "enabled": true,
+            "severity": "warning",
+            "conditions": {
+              "reason": {
+                "contains": [
+                  "OOM"
+                ]
+              }
+            }
+          }
+        ]
+      },
+      "errors": [
+        {
+          "path": [
+            "alert_rules",
+            0,
+            "name"
+          ],
+          "message": "告警规则第 1 条的名称 name 必须是字符串"
+        }
+      ]
+    },
+    {
+      "name": "名称太长（提示里只显示前 30 个字符）",
+      "rules": {
+        "global_ignore_rules": [
+          {
+            "name": "I",
+            "enabled": true,
+            "conditions": {
+              "k8s": {
+                "contains": [
+                  "test"
+                ]
+              }
+            }
+          }
+        ],
+        "alert_rules": [
+          {
+            "name": "长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长",
+            "enabled": true,
+            "severity": "warning",
+            "conditions": {
+              "reason": {
+                "contains": [
+                  "OOM"
+                ]
+              }
+            }
+          }
+        ]
+      },
+      "errors": [
+        {
+          "path": [
+            "alert_rules",
+            0,
+            "name"
+          ],
+          "message": "告警规则第 1 条「长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长…」的名称最长 100 个字符"
+        }
+      ]
+    },
+    {
+      "name": "enabled 不是布尔",
+      "rules": {
+        "global_ignore_rules": [
+          {
+            "name": "I",
+            "enabled": 1,
+            "conditions": {
+              "k8s": {
+                "contains": [
+                  "test"
+                ]
+              }
+            }
+          }
+        ],
+        "alert_rules": [
+          {
+            "name": "A",
+            "enabled": "true",
+            "severity": "warning",
+            "conditions": {
+              "reason": {
+                "contains": [
+                  "OOM"
+                ]
+              }
+            }
+          }
+        ]
+      },
+      "errors": [
+        {
+          "path": [
+            "global_ignore_rules",
+            0,
+            "enabled"
+          ],
+          "message": "忽略规则第 1 条「I」的 enabled 只能是 true 或 false"
+        },
+        {
+          "path": [
+            "alert_rules",
+            0,
+            "enabled"
+          ],
+          "message": "告警规则第 1 条「A」的 enabled 只能是 true 或 false"
+        }
+      ]
+    },
+    {
+      "name": "severity 不认识",
+      "rules": {
+        "global_ignore_rules": [
+          {
+            "name": "I",
+            "enabled": true,
+            "conditions": {
+              "k8s": {
+                "contains": [
+                  "test"
+                ]
+              }
+            }
+          }
+        ],
+        "alert_rules": [
+          {
+            "name": "A",
+            "enabled": true,
+            "severity": "error",
+            "conditions": {
+              "reason": {
+                "contains": [
+                  "OOM"
+                ]
+              }
+            }
+          },
+          {
+            "name": "B",
+            "enabled": true,
+            "severity": null,
+            "conditions": {
+              "reason": {
+                "contains": [
+                  "OOM"
+                ]
+              }
+            }
+          }
+        ]
+      },
+      "errors": [
+        {
+          "path": [
+            "alert_rules",
+            0,
+            "severity"
+          ],
+          "message": "告警规则第 1 条「A」的级别 severity 只能是 critical、warning 或 info"
+        },
+        {
+          "path": [
+            "alert_rules",
+            1,
+            "severity"
+          ],
+          "message": "告警规则第 2 条「B」的级别 severity 只能是 critical、warning 或 info"
+        }
+      ]
+    },
+    {
+      "name": "缺少 conditions",
+      "rules": {
+        "global_ignore_rules": [
+          {
+            "name": "I",
+            "enabled": true,
+            "conditions": {
+              "k8s": {
+                "contains": [
+                  "test"
+                ]
+              }
+            }
+          }
+        ],
+        "alert_rules": [
+          {
+            "name": "A",
+            "enabled": true
+          }
+        ]
+      },
+      "errors": [
+        {
+          "path": [
+            "alert_rules",
+            0
+          ],
+          "message": "告警规则第 1 条「A」缺少条件 conditions"
+        }
+      ]
+    },
+    {
+      "name": "conditions 不是对象",
+      "rules": {
+        "global_ignore_rules": [
+          {
+            "name": "I",
+            "enabled": true,
+            "conditions": {
+              "k8s": {
+                "contains": [
+                  "test"
+                ]
+              }
+            }
+          }
+        ],
+        "alert_rules": [
+          {
+            "name": "A",
+            "enabled": true,
+            "severity": "warning",
+            "conditions": []
+          }
+        ]
+      },
+      "errors": [
+        {
+          "path": [
+            "alert_rules",
+            0,
+            "conditions"
+          ],
+          "message": "告警规则第 1 条「A」的条件 conditions 必须是对象，例如 {\"reason\": {\"contains\": [\"OOMKilling\"]}}"
+        }
+      ]
+    },
+    {
+      "name": "conditions 是空对象",
+      "rules": {
+        "global_ignore_rules": [
+          {
+            "name": "I",
+            "enabled": true,
+            "conditions": {}
+          }
+        ],
+        "alert_rules": [
+          {
+            "name": "A",
+            "enabled": true,
+            "severity": "warning",
+            "conditions": {}
+          }
+        ]
+      },
+      "errors": [
+        {
+          "path": [
+            "global_ignore_rules",
+            0,
+            "conditions"
+          ],
+          "message": "忽略规则第 1 条「I」至少要有一个条件（没有条件会匹配所有事件）"
+        },
+        {
+          "path": [
+            "alert_rules",
+            0,
+            "conditions"
+          ],
+          "message": "告警规则第 1 条「A」至少要有一个条件（没有条件会匹配所有事件）"
+        }
+      ]
+    },
+    {
+      "name": "字段名大小写不对",
+      "rules": {
+        "global_ignore_rules": [
+          {
+            "name": "I",
+            "enabled": true,
+            "conditions": {
+              "k8s": {
+                "contains": [
+                  "test"
+                ]
+              }
+            }
+          }
+        ],
+        "alert_rules": [
+          {
+            "name": "A",
+            "enabled": true,
+            "severity": "warning",
+            "conditions": {
+              "Reason": {
+                "contains": [
+                  "x"
+                ]
+              }
+            }
+          }
+        ]
+      },
+      "errors": [
+        {
+          "path": [
+            "alert_rules",
+            0,
+            "conditions",
+            "Reason"
+          ],
+          "message": "告警规则第 1 条「A」的条件字段 Reason 不存在（字段名区分大小写，应为 reason）"
+        }
+      ]
+    },
+    {
+      "name": "字段不存在",
+      "rules": {
+        "global_ignore_rules": [
+          {
+            "name": "I",
+            "enabled": true,
+            "conditions": {
+              "k8s": {
+                "contains": [
+                  "test"
+                ]
+              }
+            }
+          }
+        ],
+        "alert_rules": [
+          {
+            "name": "A",
+            "enabled": true,
+            "severity": "warning",
+            "conditions": {
+              "pod": {
+                "contains": [
+                  "x"
+                ]
+              }
+            }
+          }
+        ]
+      },
+      "errors": [
+        {
+          "path": [
+            "alert_rules",
+            0,
+            "conditions",
+            "pod"
+          ],
+          "message": "告警规则第 1 条「A」的条件字段 pod 不存在（可用字段：k8s、namespace、kind、name、reason、message、level、count、eventStatus、reportingComponent、reportingInstance、firstTimestamp、lastTimestamp、eventUid）"
+        }
+      ]
+    },
+    {
+      "name": "字段的条件不是对象",
+      "rules": {
+        "global_ignore_rules": [
+          {
+            "name": "I",
+            "enabled": true,
+            "conditions": {
+              "k8s": {
+                "contains": [
+                  "test"
+                ]
+              }
+            }
+          }
+        ],
+        "alert_rules": [
+          {
+            "name": "A",
+            "enabled": true,
+            "severity": "warning",
+            "conditions": {
+              "reason": [
+                "x"
+              ]
+            }
+          }
+        ]
+      },
+      "errors": [
+        {
+          "path": [
+            "alert_rules",
+            0,
+            "conditions",
+            "reason"
+          ],
+          "message": "告警规则第 1 条「A」的条件 reason 必须写成 {\"运算符\": 值}，例如 {\"contains\": [\"abc\"]}"
+        }
+      ]
+    },
+    {
+      "name": "字段没有运算符",
+      "rules": {
+        "global_ignore_rules": [
+          {
+            "name": "I",
+            "enabled": true,
+            "conditions": {
+              "k8s": {
+                "contains": [
+                  "test"
+                ]
+              }
+            }
+          }
+        ],
+        "alert_rules": [
+          {
+            "name": "A",
+            "enabled": true,
+            "severity": "warning",
+            "conditions": {
+              "reason": {}
+            }
+          }
+        ]
+      },
+      "errors": [
+        {
+          "path": [
+            "alert_rules",
+            0,
+            "conditions",
+            "reason"
+          ],
+          "message": "告警规则第 1 条「A」的条件 reason 缺少运算符"
+        }
+      ]
+    },
+    {
+      "name": "不认识的运算符",
+      "rules": {
+        "global_ignore_rules": [
+          {
+            "name": "I",
+            "enabled": true,
+            "conditions": {
+              "k8s": {
+                "contains": [
+                  "test"
+                ]
+              }
+            }
+          }
+        ],
+        "alert_rules": [
+          {
+            "name": "A",
+            "enabled": true,
+            "severity": "warning",
+            "conditions": {
+              "reason": {
+                "contain": [
+                  "x"
+                ]
+              }
+            }
+          }
+        ]
+      },
+      "errors": [
+        {
+          "path": [
+            "alert_rules",
+            0,
+            "conditions",
+            "reason",
+            "contain"
+          ],
+          "message": "告警规则第 1 条「A」的条件 reason：不认识的运算符 contain（可用：contains、not_contains、starts_with、not_starts_with、ends_with、not_ends_with、equals、not_equals）"
+        }
+      ]
+    },
+    {
+      "name": "count 上不认识的运算符列出 12 种",
+      "rules": {
+        "global_ignore_rules": [
+          {
+            "name": "I",
+            "enabled": true,
+            "conditions": {
+              "k8s": {
+                "contains": [
+                  "test"
+                ]
+              }
+            }
+          }
+        ],
+        "alert_rules": [
+          {
+            "name": "A",
+            "enabled": true,
+            "severity": "warning",
+            "conditions": {
+              "count": {
+                "gt": 1
+              }
+            }
+          }
+        ]
+      },
+      "errors": [
+        {
+          "path": [
+            "alert_rules",
+            0,
+            "conditions",
+            "count",
+            "gt"
+          ],
+          "message": "告警规则第 1 条「A」的条件 count：不认识的运算符 gt（可用：contains、not_contains、starts_with、not_starts_with、ends_with、not_ends_with、equals、not_equals、greater_than、less_than、greater_equal、less_equal）"
+        }
+      ]
+    },
+    {
+      "name": "数值运算符只能用于 count",
+      "rules": {
+        "global_ignore_rules": [
+          {
+            "name": "I",
+            "enabled": true,
+            "conditions": {
+              "k8s": {
+                "contains": [
+                  "test"
+                ]
+              }
+            }
+          }
+        ],
+        "alert_rules": [
+          {
+            "name": "A",
+            "enabled": true,
+            "severity": "warning",
+            "conditions": {
+              "name": {
+                "greater_than": 1
+              }
+            }
+          }
+        ]
+      },
+      "errors": [
+        {
+          "path": [
+            "alert_rules",
+            0,
+            "conditions",
+            "name",
+            "greater_than"
+          ],
+          "message": "告警规则第 1 条「A」的条件 name：greater_than 只能用于 count 字段"
+        }
+      ]
+    },
+    {
+      "name": "一个字段写了多个运算符",
+      "rules": {
+        "global_ignore_rules": [
+          {
+            "name": "I",
+            "enabled": true,
+            "conditions": {
+              "k8s": {
+                "contains": [
+                  "test"
+                ]
+              }
+            }
+          }
+        ],
+        "alert_rules": [
+          {
+            "name": "A",
+            "enabled": true,
+            "severity": "warning",
+            "conditions": {
+              "count": {
+                "greater_than": 1,
+                "less_than": 10
+              }
+            }
+          }
+        ]
+      },
+      "errors": [
+        {
+          "path": [
+            "alert_rules",
+            0,
+            "conditions",
+            "count"
+          ],
+          "message": "告警规则第 1 条「A」的条件 count 只能写一个运算符，现在写了 greater_than、less_than"
+        }
+      ]
+    },
+    {
+      "name": "列表型运算符的值写成了字符串",
+      "rules": {
+        "global_ignore_rules": [
+          {
+            "name": "I",
+            "enabled": true,
+            "conditions": {
+              "k8s": {
+                "contains": [
+                  "test"
+                ]
+              }
+            }
+          }
+        ],
+        "alert_rules": [
+          {
+            "name": "A",
+            "enabled": true,
+            "severity": "warning",
+            "conditions": {
+              "reason": {
+                "contains": "OOM"
+              }
+            }
+          }
+        ]
+      },
+      "errors": [
+        {
+          "path": [
+            "alert_rules",
+            0,
+            "conditions",
+            "reason",
+            "contains"
+          ],
+          "message": "告警规则第 1 条「A」的条件 reason：contains 的值必须是字符串数组，例如 [\"abc\"]"
+        }
+      ]
+    },
+    {
+      "name": "列表为空",
+      "rules": {
+        "global_ignore_rules": [
+          {
+            "name": "I",
+            "enabled": true,
+            "conditions": {
+              "k8s": {
+                "contains": [
+                  "test"
+                ]
+              }
+            }
+          }
+        ],
+        "alert_rules": [
+          {
+            "name": "A",
+            "enabled": true,
+            "severity": "warning",
+            "conditions": {
+              "reason": {
+                "not_contains": []
+              }
+            }
+          }
+        ]
+      },
+      "errors": [
+        {
+          "path": [
+            "alert_rules",
+            0,
+            "conditions",
+            "reason",
+            "not_contains"
+          ],
+          "message": "告警规则第 1 条「A」的条件 reason：not_contains 至少要填一个值"
+        }
+      ]
+    },
+    {
+      "name": "列表里有数字",
+      "rules": {
+        "global_ignore_rules": [
+          {
+            "name": "I",
+            "enabled": true,
+            "conditions": {
+              "k8s": {
+                "contains": [
+                  "test"
+                ]
+              }
+            }
+          }
+        ],
+        "alert_rules": [
+          {
+            "name": "A",
+            "enabled": true,
+            "severity": "warning",
+            "conditions": {
+              "reason": {
+                "starts_with": [
+                  "a",
+                  1
+                ]
+              }
+            }
+          }
+        ]
+      },
+      "errors": [
+        {
+          "path": [
+            "alert_rules",
+            0,
+            "conditions",
+            "reason",
+            "starts_with",
+            1
+          ],
+          "message": "告警规则第 1 条「A」的条件 reason：starts_with 的第 2 个值必须是字符串"
+        }
+      ]
+    },
+    {
+      "name": "列表里有空串",
+      "rules": {
+        "global_ignore_rules": [
+          {
+            "name": "I",
+            "enabled": true,
+            "conditions": {
+              "k8s": {
+                "contains": [
+                  "test"
+                ]
+              }
+            }
+          }
+        ],
+        "alert_rules": [
+          {
+            "name": "A",
+            "enabled": true,
+            "severity": "warning",
+            "conditions": {
+              "reason": {
+                "ends_with": [
+                  ""
+                ]
+              }
+            }
+          }
+        ]
+      },
+      "errors": [
+        {
+          "path": [
+            "alert_rules",
+            0,
+            "conditions",
+            "reason",
+            "ends_with",
+            0
+          ],
+          "message": "告警规则第 1 条「A」的条件 reason：ends_with 的第 1 个值不能为空"
+        }
+      ]
+    },
+    {
+      "name": "列表里有只有空格的值",
+      "rules": {
+        "global_ignore_rules": [
+          {
+            "name": "I",
+            "enabled": true,
+            "conditions": {
+              "k8s": {
+                "contains": [
+                  "test"
+                ]
+              }
+            }
+          }
+        ],
+        "alert_rules": [
+          {
+            "name": "A",
+            "enabled": true,
+            "severity": "warning",
+            "conditions": {
+              "reason": {
+                "not_starts_with": [
+                  "ok",
+                  "  "
+                ]
+              }
+            }
+          }
+        ]
+      },
+      "errors": [
+        {
+          "path": [
+            "alert_rules",
+            0,
+            "conditions",
+            "reason",
+            "not_starts_with",
+            1
+          ],
+          "message": "告警规则第 1 条「A」的条件 reason：not_starts_with 的第 2 个值只有空格"
+        }
+      ]
+    },
+    {
+      "name": "列表里的值太长",
+      "rules": {
+        "global_ignore_rules": [
+          {
+            "name": "I",
+            "enabled": true,
+            "conditions": {
+              "k8s": {
+                "contains": [
+                  "test"
+                ]
+              }
+            }
+          }
+        ],
+        "alert_rules": [
+          {
+            "name": "A",
+            "enabled": true,
+            "severity": "warning",
+            "conditions": {
+              "message": {
+                "contains": [
+                  "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+                ]
+              }
+            }
+          }
+        ]
+      },
+      "errors": [
+        {
+          "path": [
+            "alert_rules",
+            0,
+            "conditions",
+            "message",
+            "contains",
+            0
+          ],
+          "message": "告警规则第 1 条「A」的条件 message：contains 的第 1 个值最长 1000 个字符"
+        }
+      ]
+    },
+    {
+      "name": "equals 的值是数组",
+      "rules": {
+        "global_ignore_rules": [
+          {
+            "name": "I",
+            "enabled": true,
+            "conditions": {
+              "k8s": {
+                "contains": [
+                  "test"
+                ]
+              }
+            }
+          }
+        ],
+        "alert_rules": [
+          {
+            "name": "A",
+            "enabled": true,
+            "severity": "warning",
+            "conditions": {
+              "level": {
+                "equals": [
+                  "Warning"
+                ]
+              }
+            }
+          }
+        ]
+      },
+      "errors": [
+        {
+          "path": [
+            "alert_rules",
+            0,
+            "conditions",
+            "level",
+            "equals"
+          ],
+          "message": "告警规则第 1 条「A」的条件 level：equals 的值必须是字符串或数字"
+        }
+      ]
+    },
+    {
+      "name": "not_equals 的值是布尔",
+      "rules": {
+        "global_ignore_rules": [
+          {
+            "name": "I",
+            "enabled": true,
+            "conditions": {
+              "k8s": {
+                "contains": [
+                  "test"
+                ]
+              }
+            }
+          }
+        ],
+        "alert_rules": [
+          {
+            "name": "A",
+            "enabled": true,
+            "severity": "warning",
+            "conditions": {
+              "level": {
+                "not_equals": true
+              }
+            }
+          }
+        ]
+      },
+      "errors": [
+        {
+          "path": [
+            "alert_rules",
+            0,
+            "conditions",
+            "level",
+            "not_equals"
+          ],
+          "message": "告警规则第 1 条「A」的条件 level：not_equals 的值必须是字符串或数字"
+        }
+      ]
+    },
+    {
+      "name": "equals 的值是 null",
+      "rules": {
+        "global_ignore_rules": [
+          {
+            "name": "I",
+            "enabled": true,
+            "conditions": {
+              "k8s": {
+                "contains": [
+                  "test"
+                ]
+              }
+            }
+          }
+        ],
+        "alert_rules": [
+          {
+            "name": "A",
+            "enabled": true,
+            "severity": "warning",
+            "conditions": {
+              "kind": {
+                "equals": null
+              }
+            }
+          }
+        ]
+      },
+      "errors": [
+        {
+          "path": [
+            "alert_rules",
+            0,
+            "conditions",
+            "kind",
+            "equals"
+          ],
+          "message": "告警规则第 1 条「A」的条件 kind：equals 的值必须是字符串或数字"
+        }
+      ]
+    },
+    {
+      "name": "equals 的值太长",
+      "rules": {
+        "global_ignore_rules": [
+          {
+            "name": "I",
+            "enabled": true,
+            "conditions": {
+              "k8s": {
+                "contains": [
+                  "test"
+                ]
+              }
+            }
+          }
+        ],
+        "alert_rules": [
+          {
+            "name": "A",
+            "enabled": true,
+            "severity": "warning",
+            "conditions": {
+              "kind": {
+                "equals": "yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy"
+              }
+            }
+          }
+        ]
+      },
+      "errors": [
+        {
+          "path": [
+            "alert_rules",
+            0,
+            "conditions",
+            "kind",
+            "equals"
+          ],
+          "message": "告警规则第 1 条「A」的条件 kind：equals 的值最长 1000 个字符"
+        }
+      ]
+    },
+    {
+      "name": "数值运算符的值是字符串（约定里的例子）",
+      "rules": {
+        "global_ignore_rules": [
+          {
+            "name": "I",
+            "enabled": true,
+            "conditions": {
+              "k8s": {
+                "contains": [
+                  "test"
+                ]
+              }
+            }
+          }
+        ],
+        "alert_rules": [
+          {
+            "name": "关键事件告警",
+            "enabled": true,
+            "severity": "warning",
+            "conditions": {
+              "reason": {
+                "contains": [
+                  "OOM"
+                ]
+              }
+            }
+          },
+          {
+            "name": "挂载失败告警",
+            "enabled": true,
+            "severity": "warning",
+            "conditions": {
+              "reason": {
+                "contains": [
+                  "OOM"
+                ]
+              }
+            }
+          },
+          {
+            "name": "重启事件告警",
+            "enabled": true,
+            "severity": "warning",
+            "conditions": {
+              "message": {
+                "contains": [
+                  "restart"
+                ]
+              },
+              "count": {
+                "greater_than": "1"
+              }
+            }
+          }
+        ]
+      },
+      "errors": [
+        {
+          "path": [
+            "alert_rules",
+            2,
+            "conditions",
+            "count",
+            "greater_than"
+          ],
+          "message": "告警规则第 3 条「重启事件告警」的条件 count：greater_than 的值必须是数字"
+        }
+      ]
+    },
+    {
+      "name": "数值运算符的值是布尔",
+      "rules": {
+        "global_ignore_rules": [
+          {
+            "name": "I",
+            "enabled": true,
+            "conditions": {
+              "k8s": {
+                "contains": [
+                  "test"
+                ]
+              }
+            }
+          }
+        ],
+        "alert_rules": [
+          {
+            "name": "A",
+            "enabled": true,
+            "severity": "warning",
+            "conditions": {
+              "count": {
+                "less_than": false
+              }
+            }
+          }
+        ]
+      },
+      "errors": [
+        {
+          "path": [
+            "alert_rules",
+            0,
+            "conditions",
+            "count",
+            "less_than"
+          ],
+          "message": "告警规则第 1 条「A」的条件 count：less_than 的值必须是数字"
+        }
+      ]
+    },
+    {
+      "name": "名称和条件写成 null 时定位到这个键",
+      "rules": {
+        "global_ignore_rules": [
+          {
+            "name": "I",
+            "enabled": true,
+            "conditions": {
+              "k8s": {
+                "contains": [
+                  "test"
+                ]
+              }
+            }
+          }
+        ],
+        "alert_rules": [
+          {
+            "name": null,
+            "enabled": true,
+            "severity": "info",
+            "conditions": null
+          }
+        ]
+      },
+      "errors": [
+        {
+          "path": [
+            "alert_rules",
+            0,
+            "name"
+          ],
+          "message": "告警规则第 1 条缺少名称 name"
+        },
+        {
+          "path": [
+            "alert_rules",
+            0,
+            "conditions"
+          ],
+          "message": "告警规则第 1 条缺少条件 conditions"
+        }
+      ]
+    },
+    {
+      "name": "一条规则的多处问题全部列出",
+      "rules": {
+        "global_ignore_rules": [
+          {
+            "name": "I",
+            "enabled": true,
+            "conditions": {
+              "k8s": {
+                "contains": []
+              }
+            }
+          }
+        ],
+        "alert_rules": [
+          {
+            "name": "A",
+            "enabled": true,
+            "severity": "warning",
+            "conditions": {
+              "level": {
+                "equals": "Warning"
+              },
+              "count": {
+                "greater_than": "x"
+              },
+              "reason": {
+                "gt": 1
+              }
+            }
+          },
+          {
+            "name": "",
+            "enabled": "yes",
+            "severity": "high",
+            "conditions": {},
+            "extra": 1
+          }
+        ]
+      },
+      "errors": [
+        {
+          "path": [
+            "global_ignore_rules",
+            0,
+            "conditions",
+            "k8s",
+            "contains"
+          ],
+          "message": "忽略规则第 1 条「I」的条件 k8s：contains 至少要填一个值"
+        },
+        {
+          "path": [
+            "alert_rules",
+            0,
+            "conditions",
+            "count",
+            "greater_than"
+          ],
+          "message": "告警规则第 1 条「A」的条件 count：greater_than 的值必须是数字"
+        },
+        {
+          "path": [
+            "alert_rules",
+            0,
+            "conditions",
+            "reason",
+            "gt"
+          ],
+          "message": "告警规则第 1 条「A」的条件 reason：不认识的运算符 gt（可用：contains、not_contains、starts_with、not_starts_with、ends_with、not_ends_with、equals、not_equals）"
+        },
+        {
+          "path": [
+            "alert_rules",
+            1,
+            "extra"
+          ],
+          "message": "告警规则第 2 条不能有 extra：只能有 name、enabled、severity、conditions"
+        },
+        {
+          "path": [
+            "alert_rules",
+            1,
+            "name"
+          ],
+          "message": "告警规则第 2 条缺少名称 name"
+        },
+        {
+          "path": [
+            "alert_rules",
+            1,
+            "enabled"
+          ],
+          "message": "告警规则第 2 条的 enabled 只能是 true 或 false"
+        },
+        {
+          "path": [
+            "alert_rules",
+            1,
+            "severity"
+          ],
+          "message": "告警规则第 2 条的级别 severity 只能是 critical、warning 或 info"
+        },
+        {
+          "path": [
+            "alert_rules",
+            1,
+            "conditions"
+          ],
+          "message": "告警规则第 2 条至少要有一个条件（没有条件会匹配所有事件）"
+        }
+      ]
+    }
+  ]
+}

@@ -441,6 +441,47 @@ export function publicURL(value: string): string {
   return url;
 }
 
+/**
+ * 第 4 步的对象存储上传地址（可选），规则同安装服务：完整的 HTTP / HTTPS 地址，可以带“账号:密码@”，
+ * 不含查询参数和锚点，去掉末尾的 /。留空表示不配置；已保存的密码显示为 ******，原样提交表示沿用。
+ */
+export function ossURLInput(value: string): string {
+  const text = (value || "").trim();
+  if (!text) return "";
+  let url: URL;
+  try {
+    url = new URL(text);
+  } catch {
+    throw new Error(
+      "请填写有效的对象存储上传地址，包含 http:// 或 https://；不配置时留空。"
+    );
+  }
+  if (
+    !["http:", "https:"].includes(url.protocol) ||
+    !url.hostname ||
+    url.hash ||
+    url.search ||
+    /[\s\\#?]/.test(text)
+  )
+    throw new Error(
+      "对象存储上传地址需为 HTTP / HTTPS 地址，不含空格、查询参数或锚点。"
+    );
+  if (url.password && !url.username)
+    throw new Error(
+      "对象存储上传地址的 @ 前面缺少账号；不需要认证时去掉“账号:密码@”。"
+    );
+  if (isLoopback(url.hostname))
+    throw new Error(
+      "对象存储上传地址需使用各业务集群都能访问的地址，不能填写本机地址。"
+    );
+  return text.replace(/\/+$/, "");
+}
+
+/** 第 5 步摘要：已保存的对象存储上传地址（密码已打码），没填写时「未配置」 */
+export function ossSummary(saved?: string): string {
+  return (saved || "").trim() || "未配置";
+}
+
 /* ---------- 第 4 步：告警通知（可选） ---------- */
 
 /** IM 类型，顺序即下拉里的顺序；和 master notify/channels.py 的 TYPES 一致 */
@@ -514,7 +555,7 @@ export const NOTICE_ROWS: NoticeRow[] = [
   {
     name: "K8S 事件告警",
     sender: "控制服务 kubedoor-master",
-    when: "K8S 事件命中「事件告警规则」时，例如重启、健康检查失败、挂载失败、调度失败、资源压力；不受告警屏蔽影响"
+    when: "K8S 事件命中事件告警规则（在系统管理 → 事件告警规则配置）时，例如重启、健康检查失败、挂载失败、调度失败、资源压力；不受告警屏蔽影响"
   },
   {
     name: "运维操作通知",

@@ -47,8 +47,6 @@ spec:
               value: 'http://kubedoor-master.__NAMESPACE__'
             - name: ENABLE_MCP
               value: '__ENABLE_MCP__'
-            - name: KUBEDOOR_EXTURL
-              value: '__KUBEDOOR_EXTURL__'
           ports:
             - name: http
               containerPort: 8000

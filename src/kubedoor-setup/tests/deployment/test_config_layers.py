@@ -1,12 +1,12 @@
 """Published defaults work with compact configs and legacy per-install overrides."""
 
-import json
 import re
 
 import pytest
 import yaml
 
 from test_ai_render import ROOT, bash_path, run_bash, setup_config
+from test_legacy_general_settings import payload
 
 # 发布默认值以 deploy/install.sh 顶部的镜像配置区为准
 PUBLISHED_VMAGENT = re.search(r'^IMAGE_VMAGENT="([^"]+)"', (ROOT / "deploy/install.sh").read_text(encoding="utf-8"),
@@ -96,7 +96,8 @@ def test_compact_config_renders_from_another_directory(tmp_path, role):
         data = resources["ConfigMap", "kubedoor-config"]["data"]
         assert data["PG_PORT"] == "5432"
         assert data["PG_USER"] == data["PG_DATABASE"] == "kubedoor"
-        assert json.loads(data["AGENT_INSTALL_DEFAULTS"])["image_vmagent"]
+        # 只剩数据库连接：其余配置在 master 就绪后写进数据库（见 test_legacy_general_settings）
+        assert all(key.startswith("PG_") for key in data)
         assert resources["Deployment", "vmalert"]
     else:
         assert resources["Deployment", "vmagent"]
@@ -122,10 +123,10 @@ def test_legacy_overrides_reach_master_and_web_agent_defaults(tmp_path):
     resources = {(obj["kind"], obj["metadata"]["name"]): obj
                  for path in output.glob("*.yaml")
                  for obj in yaml.safe_load_all(path.read_text(encoding="utf-8")) if obj}
-    data = resources["ConfigMap", "kubedoor-config"]["data"]
-    defaults = json.loads(data["AGENT_INSTALL_DEFAULTS"])
-    assert defaults["namespace"] == "custom-kubedoor"
-    assert defaults["image_vmagent"] == "registry.example.invalid/vmagent:pinned"
-    assert data["ALERTMANAGER_EXTURL"] == ""
+    # 网页安装 Agent 的采集镜像随配置写进数据库的通用配置；空的 Alertmanager 外部地址不带
+    settings = payload(fake_bin, config)
+    assert '"image_vmagent": "registry.example.invalid/vmagent:pinned"' in settings["AGENT_INSTALL_DEFAULTS"]
+    assert "ALERTMANAGER_EXTURL" not in settings
+    assert resources["ConfigMap", "kubedoor-config"]["metadata"]["namespace"] == "custom-kubedoor"
     assert resources["Deployment", "vmalert"]["spec"]["template"]["spec"]["containers"][0]["image"] == "registry.example.invalid/vmalert:pinned"
     assert "location ~ ^/(mcp|sse|messages)" not in resources["ConfigMap", "nginx-config"]["data"]["nginx.conf"]

@@ -137,7 +137,7 @@ def prepare_peak_handlers(jvm_result, write_succeeded=True):
     handlers = load_handlers()
     resources = [('historical-row',)]
     utils = types.SimpleNamespace(
-        PROM_K8S_TAG_KEY='k8s',
+        tag_key=Mock(return_value='k8s'),
         calculate_peak_duration_and_end_time=Mock(return_value=('1h', datetime.min.time(), datetime.min.time())),
         check_and_delete_day_data=AsyncMock(),
         merged_dict=Mock(),
@@ -167,6 +167,9 @@ def test_peak_collection_samples_jvm_once_after_historical_and_control_writes():
     assert utils.metrics_to_pg.await_count == 3
     for call in utils.metrics_to_pg.call_args_list:
         assert call.args == (resources,)
+    # 集群标签 key 每轮采集从通用配置取一次,同一轮的各天都用它
+    utils.tag_key.assert_called_once_with()
+    assert [call.args[:3] for call in utils.run_blocking.await_args_list] == [(utils.merged_dict, 'k8s', 'prod')] * 3
     utils.update_control_data.assert_awaited_once_with(resources)
     collect.assert_awaited_once_with('prod', handlers['call_agent_api'], utils.invalidate_admis_cache)
 

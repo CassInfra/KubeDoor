@@ -3,10 +3,6 @@ import json
 import utils
 
 
-PROM_K8S_TAG_KEY = utils.PROM_K8S_TAG_KEY
-PROMETHEUS_URL = f"{utils.PROM_URL}/api/v1/query"
-
-
 # 定义PromQL查询
 def process_promql_queries(env_key, env_value, namespace_value):
     if namespace_value:
@@ -30,11 +26,11 @@ def process_promql_queries(env_key, env_value, namespace_value):
     return promql_queries
 
 
-# Prometheus查询函数
+# Prometheus查询函数(查询地址取通用配置,每次查询时取)
 def query_prometheus(promql):
     params = {'query': promql}
     try:
-        response = requests.get(PROMETHEUS_URL, params=params, timeout=utils.PROM_TIMEOUT)
+        response = requests.get(utils.get_prom_url(), params=params, timeout=utils.PROM_TIMEOUT)
         response.raise_for_status()
         data = response.json()
         return data['data']['result']
@@ -47,7 +43,7 @@ def query_prometheus(promql):
 def get_metrics_data(env_value, namespace_value):
     # 用于存储所有数据的字典
     metrics_data = {}
-    query_dict = process_promql_queries(PROM_K8S_TAG_KEY, env_value, namespace_value)
+    query_dict = process_promql_queries(utils.tag_key(), env_value, namespace_value)
     # 执行每个查询
     for metric, query in query_dict.items():
         result = query_prometheus(query)
@@ -81,8 +77,10 @@ VALUE_METRICS = [
 def process_metrics_data(metrics_data):
     # 先把每个指标按 (env, namespace, deployment) 建好索引再拼行。原来是每个 deployment
     # 都把所有指标的结果从头扫一遍(O(n²)),服务一多光拼数据就要很久
+    key_label = utils.tag_key()
+
     def series_key(metric):
-        return (metric.get(PROM_K8S_TAG_KEY), metric.get('namespace'), metric.get('deployment'))
+        return (metric.get(key_label), metric.get('namespace'), metric.get('deployment'))
 
     def index_values(metric_name):
         # 同一个 key 有多条时取最后一条,和原逻辑一致

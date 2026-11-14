@@ -69,7 +69,7 @@ test("说明表和补充说明的文字与接口约定第 8 节一致(安装向�
   );
   assert.equal(
     utils.NOTICE_ROWS[0].when,
-    "K8S 事件命中「事件告警规则」时，例如重启、健康检查失败、挂载失败、调度失败、资源压力；不受告警屏蔽影响"
+    "K8S 事件命中事件告警规则（在系统管理 → 事件告警规则配置）时，例如重启、健康检查失败、挂载失败、调度失败、资源压力；不受告警屏蔽影响"
   );
   assert.equal(
     utils.NOTICE_ROWS[1].when,
@@ -151,6 +151,37 @@ test("机器人地址的 placeholder：已配置显示最后 4 位并提示留�
   assert.equal(utils.keepsSavedToken("wecom", savedWecom()), true);
   assert.equal(utils.keepsSavedToken("slack", savedWecom()), false);
   assert.equal(utils.keepsSavedToken("wecom", undefined), false);
+});
+
+test("安装 Agent 对话框：集群已有单独配置时说明留空保持不变", () => {
+  assert.equal(
+    utils.existingClusterText(savedWecom()),
+    "该集群已有单独配置：企业微信（****a1b2），留空保持不变，填写则覆盖"
+  );
+  assert.equal(
+    utils.existingClusterText(savedProd({ token_hint: "" })),
+    "该集群已有单独配置：钉钉，留空保持不变，填写则覆盖"
+  );
+  assert.equal(utils.existingClusterText(null), "");
+  assert.equal(
+    utils.existingClusterText(savedWecom({ configured: false })),
+    ""
+  );
+});
+
+test("读取配置可以静默：出错不弹提示，交给调用方处理", async () => {
+  const requests = [];
+  const api = compile("../src/api/notification.ts", {
+    "@/utils/http": {
+      http: { request: async (...args) => (requests.push(args), {}) }
+    }
+  });
+  await api.getNotificationSettings();
+  await api.getNotificationSettings(true);
+  assert.deepEqual(requests, [
+    ["get", "/api/admin/notification", undefined, undefined],
+    ["get", "/api/admin/notification", undefined, { silent: true }]
+  ]);
 });
 
 test("按域名认出整条 Webhook 地址是哪家的，只填 token 或认不出时为空", () => {
@@ -542,7 +573,9 @@ async function harness(t, initial = settings()) {
         message: (text, options) => messages.push([text, options?.type])
       },
       "element-plus": { ElMessageBox: { confirm: () => hooks.confirm() } },
-      "./notification-utils": utils
+      "./notification-utils": utils,
+      // 全局配置的表单项是共用组件(模板不渲染,脚本里只用到 import)
+      "./NotifyChannelFields.vue": { default: {} }
     },
     true
   ).default;

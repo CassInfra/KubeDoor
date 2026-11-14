@@ -1,5 +1,5 @@
 #!/usr/bin/python3
-import json, utils, silence, notify_client
+import json, utils, silence, notify_client, settings_client
 from flask import Flask, Response, request, jsonify
 from psycopg_pool import ConnectionPool
 from psycopg.rows import tuple_row
@@ -22,9 +22,8 @@ pool = ConnectionPool(conninfo=_conninfo, min_size=1, max_size=10, open=True)
 # 告警屏蔽引擎(内存缓存 alert_silences 规则,详见 silence.py)
 silence.init_engine(pool)
 
-ALERTMANAGER_EXTURL = utils.ALERTMANAGER_EXTURL
-KUBEDOOR_EXTURL = utils.KUBEDOOR_EXTURL
-PROM_K8S_TAG_KEY = utils.PROM_K8S_TAG_KEY
+# 集群指标标签 key、KubeDoor / Alertmanager 访问地址在「系统管理 → 通用配置」里维护,
+# 处理告警时经 settings_client 取(带缓存),不在这里拷贝成模块常量
 
 
 def parse_alert_time(time_str):
@@ -96,7 +95,7 @@ def process_single_alert(alert):
         namespace = labels.get('namespace', '') or labels.get('k8s_ns', '')
         pod = labels.get('pod', '') or labels.get('k8s_pod', '')
         container = labels.get('container', '') or labels.get('k8s_app', '')
-        env = labels.get(PROM_K8S_TAG_KEY, '')
+        env = labels.get(settings_client.value('prom_k8s_tag_key'), '')
         alert_name = labels.get('alertname', '')
 
         # 生成指纹
@@ -364,18 +363,20 @@ def handle_custom_alert():
 def build_silence_url(labels):
     """构造通知里【屏蔽】链接。
 
-    配置了 KUBEDOOR_EXTURL 就指向 KubeDoor 的屏蔽管理页,并把当前告警的关键标签
+    通用配置里有 KubeDoor 访问地址就指向 KubeDoor 的屏蔽管理页,并把当前告警的关键标签
     通过 prefill 参数带过去,页面会自动打开新建弹窗并预填匹配条件;
-    未配置时退回原来的 Alertmanager 链接。
+    没有时退回 Alertmanager 外部地址的链接。
     """
+    settings = settings_client.current()
+    kubedoor_exturl = settings['kubedoor_exturl']
     alertname = labels.get('alertname', '')
-    if not KUBEDOOR_EXTURL:
+    if not kubedoor_exturl:
         quoted = urllib.parse.quote(f'{{alertname="{alertname}"}}')
-        return f"{ALERTMANAGER_EXTURL}/#/alerts?silenced=false&inhibited=false&active=true&filter={quoted}"
+        return f"{settings['alertmanager_exturl']}/#/alerts?silenced=false&inhibited=false&active=true&filter={quoted}"
 
     prefill = {'alertname': alertname}
     for canonical, candidates in (
-        ('env', (PROM_K8S_TAG_KEY,)),
+        ('env', (settings['prom_k8s_tag_key'],)),
         ('namespace', ('namespace', 'k8s_ns')),
         ('pod', ('pod', 'k8s_pod')),
     ):
@@ -384,7 +385,7 @@ def build_silence_url(labels):
                 prefill[canonical] = labels[candidate]
                 break
     quoted = urllib.parse.quote(json.dumps(prefill, ensure_ascii=False))
-    return f"{KUBEDOOR_EXTURL.rstrip('/')}/#/alarm/silence?prefill={quoted}"
+    return f"{kubedoor_exturl.rstrip('/')}/#/alarm/silence?prefill={quoted}"
 
 
 def build_content(kind, entries):
@@ -431,7 +432,7 @@ def alertnode(token):
 
     # if (now_cn > time1830 or now_cn < time0830):
     #    return Response(status=204)
-    env = notify_client.cluster_of(req, PROM_K8S_TAG_KEY)
+    env = notify_client.cluster_of(req, settings_client.value('prom_k8s_tag_key'))
     entries = []
     # 告警规则 annotations 里的 at 优先于通知配置里的默认 @ 人(和以前一样取本批最后一条告警的)
     alert_at = None

@@ -4,20 +4,44 @@ import { ElMessageBox } from "element-plus";
 import {
   agentInstallApi,
   type AgentInstallDefaults,
+  type AgentInstallNotification,
   type AgentInstallOptions,
   type AgentInstallTask,
   type InstallCheck
 } from "@/api/agent-install";
-import { useUserStoreHook } from "@/store/modules/user";
 import {
+  getNotificationSettings,
+  testNotification,
+  type NotificationSettings,
+  type NotifyChannelInput,
+  type NotifyTestRequest
+} from "@/api/notification";
+import { useUserStoreHook } from "@/store/modules/user";
+import NotifyChannelFields from "@/views/system/notification/NotifyChannelFields.vue";
+import {
+  type ChannelForm,
+  type TestView,
+  TYPE_LABELS,
+  channelInput,
+  existingClusterText,
+  testErrorView,
+  testRequest,
+  testResultView,
+  tokenPlaceholder,
+  typeHint
+} from "@/views/system/notification/notification-utils";
+import {
+  GENERAL_SETTINGS_URL,
   INSTALL_STATUS_TEXT,
   MAX_KUBECONFIG_BYTES,
   emptyInstallOptions,
   installError,
   installFingerprint,
   installValidation,
+  missingSettings,
   pickInstallOptions,
   recoverableInstall,
+  settingsReminder,
   suggestedClusterName
 } from "./install-utils";
 
@@ -32,22 +56,56 @@ const stage = ref(0);
 const filename = ref("");
 const working = ref(false);
 const loading = ref(false);
+const reloading = ref(false);
 const error = ref("");
 const advanced = ref<string[]>([]);
 const fileInput = ref<HTMLInputElement>();
 const checkedFingerprint = ref("");
 const targetFixed = ref(false);
+// 通知配置（可选）：Agent 上线后写进「消息通知 → 按集群单独配置」
+const notify = reactive<ChannelForm>({ type: "wecom", token: "", at: "" });
+/** 这次安装上次检测时已填了机器人地址（只在服务端加密保存）：留空重新检测就沿用 */
+const notifyKept = ref<AgentInstallNotification | null>(null);
+const notifyTest = reactive<{ testing: boolean; result: TestView | null }>({
+  testing: false,
+  result: null
+});
+/** 消息通知已保存的配置，用来看这个集群是否已有单独配置；读不到时为 null */
+const notifySettings = ref<NotificationSettings | null>(null);
 let generation = 0;
 let pollTimer: ReturnType<typeof setTimeout> | undefined;
 const storageKey = () =>
   `kubedoor-agent-install:${useUserStoreHook().username}`;
 const locked = computed(() => working.value || loading.value);
 const isRunning = computed(() => task.value?.status === "running");
+/** 正在使用的通用配置（地址已脱敏） */
+const settings = computed(() => defaults.value?.settings);
+/** 通用配置里有远程写地址才能完整接入 */
+const metricsAvailable = computed(() => !!defaults.value?.metrics_available);
+const missing = computed(() => missingSettings(settings.value));
+/** 这个集群在消息通知里已有的单独配置 */
+const existingChannel = computed(() => {
+  const env = options.env.trim();
+  return (
+    notifySettings.value?.clusters?.find(
+      item => item.env === env && item.configured
+    ) ?? null
+  );
+});
+const existingText = computed(() => existingClusterText(existingChannel.value));
+/** 上次检测填的地址当作「已保存的」：IM 类型没变时机器人地址可以留空 */
+const keptChannel = computed(() =>
+  notifyKept.value ? { ...notifyKept.value, token_hint: "" } : null
+);
+const notifyPlaceholder = computed(() => {
+  if (!keptChannel.value) return typeHint(notify.type).token;
+  return keptChannel.value.type === notify.type
+    ? "这次安装已填写，留空沿用"
+    : tokenPlaceholder(notify.type, keptChannel.value);
+});
 const canInstall = computed(
   () =>
-    task.value?.status === "ready" &&
-    checkedFingerprint.value ===
-      installFingerprint(selectedContext.value, options)
+    task.value?.status === "ready" && checkedFingerprint.value === fingerprint()
 );
 const contexts = computed(() => {
   const choices = task.value?.contexts || [];
@@ -80,6 +138,49 @@ const aiConnectionType = computed(
     ]
 );
 
+/** 通知配置里要重新检测的内容：什么都没填（也没有上次检测填的）时为 null，只改 IM 类型不算修改 */
+function notificationPart() {
+  const token = notify.token.trim();
+  const at = notify.at.trim();
+  if (!token && !at && !notifyKept.value) return null;
+  return [notify.type, token, at, notifyKept.value?.type ?? null];
+}
+
+/** 已检测的计划对应的指纹：安装参数、通知配置、重新读取到的通用配置变了都要重新检测 */
+function fingerprint() {
+  return installFingerprint(selectedContext.value, options, [
+    notificationPart(),
+    settings.value ?? null
+  ]);
+}
+
+/** 任务里的通知配置填进表单：机器人地址只在服务端，表单留空表示沿用 */
+function applyNotification(saved?: AgentInstallNotification | null) {
+  notifyKept.value = saved?.configured ? { ...saved } : null;
+  Object.assign(notify, {
+    type: saved?.type || notify.type,
+    token: "",
+    at: saved?.at || ""
+  });
+  notifyTest.result = null;
+}
+
+/** 「不配置通知」：清空表单，也不再沿用这次安装上次检测填的地址 */
+function clearNotification() {
+  applyNotification(null);
+}
+
+/** 检测请求里的通知配置：什么都没填为 null；不合格抛出中文说明 */
+function notificationInput(): NotifyChannelInput | null {
+  if (notificationPart() === null) return null;
+  return channelInput("通知配置", notify, keptChannel.value);
+}
+
+function openSection(name: string) {
+  if (!advanced.value.includes(name))
+    advanced.value = [...advanced.value, name];
+}
+
 function remember(id?: string) {
   try {
     if (id) localStorage.setItem(storageKey(), id);
@@ -105,10 +206,9 @@ function applyTask(next: AgentInstallTask) {
   task.value = next;
   selectedContext.value = next.context || "";
   Object.assign(options, pickInstallOptions(next.options));
-  checkedFingerprint.value =
-    next.status === "ready"
-      ? installFingerprint(selectedContext.value, options)
-      : "";
+  applyNotification(next.options?.notification);
+  if (notifyKept.value) openSection("notify");
+  checkedFingerprint.value = next.status === "ready" ? fingerprint() : "";
   stage.value = ["draft", "ready"].includes(next.status) ? 1 : 2;
   remember(next.id);
   recentTasks.value = [
@@ -147,6 +247,7 @@ async function open() {
   stopPolling();
   error.value = "";
   loading.value = true;
+  void loadNotifySettings(current);
   try {
     const [configuration, tasks] = await Promise.all([
       agentInstallApi.defaults(),
@@ -184,7 +285,75 @@ function newInstall() {
   advanced.value = [];
   Object.assign(options, pickInstallOptions(defaults.value));
   if (defaults.value?.metrics_available === false) options.mode = "agent";
+  applyNotification(null);
+  notify.type = notifySettings.value?.default?.type ?? notify.type;
   remember();
+}
+
+/** 读消息通知的已保存配置（看这个集群是否已有单独配置）；读不到不影响安装 */
+async function loadNotifySettings(current: number) {
+  try {
+    const res = await getNotificationSettings(true);
+    if (generation === current && res?.success) notifySettings.value = res.data;
+  } catch {
+    // 不显示已有的单独配置即可
+  }
+}
+
+/** 「重新读取」：在通用配置页填好后，重新取默认值和正在使用的通用配置 */
+async function reloadDefaults() {
+  if (reloading.value) return;
+  reloading.value = true;
+  const current = generation;
+  try {
+    const next = await agentInstallApi.defaults();
+    if (generation !== current || !visible.value) return;
+    defaults.value = next;
+    error.value = "";
+    if (!options.master_url && next.master_url)
+      options.master_url = next.master_url;
+    if (!next.metrics_available && options.mode === "full")
+      options.mode = "agent";
+  } catch (reason) {
+    if (generation === current) error.value = installError(reason);
+  } finally {
+    reloading.value = false;
+  }
+}
+
+/** 新标签页打开通用配置，填完回来点「重新读取」 */
+function openGeneralSettings() {
+  window.open(GENERAL_SETTINGS_URL, "_blank", "noopener");
+}
+
+/** 发送测试消息：填了机器人地址用填的；没填时测这个集群已有的单独配置 */
+async function testNotify() {
+  if (notifyTest.testing) return;
+  const env = options.env.trim();
+  let request: NotifyTestRequest;
+  try {
+    if (!/^[A-Za-z0-9_-]{1,64}$/.test(env))
+      throw new Error("请先填写集群唯一标识");
+    if (!notify.token.trim() && notifyKept.value)
+      throw new Error(
+        "已填写的机器人地址只保存在这次安装里，发送测试消息请重新填写"
+      );
+    request = testRequest(env, notify, existingChannel.value);
+  } catch (reason) {
+    notifyTest.result = { type: "warning", text: (reason as Error).message };
+    return;
+  }
+  notifyTest.testing = true;
+  try {
+    const res = await testNotification(request);
+    notifyTest.result = res.success
+      ? testResultView(res.data)
+      : { type: "error", text: res.message || "发送测试消息失败" };
+  } catch (reason) {
+    notifyTest.result = testErrorView(reason);
+  } finally {
+    notifyTest.testing = false;
+  }
 }
 
 async function selectTask(id: string) {
@@ -288,7 +457,15 @@ async function preflight(force = false) {
   const invalid = installValidation(options);
   if (invalid) {
     error.value = invalid;
-    if (!options.master_url.trim()) advanced.value = ["advanced"];
+    if (!options.master_url.trim()) openSection("advanced");
+    return;
+  }
+  let notification: NotifyChannelInput | null;
+  try {
+    notification = notificationInput();
+  } catch (reason) {
+    error.value = (reason as Error).message;
+    openSection("notify");
     return;
   }
   working.value = true;
@@ -299,7 +476,7 @@ async function preflight(force = false) {
     const next = await agentInstallApi.preflight(
       task.value.id,
       selectedContext.value,
-      { ...options },
+      { ...options, notification },
       // 只认确认框传来的 true：按钮的点击事件等其他值都不算强制覆盖
       force === true
     );
@@ -481,23 +658,63 @@ onBeforeUnmount(() => {
           </div>
           <el-form-item label="安装方式">
             <el-radio-group v-model="options.mode">
-              <el-radio value="full">完整接入</el-radio>
+              <el-radio value="full" :disabled="!metricsAvailable"
+                >完整接入</el-radio
+              >
               <el-radio value="agent">仅安装 Agent</el-radio>
             </el-radio-group>
             <div class="field-hint">
               {{
-                options.mode === "full"
-                  ? "安装 Agent 与指标采集，检测并复用兼容的已有采集组件；vmagent 直接写入时序库。"
-                  : "使用已有监控采集，现有指标仍需具有对应的集群标签。"
+                !metricsAvailable
+                  ? "通用配置里还没有远程写地址，vmagent 不知道往哪里写指标，暂时只能仅安装 Agent；填好后点下面的「重新读取」。"
+                  : options.mode === "full"
+                    ? "安装 Agent 与指标采集，检测并复用兼容的已有采集组件；vmagent 直接写入通用配置里的远程写地址。"
+                    : "使用已有监控采集，现有指标仍需具有对应的集群标签。"
               }}
             </div>
           </el-form-item>
-          <el-alert
-            v-if="!defaults?.metrics_available && options.mode === 'full'"
-            title="控制端没有配置时序库写入地址，请在高级设置中填写指标写入地址，或选择仅安装 Agent。"
-            type="warning"
-            :closable="false"
-          />
+          <div class="settings-panel">
+            <div class="settings-head">
+              <span class="settings-title">正在使用的通用配置</span>
+              <span>
+                <el-button link type="primary" @click="openGeneralSettings"
+                  >去通用配置填写</el-button
+                >
+                <el-button
+                  link
+                  type="primary"
+                  :loading="reloading"
+                  @click="reloadDefaults"
+                  >重新读取</el-button
+                >
+              </span>
+            </div>
+            <div class="settings-row">
+              <span class="settings-label">远程写地址</span>
+              <span>{{ settings?.metrics_write_url || "未配置" }}</span>
+            </div>
+            <div class="settings-row">
+              <span class="settings-label">对象存储上传地址</span>
+              <span>{{ settings?.oss_url || "未配置" }}</span>
+            </div>
+            <div class="settings-row">
+              <span class="settings-label">镜像仓库</span>
+              <span>{{ settings?.image_repo || "未配置" }}</span>
+            </div>
+            <el-alert
+              v-for="item in missing"
+              :key="item.key"
+              :title="settingsReminder(item.label)"
+              :type="item.required ? 'warning' : 'info'"
+              :closable="false"
+              class="settings-alert"
+            />
+            <div class="field-hint">
+              远程写地址给 vmagent 写指标用；对象存储上传地址给 Java
+              诊断文件（dump、jstack、JFR）上传用，不保存在 Agent
+              里，控制端每次请求时带过去，改了马上生效。
+            </div>
+          </div>
           <el-collapse v-model="advanced" class="advanced-options">
             <el-collapse-item name="advanced" title="高级设置">
               <el-form-item label="目标集群可访问的 KubeDoor 地址" required>
@@ -523,41 +740,52 @@ onBeforeUnmount(() => {
                   />
                 </el-form-item>
               </div>
-              <el-form-item label="对象存储上传地址（可选）">
-                <el-input
-                  v-model="options.oss_url"
-                  placeholder="用于 Java 诊断文件上传"
-                />
-              </el-form-item>
-              <template v-if="options.mode === 'full'">
-                <div class="field-grid">
-                  <el-form-item label="kube-state-metrics">
-                    <el-select v-model="options.ksm">
-                      <el-option label="自动检测" value="auto" />
-                      <el-option label="安装" value="install" />
-                      <el-option label="复用已有" value="reuse" />
-                    </el-select>
-                  </el-form-item>
-                  <el-form-item label="node-exporter">
-                    <el-select v-model="options.node_exporter">
-                      <el-option label="自动检测" value="auto" />
-                      <el-option label="安装" value="install" />
-                      <el-option label="复用已有" value="reuse" />
-                    </el-select>
-                  </el-form-item>
-                </div>
-                <el-form-item label="指标写入地址覆盖（可选）">
-                  <el-input
-                    v-model="options.remote_write_url"
-                    placeholder="留空时使用控制端配置的时序库写入地址"
-                  />
-                  <div class="field-hint">
-                    vmagent
-                    直接写入这个地址，需要能从目标集群访问；账号口令可写成
-                    http://账号:口令@地址，安装时放进目标集群的 Secret。
-                  </div>
+              <div v-if="options.mode === 'full'" class="field-grid">
+                <el-form-item label="kube-state-metrics">
+                  <el-select v-model="options.ksm">
+                    <el-option label="自动检测" value="auto" />
+                    <el-option label="安装" value="install" />
+                    <el-option label="复用已有" value="reuse" />
+                  </el-select>
                 </el-form-item>
-              </template>
+                <el-form-item label="node-exporter">
+                  <el-select v-model="options.node_exporter">
+                    <el-option label="自动检测" value="auto" />
+                    <el-option label="安装" value="install" />
+                    <el-option label="复用已有" value="reuse" />
+                  </el-select>
+                </el-form-item>
+              </div>
+            </el-collapse-item>
+            <el-collapse-item name="notify" title="消息通知（可选）">
+              <el-alert
+                v-if="existingText"
+                :title="existingText"
+                type="info"
+                :closable="false"
+                class="notify-alert"
+              />
+              <p v-else class="field-hint notify-intro">
+                填写后，Agent 上线时在「系统管理 → 消息通知 →
+                按集群单独配置」为这个集群加上配置；留空则按消息通知现有的配置发送。
+              </p>
+              <div v-if="notifyKept" class="notify-kept">
+                <span
+                  >这次安装已填写{{
+                    TYPE_LABELS[notifyKept.type] || notifyKept.type
+                  }}机器人地址，留空沿用。</span
+                >
+                <el-button link type="danger" @click="clearNotification"
+                  >不配置通知</el-button
+                >
+              </div>
+              <NotifyChannelFields
+                v-model:form="notify"
+                :placeholder="notifyPlaceholder"
+                :testing="notifyTest.testing"
+                :result="notifyTest.result"
+                @test="testNotify"
+              />
             </el-collapse-item>
           </el-collapse>
         </el-form>
@@ -647,6 +875,18 @@ onBeforeUnmount(() => {
         <div v-if="task?.ai_connection" class="check-row">
           <el-tag :type="aiConnectionType" size="small">AI Kubeconfig</el-tag>
           <span>{{ task.ai_connection.message }}</span>
+        </div>
+        <div v-if="task?.notification_result" class="check-row">
+          <el-tag
+            :type="
+              task.notification_result.status === 'saved'
+                ? 'success'
+                : 'warning'
+            "
+            size="small"
+            >消息通知</el-tag
+          >
+          <span>{{ task.notification_result.message }}</span>
         </div>
         <el-alert
           v-if="task?.error"
@@ -791,6 +1031,59 @@ onBeforeUnmount(() => {
 
 .advanced-options {
   margin-top: 8px;
+}
+
+/* 正在使用的通用配置：远程写地址、对象存储上传地址（脱敏）、镜像仓库 */
+.settings-panel {
+  padding: 10px 12px;
+  margin-bottom: 8px;
+  font-size: 13px;
+  line-height: 1.7;
+  background: var(--el-fill-color-light);
+  border-radius: 6px;
+}
+
+.settings-head {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.settings-title {
+  font-weight: 600;
+}
+
+.settings-row {
+  display: flex;
+  gap: 12px;
+  overflow-wrap: anywhere;
+}
+
+.settings-label {
+  flex-shrink: 0;
+  width: 112px;
+  color: var(--el-text-color-secondary);
+}
+
+.settings-alert {
+  margin-top: 8px;
+}
+
+.notify-alert,
+.notify-intro {
+  margin: 0 0 12px;
+}
+
+.notify-kept {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  margin-bottom: 12px;
+  font-size: 13px;
+  color: var(--el-text-color-regular);
 }
 
 .section-space {

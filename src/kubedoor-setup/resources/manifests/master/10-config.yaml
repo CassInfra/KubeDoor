@@ -1,6 +1,8 @@
-# kubedoor-config:master / alarm / ai 共用的环境变量
-# 改完后需要重启对应 Deployment 才生效:
-#   kubectl -n __NAMESPACE__ rollout restart deploy/kubedoor-master deploy/kubedoor-alarm
+# kubedoor-config:master / alarm / ai 共用的 PostgreSQL 连接(旧版配置式安装脚本使用;网页安装放在 Secret kubedoor-connection)
+# 其余配置(时序库地址、访问地址、对象存储、Agent 镜像、数据保留天数、登录安全等)存在数据库里,
+# 在控制台「系统管理 → 通用配置」修改,保存后生效,不用重启。
+# 改完下面的连接配置后需要重启对应 Deployment 才生效:
+#   kubectl -n __NAMESPACE__ rollout restart deploy/kubedoor-master deploy/kubedoor-alarm deploy/kubedoor-ai
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -18,50 +20,3 @@ data:
   PG_POOL_MIN: '__PG_POOL_MIN__'
   PG_POOL_MAX: '__PG_POOL_MAX__'
   PG_CMD_TIMEOUT: '__PG_CMD_TIMEOUT__'
-
-  # --- 时序库 ---
-  PROM_TYPE: '__PROM_TYPE__'
-  PROM_URL: '__PROM_URL__'
-  # 时序库远程写地址(带账号密码):网页安装 Agent 时各集群的 vmagent 默认直连它,须能从各业务集群访问。
-  # 网页安装把它和 PROM_URL 一起放进 Secret kubedoor-connection,不留在这个 ConfigMap 里
-  METRICS_WRITE_URL: '__METRICS_WRITE_URL__'
-  PROM_K8S_TAG_KEY: '__PROM_K8S_TAG_KEY__'
-  # 网页安装 Agent 的默认配置，来自与脚本相同的发布配置。
-  AGENT_INSTALL_DEFAULTS: '__AGENT_INSTALL_DEFAULTS__'
-
-  # --- 通知 ---
-  # IM 机器人(企业微信 / 钉钉 / 飞书 / Slack)不在这里配置:在控制台「系统管理 → 消息通知」里设置,
-  # 可以按集群单独配置,保存后立即生效,不用重启。下面两项是通知消息里链接指向的外部地址
-  ALERTMANAGER_EXTURL: '__ALERTMANAGER_EXTURL__'
-  KUBEDOOR_EXTURL: '__KUBEDOOR_EXTURL__'
-
-  # --- 行为参数 ---
-  LOG_LEVEL: "INFO"
-  ALERT_DEDUP_WINDOW: '__ALERT_DEDUP_WINDOW__'
-  SILENCE_CACHE_TTL: '__SILENCE_CACHE_TTL__'
-  # admis 准入校验的热路径查询缓存(秒)。改管控配置后会主动失效,不必调小
-  ADMIS_CACHE_TTL: "60"
-  # 过期数据保留天数,master 每天清理一次;设为 0 表示不清理
-  RETENTION_EVENTS_DAYS: "90"
-  RETENTION_ALERTS_DAYS: "365"
-  RETENTION_RESOURCES_DAYS: "365"
-  RETENTION_AUDIT_DAYS: "180"
-  # 企微里再也不会继续的旧 AI 对话,多少天后删除它的检查点(kubedoor-ai 每 6 小时清理一次,消息记录保留);0 表示不清理
-  RETENTION_AI_CHECKPOINT_DAYS: "7"
-  # 节点终端临时 pod 用的镜像(需含 nsenter),master 开终端时下发给 agent。
-  # 留空 = 用 agent 内置的默认镜像(registry.cn-shenzhen.aliyuncs.com/starsl/alpine:3);
-  # 集群拉不到时换成内网仓库里的镜像,改完重启 master 即可,不用动各集群的 agent
-  NODE_SHELL_IMAGE: ""
-
-  # --- 登录与权限(账号、LDAP、集群授权都在 Web 的「系统管理」里配置)---
-  # agent 连 master 必须带账号口令(MASTER_WS 里写 Agent 账号)。升级过渡期可临时设为 "false"
-  AGENT_AUTH_REQUIRED: '__AGENT_AUTH_REQUIRED__'
-  # 登录有效期:不勾「记住我」12 小时(空闲 4 小时自动退出),勾选后 7 天
-  AUTH_SESSION_HOURS: "12"
-  AUTH_IDLE_HOURS: "4"
-  AUTH_REMEMBER_DAYS: "7"
-  # 同一账号 + 来源 IP 连续登录失败几次后锁定多少分钟
-  AUTH_LOGIN_MAX_FAILURES: "5"
-  AUTH_LOCK_MINUTES: "15"
-  # 会话 Cookie 的 Secure 标记:auto 按请求是否 HTTPS 判断;nginx 前面还有一层做 TLS 的负载均衡时设为 "true"
-  AUTH_COOKIE_SECURE: "auto"

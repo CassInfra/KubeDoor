@@ -59,6 +59,14 @@ def test_store_skips_resolved_without_record_or_send_resolved(alarm_app):
     assert alarm_app.pool.writes() == []
 
 
+def test_store_takes_cluster_from_label_in_general_settings(alarm_app, alarm_settings):
+    """集群名取自通用配置里的集群指标标签 key,改了马上按新的入库(指纹也跟着变)"""
+    alarm_settings['prom_k8s_tag_key'] = 'cluster'
+    assert store(alarm_app, store_alert(cluster='prod-b')).status_code == 200
+    [(_, params)] = alarm_app.pool.writes()
+    assert params[0] == fingerprint(env='prod-b') and params[7] == 'prod-b'
+
+
 def test_store_keeps_silenced_alert_with_mark_and_does_not_count_hit(alarm_app):
     alarm_app.pool.silence_rows = [SILENCE_RESTART]
     assert store(alarm_app, store_alert()).status_code == 200

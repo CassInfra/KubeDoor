@@ -43,6 +43,14 @@ def internal_app(monkeypatch, clients, utils):
     return app
 
 
+def fake_utils(prom_type="", tag_key="origin_prometheus", prom_url="", **attrs):
+    """假的 utils。时序库配置经 utils.prom_type() / tag_key() / prom_url() 取(master 里是通用配置的当前值);
+    返回对象的 settings 是当前配置,测试里改它就相当于在页面上改了配置。"""
+    settings = {"prom_type": prom_type, "tag_key": tag_key, "prom_url": prom_url}
+    return SimpleNamespace(prom_type=lambda: settings["prom_type"], tag_key=lambda: settings["tag_key"],
+                           prom_url=lambda: settings["prom_url"], settings=settings, **attrs)
+
+
 def test_metrics_scope_cannot_be_overridden_and_tenant_url_is_not_rewritten():
     suffix, params = ai_api.metrics_parameters({
         "env": "production", "query": 'sum(rate(cpu{origin_prometheus="other"}[5m]))',
@@ -66,8 +74,8 @@ def test_metrics_invalid_or_unbounded_range_is_rejected(updates):
 @pytest.mark.asyncio
 async def test_internal_routes_require_service_token_and_user_identity(monkeypatch):
     monkeypatch.setenv("AI_INTERNAL_TOKEN", "secret-test-token")
-    utils = SimpleNamespace(get_k8s_aliases=AsyncMock(return_value={"offline": ["离线集群"]}),
-                            PROM_TYPE="Victoria-Metrics-Cluster", PROM_K8S_TAG_KEY="origin_prometheus")
+    utils = fake_utils(get_k8s_aliases=AsyncMock(return_value={"offline": ["离线集群"]}),
+                       prom_type="Victoria-Metrics-Cluster", tag_key="origin_prometheus")
     app = internal_app(monkeypatch, {"online": {"online": True, "ver": "2"}}, utils)
     async with TestClient(TestServer(app)) as client:
         assert (await client.get("/api/ai/internal/bootstrap")).status == 401
@@ -84,9 +92,15 @@ async def test_internal_routes_require_service_token_and_user_identity(monkeypat
         assert response.status == 200
         body = await response.json()
         assert body["username"] == "viewer" and body["permission"] == "read"
+        assert (body["prom_type"], body["prom_label_key"]) == ("Victoria-Metrics-Cluster", "origin_prometheus")
         # 库里还没有的集群(只在 clients 里)别名是空列表
         assert [(c["env"], c["online"], c["permission"], c["aliases"]) for c in body["clusters"]] == [
             ("offline", False, "read", ["离线集群"]), ("online", True, "read", [])]
+        # 通用配置改了,下一次 bootstrap 马上返回新值
+        utils.settings.update(prom_type="Prometheus", tag_key="cluster")
+        body = await (await client.get("/api/ai/internal/bootstrap", headers={
+            "X-Kubedoor-Token": "secret-test-token", "X-User-Name": "viewer"})).json()
+        assert (body["prom_type"], body["prom_label_key"]) == ("Prometheus", "cluster")
         identity = await client.get("/api/ai/internal/identity", headers={
             "X-Kubedoor-Token": "secret-test-token", "X-User-Name": "limited", "X-User-Permission": "admin",
         })
@@ -100,8 +114,8 @@ async def test_internal_routes_require_service_token_and_user_identity(monkeypat
 @pytest.mark.asyncio
 async def test_bootstrap_hides_clusters_without_permission_and_execute_checks_cluster(monkeypatch):
     monkeypatch.setenv("AI_INTERNAL_TOKEN", "secret-test-token")
-    utils = SimpleNamespace(get_k8s_aliases=AsyncMock(return_value={"prod": ["生产"], "staging": [], "secret": ["机密"]}),
-                            PROM_TYPE="Victoria-Metrics-Cluster", PROM_K8S_TAG_KEY="origin_prometheus")
+    utils = fake_utils(get_k8s_aliases=AsyncMock(return_value={"prod": ["生产"], "staging": [], "secret": ["机密"]}),
+                       prom_type="Victoria-Metrics-Cluster", tag_key="origin_prometheus")
     sent = []
 
     def socket_for(env):
@@ -158,8 +172,8 @@ async def test_deployment_control_checks_cluster_and_names_and_verifies_through_
             clients["staging"]["response_events"][packet["request_id"]].set()
 
     clients = {"staging": {"online": True, "ai_tools": True, "ws": Socket()}}
-    utils = SimpleNamespace(get_k8s_names=AsyncMock(return_value=["staging"]), pg_fetchrow=pg_fetchrow,
-                            PROM_TYPE="", PROM_K8S_TAG_KEY="k8s")
+    utils = fake_utils(get_k8s_names=AsyncMock(return_value=["staging"]), pg_fetchrow=pg_fetchrow,
+                       prom_type="", tag_key="k8s")
     app = internal_app(monkeypatch, clients, utils)
     headers = {"X-Kubedoor-Token": "secret-test-token", "X-User-Name": "limited"}
     async with TestClient(TestServer(app)) as client:
@@ -240,13 +254,19 @@ async def test_metrics_bridge_preserves_tenant_path_decodes_auth_and_injects_clu
     upstream.router.add_get("/select/7/prometheus/api/v1/query", metrics)
     async with TestServer(upstream) as server:
         address = str(server.make_url("/select/7/prometheus")).split("://", 1)[1]
-        utils = SimpleNamespace(get_k8s_names=AsyncMock(return_value=["prod"]), PROM_TYPE="Victoria-Metrics-Cluster",
-                                PROM_K8S_TAG_KEY="k8s", PROM_URL=f"http://metrics-user:password%40with%3Aencoding@{address}")
+        utils = fake_utils(get_k8s_names=AsyncMock(return_value=["prod"]), prom_type="Victoria-Metrics-Cluster",
+                           tag_key="k8s", prom_url=f"http://metrics-user:password%40with%3Aencoding@{address}")
         app = internal_app(monkeypatch, {}, utils)
         async with TestClient(TestServer(app)) as client:
-            response = await client.post("/api/ai/internal/metrics", json={"env": "prod", "query": "sum(up)", "extra_label": "k8s=other"}, headers={
-                "X-Kubedoor-Token": "test-token", "X-User-Name": "reader", "X-User-Permission": "read"})
+            headers = {"X-Kubedoor-Token": "test-token", "X-User-Name": "reader", "X-User-Permission": "read"}
+            response = await client.post("/api/ai/internal/metrics", json={"env": "prod", "query": "sum(up)", "extra_label": "k8s=other"}, headers=headers)
             assert response.status == 200, await response.text()
+            # 时序库配置每次请求取:改成 Prometheus 后马上不支持自由查询,清空查询地址后提示未配置
+            utils.settings.update(prom_type="Prometheus")
+            assert (await client.post("/api/ai/internal/metrics", json={"env": "prod", "query": "up"}, headers=headers)).status == 501
+            utils.settings.update(prom_type="Victoria-Metrics-Single", prom_url="")
+            assert (await client.post("/api/ai/internal/metrics", json={"env": "prod", "query": "up"}, headers=headers)).status == 503
+    assert len(received) == 1
     path, params, authorization = received[0]
     assert path == "/select/7/prometheus/api/v1/query"
     assert params == {"query": "sum(up)", "extra_label": "k8s=prod"}
@@ -274,7 +294,7 @@ def agent_clients(sent, *envs):
 @pytest.mark.asyncio
 async def test_execute_checks_declared_operations(monkeypatch, set_policy):
     monkeypatch.setenv("AI_INTERNAL_TOKEN", "secret-test-token")
-    utils = SimpleNamespace(get_k8s_aliases=AsyncMock(return_value={}), PROM_TYPE="", PROM_K8S_TAG_KEY="origin_prometheus")
+    utils = fake_utils(get_k8s_aliases=AsyncMock(return_value={}), prom_type="", tag_key="origin_prometheus")
     sent = []
     app = internal_app(monkeypatch, agent_clients(sent, "prod", "staging"), utils)
     headers = {"X-Kubedoor-Token": "secret-test-token", "X-User-Name": "limited"}
@@ -326,8 +346,8 @@ async def test_execute_checks_declared_operations(monkeypatch, set_policy):
 @pytest.mark.asyncio
 async def test_cluster_admin_identity_and_bootstrap(monkeypatch):
     monkeypatch.setenv("AI_INTERNAL_TOKEN", "secret-test-token")
-    utils = SimpleNamespace(get_k8s_aliases=AsyncMock(return_value={"prod": [], "staging": []}),
-                            PROM_TYPE="", PROM_K8S_TAG_KEY="origin_prometheus")
+    utils = fake_utils(get_k8s_aliases=AsyncMock(return_value={"prod": [], "staging": []}),
+                       prom_type="", tag_key="origin_prometheus")
     app = internal_app(monkeypatch, {}, utils)
     headers = {"X-Kubedoor-Token": "secret-test-token", "X-User-Name": "boss"}
     async with TestClient(TestServer(app)) as client:
@@ -344,7 +364,7 @@ async def test_data_queries_need_new_agent_and_data_query_permission(monkeypatch
     """MySQL / Redis / ES 只读查询:新版 agent(data_tools)才能执行;master 固定按「AI 查询数据库 / Redis / ES」复核;
     参数里服务端填入的明文密码只转给 agent,不进日志和审计"""
     monkeypatch.setenv("AI_INTERNAL_TOKEN", "secret-test-token")
-    utils = SimpleNamespace(get_k8s_aliases=AsyncMock(return_value={}), PROM_TYPE="", PROM_K8S_TAG_KEY="origin_prometheus")
+    utils = fake_utils(get_k8s_aliases=AsyncMock(return_value={}), prom_type="", tag_key="origin_prometheus")
     sent, audits, logs = [], [], []
     clients = agent_clients(sent, "prod", "staging")
     clients["prod"]["data_tools"] = True  # staging 是只认通用工具的旧 agent

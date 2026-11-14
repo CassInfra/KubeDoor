@@ -284,9 +284,10 @@ async def test_install_runs_master_pipeline_with_in_cluster_kubeconfig_then_fina
         assert call['headers']['X-User-Name'] == 'kubedoor'
     preflight = master.named('/preflight')[0]['body']
     assert preflight['context'] == 'in-cluster'
+    # 远程写地址、镜像仓库由 master 从通用配置取（控制服务就绪时安装服务已写入），这里不再带
     assert preflight['options'] == {'env': 'prod-k8s', 'aliases': ['生产'], 'namespace': 'kubedoor', 'mode': 'full', 'ksm': 'auto',
                                     'node_exporter': 'install', 'master_url': 'http://kubedoor-master.kubedoor',
-                                    'remote_write_url': VM['write_url'], 'image_pull_secret': 'pull-key'}
+                                    'image_pull_secret': 'pull-key'}
     assert master.named('/start')[0]['body'] == {'revision': 1}
     # 收尾 Job 由安装服务创建，沿用自己的镜像和拉取凭据
     job = k8s.resources[JOB]
@@ -487,7 +488,7 @@ async def test_agent_only_mode_sends_no_remote_write_and_full_needs_write_url(tm
             assert response.status == 202
             await settle(repo, lambda s: s['phase'] == 'finalizing')
     sent = master.named('/preflight')[0]['body']['options']
-    assert sent['mode'] == 'agent' and sent['remote_write_url'] == ''
+    assert sent['mode'] == 'agent' and 'remote_write_url' not in sent
     assert 'image_pull_secret' not in sent
 
 

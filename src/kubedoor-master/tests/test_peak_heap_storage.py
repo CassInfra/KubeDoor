@@ -29,8 +29,9 @@ def selected_peak_row(heap=72.5, g1e=67.25):
 
 
 def series(value, owner='service-rs'):
+    # 集群标签 key 由调用方传给 get_prom_data(init_peak_data 每轮从通用配置取一次),这里用 k8s
     return {
-        'metric': {utils.PROM_K8S_TAG_KEY: 'prod', 'namespace': 'team', 'owner_name': owner},
+        'metric': {'k8s': 'prod', 'namespace': 'team', 'owner_name': owner},
         'value': [PEAK_END.timestamp(), value],
     }
 
@@ -55,12 +56,13 @@ def workloads():
 def test_optional_jvm_query_normalizes_missing_and_invalid_observations(monkeypatch, value, expected, metric):
     request = heap_response(monkeypatch, [series(value)])
     original = workloads()
-    result = utils.get_prom_data(metric, utils.PROM_K8S_TAG_KEY, 'prod', PEAK_END, '1h30m', original)
+    result = utils.get_prom_data(metric, 'k8s', 'prod', PEAK_END, '1h30m', original)
     assert result is original
     assert result['prod@team@service-rs'] == ['cpu-memory-result', expected]
     assert result['prod@team@no-jvm-rs'] == ['other-result', None]
     assert request.call_args.kwargs['params']['time'] == PEAK_END.timestamp()
     assert '1h30m' in request.call_args.kwargs['params']['query']
+    assert 'k8s="prod"' in request.call_args.kwargs['params']['query']
 
 
 @pytest.mark.parametrize('metric', ['heap_usage_percent', 'g1e_usage_percent'])
@@ -70,6 +72,25 @@ def test_empty_jvm_series_preserves_all_workloads_as_null(monkeypatch, metric):
         'prod@team@service-rs': ['cpu-memory-result', None],
         'prod@team@no-jvm-rs': ['other-result', None],
     }
+
+
+def test_peak_queries_use_caller_tag_key_and_current_query_url(monkeypatch):
+    """集群标签 key 用调用方这一轮取到的值;查询地址每次查询时取通用配置的当前值"""
+    import general_settings
+
+    monkeypatch.setattr(general_settings, 'value', {'prom_url': 'http://vm.example.com:8428'}.__getitem__)
+    response = Mock()
+    response.json.return_value = {'status': 'success', 'data': {'result': [{
+        'metric': {'cluster': 'prod', 'namespace': 'team', 'workload': 'service', 'owner_name': 'service-rs'},
+        'value': [PEAK_END.timestamp(), '3'],
+    }]}}
+    request = Mock(return_value=response)
+    monkeypatch.setattr(utils.requests, 'request', request)
+    rows = utils.get_prom_data('pod_num', 'cluster', 'prod', PEAK_END, '1h')
+    assert rows == {'prod@team@service-rs': [PEAK_END, 'prod', 'team', 'service', 3]}
+    assert request.call_args.args[1] == 'http://vm.example.com:8428/api/v1/query'
+    query = request.call_args.kwargs['params']['query']
+    assert 'cluster="prod",' in query and 'by (cluster, namespace' in query
 
 
 @pytest.mark.parametrize('failure', ['timeout', 'http', 'prometheus', 'json', 'malformed'])

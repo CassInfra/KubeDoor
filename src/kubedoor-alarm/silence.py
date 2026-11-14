@@ -12,6 +12,7 @@
   - 告警上不存在的 label,其值视为空字符串 ""。因此 `foo!=bar` 会命中没有 foo 标签的告警,
     这与 Alertmanager 的行为相同。
   - 规则的时间窗每次判断都按当前时间实时计算,缓存 TTL 只影响新建/解除规则的生效延迟。
+    TTL 和集群标签 key 取自通用配置(settings_client),页面上改了不用重启。
 """
 
 import re
@@ -21,7 +22,7 @@ from datetime import datetime, timezone
 
 import logging
 
-import utils
+import settings_client
 
 # 支持的操作符
 OP_EQ = '='
@@ -72,7 +73,7 @@ def build_match_labels(labels, annotations=None):
     """把告警的原始 labels 展开成可供 matcher 查询的字典。
 
     原始 label 全部保留(支持屏蔽任意自定义标签),再叠加规范化别名:
-      env       ← labels[PROM_K8S_TAG_KEY]
+      env       ← labels[集群指标标签 key](通用配置的 prom_k8s_tag_key)
       namespace ← namespace / k8s_ns
       pod       ← pod / k8s_pod
       container ← container / k8s_app
@@ -91,7 +92,7 @@ def build_match_labels(labels, annotations=None):
                 break
 
     # env 取自可配置的集群标签 key
-    tag_key = utils.PROM_K8S_TAG_KEY
+    tag_key = settings_client.value('prom_k8s_tag_key')
     if not result.get('env') and tag_key:
         result['env'] = result.get(tag_key, '')
 
@@ -159,12 +160,16 @@ class SilenceEngine:
 
     def __init__(self, pool, ttl=None):
         self._pool = pool
-        self._ttl = ttl if ttl is not None else utils.SILENCE_CACHE_TTL
+        # 规则缓存秒数:None = 每次刷新前取通用配置的 silence_cache_ttl;测试可以传固定值
+        self._ttl = ttl
         self._rules = []
         self._loaded_at = 0.0
         self._lock = threading.Lock()
         # {silence_id: [命中次数增量, 最后命中时间]}
         self._pending = {}
+
+    def _cache_ttl(self):
+        return self._ttl if self._ttl is not None else settings_client.value('silence_cache_ttl')
 
     # -- 缓存 ---------------------------------------------------------------
     def _load_rules(self):
@@ -191,11 +196,12 @@ class SilenceEngine:
 
     def _refresh_if_stale(self):
         """TTL 到期则刷新缓存,并顺带把累计的命中计数回写数据库。"""
-        if time.monotonic() - self._loaded_at < self._ttl:
+        ttl = self._cache_ttl()
+        if time.monotonic() - self._loaded_at < ttl:
             return
         with self._lock:
             # 双重检查:并发请求下只让一个线程真正查库
-            if time.monotonic() - self._loaded_at < self._ttl:
+            if time.monotonic() - self._loaded_at < ttl:
                 return
             self._loaded_at = time.monotonic()
         self._flush_counts()
@@ -293,7 +299,7 @@ _engine = None
 
 
 def init_engine(pool, ttl=None):
-    """初始化全局屏蔽引擎。在 alarm 启动时调用一次。"""
+    """初始化全局屏蔽引擎。在 alarm 启动时调用一次;ttl 不传就按通用配置的 silence_cache_ttl。"""
     global _engine
     _engine = SilenceEngine(pool, ttl)
     return _engine

@@ -36,7 +36,7 @@ _HEADERS = {'Content-Type': 'application/json'}
 
 
 class FetchError(Exception):
-    """从 master 取通知配置失败(连不上、鉴权失败、返回格式不对)。信息里不含 token。"""
+    """从 master 的内部接口取配置失败(连不上、鉴权失败、返回格式不对)。信息里不含 token。"""
 
 
 class SendError(Exception):
@@ -104,22 +104,23 @@ def _channel_from(data):
     return {'type': kind, 'token': token.strip(), 'at': at}
 
 
-def fetch_channel(env, timeout=FETCH_TIMEOUT):
-    """向 master 取一次通知配置。
+def get_internal(path, params=None, timeout=FETCH_TIMEOUT):
+    """GET master 的内部接口,返回响应里的 data。
 
-    Returns:
-        {'type', 'token', 'at'};master 说没有配置时返回 None。
+    只带内部令牌、不带 X-User-Name:master 认作系统身份(这类接口只对系统身份开放)。
+    通知配置和通用配置(settings_client)都经这里取。
+
     Raises:
-        FetchError: 连不上 master、鉴权失败或返回格式不对。
+        FetchError: 没有内部令牌、连不上 master、鉴权失败、返回的不是成功的 JSON。信息里不含令牌。
     """
     token = os.environ.get('AI_INTERNAL_TOKEN', '')
     if not token:
         raise FetchError('没有环境变量 AI_INTERNAL_TOKEN,不能调用 master 的内部接口')
-    url = f'{_master_url()}/api/internal/notification'
+    url = f'{_master_url()}{path}'
     try:
-        response = requests.get(url, params={'env': env}, headers={'X-Kubedoor-Token': token}, timeout=timeout)
+        response = requests.get(url, params=params, headers={'X-Kubedoor-Token': token}, timeout=timeout)
     except requests.RequestException as exc:
-        # 地址里只有集群名,没有 token,可以记下来方便排查
+        # 地址和查询参数(集群名)里都没有 token,可以记下来方便排查
         raise FetchError(f'请求 {url} 失败: {type(exc).__name__}: {_brief(exc, 200)}') from None
     if response.status_code != 200:
         raise FetchError(f'master 返回 HTTP {response.status_code}{_error_detail(response)}')
@@ -129,7 +130,18 @@ def fetch_channel(env, timeout=FETCH_TIMEOUT):
         raise FetchError('master 返回的不是 JSON') from None
     if not isinstance(body, dict) or body.get('success') is not True:
         raise FetchError(f'master 返回失败{_error_detail(response)}')
-    data = body.get('data')
+    return body.get('data')
+
+
+def fetch_channel(env, timeout=FETCH_TIMEOUT):
+    """向 master 取一次通知配置。
+
+    Returns:
+        {'type', 'token', 'at'};master 说没有配置时返回 None。
+    Raises:
+        FetchError: 连不上 master、鉴权失败或返回格式不对。
+    """
+    data = get_internal('/api/internal/notification', {'env': env}, timeout)
     if data is None:
         return None
     return _channel_from(data)

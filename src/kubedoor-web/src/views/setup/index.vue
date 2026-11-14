@@ -50,6 +50,8 @@ import {
   notifyResultView,
   NOTIFY_LABELS,
   NOTIFY_TYPES,
+  ossSummary,
+  ossURLInput,
   postgresPayload,
   publicURL,
   serviceStatus,
@@ -123,7 +125,9 @@ const basics = reactive({
   admin: { username: "kubedoor", password: "" },
   public_url: "",
   /** 告警组件 vmalert、Alertmanager、kubedoor-alarm 一起装或一起不装 */
-  alerting: true
+  alerting: true,
+  /** 对象存储上传地址（可选）：已保存的密码显示为 ******，原样提交表示沿用 */
+  oss_url: ""
 });
 /** 访问地址默认自动获取、只读，点「修改」后才能填写 */
 const editingURL = ref(false);
@@ -391,6 +395,7 @@ function applyState(next: SetupState, syncForms = false, restoreStep = false) {
     passwordConfirmation.value = "";
     basics.public_url = next.config.public_url || autoURL.value;
     basics.alerting = next.config.components?.alerting !== false;
+    basics.oss_url = next.config.oss_url || "";
     editingURL.value = false;
     Object.assign(notification, notificationFormFrom(next.config.notification));
     notifyTest.value = undefined;
@@ -627,7 +632,11 @@ async function advance() {
         },
         public_url: publicURL(basics.public_url),
         components: { alerting: basics.alerting },
-        notification: notificationPayload(notification, savedNotification.value)
+        notification: notificationPayload(
+          notification,
+          savedNotification.value
+        ),
+        oss_url: ossURLInput(basics.oss_url)
       };
       // 完成页要显示管理员密码：保存成功后只记在当前标签页（sessionStorage），关掉标签页或进入控制台就清除
       const typed = basics.admin.password;
@@ -1264,7 +1273,7 @@ onBeforeUnmount(() => {
             <template v-else-if="step === 4">
               <h2>完成基础设置</h2>
               <p class="subtitle">
-                设置管理员密码，确认访问地址，选择是否安装告警组件，按需填写告警通知。
+                设置管理员密码，确认访问地址，按需填写对象存储地址，选择是否安装告警组件，按需填写告警通知。
               </p>
               <fieldset :disabled="locked" @input="edited" @change="edited">
                 <div class="field-grid">
@@ -1334,6 +1343,24 @@ onBeforeUnmount(() => {
                       </button>
                     </div>
                     <p class="field-hint">{{ publicURLNote }}</p>
+                  </div>
+                  <div class="full">
+                    <label for="oss-url"
+                      >对象存储上传地址
+                      <span class="optional">可选</span></label
+                    ><input
+                      id="oss-url"
+                      v-model="basics.oss_url"
+                      type="url"
+                      autocomplete="off"
+                      placeholder="https://账号:密码@oss.example.com/kubedoor"
+                    />
+                    <p class="field-hint">
+                      各集群的 Agent 上传 jstack、jmap
+                      等诊断文件用的地址，各业务集群都要能访问；可以带“账号:密码@”，已保存的密码显示为
+                      ******。留空表示不配置，装完也可以在「系统管理 →
+                      通用配置」填写。
+                    </p>
                   </div>
                 </div>
                 <details class="advanced alerting">
@@ -1508,7 +1535,8 @@ onBeforeUnmount(() => {
               </fieldset>
               <div class="setup-callout">
                 AI
-                模型、按集群单独配置的通知群、镜像更新规则和仓库凭据，可进入控制台后配置。
+                模型、按集群单独配置的通知群、镜像更新规则和仓库凭据，可进入控制台后配置；访问地址、对象存储地址等以后在「系统管理
+                → 通用配置」修改。
               </div>
             </template>
             <template v-else-if="!executing">
@@ -1539,6 +1567,10 @@ onBeforeUnmount(() => {
                 <div>
                   <dt>访问地址</dt>
                   <dd>{{ basics.public_url }}</dd>
+                </div>
+                <div data-summary="oss">
+                  <dt>对象存储上传地址</dt>
+                  <dd>{{ ossSummary(task?.config?.oss_url) }}</dd>
                 </div>
                 <div>
                   <dt>管理员</dt>

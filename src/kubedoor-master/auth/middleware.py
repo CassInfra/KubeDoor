@@ -15,13 +15,14 @@ import time
 from aiohttp import web
 from loguru import logger
 
+import general_settings
+
 from . import audit, policy
 from .authn import AuthFailure, principal_from_basic
 from .context import client_ip
 from .principal import SYSTEM, Principal
 from .store import SESSION_COOKIE, store
 
-AGENT_AUTH_REQUIRED = os.environ.get('AGENT_AUTH_REQUIRED', 'true').strip().lower() not in ('false', '0', 'no', 'off')
 ANONYMOUS_AGENT = Principal(username='anonymous-agent', role='agent', source='system', via='anonymous-agent')
 _SAFE_METHODS = ('GET', 'HEAD', 'OPTIONS')
 _VERIFY_PATH = '/api/auth/verify'
@@ -137,7 +138,8 @@ def create_middleware():
 
         if rule.kind == 'agent':
             if principal is None:
-                if AGENT_AUTH_REQUIRED:
+                # 「Agent 连接必须带账号」取通用配置(升级过渡期可临时关掉),每次连接时取
+                if general_settings.value('agent_auth_required'):
                     _warn_agent_rejected(request, ip, '没有带账号口令')
                     return deny(401, 'unauthorized', 'agent 连接需要账号口令(MASTER_WS 里带 Agent 账号)')
                 request['principal'] = ANONYMOUS_AGENT

@@ -59,8 +59,10 @@ BUSY_HINT = "该会话已有任务运行或等待审批，请稍后重试。"
 APPROVAL_HINT = "当前对话有操作在等待审批：在审批卡片上处理，或直接回复「批准」「拒绝」；发送「新对话」可以放弃它并重新开始。"
 PROVIDER_KEYS = ("base_url", "api_key", "model", "max_input_tokens", "max_output_tokens", "compression_ratio", "reasoning_effort")
 # 企微里再也不会继续的旧对话(不是任何成员的当前对话或上一个对话、没有进行中的任务),
-# 最后活跃超过 RETENTION_AI_CHECKPOINT_DAYS 天后删除检查点;会话和消息记录保留用于审计
+# 最后活跃超过保留天数后删除检查点;会话和消息记录保留用于审计。保留天数是 master 通用配置的
+# retention_ai_checkpoint_days(「系统管理 → 通用配置」的「AI 对话检查点保留天数」,0 = 不清理),每轮清理前取
 DEFAULT_RETENTION_DAYS = 7
+MAX_RETENTION_DAYS = 3650
 PURGE_BATCH = 200
 PURGE_FIRST_DELAY = 300
 PURGE_INTERVAL = 6 * 3600
@@ -156,6 +158,8 @@ class WeComIntegration:
                        "reconnecting": False, "error": None}
         self._lock = asyncio.Lock()
         self._tasks = set()
+        # 上次从 master 取到的检查点保留天数;None = 一次都没取到
+        self._retention = None
 
     async def start(self):
         await self.reload()
@@ -188,13 +192,29 @@ class WeComIntegration:
             purged += 1
         return purged
 
+    async def retention_days(self):
+        """检查点保留天数(0 = 不清理):master 通用配置的 retention_ai_checkpoint_days。
+
+        取不到(master 不可用、旧 master 没有这个接口、返回的值不对)时沿用上次取到的;
+        一次都没取到时用环境变量 RETENTION_AI_CHECKPOINT_DAYS 的旧值,再没有用默认 7 天。
+        """
+        try:
+            days = (await self.service.gateway.master_settings()).get("retention_ai_checkpoint_days")
+            if type(days) is not int or not 0 <= days <= MAX_RETENTION_DAYS:
+                raise ValueError("retention_ai_checkpoint_days 无效")
+        except Exception as exc:
+            days = self._retention if self._retention is not None else _legacy_retention_days()
+            LOGGER.warning("从 master 获取检查点保留天数失败(%s),本轮按 %s 天处理", type(exc).__name__, days)
+            return days
+        self._retention = days
+        return days
+
     async def _purge_loop(self):
-        days = _retention_days()
-        if days <= 0:
-            return
         await asyncio.sleep(PURGE_FIRST_DELAY)
         while True:
             try:
+                # 保留天数在通用配置页随时可改(改成 0 就停止清理),每轮清理前重新取
+                days = await self.retention_days()
                 while await self.purge_checkpoints(days) == PURGE_BATCH:
                     pass
             except Exception as exc:
@@ -1412,8 +1432,9 @@ def _approval_text(event):
     return "\n".join(lines)
 
 
-def _retention_days():
-    """kubedoor-config 里的 RETENTION_AI_CHECKPOINT_DAYS;0 = 不清理,填错按默认值"""
+def _legacy_retention_days():
+    """旧版 kubedoor-config 里的 RETENTION_AI_CHECKPOINT_DAYS(升级后清理之前还在),只在从没取到通用配置时用;
+    0 = 不清理,没设或填错按默认值"""
     try:
         return max(0, int(os.getenv("RETENTION_AI_CHECKPOINT_DAYS", DEFAULT_RETENTION_DAYS)))
     except ValueError:

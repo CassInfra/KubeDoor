@@ -1175,6 +1175,12 @@ const changeOperateSwitch = async (val: string, row: any) => {
   }
 };
 
+// 失败时显示服务端给的原因（例如控制端没有配置对象存储上传地址），没有原因才显示「操作失败」
+const failText = (res: { message?: unknown }) =>
+  typeof res.message === "string" && res.message.trim()
+    ? res.message
+    : "操作失败";
+
 // Pod操作相关函数
 const handleModifyPod = async (row: any) => {
   try {
@@ -1278,7 +1284,7 @@ const handleModifyPod = async (row: any) => {
       showResultDialog(res.message, "modify");
       handleSearch(); // 刷新数据
     } else {
-      ElMessage.error("操作失败");
+      ElMessage.error(failText(res));
     }
   } catch (error) {
     if (error !== "cancel" && error !== "close") {
@@ -1303,7 +1309,7 @@ const handleDeletePod = async (row: any) => {
       ElMessage.success("操作成功");
       handleSearch(); // 刷新数据
     } else {
-      ElMessage.error("操作失败");
+      ElMessage.error(failText(res));
     }
   } catch (error) {
     console.error(error);
@@ -1326,7 +1332,7 @@ const handleAutoDump = async (row: any) => {
       showResultDialog(res.message, "dump");
       ElMessage.success("操作成功");
     } else {
-      ElMessage.error("操作失败");
+      ElMessage.error(failText(res));
     }
   } catch (error) {
     console.error(error);
@@ -1349,7 +1355,7 @@ const handleAutoJstack = async (row: any) => {
       showResultDialog(res.message, "jstack");
       ElMessage.success("操作成功");
     } else {
-      ElMessage.error("操作失败");
+      ElMessage.error(failText(res));
     }
   } catch (error) {
     console.error(error);
@@ -1372,7 +1378,7 @@ const handleAutoJfr = async (row: any) => {
       showResultDialog(res.message, "jfr");
       ElMessage.success("操作成功");
     } else {
-      ElMessage.error("操作失败");
+      ElMessage.error(failText(res));
     }
   } catch (error) {
     console.error(error);
@@ -1395,7 +1401,7 @@ const handleAutoJvmMem = async (row: any) => {
       showResultDialog(res.message, "jvm");
       ElMessage.success("操作成功");
     } else {
-      ElMessage.error("操作失败");
+      ElMessage.error(failText(res));
     }
   } catch (error) {
     console.error(error);

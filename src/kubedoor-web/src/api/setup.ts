@@ -102,6 +102,11 @@ export interface SetupConfig {
   components: SetupComponents;
   /** 旧版安装服务没有这一项 */
   notification?: NotificationSettings;
+  /**
+   * 第 4 步的对象存储上传地址（可选），安装时写进控制端的通用配置；
+   * 可带“账号:密码@”，已保存的密码显示为 ******，原样提交表示沿用。空表示不配置，旧版安装服务没有这一项
+   */
+  oss_url?: string;
 }
 
 /**
@@ -307,6 +312,8 @@ export const setupApi = {
     revision: number,
     options: Pick<SetupConfig, "admin" | "public_url" | "components"> & {
       notification?: NotificationInput;
+      /** 对象存储上传地址，空串表示不配置 */
+      oss_url?: string;
     }
   ) =>
     request<SetupState>(

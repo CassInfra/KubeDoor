@@ -85,7 +85,7 @@ vi kubedoor.conf        # 改 PG_HOST / PG_PASSWORD / PROM_URL / METRICS_WRITE_U
 ./install.sh master
 ```
 
-告警通知（IM 机器人）不在 `kubedoor.conf` 里配置：装完后在控制台「系统管理 → 消息通知」填写，可以按集群单独配置，保存后立即生效。旧配置里的 `MSG_TYPE` / `MSG_TOKEN` / `DEFAULT_AT` 已不再生效，脚本发现 `MSG_TOKEN` 有值时会提示。
+告警通知（IM 机器人）不在 `kubedoor.conf` 里配置：装完后在控制台「系统管理 → 消息通知」填写，可以按集群单独配置，保存后立即生效。旧配置里的 `MSG_TYPE` / `MSG_TOKEN` / `DEFAULT_AT` 只在控制台还没有消息通知配置时导入一次（作为全局配置），之后以控制台为准；脚本发现 `MSG_TOKEN` 有值时会提示。
 
 `PG_HOST` 要填 **K8S 里的 Pod 能访问到的地址**,通常是数据库宿主机的内网 IP。填 `127.0.0.1` 脚本会直接拒绝,因为那是 Pod 自己的回环地址。
 
@@ -98,6 +98,16 @@ METRICS_WRITE_URL="http://monit:<URL编码口令>@<VM宿主机IP>:8428/api/v1/wr
 ```
 
 `PROM_URL` 用于查询，须能从控制端访问；`METRICS_WRITE_URL` 是网页安装 Agent 时各集群 vmagent 默认直连的完整写入地址，须能从各业务集群访问。两者都不能填写 Docker Compose 内部服务名。已有时序库也按其实际接口配置这两项。
+
+**配置写进数据库。** `kubedoor.conf` 里只有数据库连接（`PG_*`）渲染进 ConfigMap `kubedoor-config`，`PROM_URL` 另外给 vmalert 和 Grafana 数据源用。时序库类型和地址、`PROM_K8S_TAG_KEY`、`KUBEDOOR_EXTURL`、`ALERTMANAGER_EXTURL`、`OSS_URL`、网页安装 Agent 用的镜像（`IMAGE_REPO`、`IMAGE_VMAGENT`、`IMAGE_KUBE_STATE_METRICS`、`IMAGE_NODE_EXPORTER`）、`AGENT_AUTH_REQUIRED` 等其余配置，在 master 就绪后由脚本写进数据库的「系统管理 → 通用配置」：
+
+```bash
+kubectl -n kubedoor exec -i deploy/kubedoor-master -c kubedoor-master -- python3 -m general_settings migrate --env-json -
+```
+
+stdin 是这些配置组成的 JSON（不出现在命令行参数里），执行脚本的身份需要 `pods/exec` 权限。之后在控制台修改，保存后生效、不用重启。K8S 事件告警规则用 master 内置的默认规则，在「系统管理 → 事件告警规则」修改；脚本不再创建 ConfigMap `kubedoor-master-file-cfg`。
+
+**重复执行安装脚本时，数据库里已有的配置不会被覆盖，以控制台为准**：改了 `kubedoor.conf` 里的这些值再执行不会生效，请到控制台修改。格式不对、写不进去的项脚本会列出来（安装照常完成），在控制台填好即可；写入失败（master 未就绪、没有 `pods/exec` 权限等）时脚本停止，修复后重新执行即可继续。
 
 #### 配置集群指标标签（重要）
 
@@ -119,11 +129,11 @@ PROM_K8S_TAG_KEY="origin_prometheus"
 
 ### 第四步:在网页安装集群端（推荐）
 
-已有部署启用此功能时，需要更新 master 和 Web 镜像，并重新执行 `./install.sh master` 应用新增的安装配置（`METRICS_WRITE_URL` 会写进 `kubedoor-config`）；master 启动时自动创建安装任务表。master 镜像现在从仓库根目录构建（`build.sh` 已处理）；本地运行 master 时还需在仓库根目录执行 `pip install -e src/kubedoor-tools` 安装共享库。
+已有部署启用此功能时，需要更新 master 和 Web 镜像，并重新执行 `./install.sh master` 应用新增的安装配置（`METRICS_WRITE_URL` 会写进数据库的通用配置，已有的不覆盖）；master 启动时自动创建安装任务表。master 镜像现在从仓库根目录构建（`build.sh` 已处理）；本地运行 master 时还需在仓库根目录执行 `pip install -e src/kubedoor-tools` 安装共享库。
 
 管理员打开「Agent 管理」→「安装 Agent」，上传 kubeconfig、选择目标 context，确认集群标识后检测并安装。默认完整接入包含 Agent 和指标采集；已有完整监控链路时可选择「仅安装 Agent」。安装进度和失败原因都显示在页面，关闭弹窗不取消后台安装。
 
-控制端需能访问 kubeconfig 中的 API Server；目标集群需能访问 KubeDoor 和时序库。`KUBEDOOR_EXTURL` 可预填这个外部连接地址。完整接入的 vmagent 默认直连控制端配置的 `METRICS_WRITE_URL`（完整写入路径，不能用查询用的 `PROM_URL` 代替），账号口令放进目标集群的 Secret；个别集群需要不同的写入地址时，在安装弹窗的高级设置里填写。
+控制端需能访问 kubeconfig 中的 API Server；目标集群需能访问 KubeDoor 和时序库。通用配置里的 KubeDoor 访问地址（首次安装时来自 `KUBEDOOR_EXTURL`）会预填这个外部连接地址。完整接入的 vmagent 默认直连通用配置里的远程写地址（首次安装时来自 `METRICS_WRITE_URL`；完整写入路径，不能用查询用的 `PROM_URL` 代替），账号口令放进目标集群的 Secret。
 
 kubeconfig 仅在本次安装期间加密保存，成功后清理。只支持内嵌 token 或证书，不执行 kubeconfig 的 `exec` 插件或读取其中引用的本地文件；这种配置需要先导出可在控制端使用的版本。Agent 本身仍用集群内 ServiceAccount。
 
@@ -140,7 +150,7 @@ vi kubedoor.conf        # 改 K8S_NAME / MASTER_WS / REMOTE_WRITE_URL(换机器�
 
 - `K8S_NAME` 是这个集群的唯一标识,会作为指标标签出现在 Web 上,每个集群必须不同。
 - `MASTER_WS` 必须带 Agent 账号口令:同集群填 `ws://Up4biLko1dNh:<口令>@kubedoor-master.kubedoor`,跨集群填 `ws://Up4biLko1dNh:<口令>@<控制端节点IP>:<Web的NodePort>`。`Up4biLko1dNh` 是内置的 Agent 账号(出厂口令 `qCa22jDkfc9y`),只能用来连 agent、不能登录 Web;装控制端时脚本会把两种写法打印出来。在 Web 上改过它的口令,就要同步改这里。
-- 启用 vmagent 时必须显式填写 `REMOTE_WRITE_URL`，例如 `http://monit:<URL编码口令>@<VM宿主机IP>:8428/api/v1/write`，地址需能从目标集群访问。网页安装默认使用控制端的 `METRICS_WRITE_URL`，不必在每个集群配置。
+- 启用 vmagent 时必须显式填写 `REMOTE_WRITE_URL`，例如 `http://monit:<URL编码口令>@<VM宿主机IP>:8428/api/v1/write`，地址需能从目标集群访问。网页安装默认使用通用配置里的远程写地址，不必在每个集群配置。
 
 几十秒后在 Web 控制台的"Agent管理"里就能看到这个集群上线了。
 
@@ -175,7 +185,9 @@ KUBE_CONTEXT="production"   # 指定目标 context，默认使用当前 context
 ENABLE_MCP="false"          # 关闭外部 MCP 入口
 ```
 
-升级时更新完整发布包（包含 `deploy/install.sh` 和安装器资源）并重新执行安装脚本，即可使用随包推荐的镜像版本。如果旧配置里已有 `TAG_*`，这些值仍会覆盖新默认值；请同步更新，或删除这些覆盖项以跟随发布包。需要固定版本时，也可在 `kubedoor.conf` 中追加对应 `TAG_*`。
+升级时更新完整发布包（包含 `deploy/install.sh` 和安装器资源）并重新执行安装脚本，即可使用随包推荐的镜像版本。如果旧配置里已有 `TAG_*`，这些值仍会覆盖新默认值；请同步更新，或删除这些覆盖项以跟随发布包。需要固定版本时，也可在 `kubedoor.conf` 中追加对应 `TAG_*`。已有 Kubernetes 控制端也可以用 [deploy/install.sh](../../deploy/install.sh) 的 `upgrade` 升级，不需要 `kubedoor.conf`（见[部署文档](../../deploy/README.md#更新已有控制端包括-230)）。
+
+从 2.6.0 之前的版本重新执行 `./install.sh master` 时：集群里旧版本的事件告警规则（ConfigMap `kubedoor-master-file-cfg`）会在部署前读出来，新 master 就绪后交给它导入数据库（数据库里已有规则时不覆盖），导入成功后删除这个 ConfigMap；`kubedoor-config` 被新模板覆盖，只剩数据库连接，其余配置按 `kubedoor.conf` 写进数据库。在集群里手工 `kubectl edit` 过、但没写进 `kubedoor.conf` 的配置不会被带过去，这种情况请用 `deploy/install.sh upgrade`，它直接从集群里的 ConfigMap 迁移。
 
 ### 已经有 Prometheus / VictoriaMetrics
 
@@ -252,8 +264,8 @@ ENABLE_MCP="false"
 - 查看 Secret 内容需要该集群的「查看 Secret 内容」权限(默认读写及以上;和 K8S 内置的 view 角色一样,只读不含 Secret)。
 - Grafana 看板做不到按集群隔离,所以**只对能看到全部集群的账号开放**(对任何集群设了「无」的账号看不到看板菜单,直接访问 `/grafana/` 返回 403;「AI 用量看板📊」在系统管理下,只有系统管理员能看到);KubeDoor 系统管理员在 Grafana 里是 Admin,其他人(包括集群管理员)是 Viewer。Grafana 的 PostgreSQL 数据源用的是 `PG_USER`,Viewer 也能借数据源查询库里的数据;对此敏感时可以给 Grafana 单独建一个只读 PG 账号(只授权看板用到的 `k8s_*` 表,AI 用量看板另外要 `kubedoor_ai_runs`、`kubedoor_ai_sessions`),改 `src/kubedoor-setup/resources/manifests/master/35-grafana.yaml` 里的数据源账号。
 - 本地账号的口令用 scrypt 哈希并加了 pepper(由 `AI_ENCRYPTION_KEY` 派生,不在数据库里),LDAP 绑定口令也用这个密钥加密存储:数据库泄露也无法离线破解口令。**`AI_ENCRYPTION_KEY` 要和数据库一起备份**,丢了本地账号的口令就对不上了,只能用下面的命令重置。
-- 登录、账号与权限变更、所有写操作(含越权被拒)都记在「系统管理 → 操作审计」里,默认保留 180 天(`RETENTION_AUDIT_DAYS`)。
-- 登录有效期:不勾「7 天内免登录」时 12 小时、空闲 4 小时自动退出;勾选时 7 天。同一账号 + 来源 IP 连续 5 次口令错误锁定 15 分钟。这些参数都在 `kubedoor-config` 里(`AUTH_*`)。
+- 登录、账号与权限变更、所有写操作(含越权被拒)都记在「系统管理 → 操作审计」里,默认保留 180 天(在「系统管理 → 通用配置」的数据保留里修改)。
+- 登录有效期:不勾「7 天内免登录」时 12 小时、空闲 4 小时自动退出;勾选时 7 天。同一账号 + 来源 IP 连续 5 次口令错误锁定 15 分钟。这些参数在「系统管理 → 通用配置」的登录与安全里修改。
 - 忘了口令(包括 `kubedoor`):在 master 容器里用命令行重置,重置后下次登录要先改口令:
   ```bash
   kubectl -n kubedoor exec -it deploy/kubedoor-master -- python3 -m auth.reset_password kubedoor
@@ -262,7 +274,7 @@ ENABLE_MCP="false"
 **从 nginx basic auth 的旧版升级:**
 
 1. `kubedoor.conf` 里的 `WEB_AUTH_USERS` / `WEB_RW_USERS` 不再生效(安装时会提示),原来的读写账号请到「用户与权限」里重新建,或接入 LDAP 后按需授权。内置的 `kubedoor` 和 `Up4biLko1dNh` 会自动创建,口令沿用旧版的出厂值,已经部署的跨集群 agent 不用改。
-2. agent 现在**一律要带账号口令**(同集群也一样)。同集群 agent 原来写的 `ws://kubedoor-master.kubedoor` 要改成 `ws://Up4biLko1dNh:<口令>@kubedoor-master.kubedoor`,重跑 `./install.sh agent` 并重启 agent。来不及一起改时,可以先在 `kubedoor.conf` 里设 `AGENT_AUTH_REQUIRED="false"` 过渡,全部改完再改回 `true` 并重跑 `./install.sh master`(配置变了 master 会自动重启)。
+2. agent 现在**一律要带账号口令**(同集群也一样)。同集群 agent 原来写的 `ws://kubedoor-master.kubedoor` 要改成 `ws://Up4biLko1dNh:<口令>@kubedoor-master.kubedoor`,重跑 `./install.sh agent` 并重启 agent。来不及一起改时,可以先在「系统管理 → 通用配置」的登录与安全里关掉「Agent 连接必须带账号」过渡,全部改完再打开(保存后生效)。全新安装前也可以在 `kubedoor.conf` 里设 `AGENT_AUTH_REQUIRED="false"`,它只在数据库里还没有这一项时写入,之后以控制台为准。
 3. nginx 配置随 `./install.sh master` 一起更新,不用手动改:集群里的 `nginx-config` 会被模板 `src/kubedoor-setup/resources/manifests/master/40-web.yaml` 覆盖(以前手工改过的也一样),web 自动滚动更新用上新配置。新配置里没有 `auth_basic` / `auth_ldap` 和读写映射,`/api/`、`/ws` 直接转给 master;AI 助手、MCP、Grafana、自定义告警用 `auth_request` 问 master 的 `/api/auth/verify`。web 镜像的底包从自编译的 nginx-ldap 换成了官方 `nginx:alpine`(自带 `ngx_http_auth_request_module`),**web 镜像要重新构建**。自己另外维护 nginx 的,照这个文件里的 `server` 段改。
 4. Grafana 改成了 auth proxy:KubeDoor 系统管理员在 Grafana 里是 Admin,其他人是 Viewer,不再是匿名 Admin;并且只对能看到全部集群的账号开放。
 
@@ -270,36 +282,43 @@ ENABLE_MCP="false"
 
 ## 改配置
 
-改 `kubedoor.conf` 后重跑 `./install.sh master` 即可:master、alarm、ai、web、Grafana 的 Pod 模板上有配置摘要注解(`checksum/config`),哪个组件的配置变了就自动滚动更新哪个,没变的不会重启。直接在集群里 `kubectl edit` 的改动,下次重跑安装脚本时会被模板覆盖。
+数据库连接(`PG_*`)、组件开关、镜像版本等部署配置:改 `kubedoor.conf` 后重跑 `./install.sh master` 即可。master、alarm、ai、web、Grafana 的 Pod 模板上有配置摘要注解(`checksum/config`),哪个组件的配置变了就自动滚动更新哪个,没变的不会重启。直接在集群里 `kubectl edit` 的改动,下次重跑安装脚本时会被模板覆盖。
+
+运行配置都在控制台修改,保存后生效,不用重启,重跑安装脚本也不会覆盖:
+
+| 配置 | 位置 |
+|---|---|
+| 时序库类型和地址、集群标签名、KubeDoor 访问地址、Alertmanager 外部地址、对象存储上传地址、网页安装 Agent 的镜像、节点终端镜像、数据保留天数、登录与安全、告警去重窗口等 | 「系统管理 → 通用配置」 |
+| K8S 事件告警规则 | 「系统管理 → 事件告警规则」 |
+| 告警通知(IM 机器人) | 「系统管理 → 消息通知」 |
+| 镜像更新规则、镜像仓库凭据 | 「系统管理 → 镜像管理」 |
+
+通用配置只管 KubeDoor 自己。改了时序库地址后,vmalert 和 Grafana 数据源要改 `kubedoor.conf` 的 `PROM_URL` 后重跑 `./install.sh master`;已安装 Agent 的集群里的 vmagent 见[部署文档](../../deploy/README.md#控制端配置通用配置)。
 
 临时改参数也可以不重跑安装脚本:
 
 ```bash
-# 改环境变量类配置(数据库、时序库地址...;告警通知在控制台「系统管理 → 消息通知」改,不用重启)
+# 改数据库连接(只在启动时读取,改完要重启)
 kubectl -n kubedoor edit configmap kubedoor-config
 kubectl -n kubedoor rollout restart deploy/kubedoor-master deploy/kubedoor-alarm deploy/kubedoor-ai
-
-# 改 K8S 事件告警规则(规则只在 master 启动时加载,改完要重启;镜像里不自带规则文件,必须靠这个 ConfigMap 挂载)
-kubectl -n kubedoor edit configmap kubedoor-master-file-cfg
-kubectl -n kubedoor rollout restart deploy/kubedoor-master
 
 # 改 vmalert 告警阈值(vmalert 不会自动重载规则,改完要重启)
 kubectl -n kubedoor edit configmap vmalert-config
 kubectl -n kubedoor rollout restart deploy/vmalert
 ```
 
-数据库里三张大表的过期数据由 master 每天清理一次,保留天数在 `kubedoor-config` 里调:
+数据库里三张大表的过期数据由 master 每天清理一次,保留天数在「系统管理 → 通用配置」的数据保留里调:
 
 | 配置项 | 表 | 默认 |
 |---|---|---|
-| `RETENTION_EVENTS_DAYS` | K8S 事件 `k8s_events` | 90 天 |
-| `RETENTION_ALERTS_DAYS` | 告警记录 `k8s_pod_alert_days` | 365 天 |
-| `RETENTION_RESOURCES_DAYS` | 高峰期资源快照 `k8s_resources` | 365 天 |
-| `RETENTION_AUDIT_DAYS` | 操作审计 `audit_logs` | 180 天 |
+| K8S 事件保留天数 | K8S 事件 `k8s_events` | 90 天 |
+| 指标告警保留天数 | 告警记录 `k8s_pod_alert_days` | 365 天 |
+| 高峰期资源保留天数 | 高峰期资源快照 `k8s_resources` | 365 天 |
+| 审计日志保留天数 | 操作审计 `audit_logs` | 180 天 |
 
-设为 `0` 表示不清理。另外 `RETENTION_AI_CHECKPOINT_DAYS`(默认 7 天)由 kubedoor-ai 每 6 小时清理一次:企微里再也不会继续的旧 AI 对话删除它的检查点(LangGraph checkpoint),会话和消息记录保留。
+设为 `0` 表示不清理。另外「AI 对话检查点保留天数」(默认 7 天)由 kubedoor-ai 每 6 小时清理一次:企微里再也不会继续的旧 AI 对话删除它的检查点(LangGraph checkpoint),会话和消息记录保留。
 
-节点终端(节点管理页的「终端」)会在该节点所在集群的 `kubedoor` 命名空间临时起一个特权 pod,默认镜像 `registry.cn-shenzhen.aliyuncs.com/starsl/alpine:3` 已内置在 agent 里。集群拉不到这个镜像时,在 `kubedoor-config` 里设置 `NODE_SHELL_IMAGE`(需含 `nsenter`,比如内网仓库里的 alpine)并重启 master,之后开终端时由 master 下发给 agent,不用改各集群的 agent。
+节点终端(节点管理页的「终端」)会在该节点所在集群的 `kubedoor` 命名空间临时起一个特权 pod,默认镜像 `registry.cn-shenzhen.aliyuncs.com/starsl/alpine:3` 已内置在 agent 里。集群拉不到这个镜像时,在「系统管理 → 通用配置」设置节点终端镜像(需含 `nsenter`,比如内网仓库里的 alpine),之后开终端时由 master 下发给 agent,不用改各集群的 agent。
 
 当然,改 `kubedoor.conf` 后重新跑 `./install.sh master` 也可以,是幂等的。但重跑会用模板覆盖上面手工 `kubectl edit` 过的 ConfigMap,想长期保留的改动要同时写进 `kubedoor.conf` 或 `src/kubedoor-setup/resources/manifests/` 下对应的模板;而且只改配置、镜像 tag 没变时 Pod 不会自动重启,仍要按上面的命令重启对应组件。
 
@@ -308,7 +327,7 @@ kubectl -n kubedoor rollout restart deploy/vmalert
 ## 安全建议
 
 - **上线前改掉内置账号的出厂口令。** `kubedoor`(出厂口令 `kubedoor`)首次登录会被强制改密;内置 Agent 账号 `Up4biLko1dNh` 的出厂口令 `qCa22jDkfc9y` 是公开的,请在「系统管理 → 用户与权限」里重置,再同步改各集群 agent 的 `MASTER_WS`,重跑 `./install.sh agent` 后执行 `kubectl -n kubedoor rollout restart deploy/kubedoor-agent`。还在用出厂口令的账号在用户列表里会标「出厂口令」。
-- **生产环境在 Web 前面加 HTTPS。** 默认是 HTTP,登录口令、会话 Cookie、AI 请求里的模型 Key 都是明文传输。脚本不带 Ingress,请自己用 Ingress 或负载均衡终结 TLS;`/ws` 开头的几个路径是 WebSocket,AI 助手和 MCP 是长连接,代理要支持 Upgrade 并放宽读超时。TLS 在 nginx 前面的负载均衡上终结时,把 `kubedoor-config` 的 `AUTH_COOKIE_SECURE` 设为 `"true"`,让会话 Cookie 只走 HTTPS。跨集群 agent 的 `MASTER_WS` 带着 Agent 账号口令,加了 HTTPS 后改用 `wss://`。
+- **生产环境在 Web 前面加 HTTPS。** 默认是 HTTP,登录口令、会话 Cookie、AI 请求里的模型 Key 都是明文传输。脚本不带 Ingress,请自己用 Ingress 或负载均衡终结 TLS;`/ws` 开头的几个路径是 WebSocket,AI 助手和 MCP 是长连接,代理要支持 Upgrade 并放宽读超时。TLS 在 nginx 前面的负载均衡上终结时,在「系统管理 → 通用配置」的登录与安全里把 Cookie Secure 设为 `true`,让会话 Cookie 只走 HTTPS。跨集群 agent 的 `MASTER_WS` 带着 Agent 账号口令,加了 HTTPS 后改用 `wss://`。
 - **准入控制是 fail-closed 的。** 某个集群在 Web 上开了"准入控制"后,只要 agent、master 或数据库有一个不可用(包括升级重启期间),这个集群里没打 `kubedoor-ignore` 标签的命名空间(默认只有 `kube-system`、`kubedoor` 打了),Deployment 的创建、更新、扩缩容都会被拒绝。紧急情况下先删掉 webhook 恢复发布,事后再到 Web 上把"准入控制"关掉,让状态同步:
   ```bash
   kubectl delete mutatingwebhookconfiguration kubedoor-admis-configuration

@@ -33,6 +33,7 @@ from func_manager.pod_exec import PodExecManager
 from func_manager.pod_log_stream import PodLogStreamer, MAX_STREAMS as MAX_LOG_STREAMS
 from func_manager.ws_lifecycle import run_connection_tasks, MasterConnection
 from func_manager import notifier
+from func_manager import oss_url
 from k8s_client_manager import OffloadApiClient, load_incluster_config
 from scaler.scale_service import ScaleService
 from scaler.cci_scaler import get_schedule_profile_info
@@ -138,12 +139,13 @@ def _message_size(message):
 
 
 async def handle_http_request(
-    ws: MasterConnection, request_id: str, method: str, query: dict, body: dict, path: str
+    ws: MasterConnection, request_id: str, method: str, query: dict, body: dict, path: str, headers: dict = None
 ):
     """把 master 转来的请求发给本机 HTTPS 服务,结果回给 master(使用全局 session 复用连接)
 
     JSON 响应体原样拼进回包:以前先 resp.json() 再 send_json,大响应要在事件循环里多做一遍解析和序列化。
     回包超过单条消息上限时改回错误:否则 master 收到超限消息会断开整条连接,其它在途请求全部失败。
+    headers:转给 pod-mgr 时带的对象存储地址(func_manager/oss_url.py),可能有账号密码,不写进日志。
     """
     message = None
     try:
@@ -153,6 +155,8 @@ async def handle_http_request(
             logger.error(response_data["error"])
         else:
             options = {"params": query, "ssl": False}
+            if headers:
+                options["headers"] = headers
             if method == "GET":
                 options["timeout"] = aiohttp.ClientTimeout(total=300)
             else:
@@ -225,12 +229,9 @@ async def process_request(ws: MasterConnection):
                 method = data["method"]
                 query = data["query"]
                 body = data["body"]
-                path = (
-                    'http://127.0.0.1:81' + data["path"]
-                    if data["path"].startswith('/api/pod/')
-                    else 'https://127.0.0.1' + data["path"]
-                )
-                _spawn(handle_http_request(ws, request_id, method, query, body, path))
+                # /api/pod/* 交给本机 pod-mgr(新 master 带来的对象存储地址放进请求头),其余交给本进程的 HTTPS 服务
+                path, headers = oss_url.local_request(data)
+                _spawn(handle_http_request(ws, request_id, method, query, body, path, headers))
             elif data.get("type") == "start_pod_logs":
                 # 开始Pod日志流(同步建任务,不等待)
                 pod_log_streamer.start(ws, data)

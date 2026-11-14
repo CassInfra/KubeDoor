@@ -1,4 +1,4 @@
-// 系统管理:用户与集群授权、LDAP、企微 AI 机器人、获取代码接口、获取运行配置接口、消息通知、AI 用量看板、操作审计,只对管理员开放(后端 /api/admin/* 同样只认管理员)
+// 系统管理:用户与权限、权限与审批、LDAP、通用配置、镜像管理、企微 AI 机器人、获取代码接口、获取运行配置接口、消息通知、事件告警规则、AI 用量看板、操作审计,只对管理员开放(后端 /api/admin/* 同样只认管理员)
 export default {
   path: "/system",
   redirect: "/system/users",
@@ -33,6 +33,16 @@ export default {
       component: () => import("@/views/system/ldap/index.vue"),
       meta: {
         title: "LDAP 设置",
+        roles: ["admin"]
+      }
+    },
+    {
+      // 时序库、访问地址、对象存储、Agent 安装镜像、数据保留、登录与安全等运行配置(存数据库,保存后马上生效)
+      path: "/system/general-settings",
+      name: "SystemGeneralSettings",
+      component: () => import("@/views/system/general-settings/index.vue"),
+      meta: {
+        title: "通用配置",
         roles: ["admin"]
       }
     },
@@ -81,6 +91,16 @@ export default {
       component: () => import("@/views/system/notification/index.vue"),
       meta: {
         title: "消息通知",
+        roles: ["admin"]
+      }
+    },
+    {
+      // K8S 事件告警规则(界面配置 / JSON),存数据库,保存后马上生效
+      path: "/system/event-alert-rules",
+      name: "SystemEventAlertRules",
+      component: () => import("@/views/system/event-alert-rules/index.vue"),
+      meta: {
+        title: "事件告警规则",
         roles: ["admin"]
       }
     },

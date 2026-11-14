@@ -1,369 +1,72 @@
-# K8S 事件告警规则配置指南
+# K8S 事件告警规则(开发说明)
 
-## 概述
+使用说明(页面操作、规则语法、默认规则、试运行、排查)见 [help/K8S事件告警规则配置说明.md](../../../help/K8S事件告警规则配置说明.md)。本文说明代码结构和约定。
 
-K8S 事件告警系统是一个基于规则驱动的智能告警解决方案，能够根据配置的规则自动检测和处理 Kubernetes 事件，并发送相应的告警通知。
+## 规则从哪里来
 
-## 功能特性
+- 规则在 Web「系统管理 → 事件告警规则」配置(界面配置 / JSON 两种模式),存 PostgreSQL 的 `auth_settings`,key 为 `event_alert_rules`,value 的结构与以前的 `alert_rules.json` 相同:`{"global_ignore_rules": [...], "alert_rules": [...]}`。
+- 库里没有这一行时用内置默认规则 `default_alert_rules.json`(随版本更新),不写库;页面上显示「当前使用内置默认规则」。
+- 保存后马上生效,不用重启 master。以前的 ConfigMap `kubedoor-master-file-cfg`(挂载到 `/k8s_event/rules/`)已不再使用,升级时由 `import_legacy_file` 导入一次。
 
-- 🎯 **规则驱动**: 基于 JSON 配置文件的灵活告警规则
-- 🔍 **多条件匹配**: 支持字段包含/不包含、开头/结尾匹配、数值比较等多种匹配条件
-- 🚫 **智能过滤**: 忽略 DELETED 事件和配置的忽略规则
-- 🔄 **修改生效**: 规则在 master 启动时加载，修改 ConfigMap 后需重启 master
-- 📱 **多渠道通知**: 支持企业微信、钉钉、飞书、Slack 等多种告警通知方式
+## 代码结构
 
-## 快速开始
+| 文件 | 职责 |
+| --- | --- |
+| `rules_schema.py` | 纯函数:字段、运算符、保存时的严格校验(`check` / `validate`,错误信息指明位置)、导入旧文件时的宽松结构检查、审计摘要 |
+| `rules_store.py` | 内存快照:`current()` 返回只读的 `RuleSet`(规则冻结成 `MappingProxyType` / `tuple`);`refresh()` 从库加载(库里没有用默认规则,读库失败保留旧快照),`apply()` 保存后立即替换,`refresh_loop()` 每 10 秒刷新 |
+| `alert_rule_matcher.py` | 匹配引擎:`first_match` / `rule_matches` / `match_field_condition` 是纯函数;`AlertRuleMatcher` 每次匹配读一次当前快照(也可以传固定的 `RuleSet`,试运行用) |
+| `event_alert_processor.py` | 处理一个事件:DELETED 跳过 → `evaluate`(忽略规则 + 告警规则用同一份快照)→ 标记「已告警」→ 去重 → `notify`。去重窗口每次取 `general_settings.value('alert_dedup_window')`,检查和记录在同一把锁里 |
+| `rules_api.py` | 接口、旧文件导入、启停(见下) |
+| `default_alert_rules.json` | 内置默认规则(取自原来 setup 下的 `alert_rules.json`,逐字一致) |
 
-告警系统已集成到事件处理流程中，当事件匹配告警规则时会自动发送告警通知。
+- 页面保存后替换快照,**不重建** `EventAlertProcessor`:去重记录和统计在处理器上,保存规则后照常保留。
+- `rules_api.on_startup` 必须排在建表(`init_db_and_schema`)之后:导入旧文件(失败只记 error)→ 加载快照 → 建好事件处理器 → 启动刷新任务。不再等第一条事件才加载规则。
+- 快照还没加载成功之前(单测、启动时库不可用)匹配器用内置默认规则。
 
-告警消息会通过 kubedoor 的统一消息发送接口自动发送到配置的通知渠道（企业微信、钉钉、飞书、Slack）。
+## 匹配语义
 
-## DELETED 事件处理
+与以前读规则文件时完全一致(`tests/test_event_rules_matcher.py` 把旧实现原样拷贝过来随机对照):
 
-系统对 `eventStatus=DELETED` 的事件采用**硬编码忽略**策略：
+- `eventStatus == "DELETED"` 的事件不进入规则。
+- 忽略规则之间是 OR:任一启用的忽略规则命中即忽略;告警规则按数组顺序,第一条启用且命中的生效。不写 `enabled` 视为启用。
+- 一条规则里各字段的条件是 AND;同一字段的多个值:`contains` / `starts_with` / `ends_with` 是 OR,`not_*` 是 AND。字符串比较不区分大小写,`contains` 是子串匹配。
+- 12 个运算符:`contains`、`not_contains`、`starts_with`、`not_starts_with`、`ends_with`、`not_ends_with`、`equals`、`not_equals`、`greater_than`、`less_than`、`greater_equal`、`less_equal`(后 4 个只对 `count` 有效)。
 
-- **优先级最高**: 在所有规则检查之前，直接忽略 DELETED 事件
-- **不影响入库**: 事件仍会正常存储到 PostgreSQL，只是跳过告警处理
-- **统计计入**: DELETED 事件会被计入忽略事件统计
-- **日志记录**: 会记录调试日志 "DELETED 事件被直接忽略"
+下面这些宽松的情况在页面保存时会被严格校验拒绝,只可能出现在从旧文件原样导入、还没在页面上保存过的规则里,匹配时保持旧行为:
 
-这种设计确保了 DELETED 事件不会触发任何告警，同时保持数据完整性。
+- 一个字段写了多个运算符时只认第一个(按上面的顺序);不认识的运算符视为成立;数值运算符写在 `count` 以外的字段上视为成立。
+- 列表型运算符的值写成单个值时等同于只有一个元素的数组。
+- 事件里没有这个字段(字段名写错)时,`not_contains` / `not_starts_with` / `not_ends_with` 视为成立,其它不成立。
+- 数值运算符的值不是数字时不成立(日志「无法将count字段转换为数值」)。
+- 快照里不是对象的规则、不是数组的分组在匹配时跳过;条件不是对象时不成立(以前会抛异常)。
 
-## 规则匹配逻辑
+## 保存时的校验
 
-### 规则组之间的关系
+`rules_schema.check` 与 Web 的 `views/system/event-alert-rules/rules-utils.ts` 的 `checkRules` 逐字一致,两边共用用例 `tests/fixtures/event_rules_cases.json`(改校验时用 `check` 重新生成 `errors` / `normalized` 并逐条核对)。规则:
 
-- **global_ignore_rules**: 多条忽略规则之间是 **OR** 关系，任意一条规则匹配即忽略事件
-- **alert_rules**: 多条告警规则之间是 **OR** 关系，按数组顺序匹配，第一个匹配的规则生效
+- 顶层只能有两个键,两个都是数组,每组最多 200 条;每条规则是对象,只能有 `name`、`enabled`、`severity`(只有告警规则)、`conditions`。
+- `name` 必填(去掉首尾空白后非空,最长 100);`enabled` 是布尔(不写补 `true`);`severity` ∈ critical / warning / info(不写补 `warning`)。
+- `conditions` 至少一个;字段在 14 个事件字段内;每个字段恰好一个已知运算符;数值运算符只能用于 `count` 且值是数字(不能是布尔、NaN、Infinity)。
+- 列表型运算符的值是非空字符串数组,不含空串和只有空格的值,最多 200 个、每个最长 1000 字符;`equals` / `not_equals` 的值是字符串(可以为空)或数字。
+- 错误信息带位置,例如:`告警规则第 3 条「重启事件告警」的条件 count：greater_than 的值必须是数字`;每处问题还带 `path`(在规则 JSON 里的位置),页面用它把问题标在卡片或 JSON 的行上。
 
-### 单条规则内的条件关系
+## 接口(都在 `/api/admin/` 下,系统管理员)
 
-每条规则的 `conditions` 内的多个字段条件之间是 **AND** 关系，必须所有条件都满足才算匹配：
+| 接口 | 说明 |
+| --- | --- |
+| `GET /api/admin/event-alert-rules` | `{"rules", "source": "database"\|"default", "updated_by", "updated_at"}`;库里的规则原样返回(可能不符合严格校验) |
+| `PUT /api/admin/event-alert-rules` | 请求 `{"rules": {...}}`,严格校验后保存并立即替换快照,响应同 GET;不合法 422 `invalid_rules`(`message` 是第一处问题,`errors` 是全部问题);审计 `event_rules.update`,detail 只记每组条数和名称 |
+| `GET /api/admin/event-alert-rules/default` | `{"rules": 内置默认规则}`;页面「恢复默认」把它载入编辑区,保存后才生效(不删库里的这一行) |
+| `POST /api/admin/event-alert-rules/preview` | 试运行:请求 `{"rules", "hours": 1~168(默认 24), "env": 可选}`,规则先过严格校验;按 `lasttimestamp` 倒序取最近的事件(最多 10000 条),匹配在线程里跑,不发通知、不改事件 |
 
-```json
-{
-  "conditions": {
-    "reason": { "contains": ["OOMKilling"] }, // 条件1
-    "level": { "equals": "Warning" }, // 条件2
-    "namespace": { "not_contains": ["test"] } // 条件3
-  }
-  // 只有当 reason包含OOMKilling AND level等于Warning AND namespace不包含test 时才匹配
-}
-```
+试运行把库里的行还原成实时处理时的事件:时间换成北京时间(不带时区);库里只有最新状态,`DELETED` 按删除前的状态算(次数大于 1 当成 MODIFIED,否则 ADDED),级别「已告警」按 Warning 算,两种情况的条数分别在 `deleted`、`alerted_level` 里返回。每条忽略规则的 `hits` 是按顺序第一条命中、由它忽略的事件数;每条告警规则的 `hits` 是第一条命中的事件数,`shadowed` 是也能命中但被前面的规则先命中的事件数。
 
-### 字段条件内的值关系
+## 旧规则文件导入
 
-对于同一字段的多个值，关系取决于条件类型：
+`rules_api.import_legacy_file(path='/k8s_event/rules/alert_rules.json') -> str`,master 启动时和 `python3 -m general_settings migrate` 都会调用,幂等:
 
-- **contains**: 多个值之间是 **OR** 关系（包含任一值即匹配）
-- **not_contains**: 多个值之间是 **AND** 关系（不包含任何值才匹配）
-- **starts_with/ends_with**: 多个值之间是 **OR** 关系
-- **not_starts_with/not_ends_with**: 多个值之间是 **AND** 关系
-
-## 全局忽略规则
-
-全局忽略规则用于过滤不需要处理的事件，支持多条规则按顺序匹配：
-
-- **顺序匹配**: 按数组顺序依次检查规则，前面的规则先匹配
-- **启用状态**: 可以通过 `enabled` 字段控制规则是否生效
-- **OR 关系**: 多条忽略规则之间是 OR 关系，任一规则匹配即忽略事件
-- **AND 关系**: 每条规则内的 conditions 字段之间是 AND 关系，必须全部满足
-- **灵活配置**: 可以根据不同场景添加多条专门的忽略规则
-
-## 告警规则配置
-
-告警规则配置文件 `src/kubedoor-setup/resources/manifests/master/alert_rules.json`，安装时做成 ConfigMap `kubedoor-master-file-cfg`，挂载到 master 的 `/k8s_event/rules/`（镜像内不自带规则文件），格式示例如下（集群名、服务名均为示意）:
-
-```json
-{
-  "global_ignore_rules": [
-    {
-      "name": "环境过滤规则(排除非生产环境的K8S)",
-      "enabled": true,
-      "conditions": {
-        "k8s": {
-          "contains": ["test-a", "test-b"]
-        }
-      }
-    },
-    {
-      "name": "常见忽略事件",
-      "enabled": true,
-      "conditions": {
-        "reason": {
-          "contains": ["BackOffStart", "SuccessfulCreate", "SuccessfulMountVolume"]
-        }
-      }
-    }
-  ],
-  "alert_rules": [
-    {
-      "name": "关键事件告警",
-      "enabled": true,
-      "severity": "critical",
-      "conditions": {
-        "reason": {
-          "contains": [
-            "LoadBalancerFailed",
-            "OOMKilling",
-            "NodeNotReady",
-            "SystemOOM",
-            "Unreachable",
-            "BackOffPullImage"
-          ]
-        },
-        "level": {
-          "contains": ["Warning"]
-        }
-      }
-    },
-    {
-      "name": "重启事件告警",
-      "enabled": true,
-      "severity": "warning",
-      "conditions": {
-        "message": {
-          "contains": ["restart"]
-        }
-      }
-    },
-    {
-      "name": "健康检查失败告警",
-      "enabled": true,
-      "severity": "warning",
-      "conditions": {
-        "reason": {
-          "contains": ["Unhealthy"]
-        },
-        "name": {
-          "not_starts_with": ["deploy-demo-"]
-        },
-        "count": {
-          "greater_than": 1
-        }
-      }
-    },
-    {
-      "name": "挂载失败告警",
-      "enabled": true,
-      "severity": "warning",
-      "conditions": {
-        "reason": {
-          "contains": ["FailedMount", "FailedAttachVolume"]
-        }
-      }
-    },
-    {
-      "name": "调度失败告警",
-      "enabled": true,
-      "severity": "warning",
-      "conditions": {
-        "reason": {
-          "contains": ["FailedScheduling", "Insufficient"]
-        }
-      }
-    },
-    {
-      "name": "资源压力告警",
-      "enabled": true,
-      "severity": "warning",
-      "conditions": {
-        "reason": {
-          "contains": ["Pressure", "OutOf", "Evict"]
-        }
-      }
-    },
-    {
-      "name": "僵尸进程告警",
-      "enabled": true,
-      "severity": "warning",
-      "conditions": {
-        "reason": {
-          "contains": ["ProcessZ"]
-        }
-      }
-    }
-  ]
-}
-```
-
-## 支持的条件类型
-
-| 条件类型          | 说明                      | 示例                                               |
-| ----------------- | ------------------------- | -------------------------------------------------- |
-| `contains`        | 字段包含任一指定值        | `{"reason": {"contains": ["OOM", "Failed"]}}`      |
-| `not_contains`    | 字段不包含任何指定值      | `{"namespace": {"not_contains": ["test", "dev"]}}` |
-| `equals`          | 字段等于指定值            | `{"level": {"equals": "Warning"}}`                 |
-| `not_equals`      | 字段不等于指定值          | `{"eventStatus": {"not_equals": "DELETED"}}`       |
-| `starts_with`     | 字段以指定值开头          | `{"name": {"starts_with": ["deploy-"]}}`           |
-| `not_starts_with` | 字段不以指定值开头        | `{"name": {"not_starts_with": ["test-"]}}`         |
-| `ends_with`       | 字段以指定值结尾          | `{"name": {"ends_with": ["-service", "-pod"]}}`    |
-| `not_ends_with`   | 字段不以指定值结尾        | `{"name": {"not_ends_with": ["-test", "-debug"]}}` |
-| `greater_than`    | 数值大于（仅 count 字段） | `{"count": {"greater_than": 3}}`                   |
-| `less_than`       | 数值小于（仅 count 字段） | `{"count": {"less_than": 10}}`                     |
-
-## 配置示例
-
-### 基础告警规则
-
-```json
-{
-  "alert_rules": [
-    {
-      "name": "重启事件告警",
-      "enabled": true,
-      "conditions": {
-        "message": {
-          "contains": ["restart"]
-        },
-        "k8s": {
-          "contains": ["prod"]
-        },
-        "namespace": {
-          "not_contains": ["apo"]
-        }
-      },
-      "severity": "warning"
-    }
-  ]
-}
-```
-
-**规则匹配逻辑说明**：
-
-- `message` 包含 "restart" **AND**
-- `k8s` 包含 "prod" **AND**
-- `namespace` 不包含 "apo"
-- 三个条件必须同时满足才会触发告警
-
-### 高级过滤规则
-
-```json
-{
-  "global_ignore_rules": [
-    {
-      "name": "环境过滤规则",
-      "enabled": true,
-      "conditions": {
-        "k8s": {
-          "not_contains": ["prod", "prd", "online"]
-        }
-      }
-    },
-    {
-      "name": "系统组件过滤",
-      "enabled": true,
-      "conditions": {
-        "namespace": {
-          "contains": ["kube-system", "kube-public"]
-        },
-        "name": {
-          "starts_with": ["system-"]
-        }
-      }
-    }
-  ]
-}
-```
-
-**忽略规则匹配逻辑说明**：
-
-- **规则 1**: `k8s` 字段不包含任何生产环境标识
-- **规则 2**: `namespace` 包含系统命名空间 **AND** `name` 以 "system-" 开头
-- 两条规则之间是 **OR** 关系，任一规则匹配即忽略事件
-
-### 复杂条件组合
-
-```json
-{
-  "alert_rules": [
-    {
-      "name": "健康检查失败告警",
-      "enabled": true,
-      "conditions": {
-        "reason": {
-          "contains": ["Unhealthy"]
-        },
-        "k8s": {
-          "not_contains": ["test", "dev"]
-        },
-        "name": {
-          "not_starts_with": ["deploy-demo-", "deploy-batch-", "deploy-temp-"]
-        },
-        "count": {
-          "greater_than": 1
-        },
-        "namespace": {
-          "not_contains": ["apo"]
-        }
-      },
-      "severity": "warning"
-    }
-  ]
-}
-```
-
-**复杂条件匹配逻辑说明**：
-
-- `reason` 包含 "Unhealthy" **AND**
-- `k8s` 不包含测试环境标识 **AND**
-- `name` 不以特定服务前缀开头（多个前缀之间是 AND 关系） **AND**
-- `count` 大于 1 **AND**
-- `namespace` 不包含 "apo"
-- 所有 5 个条件必须同时满足才会触发告警
-
-## 规则匹配流程总结
-
-### 完整的事件处理流程
-
-1. **硬编码检查**: 首先检查 `eventStatus=DELETED`，如果是则直接忽略（最高优先级）
-2. **全局忽略规则**: 按顺序检查 `global_ignore_rules`，任一规则匹配即忽略事件
-3. **告警规则匹配**: 按数组顺序检查 `alert_rules`，第一个匹配的规则生效
-4. **告警发送**: 如果匹配到告警规则，则生成告警消息并发送
-
-### 关键逻辑要点
-
-| 层级           | 关系类型       | 说明                                                           |
-| -------------- | -------------- | -------------------------------------------------------------- |
-| **规则组间**   | OR             | `global_ignore_rules` 中任一规则匹配即忽略                     |
-| **规则组间**   | OR             | `alert_rules` 中按数组顺序匹配，第一个匹配的生效               |
-| **规则内条件** | AND            | 单条规则的 `conditions` 内所有字段条件必须都满足               |
-| **字段内值**   | 取决于条件类型 | `contains`/`starts_with`/`ends_with` 是 OR，`not_*` 系列是 AND |
-
-### 实际匹配示例
-
-假设有事件：`{"reason": "Unhealthy", "k8s": "prod", "namespace": "default", "count": 3}`
-
-对于规则：
-
-```json
-{
-  "conditions": {
-    "reason": { "contains": ["Unhealthy", "Failed"] }, // ✅ 匹配（包含Unhealthy）
-    "k8s": { "contains": ["prod"] }, // ✅ 匹配（包含prod）
-    "count": { "greater_than": 1 } // ✅ 匹配（3>1）
-  }
-}
-```
-
-**结果**: 所有条件都满足（AND 关系），规则匹配成功 ✅
-
-## 最佳实践
-
-### 1. 规则顺序设计
-
-- **数组前部**: 严重故障，如 OOM、节点不可用（优先匹配）
-- **数组中部**: 一般告警，如 Pod 重启、镜像拉取失败
-- **数组后部**: 信息性告警，如配置更新、扩缩容
-
-### 2. 忽略规则配置
-
-- 优先配置环境过滤，避免测试环境干扰
-- 忽略正常的系统事件，如 SuccessfulCreate
-- 根据业务需求配置特定的忽略条件
-
-### 3. 性能优化
-
-- 合理设置忽略规则，减少不必要的处理
-- 在高并发场景下使用异步处理
-- 定期检查和优化规则配置
+- 库里已有 `event_alert_rules` → `'present'`(不读文件);文件不存在 → `'absent'`;
+- 文件读不了、不是 JSON(含 NaN / Infinity)、超过 2MB、顶层不是对象、两个键存在但不是数组 → `'invalid'`(不导入);
+- 否则原样写库(`INSERT ... ON CONFLICT (key) DO NOTHING`,`updated_by='legacy-import'`)→ `'imported'`;并发时别人先写了 → `'present'`;
+- 不做严格校验(保持用户原来的规则行为);每次调用都现读文件;读写数据库失败时抛异常。
+- 接口没有删除这一行的操作,所以导入过一次(或页面保存过一次)之后,旧文件还挂着也不会再导回来。

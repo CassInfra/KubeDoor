@@ -3,19 +3,21 @@ import json
 import re
 import time
 from collections import defaultdict
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
 import asyncpg
+import httpx
 import pytest
 
-from kubedoor_ai.domain import BEIJING_TZ, AIError, Identity
-from kubedoor_ai.gateway import RunContext, request_cluster_switch
+import kubedoor_ai.wecom as wecom_module
+from kubedoor_ai.domain import BEIJING_TZ, AIError, CredentialCipher, Identity
+from kubedoor_ai.gateway import Gateway, RunContext, request_cluster_switch
 from kubedoor_ai.http import create_app
 from kubedoor_ai.wecom import (WeComIntegration, _PushReply, _StreamReply, _approval_summary, _approval_text, _brief,
-                               _limit_stream, _mentioned_cluster, _pick_cluster, _retention_days)
+                               _legacy_retention_days, _limit_stream, _mentioned_cluster, _pick_cluster)
 
 
 class Store:
@@ -1643,12 +1645,137 @@ def test_friendly_time_uses_beijing_days():
 
 
 @pytest.mark.parametrize("value, days", [(None, 7), ("30", 30), ("0", 0), ("-3", 0), ("seven", 7)])
-def test_checkpoint_retention_days_come_from_kubedoor_config(monkeypatch, value, days):
+def test_legacy_retention_days_env(monkeypatch, value, days):
+    """一次都没取到通用配置时用的旧环境变量"""
     if value is None:
         monkeypatch.delenv("RETENTION_AI_CHECKPOINT_DAYS", raising=False)
     else:
         monkeypatch.setenv("RETENTION_AI_CHECKPOINT_DAYS", value)
-    assert _retention_days() == days
+    assert _legacy_retention_days() == days
+
+
+MASTER_SETTINGS = {"prom_k8s_tag_key": "origin_prometheus", "kubedoor_exturl": "", "alertmanager_exturl": "",
+                   "silence_cache_ttl": 15, "retention_ai_checkpoint_days": 30}
+
+
+@pytest.mark.asyncio
+async def test_master_settings_are_fetched_as_system_identity():
+    seen = []
+
+    def receive(request):
+        seen.append(request)
+        return httpx.Response(200, json={"success": True, "data": MASTER_SETTINGS})
+
+    gateway = Gateway(None, CredentialCipher("ab" * 32), "http://master/", "internal-token",
+                      http=httpx.AsyncClient(transport=httpx.MockTransport(receive)))
+    try:
+        assert await gateway.master_settings() == MASTER_SETTINGS
+    finally:
+        await gateway.close()
+    [request] = seen
+    assert request.method == "GET" and str(request.url) == "http://master/api/internal/settings"
+    # 系统身份:只带内部令牌,不带 X-User-Name(master 只对系统身份开放这个接口)
+    assert request.headers["X-Kubedoor-Token"] == "internal-token"
+    assert "X-User-Name" not in request.headers and "X-User-Permission" not in request.headers
+
+
+def _refused(request):
+    raise httpx.ConnectError("connection refused")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("handler", [
+    _refused,
+    lambda request: httpx.Response(404, text="404: Not Found"),   # 还没有这个接口的旧 master
+    lambda request: httpx.Response(503, json={"success": False, "code": "not_ready", "message": "还没有加载"}),
+    lambda request: httpx.Response(200, json={"success": False}),
+    lambda request: httpx.Response(200, json={"success": True, "data": None}),
+    lambda request: httpx.Response(200, text="not json"),
+], ids=["refused", "http404", "http503", "not-success", "no-data", "not-json"])
+async def test_master_settings_failures_raise(handler):
+    gateway = Gateway(None, CredentialCipher("ab" * 32), "http://master", "internal-token",
+                      http=httpx.AsyncClient(transport=httpx.MockTransport(handler)))
+    try:
+        with pytest.raises(AIError):
+            await gateway.master_settings()
+    finally:
+        await gateway.close()
+
+
+class SettingsGateway:
+    """master_settings 依次返回 replies 里的结果(配置 dict 或异常)"""
+    def __init__(self, *replies):
+        self.replies, self.calls = list(replies), 0
+
+    async def master_settings(self):
+        self.calls += 1
+        reply = self.replies.pop(0)
+        if isinstance(reply, Exception):
+            raise reply
+        return reply
+
+
+@pytest.mark.asyncio
+async def test_checkpoint_retention_days_come_from_general_settings(monkeypatch):
+    monkeypatch.setenv("RETENTION_AI_CHECKPOINT_DAYS", "3")
+    gateway = SettingsGateway(MASTER_SETTINGS, AIError("KubeDoor 接口暂不可用", 502, "upstream_error"),
+                              {**MASTER_SETTINGS, "retention_ai_checkpoint_days": "7"},
+                              {**MASTER_SETTINGS, "retention_ai_checkpoint_days": 0})
+    integration = WeComIntegration(SimpleNamespace(gateway=gateway))
+    assert await integration.retention_days() == 30
+    # master 不可用、返回的值不对:沿用上次取到的,不退回环境变量
+    assert await integration.retention_days() == 30
+    assert await integration.retention_days() == 30
+    # 页面上改成 0:停止清理
+    assert await integration.retention_days() == 0
+    assert gateway.calls == 4
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("env, days", [("3", 3), (None, 7)])
+async def test_checkpoint_retention_days_use_legacy_env_until_master_answers(monkeypatch, env, days):
+    if env is None:
+        monkeypatch.delenv("RETENTION_AI_CHECKPOINT_DAYS", raising=False)
+    else:
+        monkeypatch.setenv("RETENTION_AI_CHECKPOINT_DAYS", env)
+    gateway = SettingsGateway(AIError("KubeDoor 接口返回 HTTP 404", 404, "upstream_error"),
+                              {**MASTER_SETTINGS, "retention_ai_checkpoint_days": True},
+                              {**MASTER_SETTINGS, "retention_ai_checkpoint_days": 3651},
+                              MASTER_SETTINGS)
+    integration = WeComIntegration(SimpleNamespace(gateway=gateway))
+    assert await integration.retention_days() == days   # 旧 master 没有这个接口
+    assert await integration.retention_days() == days   # 布尔不算天数
+    assert await integration.retention_days() == days   # 超出范围
+    assert await integration.retention_days() == 30
+
+
+@pytest.mark.asyncio
+async def test_purge_loop_reads_retention_days_every_round(monkeypatch):
+    monkeypatch.setattr(wecom_module, "PURGE_FIRST_DELAY", 0)
+    monkeypatch.setattr(wecom_module, "PURGE_INTERVAL", 0)
+    gateway = SettingsGateway({**MASTER_SETTINGS, "retention_ai_checkpoint_days": 0}, MASTER_SETTINGS,
+                              AIError("KubeDoor 接口暂不可用", 502, "upstream_error"))
+    integration = WeComIntegration(SimpleNamespace(gateway=gateway))
+    purged, finished = [], asyncio.Event()
+
+    async def purge(days, limit=200):
+        purged.append(days)
+        if len(purged) == 4:
+            finished.set()
+            await asyncio.Event().wait()   # 停在这里,等用例取消
+        return {1: 0, 2: wecom_module.PURGE_BATCH, 3: 5}[len(purged)]
+
+    integration.purge_checkpoints = purge
+    task = asyncio.create_task(integration._purge_loop())
+    try:
+        await asyncio.wait_for(finished.wait(), 5)
+    finally:
+        task.cancel()
+        with suppress(asyncio.CancelledError):
+            await task
+    # 第一轮 0 天(不清理)但循环不退出;第二轮改成 30 天,删满一批接着删;第三轮 master 不可用沿用 30 天
+    assert purged == [0, 30, 30, 30]
+    assert gateway.calls == 3
 
 
 class PurgeStore:

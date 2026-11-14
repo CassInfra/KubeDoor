@@ -97,6 +97,11 @@ class ObservedRunner(InstallRunner):
         self.poll_interval = 0
         self.finalized = False
         self.verified = False
+        # 写通用配置的次数（控制服务就绪后、健康检查之前）
+        self.settings_saved = 0
+
+    async def save_general_settings(self):
+        self.settings_saved += 1
 
     async def service_health(self, sid):
         if sid == self.bad_service:
@@ -124,6 +129,8 @@ async def test_all_selected_services_required_before_finalizer(monkeypatch):
     await runner.run()
     assert runner.finalized and runner.verified
     assert repo.state['phase'] == 'finalizing'
+    # 只有控制服务就绪时写一次通用配置；发布默认值（含 Agent 镜像）已加载
+    assert runner.settings_saved == 1 and runner.defaults['IMAGE_REPO']
     assert len(repo.state['services']) == 7
     assert all(row['status'] == 'ready' for row in repo.state['services'])
     assert all(state['phase'] != 'succeeded' for state in repo.history)
@@ -209,6 +216,8 @@ async def test_retry_preserves_matching_workload_and_rechecks_health(monkeypatch
     await runner.run()
     assert runner.finalized
     assert not k8s.created and not k8s.replaced
+    # 重试时工作负载没变也重新写一遍通用配置（幂等），第 3、4 步改过的地址在这时生效
+    assert runner.settings_saved == 1
     for sid, _, _ in SERVICES:
         assert sum(call.args == (sid,) for call in runner.service_health.call_args_list) >= 2
 
@@ -691,3 +700,147 @@ def test_pod_summary_reports_waiting_reason_restarts_and_deletion():
     assert pod_summary(pod) == ('Pod kubedoor-ai-1：删除中，就绪 0/1，重启 3 次，等待原因 CrashLoopBackOff，'
                                 '运行镜像 example/kubedoor-ai:2.5.0')
     assert pod_summary({}) == 'Pod ：状态未知，就绪 0/0，重启 0 次'
+
+
+# ---------- 控制服务就绪后写通用配置 ----------
+
+SETTINGS_READ = 'http://monit:vm%40secret@vm.example.com:8481/select/0/prometheus'
+SETTINGS_WRITE = 'http://monit:vm%40secret@vm.example.com:8480/insert/0/prometheus'
+SETTINGS_OSS = 'https://ak:oss-secret-key@oss.example.com/bucket'
+
+
+class SettingsMaster:
+    """假 master：通用配置接口 + 安装健康接口，按顺序记下收到的请求。
+
+    responses 是通用配置接口依次返回的 (HTTP 状态, JSON)，用完后返回保存成功；put=False 表示旧镜像没有这个接口。
+    """
+
+    def __init__(self, responses=(), put=True):
+        self.calls, self.responses, self.put_enabled = [], list(responses), put
+
+    def app(self):
+        app = web.Application()
+        if self.put_enabled:
+            app.router.add_put('/api/admin/general-settings', self.put)
+        app.router.add_get('/api/internal/setup-health', self.health)
+        return app
+
+    async def put(self, request):
+        self.calls.append(('PUT', dict(request.headers), await request.json()))
+        status, body = self.responses.pop(0) if self.responses else (200, {'success': True, 'data': {}})
+        return web.json_response(body, status=status)
+
+    async def health(self, request):
+        self.calls.append(('GET', dict(request.headers), None))
+        return web.json_response({'ok': True, 'installation_id': ID})
+
+
+class SettingsRunner(HealthRunner):
+    """真实的写通用配置和健康检查，地址指向假 master。"""
+    save_general_settings = InstallRunner.save_general_settings
+
+    def __init__(self, repo, k8s, base):
+        super().__init__(repo, k8s, base)
+        self.config = repo.private['config']
+        self.defaults = {'IMAGE_REPO': 'registry.example.com/kd', 'IMAGE_VMAGENT': 'registry.example.com/vmagent:v1',
+                         'IMAGE_KUBE_STATE_METRICS': '', 'IMAGE_NODE_EXPORTER': 'registry.example.com/node-exporter',
+                         'ALERTMANAGER_EXTURL': ''}
+
+
+def settings_repo(oss_url=SETTINGS_OSS):
+    repo = MemoryRepo()
+    config = repo.private['config']
+    config['metrics'].update(type='Victoria-Metrics-Cluster', user='monit', password='vm@secret',
+                             read_url=SETTINGS_READ, write_url=SETTINGS_WRITE, tag_key='cluster')
+    config['oss_url'] = oss_url
+    return repo
+
+
+async def deploy_master(repo, master, **timing):
+    async with TestServer(master.app()) as server, aiohttp.ClientSession() as session:
+        base = str(server.make_url('')).rstrip('/')
+        runner = SettingsRunner(repo, FakeKubernetes([deployment('kubedoor-master')]), base)
+        runner.http, runner.objects = session, [deployment('kubedoor-master')]
+        for key, value in timing.items():
+            setattr(runner, key, value)
+        await runner.deploy('master')
+    return runner, base
+
+
+def master_messages(repo, status='checking'):
+    return [row['message'] for state in repo.history for row in state.get('services', [])
+            if row['id'] == 'master' and row['status'] == status]
+
+
+@pytest.mark.asyncio
+async def test_master_general_settings_are_written_before_health_check():
+    repo = settings_repo()
+    master = SettingsMaster()
+    runner, _ = await deploy_master(repo, master)
+    assert runner.row(repo.state, 'master')['status'] == 'ready'
+    # 先写通用配置，再调安装健康接口（健康检查要用到时序库地址）
+    assert [method for method, _, _ in master.calls] == ['PUT', 'GET']
+    _, headers, body = master.calls[0]
+    assert headers['X-Kubedoor-Token'] == repo.private['secrets']['internal_token']
+    assert headers['X-User-Name'] == 'kubedoor' and 'X-User-Permission' not in headers
+    assert body == {'values': {
+        'prom_type': 'Victoria-Metrics-Cluster', 'prom_url': SETTINGS_READ, 'metrics_write_url': SETTINGS_WRITE,
+        'prom_k8s_tag_key': 'cluster', 'kubedoor_exturl': 'https://kd.example.com', 'alertmanager_exturl': None,
+        'oss_url': SETTINGS_OSS, 'image_repo': 'registry.example.com/kd', 'image_vmagent': 'registry.example.com/vmagent:v1',
+        'image_kube_state_metrics': None, 'image_node_exporter': 'registry.example.com/node-exporter'}}
+    assert master_messages(repo)[0] == '副本已就绪，正在写入通用配置并验证服务接口和依赖连接'
+
+
+@pytest.mark.asyncio
+async def test_rejected_general_settings_fail_at_once_without_leaking_addresses():
+    # master 的校验说明本不带地址；即使带了，写进安装状态（公开可读）前也要去掉
+    reason = f'时序库查询地址无效：{SETTINGS_READ}（密码 vm@secret）'
+    master = SettingsMaster([(422, {'success': False, 'code': 'invalid_config', 'message': reason})])
+    repo = settings_repo()
+    runner, base = await deploy_master(repo, master, health_timeout=30)
+    row = runner.row(repo.state, 'master')
+    assert row['status'] == 'failed'
+    assert row['message'] == ('kubedoor-master 没有接受通用配置（HTTP 422）：时序库查询地址无效：***（密码 ***）；'
+                              '请回到第 3、4 步检查时序库和对象存储地址后重试')
+    # 配置被拒绝不再重试，也不做健康检查
+    assert [method for method, _, _ in master.calls] == ['PUT']
+    assert row['details'][2] == f'写入通用配置：PUT {base}/api/admin/general-settings → HTTP 422'
+    history = json.dumps(repo.history, ensure_ascii=False)
+    for secret in ('vm@secret', 'vm%40secret', 'oss-secret-key', repo.private['secrets']['internal_token']):
+        assert secret not in history
+
+
+@pytest.mark.asyncio
+async def test_unavailable_master_is_retried_and_rewrites_settings():
+    master = SettingsMaster([(503, {'success': False, 'code': 'db_unavailable', 'message': '数据库暂时不可用'})])
+    repo = settings_repo(oss_url='')
+    runner, _ = await deploy_master(repo, master, health_timeout=5, poll_interval=0)
+    assert runner.row(repo.state, 'master')['status'] == 'ready'
+    assert [method for method, _, _ in master.calls] == ['PUT', 'PUT', 'GET']
+    assert master.calls[1][2]['values']['oss_url'] is None
+    assert any(message.endswith('；上次未通过：kubedoor-master 暂时无法保存通用配置（HTTP 503）：数据库暂时不可用')
+               for message in master_messages(repo))
+
+
+@pytest.mark.asyncio
+async def test_master_image_without_general_settings_api_is_named():
+    repo = settings_repo()
+    runner, base = await deploy_master(repo, SettingsMaster(put=False), health_timeout=0)
+    row = runner.row(repo.state, 'master')
+    assert row['status'] == 'failed'
+    assert row['message'] == ('kubedoor-master 镜像 example/image:version 没有通用配置接口（/api/admin/general-settings 返回 HTTP 404），'
+                              '镜像版本过旧；请换用新版镜像后重试')
+    assert row['details'][:3] == ['Deployment：kubedoor/kubedoor-master', '期望镜像：example/image:version',
+                                  f'写入通用配置：PUT {base}/api/admin/general-settings → HTTP 404']
+
+
+@pytest.mark.asyncio
+async def test_unreachable_master_settings_reason_has_no_credentials():
+    repo = settings_repo()
+    runner = SettingsRunner(repo, FakeKubernetes(), 'http://127.0.0.1:9')
+    async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=2)) as session:
+        runner.http, runner.objects = session, [deployment('kubedoor-master')]
+        with pytest.raises(ServiceCheckError) as caught:
+            await runner.save_general_settings()
+    assert caught.value.message == '无法连接 kubedoor-master 写入通用配置，请检查服务状态和 kubedoor-master 日志'
+    assert caught.value.probe == 'PUT http://127.0.0.1:9/api/admin/general-settings → 连接失败或超时'

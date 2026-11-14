@@ -130,6 +130,10 @@ def test_env_condition_sql():
     ('PUT', '/api/admin/runtime-config', 'admin'),
     ('POST', '/api/admin/runtime-config/test', 'admin'),
     ('GET', '/api/ai/internal/runtime-config', 'internal'),  # handler 再按库里的权限查 config.view
+    ('GET', '/api/admin/general-settings', 'admin'),  # 通用配置
+    ('PUT', '/api/admin/general-settings', 'admin'),
+    ('POST', '/api/admin/general-settings/test-metrics', 'admin'),
+    ('GET', '/api/internal/settings', 'internal'),  # kubedoor-alarm、kubedoor-ai 取配置,handler 只认系统身份
     ('POST', '/api/admis', 'env_write'),  # 准入 webhook 由 K8S 直接调 agent,不经过 master
     ('GET', '/api/something/new', 'env_write'),  # 没登记的接口默认按集群写
 ])

@@ -6,13 +6,15 @@ import aiohttp
 from aiohttp import web
 
 import db
+import general_settings
 
 
 async def check(request):
     try:
         await asyncio.wait_for(db.pg_fetchval('SELECT 1'), 5)
         async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10)) as session:
-            url = os.environ.get('PROM_URL', '').rstrip('/') + '/api/v1/query'
+            # 时序库查询地址取通用配置(安装向导在调这个接口之前已经写好)
+            url = general_settings.value('prom_url').rstrip('/') + '/api/v1/query'
             async with session.get(url, params={'query': 'vector(1)'}, allow_redirects=False) as response:
                 if response.status != 200:
                     raise ValueError('query_failed')

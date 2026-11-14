@@ -37,9 +37,11 @@ from kubernetes_asyncio.stream.ws_client import (
     STDOUT_CHANNEL,
 )
 from loguru import logger
+import shlex
 import utils
 import uuid
 from func_manager.k8s_node_scheduler import K8sNodeScheduler
+from func_manager import oss_url
 from k8s_client_manager import K8sClientManager, load_incluster_config
 
 logger.remove()
@@ -95,7 +97,20 @@ def get_pod_isolate_label(pod_name: str):
     return 'app'
 
 
-async def jfr_upload(env, ns, pod_name, file_name, task_id):
+def upload_base(request: Request):
+    """这次请求用的对象存储上传地址，返回 (地址, 原因)：控制端转发时带的请求头优先，旧 master 不带时用环境变量 OSS_URL"""
+    return oss_url.resolve(request.headers, utils.OSS_URL)
+
+
+async def upload_file(v1, ns, pod_name, container_name, file_name, url):
+    """用 curl 把 Pod 里的 /{file_name} 上传到 url（整个地址含集群、类型、文件名一起转义，地址里的引号、; 和 $ 不会被 shell 解释）；
+    日志和错误信息里显示的命令把地址的密码换成 ******"""
+    command = f'curl -s -T {shlex.quote("/" + file_name)} {shlex.quote(url)}'
+    shown = f'curl -s -T /{file_name} {oss_url.masked(url)}'
+    return await execute_command(command, v1, pod_name, ns, container_name, shown=shown)
+
+
+async def jfr_upload(env, ns, pod_name, file_name, task_id, oss):
     try:
         logger.info("【JFR-TASK】等待文件生成中...")
         TASK_RESULTS[task_id] = {"status": "等待中"}
@@ -108,13 +123,12 @@ async def jfr_upload(env, ns, pod_name, file_name, task_id):
             if i + interval >= total_wait_time:
                 break
         TASK_RESULTS[task_id] = {"status": "上传中"}
-        dlurl = f'{utils.OSS_URL}/{env}/jfr/{file_name}'
-        command = f'curl -s -T /{file_name} {dlurl}'
+        dlurl = f'{oss}/{env}/jfr/{file_name}'
 
         async with K8sClientManager() as k8s_manager:
             v1 = k8s_manager.core_v1_api
             container_name = await get_pod_container_name(v1, ns, pod_name)
-            status, message = await execute_command(command, v1, pod_name, ns, container_name)
+            status, message = await upload_file(v1, ns, pod_name, container_name, file_name, dlurl)
             if status:
                 message = f"jfr文件上传成功，下载地址：\n{dlurl}"
                 TASK_RESULTS[task_id] = {"status": "已完成", "message": message}
@@ -559,7 +573,8 @@ async def get_pod_container_name(v1, ns, pod_name):
     return container_name
 
 
-async def execute_command(command, v1, pod_name, ns, container=None):
+async def execute_command(command, v1, pod_name, ns, container=None, shown=None):
+    """在 Pod 里执行命令。shown：日志和错误信息里显示的命令（命令里有对象存储地址时传脱敏后的）"""
     cache_key = f"{ns}/{pod_name}"
     try:
         target_container = container or await get_pod_container_name(v1, ns, pod_name)
@@ -568,7 +583,8 @@ async def execute_command(command, v1, pod_name, ns, container=None):
         logger.exception(f"获取容器失败: {e}")
         return False, f"获取容器失败: {e}"
 
-    logger.info(f"执行命令：{command} | namespace={ns} | pod={pod_name} | container={target_container}")
+    shown = shown or command
+    logger.info(f"执行命令：{shown} | namespace={ns} | pod={pod_name} | container={target_container}")
     exec_command = ['/bin/sh', '-c', f"{command}; echo $?"]
     try:
         async with WsApiClient() as ws_api:
@@ -626,17 +642,22 @@ async def execute_command(command, v1, pod_name, ns, container=None):
                 command_output = ''
 
             if status_code != '0':
-                message = f"命令 {command} 执行失败，状态码: {status_code}，输出信息: {command_output}，错误信息: {error_output}"
+                message = f"命令 {shown} 执行失败，状态码: {status_code}，输出信息: {command_output}，错误信息: {error_output}"
                 logger.error(message)
                 return False, message
             return True, command_output
     except Exception as e:
         POD_CONTAINER_CACHE.pop(cache_key, None)
+        if shown != command:
+            # 命令里有对象存储地址：异常信息可能带着整条 exec 请求地址（含命令），只记类型
+            logger.error(f"命令 {shown} 执行失败: {type(e).__name__}")
+            return False, f"命令 {shown} 执行失败（{type(e).__name__}）"
         logger.exception(str(e))
         return False, str(e)
 
 
-async def execute_in_pod(env, ns, v1, pod_name, type, file_name="not_found", container_name=None):
+async def execute_in_pod(env, ns, v1, pod_name, type, file_name="not_found", container_name=None, oss="", oss_reason=""):
+    """oss / oss_reason：对象存储上传地址和没有地址的原因（upload_base 的结果）；dump、jstack 上传文件用"""
     try:
         container_name = container_name or await get_pod_container_name(v1, ns, pod_name)
     except Exception as e:
@@ -656,9 +677,8 @@ async def execute_in_pod(env, ns, v1, pod_name, type, file_name="not_found", con
         command = f"env -u JAVA_TOOL_OPTIONS jmap -dump:format=b,file=/{file_name} `pidof -s java`"
         status, message = await execute_command(command, v1, pod_name, ns, container_name)
         if status:
-            dlurl = f'{utils.OSS_URL}/{env}/dump/{file_name}'
-            command = f'curl -s -T /{file_name} {dlurl}'
-            status2, message = await execute_command(command, v1, pod_name, ns, container_name)
+            dlurl = f'{oss}/{env}/dump/{file_name}'
+            status2, message = await upload_file(v1, ns, pod_name, container_name, file_name, dlurl)
             if status2:
                 message = f"dump文件上传成功，下载地址：\n{dlurl}"
                 await execute_command(f"rm -rf /{file_name}", v1, pod_name, ns, container_name)
@@ -677,12 +697,22 @@ async def execute_in_pod(env, ns, v1, pod_name, type, file_name="not_found", con
         if not status:
             return status, message + '\n' + "开启jfr飞行记录失败"
     if type == "jstack":
+        if not oss:
+            # 没有对象存储地址：照样给出线程栈，只是不写文件、不上传
+            command = "env -u JAVA_TOOL_OPTIONS jstack -l `pidof -s java`"
+            status, jstack_msg = await execute_command(command, v1, pod_name, ns, container_name)
+            if status:
+                dlmsg = f"jstack成功，文件没有上传：{oss_reason}"
+                message = jstack_msg + '\n' + dlmsg
+                send_md(dlmsg, env, ns, pod_name)
+            else:
+                message = f"jstack失败"
+            return status, message
         command = f"env -u JAVA_TOOL_OPTIONS jstack -l `pidof -s java` |tee /{file_name}"
         status, jstack_msg = await execute_command(command, v1, pod_name, ns, container_name)
         if status:
-            dlurl = f'{utils.OSS_URL}/{env}/jstack/{file_name}'
-            command = f'curl -s -T /{file_name} {dlurl}'
-            status2, message = await execute_command(command, v1, pod_name, ns, container_name)
+            dlurl = f'{oss}/{env}/jstack/{file_name}'
+            status2, message = await upload_file(v1, ns, pod_name, container_name, file_name, dlurl)
             if status2:
                 dlmsg = f"jstack文件上传成功，下载地址：\n{dlurl}"
                 await execute_command(f"rm -rf /{file_name}", v1, pod_name, ns, container_name)
@@ -709,7 +739,11 @@ def send_md(msg, env, ns, pod_name):
 
 
 @app.get("/api/pod/auto_dump")
-async def auto_dump(env: str, ns: str, pod_name: str):
+async def auto_dump(env: str, ns: str, pod_name: str, request: Request):
+    # 没有上传地址就不 dump：dump 会暂停 JVM，文件也只能留在 Pod 里
+    oss, reason = upload_base(request)
+    if not oss:
+        return JSONResponse(status_code=400, content={"message": reason, "success": False})
     async with K8sClientManager() as k8s_manager:
         v1 = k8s_manager.core_v1_api
         file_name, err_msg = await get_pod_info(ns, pod_name, v1, "dump", "hprof")
@@ -728,23 +762,25 @@ async def auto_dump(env: str, ns: str, pod_name: str):
             all_msg = "Java 进程对象统计信息直方图:" + '\n' + message
         else:
             all_msg = message + '\n' + "生成 Java 进程对象统计信息直方图失败"
-        status, message = await execute_in_pod(env, ns, v1, pod_name, "dump", file_name, container_name)
+        status, message = await execute_in_pod(env, ns, v1, pod_name, "dump", file_name, container_name, oss=oss)
         all_msg = all_msg + '\n' + message
         if status:
-            dlurl = f'{utils.OSS_URL}/{env}/dump/{file_name}'
+            dlurl = f'{oss}/{env}/dump/{file_name}'
             send_md(all_msg, env, ns, pod_name)
             return {"message": all_msg, "success": True, "link": dlurl}
         return JSONResponse(status_code=500, content={"message": all_msg})
 
 
 @app.get("/api/pod/auto_jstack")
-async def auto_jstack(env: str, ns: str, pod_name: str):
+async def auto_jstack(env: str, ns: str, pod_name: str, request: Request):
+    # 没有上传地址时照样执行 jstack，只是不上传文件（结果里说明原因）
+    oss, reason = upload_base(request)
     async with K8sClientManager() as k8s_manager:
         v1 = k8s_manager.core_v1_api
         file_name, err_msg = await get_pod_info(ns, pod_name, v1, "jstack", "jstack")
         if file_name == "error":
             return JSONResponse(status_code=500, content={"message": err_msg})
-        status, message = await execute_in_pod(env, ns, v1, pod_name, "jstack", file_name)
+        status, message = await execute_in_pod(env, ns, v1, pod_name, "jstack", file_name, oss=oss, oss_reason=reason)
         if status:
             return {"message": message, "success": True}
         else:
@@ -752,7 +788,11 @@ async def auto_jstack(env: str, ns: str, pod_name: str):
 
 
 @app.get("/api/pod/auto_jfr")
-async def auto_jfr(env: str, ns: str, pod_name: str, background_tasks: BackgroundTasks):
+async def auto_jfr(env: str, ns: str, pod_name: str, background_tasks: BackgroundTasks, request: Request):
+    # 没有上传地址就不开飞行记录：5 分钟后的文件没有地方传
+    oss, reason = upload_base(request)
+    if not oss:
+        return JSONResponse(status_code=400, content={"message": reason, "success": False})
     async with K8sClientManager() as k8s_manager:
         v1 = k8s_manager.core_v1_api
         file_name, err_msg = await get_pod_info(ns, pod_name, v1, "jfr", "jfr")
@@ -762,12 +802,12 @@ async def auto_jfr(env: str, ns: str, pod_name: str, background_tasks: Backgroun
         if status:
             task_id = str(uuid.uuid4())
             TASK_RESULTS[task_id] = {"status": "处理中"}
-            background_tasks.add_task(jfr_upload, env, ns, pod_name, file_name, task_id)
+            background_tasks.add_task(jfr_upload, env, ns, pod_name, file_name, task_id, oss)
             now = datetime.now()
             finish_time = now + timedelta(minutes=6)
             formatted_now = now.strftime("%H:%M:%S")
             formatted_finish = finish_time.strftime("%H:%M:%S")
-            link = f'{utils.OSS_URL}/{env}/jfr/{file_name}'
+            link = f'{oss}/{env}/jfr/{file_name}'
             message = f"飞行记录后台执行需要5分钟，任务ID：{task_id}\n（/api/pod/task_status/{task_id}?env={env}）\n请于{formatted_finish}后，访问以下链接下载:\n{link}"
             send_md(message, env, ns, pod_name)
             return {"message": message, "success": True, 'link': link}

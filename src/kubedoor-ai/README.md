@@ -387,7 +387,7 @@ DeepAgents 加载仓库内 `skills/kubedoor-k8s`，Skills 文件只读；会话�
 | `MASTER_URL` | 固定 master 服务地址，默认 `http://kubedoor-master` |
 | `PG_HOST`、`PG_PORT`、`PG_USER`、`PG_PASSWORD`、`PG_DATABASE` | 历史、动作、连接与 checkpoint 使用的 PostgreSQL |
 | `PORT` | 服务端口，默认 `8000` |
-| `RETENTION_AI_CHECKPOINT_DAYS` | 企微旧对话的检查点保留天数，默认 `7`，`0` 表示不清理（见下文企业微信一节） |
+| `RETENTION_AI_CHECKPOINT_DAYS` | 旧版本的企微检查点保留天数，已迁到「系统管理 → 通用配置 · 数据保留」；只在一次都没从 master 取到通用配置时作为后备（见下文企业微信一节） |
 
 ### 企业微信智能机器人
 
@@ -429,7 +429,7 @@ K8S 上的操作和网页一样按「权限与审批」判定（企微配置页�
 
 当前对话记在 `kubedoor_ai_wecom_users.session_id`，上一个对话记在 `previous_session_id`，当前对话的集群记在 `current_env`；旧对话保留不删，审计不受影响。同一成员的并发消息在 PostgreSQL advisory lock 内解析当前对话，只会建一个新对话。「继续上次」和卡片上的按钮只用本地记着的花折账号名，不调 master，保证卡片 5 秒内更新；卡片里选的集群在下一次提问时校验，没有权限会再发一张选集群卡片。「新对话」没有默认集群时要问 master 取集群列表来发卡片。切换本身不授予任何权限，下一次提问照常完整校验。
 
-企微里再也不会继续的旧对话（不是任何成员的当前对话或上一个对话，也没有运行中或待审批的任务），最后活跃超过 `RETENTION_AI_CHECKPOINT_DAYS` 天（`kubedoor-config`，默认 7，0 = 不清理）后删除它的 LangGraph 检查点，会话和消息记录保留用于审计。AI 服务启动 5 分钟后第一次清理，之后每 6 小时一轮、每批 200 个；每个对话在它成员的锁里再确认一次再删，并记下 `kubedoor_ai_sessions.checkpoint_purged_at`，之后旧欢迎卡片的「继续上次对话」会被拒绝。网页 AI 的会话由用户自己管理，不自动清理。
+企微里再也不会继续的旧对话（不是任何成员的当前对话或上一个对话，也没有运行中或待审批的任务），最后活跃超过保留天数后删除它的 LangGraph 检查点，会话和消息记录保留用于审计。保留天数是「系统管理 → 通用配置 · 数据保留」的「AI 对话检查点保留天数」（默认 7，0 = 不清理），每轮清理前以系统身份（只带内部令牌、不带 `X-User-Name`）向 master 的 `/api/internal/settings` 取，页面上改了下一轮生效；取不到时沿用上次取到的值，一次都没取到时用旧环境变量 `RETENTION_AI_CHECKPOINT_DAYS`，再没有用 7。AI 服务启动 5 分钟后第一次清理，之后每 6 小时一轮、每批 200 个；每个对话在它成员的锁里再确认一次再删，并记下 `kubedoor_ai_sessions.checkpoint_purged_at`，之后旧欢迎卡片的「继续上次对话」会被拒绝。网页 AI 的会话由用户自己管理，不自动清理。
 
 企微专用模型同样有上下文窗口、最大输出、压缩阈值和思考强度四项设置（见上文），配置页另有「对话空闲超时」。
 

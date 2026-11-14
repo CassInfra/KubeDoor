@@ -7,7 +7,6 @@ master 是单实例,缓存放内存即可:管理员改了用户/权限会主动�
 import asyncio
 import hashlib
 import json
-import os
 import re
 import secrets
 import time
@@ -16,14 +15,28 @@ from datetime import datetime, timedelta, timezone
 from loguru import logger
 
 import db
+import general_settings
 
 from . import passwords
 from .principal import make_principal
 
 SESSION_COOKIE = 'kubedoor_session'
-SESSION_HOURS = float(os.environ.get('AUTH_SESSION_HOURS', '12'))
-REMEMBER_DAYS = float(os.environ.get('AUTH_REMEMBER_DAYS', '7'))
-IDLE_HOURS = float(os.environ.get('AUTH_IDLE_HOURS', '4'))
+
+
+# 会话有效期、空闲超时、「记住我」天数在「系统管理 → 通用配置 → 登录与安全」设置,每次用时再取:
+# 改了对新登录马上生效;空闲超时对已有会话的下一次校验就生效
+def session_lifetime(remember):
+    """新会话的有效期:勾了「记住我」按天数,否则按小时。"""
+    if remember:
+        return timedelta(days=general_settings.value('auth_remember_days'))
+    return timedelta(hours=general_settings.value('auth_session_hours'))
+
+
+def idle_timeout():
+    """没勾「记住我」的会话多久没有活动就失效;不大于 0 表示不限,返回 None。"""
+    hours = general_settings.value('auth_idle_hours')
+    return timedelta(hours=hours) if hours > 0 else None
+
 
 CACHE_TTL = 30  # 秒
 TOUCH_INTERVAL = 60  # last_seen_at 最多每分钟回写一次
@@ -215,7 +228,7 @@ class AuthStore:
     # ------------------------------------------------------------------ 会话
     async def create_session(self, user_id, remember, ip, user_agent):
         token = secrets.token_urlsafe(32)
-        lifetime = timedelta(days=REMEMBER_DAYS) if remember else timedelta(hours=SESSION_HOURS)
+        lifetime = session_lifetime(remember)
         await db.pg_execute(
             'INSERT INTO auth_sessions (token_hash, user_id, expires_at, remember, ip, user_agent) '
             'VALUES ($1,$2,$3,$4,$5,$6)',
@@ -244,7 +257,8 @@ class AuthStore:
         if session['expires_at'] <= now:
             await self.delete_session(key)
             return None
-        if not session['remember'] and IDLE_HOURS > 0 and session['last_seen_at'] + timedelta(hours=IDLE_HOURS) <= now:
+        idle = idle_timeout()
+        if not session['remember'] and idle is not None and session['last_seen_at'] + idle <= now:
             await self.delete_session(key)
             return None
         if (now - session['last_seen_at']).total_seconds() > TOUCH_INTERVAL:
@@ -269,7 +283,7 @@ class AuthStore:
             self._sessions.pop(key, None)
 
     async def cleanup_sessions(self):
-        idle = timedelta(hours=IDLE_HOURS) if IDLE_HOURS > 0 else timedelta(days=36500)
+        idle = idle_timeout() or timedelta(days=36500)
         status = await db.pg_execute(
             'DELETE FROM auth_sessions WHERE expires_at <= now() OR (NOT remember AND last_seen_at <= now() - $1::interval)',
             idle,

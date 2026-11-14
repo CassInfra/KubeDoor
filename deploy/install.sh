@@ -43,8 +43,8 @@ usage() {
     printf '%s\n' \
         '用法：sh install.sh [web|upgrade] [选项]（也支持 bash）' \
         '  upgrade                升级已有控制端，默认使用本脚本内的发布版本' \
-        '  --dry-run              查看版本和 Deployment 变更，不修改集群、不写备份' \
-        '  --backup FILE          升级前保存 Deployment 和 Nginx 配置，默认 kubedoor-upgrade-backup.yaml' \
+        '  --dry-run              查看版本、Deployment 变更及旧配置迁移和清理计划，不修改集群、不写备份' \
+        '  --backup FILE          升级前保存 Deployment、Nginx 及旧配置（含 Secret），默认 kubedoor-upgrade-backup.yaml' \
         '  --namespace NAME       命名空间，默认 kubedoor' \
         '  --context NAME         kubectl context，默认当前 context' \
         '  --image-repo REPO      KubeDoor 镜像仓库' \
@@ -59,7 +59,8 @@ usage() {
         '  -h, --help             显示帮助' \
         '首次安装在网页填写数据库及管理员信息；重复运行保留原安装。' \
         '升级示例：sh install.sh upgrade --dry-run；sh install.sh upgrade --tag 2.6.0' \
-        'upgrade 保留现有镜像仓库；--image-repo 可覆盖。请先备份 PostgreSQL。'
+        'upgrade 保留现有镜像仓库；--image-repo 可覆盖。请先备份 PostgreSQL。' \
+        'upgrade 会把 ConfigMap 里的旧配置和事件告警规则迁入数据库（需要 pods/exec 权限），成功后清理旧配置。'
 }
 need_value() { [ "$#" -ge 2 ] && [ -n "$2" ] || die "参数 $1 缺少值"; }
 while [ "$#" -gt 0 ]; do
@@ -565,9 +566,6 @@ spec:
         ports:
         - name: http
           containerPort: 80
-        volumeMounts:
-        - name: kubedoor-master-file-cfg
-          mountPath: /k8s_event/rules
         livenessProbe:
           tcpSocket:
             port: 80
@@ -583,13 +581,6 @@ spec:
           periodSeconds: 10
           failureThreshold: 3
       restartPolicy: Always
-      volumes:
-      - name: kubedoor-master-file-cfg
-        configMap:
-          name: kubedoor-master-file-cfg
-          items:
-          - key: alert_rules.json
-            path: alert_rules.json
 EOF
             ;;
         kubedoor-ai)
@@ -736,6 +727,132 @@ EOF
 $UPGRADE_NGINX
 EOF
 }
+# 2.6.0 起 master、alarm、ai 的配置和 K8S 事件告警规则存在数据库，在控制台「系统管理」修改。
+# 升级时先把旧配置迁入数据库，迁移命令确认成功后才清理旧 ConfigMap 和规则挂载；中途失败重跑是安全的。
+RULES_CONFIGMAP=kubedoor-master-file-cfg
+MIGRATE_COMMAND='python3 -m general_settings migrate'
+# kubedoor-config 里已迁入数据库的配置项；PG_* 保留（master、alarm、ai 仍从这里取数据库连接）
+MIGRATED_KEYS='PROM_TYPE PROM_URL METRICS_WRITE_URL PROM_K8S_TAG_KEY AGENT_INSTALL_DEFAULTS ALERTMANAGER_EXTURL
+KUBEDOOR_EXTURL LOG_LEVEL ALERT_DEDUP_WINDOW SILENCE_CACHE_TTL ADMIS_CACHE_TTL RETENTION_EVENTS_DAYS
+RETENTION_ALERTS_DAYS RETENTION_RESOURCES_DAYS RETENTION_AUDIT_DAYS RETENTION_AI_CHECKPOINT_DAYS NODE_SHELL_IMAGE
+AGENT_AUTH_REQUIRED AUTH_SESSION_HOURS AUTH_IDLE_HOURS AUTH_REMEMBER_DAYS AUTH_LOGIN_MAX_FAILURES AUTH_LOCK_MINUTES
+AUTH_COOKIE_SECURE UPDATE_IMAGE REGISTRY_SECRET MSG_TYPE MSG_TOKEN DEFAULT_AT OSS_URL'
+NL='
+'
+CR=$(printf '\r')
+warn() { printf '警告：%s\n' "$*" >&2; }
+# master 去掉事件告警规则的卷和挂载：strategic merge 按名称 / 挂载路径删除列表项，已不存在时是空操作
+rules_volume_patch() {
+    yaml <<'EOF'
+spec:
+  template:
+    spec:
+      containers:
+      - name: kubedoor-master
+        volumeMounts:
+        - mountPath: /k8s_event/rules
+          $patch: delete
+      volumes:
+      - name: kubedoor-master-file-cfg
+        $patch: delete
+EOF
+}
+# kubedoor-config 删除已迁移的键：JSON merge patch 设为 null，键不存在时不报错
+legacy_config_patch() {
+    printf 'data:\n'
+    for key in $MIGRATED_KEYS; do printf '  %s: null\n' "$key"; done
+}
+# master 是否还挂载或引用规则 ConfigMap：有输出表示还在用；读取失败返回非零
+rules_references() {
+    kc -n "$NAMESPACE" get deployment kubedoor-master -o 'jsonpath={.spec.template.spec.volumes[?(@.name=="kubedoor-master-file-cfg")].name}{.spec.template.spec.volumes[?(@.configMap.name=="kubedoor-master-file-cfg")].name}{.spec.template.spec.containers[?(@.name=="kubedoor-master")].volumeMounts[?(@.mountPath=="/k8s_event/rules")].mountPath}'
+}
+# 迁移汇总（stdout 最后一行 JSON，只有配置项名称和状态，不含配置值）里没能迁入数据库的项
+migration_problems() (
+    summary=$1
+    problems=
+    section=${summary#*'"general_settings"'}
+    if [ "$section" != "$summary" ]; then
+        section=${section#*\{}
+        section=${section%%\}*}
+        case "$section" in
+            *'"invalid"'*\]*)
+                keys=${section#*'"invalid"'}
+                keys=${keys#*\[}
+                keys=${keys%%\]*}
+                set -f
+                IFS=', "'
+                for key in $keys; do
+                    [ -z "$key" ] || problems="$problems${problems:+、}$key"
+                done
+                [ -z "$problems" ] || problems="通用配置 $problems"
+                ;;
+        esac
+    fi
+    for item in 'notification:消息通知（MSG_TYPE / MSG_TOKEN / DEFAULT_AT）' 'rules:镜像更新规则（UPDATE_IMAGE）' \
+        'registries:镜像仓库凭据（REGISTRY_SECRET）' 'event_rules:事件告警规则（ConfigMap kubedoor-master-file-cfg）'; do
+        case "$summary" in
+            *"\"${item%%:*}\": \"invalid\""*|*"\"${item%%:*}\":\"invalid\""*) problems="$problems${problems:+；}${item#*:}" ;;
+        esac
+    done
+    printf '%s' "${problems:-汇总没有列出具体项：$summary}"
+)
+# master 就绪后在容器里执行迁移；退出码 0 才在全部组件升级完成后清理
+run_migration() {
+    printf '%s\n' "迁移旧配置：在 kubedoor-master 容器里执行 $MIGRATE_COMMAND"
+    if migrate_output=$(kc -n "$NAMESPACE" exec deploy/kubedoor-master -c kubedoor-master -- python3 -m general_settings migrate); then
+        MIGRATE_STATUS=0
+    else
+        MIGRATE_STATUS=$?
+    fi
+    migrate_summary=${migrate_output##*"$NL"}
+    migrate_summary=${migrate_summary%"$CR"}
+    [ -z "$migrate_summary" ] || printf '迁移结果：%s\n' "$migrate_summary"
+    case "$MIGRATE_STATUS" in
+        0) printf '%s\n' '旧配置已迁入数据库，全部组件升级完成后清理旧配置。' ;;
+        3)
+            warn "以下旧配置没能迁入数据库：$(migration_problems "$migrate_summary")"
+            warn '请在控制台对应页面（系统管理 → 通用配置、消息通知、事件告警规则、镜像管理）填好后再执行一次 upgrade；本次保留旧配置，不清理'
+            ;;
+        *)
+            warn "迁移检查失败（退出码 $MIGRATE_STATUS）：旧配置保留不动，本次不清理。确认 kubectl 有 pods/exec 权限、kubedoor-master 日志没有报错后再执行一次 upgrade"
+            ;;
+    esac
+}
+# 迁移成功后清理：master 去掉规则挂载并等待就绪 → 删除规则 ConfigMap → kubedoor-config 只留 PG_*
+cleanup_legacy_config() {
+    printf '%s\n' '清理已迁入数据库的旧配置：'
+    if ! refs=$(rules_references); then
+        warn '无法读取 kubedoor-master 的卷配置，跳过清理；旧配置保留不动，稍后再执行一次 upgrade 即可完成清理'
+        return 0
+    fi
+    if [ -n "$refs" ]; then
+        if ! kc -n "$NAMESPACE" patch deployment kubedoor-master --type=strategic --patch "$(rules_volume_patch)" \
+            --dry-run=server -o name >/dev/null; then
+            warn '去掉 kubedoor-master 事件告警规则挂载的试运行未通过，跳过清理；旧配置保留不动，请核对 deployment/kubedoor-master 的卷和挂载后再执行一次 upgrade'
+            return 0
+        fi
+        kc -n "$NAMESPACE" patch deployment kubedoor-master --type=strategic --patch "$(rules_volume_patch)" ||
+            die "去掉 kubedoor-master 事件告警规则挂载失败；升级已完成，旧配置尚未清理。备份：$BACKUP_FILE；修复后用新的 --backup 文件重试"
+        kc -n "$NAMESPACE" rollout status deployment/kubedoor-master --timeout=300s ||
+            die "kubedoor-master 去掉事件告警规则挂载后未就绪；检查 describe/logs。备份：$BACKUP_FILE；修复后用新的 --backup 文件重试"
+        refs=$(rules_references) || refs=unknown
+    fi
+    if [ -n "$refs" ]; then
+        warn "kubedoor-master 仍有自定义的卷或挂载引用 ConfigMap $RULES_CONFIGMAP，保留该 ConfigMap；去掉引用后再执行一次 upgrade 即可删除"
+    else
+        kc -n "$NAMESPACE" delete configmap "$RULES_CONFIGMAP" --ignore-not-found ||
+            die "删除 ConfigMap $RULES_CONFIGMAP 失败；升级已完成，可稍后再执行一次 upgrade 完成清理"
+    fi
+    [ -n "$LEGACY_CONFIG" ] || return 0
+    if ! kc -n "$NAMESPACE" patch configmap kubedoor-config --type=merge --patch "$(legacy_config_patch)" \
+        --dry-run=server -o name >/dev/null; then
+        warn 'kubedoor-config 删除已迁移配置项的试运行未通过，保留旧配置；可稍后再执行一次 upgrade 完成清理'
+        return 0
+    fi
+    kc -n "$NAMESPACE" patch configmap kubedoor-config --type=merge --patch "$(legacy_config_patch)" ||
+        die "清理 kubedoor-config 失败；升级已完成，可稍后再执行一次 upgrade 完成清理"
+    printf '%s\n' '旧配置已清理：事件告警规则改从数据库读取，kubedoor-config 只保留数据库连接（PG_*）。'
+}
 upgrade_control() {
     upgrade_state=$(field ConfigMap kubedoor-setup-state '{.metadata.uid}')
     if [ -n "$upgrade_state" ]; then
@@ -792,6 +909,21 @@ upgrade_control() {
             ;;
     esac
     UPGRADE_RESOURCES="$UPGRADE_RESOURCES configmap/nginx-config"
+    # 旧配置：存在的才备份（kubectl get 多个资源时有一个不存在就失败）
+    LEGACY_CONFIG=$(field ConfigMap kubedoor-config '{.metadata.uid}')
+    legacy_connection=$(field Secret kubedoor-connection '{.metadata.uid}')
+    LEGACY_RULES=$(field ConfigMap "$RULES_CONFIGMAP" '{.metadata.uid}')
+    RULES_REFS=$(rules_references) || die '无法读取 kubedoor-master 的卷配置，尚未修改集群'
+    [ -z "$LEGACY_CONFIG" ] || UPGRADE_RESOURCES="$UPGRADE_RESOURCES configmap/kubedoor-config"
+    [ -z "$legacy_connection" ] || UPGRADE_RESOURCES="$UPGRADE_RESOURCES secret/kubedoor-connection"
+    [ -z "$LEGACY_RULES" ] || UPGRADE_RESOURCES="$UPGRADE_RESOURCES configmap/$RULES_CONFIGMAP"
+    printf '%s\n' '  旧配置迁移：kubedoor-master 就绪后在容器里执行迁移命令，把旧配置和事件告警规则迁入数据库（需要 pods/exec 权限）'
+    if [ -n "$RULES_REFS$LEGACY_RULES$LEGACY_CONFIG" ]; then
+        printf '%s\n' '  迁移成功且全部组件升级完成后清理（迁移未成功时保留旧配置，不清理）：'
+        [ -z "$RULES_REFS" ] || printf '%s\n' '    - kubedoor-master 去掉事件告警规则挂载（master 会再重启一次）'
+        [ -z "$LEGACY_RULES" ] || printf '    - 删除 ConfigMap %s\n' "$RULES_CONFIGMAP"
+        [ -z "$LEGACY_CONFIG" ] || printf '%s\n' '    - kubedoor-config 删除已迁入数据库的配置项，只保留数据库连接（PG_*）'
+    fi
     printf '%s\n' '升级会重建相关 Pod，master 重启期间 Agent 会重连；请安排维护窗口并先备份 PostgreSQL。'
     if [ "$DRY_RUN" = true ]; then
         for entry in $UPGRADE_PLAN; do
@@ -800,6 +932,20 @@ upgrade_control() {
             printf '\n# deployment/%s strategic merge patch\n' "$deployment"
             deployment_upgrade_patch "$deployment"
         done
+        kubectl_hint="kubectl${KUBE_CONTEXT:+ --context $KUBE_CONTEXT} -n $NAMESPACE"
+        printf '\n# 旧配置迁移：kubedoor-master 就绪后执行（只导入数据库里还没有的项，可重复执行）\n'
+        printf '# %s exec deploy/kubedoor-master -c kubedoor-master -- %s\n' "$kubectl_hint" "$MIGRATE_COMMAND"
+        printf '%s\n' '# 退出码 0 时，全部组件升级完成后按下面的步骤清理；退出码 3（有导入不了的旧配置）或其他失败时保留旧配置，不清理'
+        if [ -n "$RULES_REFS" ]; then
+            printf '\n# deployment/kubedoor-master strategic merge patch（去掉事件告警规则的卷和挂载，之后等待 rollout）\n'
+            rules_volume_patch
+        fi
+        [ -z "$LEGACY_RULES$RULES_REFS" ] ||
+            printf '\n# %s delete configmap %s --ignore-not-found\n' "$kubectl_hint" "$RULES_CONFIGMAP"
+        if [ -n "$LEGACY_CONFIG" ]; then
+            printf '\n# configmap/kubedoor-config merge patch（删除已迁入数据库的配置项，保留 PG_*）\n'
+            legacy_config_patch
+        fi
         printf '%s\n' '预览结束，未修改集群。目标版本来自当前脚本；升级到新发布版本请先下载新版脚本。'
         return
     fi
@@ -822,11 +968,12 @@ upgrade_control() {
     [ -n "$backup_yaml" ] || die '升级备份为空，尚未修改集群'
     (umask 077; set -C; printf '%s\n' "$backup_yaml" > "$BACKUP_FILE") ||
         die '无法创建升级备份（文件已存在或目录不可写），请用 --backup 指定新文件'
-    printf '已保存升级前资源：%s（不含数据库备份）\n' "$BACKUP_FILE"
+    printf '已保存升级前资源：%s（含数据库连接等 Secret，请妥善保管；不含数据库备份）\n' "$BACKUP_FILE"
     if [ "$NGINX_PATCH" = true ]; then
         kc -n "$NAMESPACE" patch configmap nginx-config --type=merge --patch "$(upgrade_nginx_patch)" ||
             die '更新 Nginx 配置失败；已保留升级备份，请检查后重试'
     fi
+    MIGRATE_STATUS=
     for entry in $UPGRADE_PLAN; do
         deployment=${entry%%=*}
         target=${entry#*=}
@@ -842,8 +989,16 @@ upgrade_control() {
         if ! kc -n "$NAMESPACE" rollout status "deployment/$deployment" --timeout=300s; then
             die "$deployment 升级未就绪；检查 describe/logs。升级可能部分完成，备份：$BACKUP_FILE；修复后用新的 --backup 文件重试"
         fi
+        # 新 master 启动时会自己导入旧配置；这里再执行一遍确认结果，决定是否清理
+        [ "$deployment" != kubedoor-master ] || run_migration
     done
-    printf '%s\n' '控制端镜像及 Deployment 升级完成，所有目标 Deployment 已就绪。请登录控制台核对功能；Agent 可在控制台按集群单独升级。'
+    printf '%s\n' '控制端镜像及 Deployment 升级完成，所有目标 Deployment 已就绪。'
+    if [ "$MIGRATE_STATUS" = 0 ]; then
+        cleanup_legacy_config
+    else
+        warn '旧配置保留不动：按上面的提示处理后再执行一次 upgrade，迁移成功后会自动清理'
+    fi
+    printf '%s\n' '请登录控制台核对功能：时序库、访问地址等配置在「系统管理 → 通用配置」，事件告警规则在「系统管理 → 事件告警规则」；Agent 可在控制台按集群单独升级。'
 }
 if [ "$ACTION" = upgrade ]; then
     upgrade_control

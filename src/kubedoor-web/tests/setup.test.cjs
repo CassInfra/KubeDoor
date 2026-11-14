@@ -1731,6 +1731,92 @@ test("第 4 步填写告警通知后随基础设置一起提交，保存后不�
   assert.equal(utils.notificationSummary(vm.savedNotification), "钉钉");
 });
 
+test("对象存储上传地址可选：去掉空白和末尾 /，可带账号密码，拒绝查询参数、锚点和本机地址", () => {
+  assert.equal(utils.ossURLInput(""), "");
+  assert.equal(utils.ossURLInput("   "), "");
+  assert.equal(
+    utils.ossURLInput(" https://ak:s%40k@oss.example.com/bucket/ "),
+    "https://ak:s%40k@oss.example.com/bucket"
+  );
+  // 已保存的密码显示为 ******，原样提交表示沿用
+  assert.equal(
+    utils.ossURLInput("https://ak:******@oss.example.com/bucket"),
+    "https://ak:******@oss.example.com/bucket"
+  );
+  assert.equal(
+    utils.ossURLInput("http://192.0.2.30:9000"),
+    "http://192.0.2.30:9000"
+  );
+  for (const [value, reason] of [
+    ["oss.example.com/bucket", /有效的对象存储上传地址/],
+    ["ftp://oss.example.com", /HTTP \/ HTTPS/],
+    ["https://oss.example.com/upload?token=x", /查询参数或锚点/],
+    ["https://oss.example.com/upload#part", /查询参数或锚点/],
+    ["https://oss.example.com/upload?", /查询参数或锚点/],
+    ["https://ak:pa ss@oss.example.com", /不含空格/],
+    ["https://:secret@oss.example.com", /缺少账号/],
+    ["http://127.0.0.1:9000", /本机地址/],
+    ["http://localhost:9000/bucket", /本机地址/]
+  ])
+    assert.throws(() => utils.ossURLInput(value), reason, value);
+  assert.equal(utils.ossSummary(""), "未配置");
+  assert.equal(utils.ossSummary(undefined), "未配置");
+  assert.equal(
+    utils.ossSummary("https://ak:******@oss.example.com/b"),
+    "https://ak:******@oss.example.com/b"
+  );
+});
+
+test("第 4 步的对象存储上传地址随基础设置一起提交，填错时留在本步", async t => {
+  const sent = [];
+  const initial = state({ step: 4 });
+  initial.config.oss_url = "https://ak:******@oss.example.com/old";
+  const { vm } = await harness(t, {
+    initial,
+    api: {
+      configure: async (revision, data) => {
+        sent.push(data);
+        const next = state({ revision: revision + 1, phase: "ready", step: 5 });
+        next.config.oss_url = data.oss_url.replace(/:[^:@/]+@/, ":******@");
+        return next;
+      }
+    }
+  });
+  // 载入已保存的打码地址：原样提交表示沿用密码
+  assert.equal(vm.basics.oss_url, "https://ak:******@oss.example.com/old");
+  vm.basics.oss_url = "https://oss.example.com/upload?token=x";
+  await vm.advance();
+  assert.equal(sent.length, 0);
+  assert.equal(vm.step, 4);
+  assert.match(vm.error, /查询参数或锚点/);
+  vm.basics.oss_url = " https://ak:new-secret@oss.example.com/kubedoor/ ";
+  await vm.advance();
+  assert.equal(vm.step, 5);
+  assert.equal(
+    sent[0].oss_url,
+    "https://ak:new-secret@oss.example.com/kubedoor"
+  );
+  // 保存后表单换成安装服务返回的打码地址，新密码不再留在页面上
+  assert.equal(vm.basics.oss_url, "https://ak:******@oss.example.com/kubedoor");
+});
+
+test("对象存储上传地址留空表示不配置，提交空串", async t => {
+  const sent = [];
+  const { vm } = await harness(t, {
+    initial: state({ step: 4 }),
+    api: {
+      configure: async (revision, data) => {
+        sent.push(data);
+        return state({ revision: revision + 1, phase: "ready", step: 5 });
+      }
+    }
+  });
+  assert.equal(vm.basics.oss_url, "");
+  await vm.advance();
+  assert.equal(vm.step, 5);
+  assert.equal(sent[0].oss_url, "");
+});
+
 test("已保存的告警通知：留空保留，换类型不填地址不能继续，点清除后提交 clear", async t => {
   const initial = state({ step: 4 });
   initial.config.notification = {
@@ -1909,6 +1995,55 @@ test("页面上的告警通知：IM 类型下拉、说明表、测试结果的�
       item => item.props["data-summary"] === "notification"
     )[0];
     assert.equal(summary.textOf(row), `告警通知${expected}`);
+  }
+});
+
+test("页面上的对象存储上传地址：第 4 步的可选输入框，第 5 步摘要显示打码后的地址", async t => {
+  const initial = state({ step: 4 });
+  initial.config.oss_url = "https://ak:******@oss.example.com/bucket";
+  const page = await renderPage(t, null, {
+    status: async () => ({
+      phase: "draft",
+      authenticated: true,
+      installation_id: "install-1"
+    }),
+    state: async () => initial
+  });
+  const input = page.findAll(item => item.props.id === "oss-url")[0];
+  assert.ok(input, "第 4 步应有对象存储上传地址输入框");
+  assert.equal(input.props.type, "url");
+  assert.match(input.props.placeholder, /oss\.example\.com/);
+  const text = page.textOf(page.root);
+  assert.match(text, /对象存储上传地址\s*可选/);
+  assert.match(text, /系统管理 →\s*通用配置/);
+  // 说明表：K8S 事件告警写明规则在哪里配置（和控制台消息通知页的说明一致）
+  assert.equal(
+    utils.NOTICE_ROWS[0].when,
+    "K8S 事件命中事件告警规则（在系统管理 → 事件告警规则配置）时，例如重启、健康检查失败、挂载失败、调度失败、资源压力；不受告警屏蔽影响"
+  );
+
+  for (const [oss, expected] of [
+    [
+      "https://ak:******@oss.example.com/bucket",
+      "https://ak:******@oss.example.com/bucket"
+    ],
+    ["", "未配置"],
+    [undefined, "未配置"]
+  ]) {
+    const ready = state({ phase: "ready", step: 5 });
+    if (oss !== undefined) ready.config.oss_url = oss;
+    const summary = await renderPage(t, null, {
+      status: async () => ({
+        phase: "ready",
+        authenticated: true,
+        installation_id: "install-1"
+      }),
+      state: async () => ready
+    });
+    const row = summary.findAll(
+      item => item.props["data-summary"] === "oss"
+    )[0];
+    assert.equal(summary.textOf(row), `对象存储上传地址${expected}`);
   }
 });
 

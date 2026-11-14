@@ -29,7 +29,7 @@ Alertmanager
 
 Web ──► kubedoor-master /api/db/silence/* ──► alert_silences 表
                                                     ▲
-kubedoor-alarm 每 SILENCE_CACHE_TTL 秒拉取一次 ──────┘
+kubedoor-alarm 按「告警屏蔽规则缓存」秒数拉取一次 ───┘
 ```
 
 设计取舍：
@@ -71,7 +71,7 @@ kubedoor-alarm 每 SILENCE_CACHE_TTL 秒拉取一次 ──────┘
 
 | 规范 key      | 取值来源（按顺序取第一个非空）              |
 | ------------- | ------------------------------------------- |
-| `env`         | `labels[PROM_K8S_TAG_KEY]`                  |
+| `env`         | `labels[集群指标标签 key]`（系统管理 → 通用配置，默认 `origin_prometheus`） |
 | `namespace`   | `namespace` → `k8s_ns`                      |
 | `pod`         | `pod` → `k8s_pod`                           |
 | `container`   | `container` → `k8s_app`                     |
@@ -194,10 +194,10 @@ Python 特有的写法（如 `(?i)`）在预览时会报错，但不影响规则
 - **K8S告警详情 → 操作 → 屏蔽**：自动带出该行的 `env`/`namespace`/`alertname`/`pod` 作为
   匹配条件，改一改就能提交。
 - **K8S告警详情的「已屏蔽」标记**：命中屏蔽的告警行会显示静音标签，点击跳到对应规则。
-- **IM 通知里的【屏蔽】链接**：只有故障通知带，恢复通知不带。在 `deploy/kubedoor.conf` 里配置
-  `KUBEDOOR_EXTURL`（KubeDoor Web 的外部访问地址，如 `http://<节点IP>:<NodePort>`）后，链接指向
-  KubeDoor 屏蔽页并预填条件（`alertname`/`env`/`namespace`/`pod`）；未配置则退回原来的 Alertmanager
-  链接（`ALERTMANAGER_EXTURL`）。
+- **IM 通知里的【屏蔽】链接**：只有故障通知带，恢复通知不带。「系统管理 → 通用配置 · 访问地址」里有
+  「KubeDoor 访问地址」（KubeDoor Web 的外部访问地址，如 `http://<节点IP>:<NodePort>`；网页安装时自动填成
+  安装向导里的访问地址）时，链接指向 KubeDoor 屏蔽页并预填条件（`alertname`/`env`/`namespace`/`pod`）；
+  没有则退回同一组里「Alertmanager 外部地址」的 Alertmanager 页面链接。改了不用重启，最长 15 秒后生效。
 
 IM 通知示例：左边是故障通知，每条后面带【屏蔽】链接；右边是恢复通知，不带链接。
 
@@ -211,8 +211,12 @@ IM 通知示例：左边是故障通知，每条后面带【屏蔽】链接；�
 
 ## 7. 性能与可靠性
 
-- **规则缓存**：alarm 侧内存缓存有效规则，TTL 由 `SILENCE_CACHE_TTL` 控制（默认 15 秒）。
-  告警风暴时不会把库打爆。新建/解除规则最长 15 秒生效。
+- **规则缓存**：alarm 侧内存缓存有效规则，缓存秒数在「系统管理 → 通用配置 · 高级」的
+  「告警屏蔽规则缓存（秒）」里设置（默认 15 秒，改了不用重启）。告警风暴时不会把库打爆。
+  新建/解除规则最长这么多秒后生效。
+- **通用配置**：集群指标标签 key、KubeDoor / Alertmanager 访问地址和上面的缓存秒数，alarm 向 master 的
+  `/api/internal/settings` 取（缓存 15 秒）；master 暂时不可用时沿用上次取到的，一次都没取到时用旧环境变量
+  （`PROM_K8S_TAG_KEY` 等，升级清理前还在）或默认值。
 - **时间窗实时判断**：缓存的是「未解除且未过期」的规则集合，`starts_at`/`ends_at` 在每次
   匹配时按当前时间实时比较，所以缓存 TTL 只影响规则增删的生效延迟，不影响时间窗精度。
 - **命中计数批量回写**：命中次数先在内存累加，随缓存刷新批量 UPDATE，避免每条告警一次写库。

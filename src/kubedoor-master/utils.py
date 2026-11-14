@@ -1,5 +1,5 @@
-import os
 import sys
+import re
 import time
 import json
 import math
@@ -13,6 +13,7 @@ from loguru import logger
 from promql import query_dict, node_rank_query
 from jvm_config import CONFIG_FIELDS, JVM_FIELDS
 import db
+import general_settings
 from db import (
     pg_fetch,
     pg_fetchrow,
@@ -36,10 +37,9 @@ async def run_blocking(func, *args):
 
 
 # admis 查询缓存：key=(env, namespace, deployment, include_jvm) -> (result, expire_ts)
-# TTL 兜底，写表时主动失效
+# TTL 兜底(通用配置 admis_cache_ttl，写缓存时取)，写表时主动失效
 _admis_cache = {}
 _admis_cache_lock = threading.Lock()
-ADMIS_CACHE_TTL = int(os.environ.get('ADMIS_CACHE_TTL', '60'))
 
 
 def invalidate_admis_cache():
@@ -59,12 +59,31 @@ logger.add(
     level='INFO',
 )
 
-# 环境变量(消息通知的 IM 类型和机器人在「系统管理 → 消息通知」里配置,见 notify/)
-PROM_K8S_TAG_KEY = os.environ.get('PROM_K8S_TAG_KEY')
-# 告警去重时间窗口（秒），默认300秒
-ALERT_DEDUP_WINDOW = int(os.environ.get('ALERT_DEDUP_WINDOW', '300'))
-PROM_TYPE = os.environ.get('PROM_TYPE')
-PROM_URL = os.environ.get('PROM_URL')
+# 时序库配置在「系统管理 → 通用配置」(general_settings),每次用时再取,改了马上生效。
+# 不要在模块顶层取值(import 时拷贝一份,之后改了配置也不会变)
+def prom_type():
+    """时序库类型:Victoria-Metrics-Single / Victoria-Metrics-Cluster / Prometheus"""
+    return general_settings.value('prom_type')
+
+
+def prom_url():
+    """时序库查询地址,可能带账号密码(不要写进日志);没配置时是空串"""
+    return general_settings.value('prom_url')
+
+
+def tag_key():
+    """指标上区分集群的标签 key(永远非空,默认 origin_prometheus)"""
+    return general_settings.value('prom_k8s_tag_key')
+
+
+# 地址里的「账号:密码@」:requests / aiohttp 的报错原文会带上完整请求地址
+_URL_PASSWORD = re.compile(r"(?i)\b([a-z][a-z0-9+.-]*://[^/\s:@'\"]+):[^/\s@'\"]*@")
+
+
+def redact_credentials(text):
+    """把文字里地址的密码换成 ******。时序库报错要返回给页面或写日志时先过一遍,查询地址里可能带账号密码"""
+    return _URL_PASSWORD.sub(r'\1:******@', str(text))
+
 
 # 外部 HTTP 调用的超时(连接, 读取)秒。requests 默认不超时,对端不响应时线程会一直卡住
 PROM_TIMEOUT = (5, 120)
@@ -133,22 +152,12 @@ async def check_and_delete_day_data(date, env_value):
 
 
 def get_prom_url():
-    """按类型选择查询指标的方式"""
-    # url = f"{PROM_URL}/api/v1/query_range"
-    url = f"{PROM_URL}/api/v1/query"
-    # if PROM_TYPE == "Prometheus":
-    #     url = f"{PROM_URL}/api/v1/query_range"
-    # if PROM_TYPE == "Victoria-Metrics-Single":
-    #     url = f"{PROM_URL}/api/v1/query_range"
-    # if PROM_TYPE == "Victoria-Metrics-Cluster":
-    #     url = f"{PROM_URL}/select/0/prometheus/api/v1/query_range"
-    return url
+    """瞬时查询接口地址:查询地址后面直接拼 /api/v1/query(VictoriaMetrics 集群版的查询地址本身带 /select/<租户>/prometheus)"""
+    return f"{prom_url()}/api/v1/query"
 
 
 def fetch_prom_namespaces(env_value):
-    # 使用 max_over_time 来获取最近一小时的数据
-    # query = f'group by (namespace) (max_over_time(kube_namespace_created{{{PROM_K8S_TAG_KEY}="{env_value}"}}[1h]))'
-    query = f'group by (namespace) (kube_namespace_created{{{PROM_K8S_TAG_KEY}="{env_value}"}})'
+    query = f'group by (namespace) (kube_namespace_created{{{tag_key()}="{env_value}"}})'
     try:
         response = requests.get(get_prom_url(), params={'query': query}, timeout=PROM_TIMEOUT)
         response.raise_for_status()  # 检查请求是否成功
@@ -158,40 +167,6 @@ def fetch_prom_namespaces(env_value):
             labels = result['metric']
             namespaces.append(labels.get('namespace'))
         return namespaces
-    except requests.exceptions.RequestException as e:
-        raise Exception(f"Error fetching data from Prometheus: {e}")
-
-
-def fetch_prom_services(env_value, namespace):
-    """
-    获取指定环境和命名空间的service列表
-    """
-    query = f'group by(service)(kube_service_info{{{PROM_K8S_TAG_KEY}="{env_value}",namespace="{namespace}"}})'
-    try:
-        response = requests.get(get_prom_url(), params={'query': query}, timeout=PROM_TIMEOUT)
-        response.raise_for_status()  # 检查请求是否成功
-        data = response.json()
-        services = []
-        for result in data['data']['result']:
-            labels = result['metric']
-            services.append(labels.get('service'))
-        return services
-    except requests.exceptions.RequestException as e:
-        raise Exception(f"Error fetching data from Prometheus: {e}")
-
-
-def fetch_prom_envs():
-    # query = f'group by ({PROM_K8S_TAG_KEY}) (kube_state_metrics_build_info)'
-    query = f'group by ({PROM_K8S_TAG_KEY}) (kube_node_info)'
-    try:
-        response = requests.get(get_prom_url(), params={'query': query}, timeout=PROM_TIMEOUT)
-        response.raise_for_status()  # 检查请求是否成功
-        data = response.json()
-        envs = []
-        for result in data['data']['result']:
-            labels = result['metric']
-            envs.append(labels.get(PROM_K8S_TAG_KEY))
-        return envs
     except requests.exceptions.RequestException as e:
         raise Exception(f"Error fetching data from Prometheus: {e}")
 
@@ -207,14 +182,14 @@ def _nullable_jvm_pct(value):
     return number if math.isfinite(number) and number >= 0 else None
 
 
-def _append_optional_jvm_percent(metric, env_value, end_time_full, duration, workload_dict):
+def _append_optional_jvm_percent(metric, env_key, env_value, end_time_full, duration, workload_dict):
     """An optional JVM query cannot discard resource data or another JVM observation."""
     values = {}
     try:
         query = (
             query_dict[metric]
-            .replace("{env}", f'{PROM_K8S_TAG_KEY}="{env_value}",')
-            .replace("{env_key}", f"{PROM_K8S_TAG_KEY},")
+            .replace("{env}", f'{env_key}="{env_value}",')
+            .replace("{env_key}", f"{env_key},")
             .replace("{duration}", duration)
         )
         response = requests.request(
@@ -229,12 +204,12 @@ def _append_optional_jvm_percent(metric, env_value, end_time_full, duration, wor
         for series in payload['data']['result']:
             try:
                 labels = series['metric']
-                key = f"{labels[PROM_K8S_TAG_KEY]}@{labels['namespace']}@{labels['owner_name']}"
+                key = f"{labels[env_key]}@{labels['namespace']}@{labels['owner_name']}"
                 values[key] = _nullable_jvm_pct(series['value'][1])
             except (KeyError, IndexError, TypeError):
                 continue
     except (requests.exceptions.RequestException, ValueError, KeyError, TypeError) as exc:
-        logger.warning(f"{env_value}: 高峰{metric}采集失败，本指标本轮记为NULL: {exc}")
+        logger.warning(f"{env_value}: 高峰{metric}采集失败，本指标本轮记为NULL: {redact_credentials(exc)}")
         values = {}
     for key, row in workload_dict.items():
         row.append(values.get(key))
@@ -242,15 +217,15 @@ def _append_optional_jvm_percent(metric, env_value, end_time_full, duration, wor
 
 
 def get_prom_data(promql, env_key, env_value, end_time_full, duration, workload_dict={}):
-    """获取指标源数据"""
+    """获取指标源数据。env_key 是集群标签 key,由调用方每轮采集取一次,保证同一轮的各条查询一致"""
     if promql in ('heap_usage_percent', 'g1e_usage_percent'):
-        return _append_optional_jvm_percent(promql, env_value, end_time_full, duration, workload_dict)
+        return _append_optional_jvm_percent(promql, env_key, env_value, end_time_full, duration, workload_dict)
     url = get_prom_url()
-    k8s_filter = f'{PROM_K8S_TAG_KEY}="{env_value}",'
+    k8s_filter = f'{env_key}="{env_value}",'
     query = (
         query_dict.get(promql)
         .replace("{env}", k8s_filter)
-        .replace("{env_key}", f"{PROM_K8S_TAG_KEY},")
+        .replace("{env_key}", f"{env_key},")
         .replace("{duration}", duration)
     )
     querystring = {"query": query, "time": end_time_full.timestamp(), "step": "15"}
@@ -261,7 +236,7 @@ def get_prom_data(promql, env_key, env_value, end_time_full, duration, workload_
         if promql == "pod_num":
             workload_dict = {}
             for x in result:
-                k8s = x['metric'][PROM_K8S_TAG_KEY]
+                k8s = x['metric'][env_key]
                 ns = x['metric'].get('namespace')
                 dpm = x['metric'].get('workload')
                 replicaset = x['metric'].get('owner_name')
@@ -271,7 +246,7 @@ def get_prom_data(promql, env_key, env_value, end_time_full, duration, workload_
         else:
             workload_metrics_dict = {}
             for x in result:
-                k8s = x['metric'][PROM_K8S_TAG_KEY]
+                k8s = x['metric'][env_key]
                 ns = x['metric'].get('namespace')
                 replicaset = x['metric'].get('owner_name')
                 workload_metrics_dict[f'{k8s}@{ns}@{replicaset}'] = float(x['value'][1])
@@ -355,7 +330,7 @@ def get_node_deployments(node, env_value):
     logger.info(f"开始查询节点 {node} 上的所有deployment (env: {env_value})")
     deployment_list = []
     url = get_prom_url()
-    k8s_filter = f'{PROM_K8S_TAG_KEY}="{env_value}",'
+    k8s_filter = f'{tag_key()}="{env_value}",'
     query = (
         query_dict.get('deployments_by_node')
         .replace("{env}", k8s_filter)
@@ -517,9 +492,10 @@ async def get_deploy_admis_async(env, namespace, deployment, include_jvm=False):
                 logger.warning(content)
                 result = [404, content]
 
-        # 3) 正常结果写缓存（异常分支不缓存，见下方 except）
+        # 3) 正常结果写缓存（异常分支不缓存，见下方 except）；TTL 取通用配置，0 表示不缓存
+        ttl = general_settings.value('admis_cache_ttl')
         with _admis_cache_lock:
-            _admis_cache[cache_key] = (result, now + ADMIS_CACHE_TTL)
+            _admis_cache[cache_key] = (result, now + ttl)
         return result
     except Exception as e:
         # 全异常兜底：返回 2 元素让 agent 秒级失败，而非干等 30s 超时。异常不写缓存。
@@ -764,10 +740,11 @@ async def get_deployment_from_control_data(deployment_list, num, type, env):
 
 def _get_deployment_node_sync(promql, k8s, namespace, deployment):
     """同步查询节点信息"""
+    key = tag_key()
     query = (
         promql.get("promql")
-        .replace("{env_key}", f"{PROM_K8S_TAG_KEY},")
-        .replace("{env}", f'{PROM_K8S_TAG_KEY}="{k8s}",')
+        .replace("{env_key}", f"{key},")
+        .replace("{env}", f'{key}="{k8s}",')
         .replace("{namespace}", namespace)
         .replace("{deployment}", deployment)
     )
@@ -794,10 +771,11 @@ async def get_deployment_node(promql, k8s, namespace, deployment):
 
 def _get_deployment_image_sync(promql, k8s, namespace, deployment):
     """同步查询镜像信息"""
+    key = tag_key()
     query = (
         promql.get("promql")
-        .replace("{env_key}", f"{PROM_K8S_TAG_KEY},")
-        .replace("{env}", f'{PROM_K8S_TAG_KEY}="{k8s}",')
+        .replace("{env_key}", f"{key},")
+        .replace("{env}", f'{key}="{k8s}",')
         .replace("{namespace}", namespace)
         .replace("{deployment}", deployment)
     )
@@ -827,7 +805,7 @@ async def get_deployment_image(promql, k8s, namespace, deployment):
 
 def _get_node_res_rank_sync(env_value, res_type):
     """同步查询节点资源排名"""
-    query = node_rank_query.get(res_type).replace("{env}", f'{PROM_K8S_TAG_KEY}="{env_value}",')
+    query = node_rank_query.get(res_type).replace("{env}", f'{tag_key()}="{env_value}",')
     logger.info(f'查询节点{res_type}排名，环境: {env_value}')
     logger.info(query)
     response = requests.get(get_prom_url(), params={'query': query}, timeout=PROM_TIMEOUT)

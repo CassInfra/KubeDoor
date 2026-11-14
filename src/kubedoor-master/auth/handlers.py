@@ -1,17 +1,16 @@
 """登录、退出、当前用户、自助改密,以及给 nginx auth_request 用的身份校验接口。"""
 
 import json
-import os
 
 from aiohttp import web
+
+import general_settings
 
 from . import audit, passwords, permissions
 from .authn import AuthFailure, check_credentials
 from .context import client_ip
 from .ratelimit import limiter
 from .store import SESSION_COOKIE, hash_password, store, token_hash, verify_local
-
-_COOKIE_SECURE = os.environ.get('AUTH_COOKIE_SECURE', 'auto').strip().lower()
 
 # 由 auth.setup 注入:返回当前已知的集群名(库里登记过的 + 在线的)
 known_envs = None
@@ -25,9 +24,11 @@ def _fail(status, code, message, retry_after=0):
 
 
 def _secure(request):
-    if _COOKIE_SECURE in ('true', '1', 'yes'):
+    # Cookie Secure 取通用配置(auto / true / false),每次设置 Cookie 时取;auto 按这次请求是不是 HTTPS
+    mode = str(general_settings.value('auth_cookie_secure') or 'auto').strip().lower()
+    if mode in ('true', '1', 'yes'):
         return True
-    if _COOKIE_SECURE in ('false', '0', 'no'):
+    if mode in ('false', '0', 'no'):
         return False
     return request.secure or request.headers.get('X-Forwarded-Proto', '').lower() == 'https'
 

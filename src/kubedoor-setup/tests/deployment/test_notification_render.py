@@ -44,7 +44,8 @@ def legacy_render(tmp_path, extra=()):
 
 
 def check_notification_resources(docs, namespace, tag_key):
-    assert not set(LEGACY_KEYS) & set(docs["ConfigMap", "kubedoor-config"]["data"])
+    # 网页安装没有 kubedoor-config；旧脚本的只剩数据库连接
+    assert not set(LEGACY_KEYS) & set(docs.get(("ConfigMap", "kubedoor-config"), {"data": {}})["data"])
     source = docs["ConfigMap", "alertmanager-config"]["data"]["config.yml"]
     assert "__" not in source
     alertmanager = yaml.safe_load(source)
@@ -92,6 +93,8 @@ def test_legacy_render_keeps_alarm_webhook_and_has_no_notification_settings(tmp_
 
 @pytest.mark.parametrize("role", ["master", "agent"])
 def test_old_notification_settings_only_warn_and_are_not_rendered(tmp_path, role):
+    """控制端：旧值在 master 就绪后导入为消息通知的全局配置（控制台还没有配置时才导入，见 test_legacy_general_settings）；
+    Agent：不发通知，直接提示不再生效。两种都不渲染进资源。"""
     old = ('MSG_TYPE="dingding"', 'MSG_TOKEN="old-legacy-token-0123"', 'DEFAULT_AT="13800000000"')
     agent = ('K8S_NAME="demo-k8s"', 'MASTER_WS="ws://Up4biLko1dNh:agent-secret@kubedoor-master.kubedoor"',
              'REMOTE_WRITE_URL="http://metrics.example.invalid:8428/api/v1/write"')
@@ -100,7 +103,8 @@ def test_old_notification_settings_only_warn_and_are_not_rendered(tmp_path, role
     result = run_bash(fake_bin, 'exec bash "$@"', bash_path(ROOT / "tools/legacy-install/install.sh"),
                       "render", role, "-c", bash_path(config), "-o", bash_path(output))
     assert result.returncode == 0, result.stderr
-    assert "已不再生效" in result.stderr and "系统管理 → 消息通知" in result.stderr
+    assert "系统管理 → 消息通知" in result.stderr
+    assert ("只在控制台还没有消息通知配置时导入一次" if role == "master" else "已不再生效") in result.stderr
     rendered = "\n".join(path.read_text(encoding="utf-8") for path in output.glob("*.yaml"))
     for value in ("old-legacy-token-0123", "13800000000", *LEGACY_KEYS):
         assert value not in rendered

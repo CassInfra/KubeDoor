@@ -5,9 +5,11 @@ K8S事件处理器模块
 负责处理从kubedoor-agent接收到的K8S事件数据，并存储到 PostgreSQL
 """
 
+import threading
 from typing import Dict, Any, Optional
 from datetime import datetime, timezone, timedelta
 from loguru import logger
+from . import rules_store
 from .pg_event_client import get_pg_event_client
 from .event_alert_processor import EventAlertProcessor
 
@@ -214,23 +216,29 @@ class K8SEventProcessor:
             return False
 
 
-# 全局事件处理器实例
+# 全局事件处理器实例(rules_api.on_startup 时就建好;事件在线程池里并发处理,创建时加锁只建一个)
 _event_processor: Optional[K8SEventProcessor] = None
+_event_processor_lock = threading.Lock()
 
 
 def get_event_processor() -> K8SEventProcessor:
     """获取全局事件处理器实例"""
     global _event_processor
-    if _event_processor is None:
-        _event_processor = K8SEventProcessor()
-    return _event_processor
+    processor = _event_processor
+    if processor is None:
+        with _event_processor_lock:
+            if _event_processor is None:
+                _event_processor = K8SEventProcessor()
+            processor = _event_processor
+    return processor
 
 
-def reload_alert_rules() -> None:
-    """重新加载告警规则"""
-    processor = get_event_processor()
-    processor.alert_processor.reload_rules()
-    logger.info("告警规则已重新加载")
+async def reload_alert_rules() -> bool:
+    """马上从数据库重新加载告警规则(平时后台每 10 秒刷新一次,页面保存后立即生效,一般不用调用)"""
+    ok = await rules_store.refresh()
+    if ok:
+        logger.info("告警规则已重新加载")
+    return ok
 
 
 def get_alert_stats() -> Dict[str, Any]:

@@ -102,7 +102,7 @@ AI 通用工具(kubectl / istioctl / K8S API / Pod 内命令 / 诊断)怎么归�
    token 不对直接 401。nginx 会清掉外部请求带的这个头。这类调用不受「先改初始口令」限制:
    网页 AI 助手和 MCP 的入口已经在 `/api/auth/verify` 拦过,企微机器人用不到账号的口令;停用的账号照样拒绝。
 2. 会话 Cookie `kubedoor_session`:浏览器登录后的 HttpOnly + SameSite=Strict Cookie。库里只存 token 的
-   SHA-256;不勾「记住我」12 小时、空闲 4 小时过期,勾选 7 天(`AUTH_*`)。改密、禁用、重置口令、
+   SHA-256;不勾「记住我」12 小时、空闲 4 小时过期,勾选 7 天(在「系统管理 → 通用配置 · 登录与安全」修改,`general_settings` 的 `auth_*` 项)。改密、禁用、重置口令、
    删除账号会删掉对应会话。
 3. `Authorization: Basic`:只接受非浏览器客户端(没有 `Sec-Fetch-*` 头):agent、MCP 客户端、脚本。
    浏览器缓存的旧 basic auth 凭据一律忽略,避免被跨站请求利用。校验结果缓存 5 分钟,口令一改缓存失效。
@@ -173,12 +173,12 @@ AI 服务据此算出各集群的有效权限,再按「权限与审批」判断�
 ## 数据表(`db.sql`)
 
 `auth_users`、`auth_user_clusters`、`auth_sessions`、`auth_settings`(LDAP 配置,绑定口令用
-`AI_ENCRYPTION_KEY` 做 AES-GCM 加密;权限与审批 `permission_policy`)、`audit_logs`(登录、账号与权限变更、所有写操作和越权被拒,
-`RETENTION_AUDIT_DAYS` 天后清理)。旧库升级时 `db.sql` 用 DO 块给 `ck_auth_users_role` 加上 `cluster_admin`、
+`AI_ENCRYPTION_KEY` 做 AES-GCM 加密;权限与审批 `permission_policy`;通用配置 `general_settings` 等)、`audit_logs`(登录、账号与权限变更、所有写操作和越权被拒,
+通用配置「审计日志保留天数」天后清理)。旧库升级时 `db.sql` 用 DO 块给 `ck_auth_users_role` 加上 `cluster_admin`、
 给 `ck_auth_user_clusters_perm` 加上 `admin`(按约束定义判断,改过的不再改)。
 
 ## 运维
 
 - 忘记口令:`kubectl -n kubedoor exec -it deploy/kubedoor-master -- python3 -m auth.reset_password <用户名>`
 - agent 认证失败会在 master 日志里打 `[鉴权] 拒绝 agent 连接`(同一来源每分钟一条)。
-- 升级过渡期可以设 `AGENT_AUTH_REQUIRED=false` 临时允许不带口令的 agent 连接。
+- 升级过渡期可以在「系统管理 → 通用配置 · 登录与安全」关掉「Agent 连接必须带账号」,临时允许不带口令的 agent 连接(马上生效)。

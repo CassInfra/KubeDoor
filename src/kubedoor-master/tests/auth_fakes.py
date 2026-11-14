@@ -2,7 +2,7 @@
 
 import itertools
 import secrets
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 
 from auth import store as store_module
 from auth.principal import make_principal
@@ -108,7 +108,7 @@ class FakeStore(AuthStore):
     # ---- 会话 ----
     async def create_session(self, user_id, remember, ip, user_agent):
         token = secrets.token_urlsafe(32)
-        lifetime = timedelta(days=store_module.REMEMBER_DAYS) if remember else timedelta(hours=store_module.SESSION_HOURS)
+        lifetime = store_module.session_lifetime(remember)
         now = datetime.now(timezone.utc)
         self.sessions[token_hash(token)] = {
             'token_hash': token_hash(token), 'user_id': user_id, 'created_at': now, 'last_seen_at': now,

@@ -1,7 +1,9 @@
 """认证中间件 + 登录 / 改密 / 管理接口的端到端测试(内存用户库,不需要数据库)。"""
+import asyncio
 import base64
 import pathlib
 import sys
+from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock
 
 import pytest
@@ -547,3 +549,109 @@ async def test_permission_policy_admin_api(fake, monkeypatch):
     finally:
         await user_client.close()
         await client.close()
+
+
+# ---------------------------------------------------------------------------
+# 登录与安全(「系统管理 → 通用配置」):每次用时取,页面上改了不用重启 master
+# ---------------------------------------------------------------------------
+@pytest.fixture
+def settings(monkeypatch):
+    """覆盖通用配置的生效值;没覆盖的 key 用 general_settings 自己的值(快照没加载时是默认值)"""
+    import general_settings
+
+    values = {}
+    real = general_settings.value
+    monkeypatch.setattr(general_settings, 'value', lambda name: values[name] if name in values else real(name))
+    return values
+
+
+@pytest.mark.asyncio
+async def test_agent_auth_required_follows_general_settings(fake, settings):
+    client = await make_client(fake)
+    try:
+        settings['agent_auth_required'] = True
+        assert (await client.get('/ws', params={'env': 'prod'})).status == 401
+        # 升级过渡期在页面上关掉「Agent 连接必须带账号」:马上生效,不带账号的旧 agent 也能连
+        settings['agent_auth_required'] = False
+        anonymous = await client.get('/ws', params={'env': 'prod'})
+        assert anonymous.status == 200 and (await anonymous.json())['user'] == 'anonymous-agent'
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_cookie_secure_and_session_lifetime_follow_general_settings(fake, settings):
+    client = await make_client(fake)
+    try:
+        await add_user(fake, 'alice', 'read', 'Alice-pass-1')
+        settings.update(auth_cookie_secure='true', auth_remember_days=2)
+        response = await login(client, 'alice', 'Alice-pass-1', remember=True)
+        assert response.status == 200
+        cookie = response.cookies['kubedoor_session']
+        assert cookie['secure'] and cookie['max-age'] == str(2 * 86400)
+
+        settings.update(auth_cookie_secure='false', auth_session_hours=1.5)
+        response = await login(client, 'alice', 'Alice-pass-1')
+        cookie = response.cookies['kubedoor_session']
+        assert not cookie['secure'] and not cookie['max-age']  # 没勾「记住我」是会话 Cookie
+        lifetimes = {s['expires_at'] - s['created_at'] for s in fake.sessions.values()}
+        assert lifetimes == {timedelta(days=2), timedelta(hours=1.5)}
+
+        # auto:按这次请求是不是 HTTPS(经 nginx 时看 X-Forwarded-Proto)
+        settings['auth_cookie_secure'] = 'auto'
+        assert not (await login(client, 'alice', 'Alice-pass-1')).cookies['kubedoor_session']['secure']
+        https = await client.post('/api/auth/login', json={'username': 'alice', 'password': 'Alice-pass-1'},
+                                  headers={'X-Forwarded-Proto': 'https'})
+        assert https.status == 200 and https.cookies['kubedoor_session']['secure']
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_store_session_lifetime_and_idle_timeout_follow_general_settings(monkeypatch, settings):
+    from auth import store as store_module
+
+    monkeypatch.setattr(store_module.db, 'pg_execute', AsyncMock(return_value='DELETE 0'))
+    real_store = store_module.AuthStore()
+    settings.update(auth_session_hours=1.5, auth_remember_days=2)
+    assert (await real_store.create_session(1, False, '10.0.0.1', 'ua'))[1] == timedelta(hours=1.5)
+    assert (await real_store.create_session(1, True, '10.0.0.1', 'ua'))[1] == timedelta(days=2)
+
+    now = datetime.now(timezone.utc)
+    row = {'token_hash': 'h', 'user_id': 1, 'created_at': now - timedelta(hours=3),
+           'last_seen_at': now - timedelta(hours=2), 'expires_at': now + timedelta(hours=5), 'remember': False}
+    monkeypatch.setattr(store_module.db, 'pg_fetchrow', AsyncMock(return_value=row))
+    settings['auth_idle_hours'] = 3
+    assert await real_store.resolve_session('token') is not None
+    real_store._sessions.clear()
+    # 调小空闲超时:已有会话下一次校验就按新值失效
+    settings['auth_idle_hours'] = 1
+    assert await real_store.resolve_session('token') is None
+    # 不大于 0 表示不限
+    settings['auth_idle_hours'] = 0
+    assert await real_store.resolve_session('token') is not None
+    await asyncio.gather(*real_store._tasks)  # 等回写 last_seen_at 的后台任务做完,下面只看清理语句
+    await real_store.cleanup_sessions()
+    assert store_module.db.pg_execute.await_args.args[-1] == timedelta(days=36500)
+    settings['auth_idle_hours'] = 4
+    await real_store.cleanup_sessions()
+    assert store_module.db.pg_execute.await_args.args[-1] == timedelta(hours=4)
+
+
+def test_login_limiter_reads_general_settings_when_not_fixed(settings):
+    now = [1000.0]
+    limiter = LoginLimiter(clock=lambda: now[0])
+    settings.update(auth_login_max_failures=2, auth_lock_minutes=1)
+    limiter.failure('alice', '10.0.0.1')
+    assert limiter.retry_after('alice', '10.0.0.1') == 0
+    limiter.failure('alice', '10.0.0.1')
+    assert limiter.retry_after('alice', '10.0.0.1') == 61  # 锁 1 分钟
+    now[0] += 61
+    assert limiter.retry_after('alice', '10.0.0.1') == 0
+    # 改成 5 次:马上按新值,第 5 次失败才锁
+    settings['auth_login_max_failures'] = 5
+    for _ in range(4):
+        limiter.failure('bob', '10.0.0.2')
+    assert limiter.retry_after('bob', '10.0.0.2') == 0
+    limiter.failure('bob', '10.0.0.2')
+    assert limiter.retry_after('bob', '10.0.0.2') == 61

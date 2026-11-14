@@ -6,26 +6,26 @@
 只追加的大表按时间列保留固定天数,顺带清掉过期的登录会话。master 启动后先等一会儿,之后每 24 小时
 清理一轮。按批删除,每批之间稍作停顿,避免一次删太多行长时间占锁、超过语句超时。
 
-保留天数可用环境变量调整,设为 0 表示不清理该表:
-  RETENTION_EVENTS_DAYS     k8s_events          默认 90
-  RETENTION_ALERTS_DAYS     k8s_pod_alert_days  默认 365
-  RETENTION_RESOURCES_DAYS  k8s_resources       默认 365
-  RETENTION_AUDIT_DAYS      audit_logs          默认 180
+保留天数在「系统管理 → 通用配置 → 数据保留」设置(每一轮重新取,改了下一轮生效),0 表示不清理该表:
+  retention_events_days     k8s_events          默认 90
+  retention_alerts_days     k8s_pod_alert_days  默认 365
+  retention_resources_days  k8s_resources       默认 365
+  retention_audit_days      audit_logs          默认 180
 """
 
-import os
 import asyncio
 
 from loguru import logger
 
 import db
+import general_settings
 
-# (表名, 时间列, 保留天数)。表名和列名会直接拼进 SQL,只能写死在这里,不能来自外部输入
+# (表名, 时间列, 通用配置里保留天数的 key)。表名和列名会直接拼进 SQL,只能写死在这里,不能来自外部输入
 RETENTION_RULES = [
-    ('k8s_events', 'lasttimestamp', int(os.environ.get('RETENTION_EVENTS_DAYS', '90'))),
-    ('k8s_pod_alert_days', 'start_time', int(os.environ.get('RETENTION_ALERTS_DAYS', '365'))),
-    ('k8s_resources', 'date', int(os.environ.get('RETENTION_RESOURCES_DAYS', '365'))),
-    ('audit_logs', 'ts', int(os.environ.get('RETENTION_AUDIT_DAYS', '180'))),
+    ('k8s_events', 'lasttimestamp', 'retention_events_days'),
+    ('k8s_pod_alert_days', 'start_time', 'retention_alerts_days'),
+    ('k8s_resources', 'date', 'retention_resources_days'),
+    ('audit_logs', 'ts', 'retention_audit_days'),
 ]
 
 BATCH_SIZE = 5000
@@ -53,8 +53,9 @@ async def purge_table(table: str, ts_column: str, days: int, batch_size: int = B
 
 
 async def purge_expired() -> None:
-    """按 RETENTION_RULES 清理一轮。单张表失败只记日志,不影响其它表。"""
-    for table, ts_column, days in RETENTION_RULES:
+    """按 RETENTION_RULES 清理一轮。保留天数每一轮从通用配置重新取;单张表失败只记日志,不影响其它表。"""
+    for table, ts_column, setting in RETENTION_RULES:
+        days = general_settings.value(setting)
         if days <= 0:
             continue
         try:

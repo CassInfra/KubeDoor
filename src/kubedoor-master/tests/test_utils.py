@@ -31,6 +31,25 @@ def test_day_range_rejects_bad_date():
 
 
 # ---------------------------------------------------------------------------
+# redact_credentials:时序库报错原文带完整请求地址,返回页面 / 写日志前去掉密码
+# ---------------------------------------------------------------------------
+def test_redact_credentials_hides_password_in_urls():
+    text = ("401 Client Error: Unauthorized for url: http://monit:p%40ss@vm.example:8428/api/v1/query?query=up "
+            "and https://u:s3cret@other/x")
+    redacted = utils.redact_credentials(text)
+    assert 'p%40ss' not in redacted and 's3cret' not in redacted
+    assert 'http://monit:******@vm.example:8428/api/v1/query?query=up' in redacted
+    assert 'https://u:******@other/x' in redacted
+
+
+def test_redact_credentials_keeps_text_without_password():
+    for text in ('HTTPConnectionPool(host=\'vm\', port=8428): Max retries exceeded',
+                 'http://vm.example:8428/api/v1/query', 'http://only-user@vm/x', ''):
+        assert utils.redact_credentials(text) == text
+    assert utils.redact_credentials(ValueError('http://a:b@h/x')) == 'http://a:******@h/x'
+
+
+# ---------------------------------------------------------------------------
 # get_deploy_admis_async
 # ---------------------------------------------------------------------------
 class FakeFetch:
