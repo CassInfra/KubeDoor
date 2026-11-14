@@ -10,14 +10,12 @@ export type InstallStatus =
   | "interrupted"
   | "expired";
 
+/** 网页「安装 Agent」提交的参数；镜像仓库用控制端配置，集群别名装好后在 Agent 列表里编辑 */
 export interface AgentInstallOptions {
   env: string;
-  aliases: string[];
   namespace: string;
   master_url: string;
   mode: "full" | "agent";
-  image_repo: string;
-  image_pull_secret?: string;
   agent_tag: string;
   oss_url: string;
   ksm: "auto" | "install" | "reuse";

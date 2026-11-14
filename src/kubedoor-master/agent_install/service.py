@@ -533,7 +533,10 @@ class Service:
 
                     await self.wait_for(online, self.online_timeout, 'Agent 未连接控制端，请检查目标集群访问 KubeDoor 地址的网络、DNS和认证')
                     await self.step(task, index, 'success')
-                    await db.pg_execute('UPDATE k8s_agent_status SET aliases=$2 WHERE env=$1', task['env'], options.get('aliases', []))
+                    # 只有安装参数里带了别名才写（安装向导第 6 步可填）；网页「安装 Agent」不填别名，
+                    # 重装时保留在 Agent 列表里编辑过的别名
+                    if options.get('aliases'):
+                        await db.pg_execute('UPDATE k8s_agent_status SET aliases=$2 WHERE env=$1', task['env'], options['aliases'])
                     # 顺带配置该集群的 AI Kubeconfig（Agent 服务账号令牌）；失败只记结果，不影响安装
                     task['payload']['ai_connection'] = await self.configure_ai_connection(task, options, parsed, kube)
                     await self.repo.save(task)

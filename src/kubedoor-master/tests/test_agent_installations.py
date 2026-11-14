@@ -198,6 +198,28 @@ async def test_installs_new_namespace_then_resources_and_destroys_credentials(en
     assert address.startswith('wss://agent-') and address.endswith('@kubedoor.example.test')
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize('extra, written', [({}, None), ({'aliases': ['生产']}, ['生产'])])
+async def test_aliases_written_only_when_given_and_image_repo_from_master(environment, monkeypatch, extra, written):
+    """网页「安装 Agent」不提交别名、镜像仓库和镜像拉取 Secret：镜像仓库用控制端配置，重装不清掉 Agent 列表里编辑过的别名；
+    安装向导第 6 步填了别名才写"""
+    service, cluster, repo = environment
+    service.clients.clear()
+    monkeypatch.setenv('AGENT_INSTALL_DEFAULTS', json.dumps({'image_repo': 'registry.example.test/kd'}))
+    task = await service.inspect(CONFIG, 'admin')
+    page = {k: v for k, v in task['payload']['options'].items() if k not in ('aliases', 'image_repo', 'image_pull_secret')}
+    task = await service.preflight(task['id'], 'production', {**page, 'mode': 'agent', **extra})
+    assert task['status'] == 'ready', task['payload']['checks']
+    await service.start(task['id'], task['revision'])
+    await service.tasks[task['id']]
+    assert (await repo.get(task['id']))['status'] == 'succeeded'
+    agent = cluster.resources['Deployment', 'kubedoor-agent']['spec']['template']['spec']
+    assert agent['containers'][0]['image'].startswith('registry.example.test/kd/kubedoor-agent:')
+    assert 'imagePullSecrets' not in agent
+    updates = [call.args for call in module.db.pg_execute.await_args_list if 'aliases' in call.args[0]]
+    assert updates == ([('UPDATE k8s_agent_status SET aliases=$2 WHERE env=$1', 'production', written)] if written else [])
+
+
 class FakeAI:
     """假 kubedoor-ai：记下保存 AI Kubeconfig 的请求，按 status / reply 回复"""
 

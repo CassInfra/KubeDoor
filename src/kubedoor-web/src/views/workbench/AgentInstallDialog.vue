@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, h, onBeforeUnmount, reactive, ref, watch } from "vue";
-import { ElInputTag, ElMessageBox } from "element-plus";
+import { ElMessageBox } from "element-plus";
 import {
   agentInstallApi,
   type AgentInstallDefaults,
@@ -12,30 +12,18 @@ import { useUserStoreHook } from "@/store/modules/user";
 import {
   INSTALL_STATUS_TEXT,
   MAX_KUBECONFIG_BYTES,
+  emptyInstallOptions,
   installError,
   installFingerprint,
   installValidation,
+  pickInstallOptions,
   recoverableInstall,
   suggestedClusterName
 } from "./install-utils";
 
 const visible = defineModel<boolean>({ default: false });
 const emit = defineEmits<{ changed: [] }>();
-const emptyOptions = (): AgentInstallOptions => ({
-  env: "",
-  aliases: [],
-  namespace: "kubedoor",
-  master_url: "",
-  mode: "full",
-  image_repo: "",
-  image_pull_secret: "",
-  agent_tag: "",
-  oss_url: "",
-  ksm: "auto",
-  node_exporter: "auto",
-  remote_write_url: ""
-});
-const options = reactive<AgentInstallOptions>(emptyOptions());
+const options = reactive<AgentInstallOptions>(emptyInstallOptions());
 const defaults = ref<AgentInstallDefaults>();
 const task = ref<AgentInstallTask>();
 const recentTasks = ref<AgentInstallTask[]>([]);
@@ -116,8 +104,7 @@ function applyTask(next: AgentInstallTask) {
       ));
   task.value = next;
   selectedContext.value = next.context || "";
-  Object.assign(options, emptyOptions(), next.options);
-  options.aliases = [...(next.options?.aliases || [])];
+  Object.assign(options, pickInstallOptions(next.options));
   checkedFingerprint.value =
     next.status === "ready"
       ? installFingerprint(selectedContext.value, options)
@@ -195,10 +182,8 @@ function newInstall() {
   error.value = "";
   stage.value = 0;
   advanced.value = [];
-  const { metrics_available: metricsAvailable, ...configured } =
-    defaults.value || ({} as AgentInstallDefaults);
-  Object.assign(options, emptyOptions(), configured);
-  if (metricsAvailable === false) options.mode = "agent";
+  Object.assign(options, pickInstallOptions(defaults.value));
+  if (defaults.value?.metrics_available === false) options.mode = "agent";
   remember();
 }
 
@@ -314,7 +299,7 @@ async function preflight(force = false) {
     const next = await agentInstallApi.preflight(
       task.value.id,
       selectedContext.value,
-      { ...options, aliases: [...(options.aliases || [])] },
+      { ...options },
       // 只认确认框传来的 true：按钮的点击事件等其他值都不算强制覆盖
       force === true
     );
@@ -493,13 +478,6 @@ onBeforeUnmount(() => {
                 用于区分集群及指标，安装后请保持一致。
               </div>
             </el-form-item>
-            <el-form-item label="集群别名（可选）">
-              <ElInputTag
-                v-model="options.aliases"
-                placeholder="输入别名后按回车"
-                :max="20"
-              />
-            </el-form-item>
           </div>
           <el-form-item label="安装方式">
             <el-radio-group v-model="options.mode">
@@ -545,21 +523,6 @@ onBeforeUnmount(() => {
                   />
                 </el-form-item>
               </div>
-              <el-form-item label="镜像仓库">
-                <el-input
-                  v-model="options.image_repo"
-                  placeholder="使用系统配置"
-                />
-              </el-form-item>
-              <el-form-item label="镜像拉取 Secret（可选）">
-                <el-input
-                  v-model="options.image_pull_secret"
-                  placeholder="目标命名空间中已有的 Secret 名称"
-                />
-                <div class="field-hint">
-                  私有镜像仓库可使用已有 Secret，安装前会检查它是否存在。
-                </div>
-              </el-form-item>
               <el-form-item label="对象存储上传地址（可选）">
                 <el-input
                   v-model="options.oss_url"

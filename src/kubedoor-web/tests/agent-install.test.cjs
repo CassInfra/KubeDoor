@@ -35,11 +35,9 @@ function compile(filename, overrides = {}, vue = false) {
 const utils = compile("../src/views/workbench/install-utils.ts");
 const options = (extra = {}) => ({
   env: "production",
-  aliases: [],
   namespace: "kubedoor",
   master_url: "https://kubedoor.example.com",
   mode: "agent",
-  image_repo: "registry.example.com/kubedoor",
   agent_tag: "2.3.0",
   oss_url: "",
   ksm: "auto",
@@ -47,13 +45,21 @@ const options = (extra = {}) => ({
   remote_write_url: "",
   ...extra
 });
+// 服务端返回的安装参数还带着对话框里没有的集群别名、镜像仓库、镜像拉取 Secret
+const served = (extra = {}) =>
+  options({
+    aliases: ["生产"],
+    image_repo: "registry.example.com/kubedoor",
+    image_pull_secret: "pull-key",
+    ...extra
+  });
 const task = (extra = {}) => ({
   id: "installation-1",
   status: "draft",
   revision: 1,
   context: "production",
   contexts: [{ name: "production", server: "https://k8s.example.com" }],
-  options: options(),
+  options: served(),
   ...extra
 });
 
@@ -79,7 +85,7 @@ async function harness(t, overrides = {}, elementPlus = {}) {
   };
   const calls = { start: 0, inspect: 0 };
   const api = {
-    defaults: async () => ({ ...options(), metrics_available: true }),
+    defaults: async () => ({ ...served(), metrics_available: true }),
     list: async () => [],
     inspect: async () => task(),
     preflight: async (id, context, selected) =>
@@ -104,7 +110,7 @@ async function harness(t, overrides = {}, elementPlus = {}) {
         useUserStoreHook: () => ({ username: "alice" })
       },
       "./install-utils": utils,
-      "element-plus": { ElInputTag: {}, ...elementPlus }
+      "element-plus": { ...elementPlus }
     },
     true
   ).default;
@@ -136,12 +142,9 @@ test("每个安装参数和 context 的变更都会使已检测的计划失效",
   const before = utils.installFingerprint("production", options());
   for (const [key, value] of Object.entries({
     env: "other",
-    aliases: ["prod"],
     namespace: "other",
     master_url: "https://other.example.com",
     mode: "full",
-    image_repo: "other/repo",
-    image_pull_secret: "registry-key",
     agent_tag: "new",
     oss_url: "https://objects.example.com",
     ksm: "reuse",
@@ -154,6 +157,24 @@ test("每个安装参数和 context 的变更都会使已检测的计划失效",
       key
     );
   assert.notEqual(before, utils.installFingerprint("staging", options()));
+});
+
+test("对话框不提交集群别名、镜像仓库和镜像拉取 Secret，服务端返回的这几项也不带回去", async t => {
+  const sent = [];
+  const { vm } = await harness(t, {
+    list: async () => [task()],
+    preflight: async (id, context, selected) => {
+      sent.push(selected);
+      return task({ id, context, status: "ready", revision: 2 });
+    }
+  });
+  assert.deepEqual({ ...vm.options }, options());
+  await vm.preflight();
+  assert.deepEqual(sent, [options()]);
+  // 任务原样带回这几项也不影响「参数没改过」的判断
+  assert.equal(vm.canInstall, true);
+  vm.newInstall();
+  assert.deepEqual({ ...vm.options }, options());
 });
 
 test("检查地址和命名空间，不能将带口令的 master URL 当作普通连接地址", () => {

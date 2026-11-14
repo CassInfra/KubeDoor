@@ -24,6 +24,38 @@ export function suggestedClusterName(context: string): string {
     .slice(0, 64);
 }
 
+/**
+ * 安装对话框能修改的参数及默认值。集群别名、镜像仓库、镜像拉取 Secret 不在对话框里：
+ * 别名装好后在 Agent 列表里编辑，镜像仓库用控制端的配置。
+ */
+export function emptyInstallOptions(): AgentInstallOptions {
+  return {
+    env: "",
+    namespace: "kubedoor",
+    master_url: "",
+    mode: "full",
+    agent_tag: "",
+    oss_url: "",
+    ksm: "auto",
+    node_exporter: "auto",
+    remote_write_url: ""
+  };
+}
+
+/** 从安装任务或默认值里只取对话框能修改的参数：服务端返回的其他参数（别名、镜像仓库等）不再提交回去 */
+export function pickInstallOptions(
+  source?: Partial<AgentInstallOptions> | null
+): AgentInstallOptions {
+  const result = emptyInstallOptions();
+  // 与 result 是同一个对象，用宽松的值类型逐项覆盖
+  const target: Partial<Record<keyof AgentInstallOptions, unknown>> = result;
+  for (const key of Object.keys(result) as Array<keyof AgentInstallOptions>) {
+    const value = source?.[key];
+    if (value !== undefined && value !== null) target[key] = value;
+  }
+  return result;
+}
+
 export function installFingerprint(
   context: string,
   options: AgentInstallOptions
@@ -32,12 +64,9 @@ export function installFingerprint(
   return JSON.stringify([
     context,
     options.env,
-    options.aliases || [],
     options.namespace,
     options.master_url,
     options.mode,
-    options.image_repo,
-    options.image_pull_secret || "",
     options.agent_tag,
     options.oss_url,
     options.ksm,
