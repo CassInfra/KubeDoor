@@ -31,9 +31,12 @@ import {
   typeHint
 } from "@/views/system/notification/notification-utils";
 import {
+  COLLECTOR_CHOICES,
   GENERAL_SETTINGS_URL,
   INSTALL_STATUS_TEXT,
   MAX_KUBECONFIG_BYTES,
+  clusterLabelPair,
+  collectorPreset,
   emptyInstallOptions,
   installError,
   installFingerprint,
@@ -58,7 +61,8 @@ const working = ref(false);
 const loading = ref(false);
 const reloading = ref(false);
 const error = ref("");
-const advanced = ref<string[]>([]);
+/** 展开的折叠项：只有「消息通知（可选）」 */
+const expanded = ref<string[]>([]);
 const fileInput = ref<HTMLInputElement>();
 const checkedFingerprint = ref("");
 const targetFixed = ref(false);
@@ -80,9 +84,18 @@ const locked = computed(() => working.value || loading.value);
 const isRunning = computed(() => task.value?.status === "running");
 /** 正在使用的通用配置（地址已脱敏） */
 const settings = computed(() => defaults.value?.settings);
-/** 通用配置里有远程写地址才能完整接入 */
+/** 通用配置里有远程写地址才能安装 vmagent */
 const metricsAvailable = computed(() => !!defaults.value?.metrics_available);
 const missing = computed(() => missingSettings(settings.value));
+/** external_labels 里要有的键值对，例如 origin_prometheus: prod-k8s */
+const labelPair = computed(() =>
+  clusterLabelPair(settings.value?.prom_k8s_tag_key, options.env)
+);
+const collectorHint = computed(() =>
+  options.vmagent === "install"
+    ? "自动检测：集群里已有就复用，没有就安装。vmagent 把指标写入通用配置里的远程写地址，装好后验证能采到指标；它要抓取的 kube-state-metrics、node-exporter 选了不安装时，集群里要已有。"
+    : "不安装 vmagent 时用已有的 Prometheus / vmagent 采集，检测时会查时序库里有没有这个集群的指标；这里安装的 kube-state-metrics、node-exporter 要由已有的采集去抓取。"
+);
 /** 这个集群在消息通知里已有的单独配置 */
 const existingChannel = computed(() => {
   const env = options.env.trim();
@@ -177,8 +190,15 @@ function notificationInput(): NotifyChannelInput | null {
 }
 
 function openSection(name: string) {
-  if (!advanced.value.includes(name))
-    advanced.value = [...advanced.value, name];
+  if (!expanded.value.includes(name))
+    expanded.value = [...expanded.value, name];
+}
+
+/** 切换安装方式：三个采集组件换成这种方式的默认值（之后每个还能单独改） */
+function changeMode(value: unknown) {
+  const mode = value === "agent" ? "agent" : "full";
+  options.mode = mode;
+  Object.assign(options, collectorPreset(mode));
 }
 
 function remember(id?: string) {
@@ -282,9 +302,9 @@ function newInstall() {
   targetFixed.value = false;
   error.value = "";
   stage.value = 0;
-  advanced.value = [];
+  expanded.value = [];
   Object.assign(options, pickInstallOptions(defaults.value));
-  if (defaults.value?.metrics_available === false) options.mode = "agent";
+  if (defaults.value?.metrics_available === false) changeMode("agent");
   applyNotification(null);
   notify.type = notifySettings.value?.default?.type ?? notify.type;
   remember();
@@ -312,8 +332,12 @@ async function reloadDefaults() {
     error.value = "";
     if (!options.master_url && next.master_url)
       options.master_url = next.master_url;
-    if (!next.metrics_available && options.mode === "full")
-      options.mode = "agent";
+    // 远程写地址又没了：不能再装 vmagent，退回仅安装 kubedoor-agent
+    if (
+      !next.metrics_available &&
+      (options.mode === "full" || options.vmagent === "install")
+    )
+      changeMode("agent");
   } catch (reason) {
     if (generation === current) error.value = installError(reason);
   } finally {
@@ -457,7 +481,6 @@ async function preflight(force = false) {
   const invalid = installValidation(options);
   if (invalid) {
     error.value = invalid;
-    if (!options.master_url.trim()) openSection("advanced");
     return;
   }
   let notification: NotifyChannelInput | null;
@@ -643,36 +666,70 @@ onBeforeUnmount(() => {
           class="section-space"
         />
         <el-form :model="options" label-position="top" :disabled="locked">
-          <div class="field-grid">
-            <el-form-item label="集群唯一标识" required>
-              <el-input
-                v-model="options.env"
-                :disabled="targetFixed"
-                placeholder="例如 production-k8s"
-                maxlength="64"
-              />
-              <div class="field-hint">
-                用于区分集群及指标，安装后请保持一致。
-              </div>
-            </el-form-item>
-          </div>
-          <el-form-item label="安装方式">
-            <el-radio-group v-model="options.mode">
-              <el-radio value="full" :disabled="!metricsAvailable"
-                >完整接入</el-radio
-              >
-              <el-radio value="agent">仅安装 Agent</el-radio>
-            </el-radio-group>
+          <el-form-item label="集群唯一标识" required>
+            <el-input
+              v-model="options.env"
+              class="env-input"
+              :disabled="targetFixed"
+              placeholder="例如 production-k8s"
+              maxlength="64"
+            />
             <div class="field-hint">
-              {{
-                !metricsAvailable
-                  ? "通用配置里还没有远程写地址，vmagent 不知道往哪里写指标，暂时只能仅安装 Agent；填好后点下面的「重新读取」。"
-                  : options.mode === "full"
-                    ? "安装 Agent 与指标采集，检测并复用兼容的已有采集组件；vmagent 直接写入通用配置里的远程写地址。"
-                    : "使用已有监控采集，现有指标仍需具有对应的集群标签。"
-              }}
+              用来区分各集群的指标，安装后请保持不变。会作为 vmagent 配置里
+              external_labels 的值：<code class="label-pair">{{
+                labelPair
+              }}</code
+              >（key 是通用配置的集群指标标签 key）；使用已有的 Prometheus /
+              vmagent 时，它们配置的 external_labels 下也要有这个键值对。
             </div>
           </el-form-item>
+          <el-form-item label="安装方式">
+            <el-radio-group v-model="options.mode" @change="changeMode">
+              <el-radio value="full" :disabled="!metricsAvailable"
+                >完整安装</el-radio
+              >
+              <el-radio value="agent">仅安装 kubedoor-agent</el-radio>
+            </el-radio-group>
+            <div v-if="!metricsAvailable" class="field-hint">
+              通用配置里还没有远程写地址，vmagent
+              不知道往哪里写指标，暂时不能安装
+              vmagent；填好后点下面的「重新读取」。
+            </div>
+          </el-form-item>
+          <div class="collector-grid">
+            <el-form-item label="kube-state-metrics">
+              <el-select v-model="options.ksm">
+                <el-option
+                  v-for="item in COLLECTOR_CHOICES.component"
+                  :key="item.value"
+                  :label="item.label"
+                  :value="item.value"
+                />
+              </el-select>
+            </el-form-item>
+            <el-form-item label="node-exporter">
+              <el-select v-model="options.node_exporter">
+                <el-option
+                  v-for="item in COLLECTOR_CHOICES.component"
+                  :key="item.value"
+                  :label="item.label"
+                  :value="item.value"
+                />
+              </el-select>
+            </el-form-item>
+            <el-form-item label="vmagent">
+              <el-select v-model="options.vmagent">
+                <el-option
+                  v-for="item in COLLECTOR_CHOICES.vmagent"
+                  :key="item.value"
+                  :label="item.label"
+                  :value="item.value"
+                  :disabled="item.value === 'install' && !metricsAvailable"
+                />
+              </el-select>
+            </el-form-item>
+          </div>
+          <div class="field-hint collector-hint">{{ collectorHint }}</div>
           <div class="settings-panel">
             <div class="settings-head">
               <span class="settings-title">正在使用的通用配置</span>
@@ -715,49 +772,31 @@ onBeforeUnmount(() => {
               里，控制端每次请求时带过去，改了马上生效。
             </div>
           </div>
-          <el-collapse v-model="advanced" class="advanced-options">
-            <el-collapse-item name="advanced" title="高级设置">
-              <el-form-item label="目标集群可访问的 KubeDoor 地址" required>
-                <el-input
-                  v-model="options.master_url"
-                  placeholder="https://kubedoor.example.com"
-                />
-                <div class="field-hint">
-                  Agent 通过这个地址连接控制端。请勿填写本机端口转发地址。
-                </div>
-              </el-form-item>
-              <div class="field-grid">
-                <el-form-item label="命名空间">
-                  <el-input
-                    v-model="options.namespace"
-                    :disabled="targetFixed"
-                  />
-                </el-form-item>
-                <el-form-item label="Agent 镜像版本">
-                  <el-input
-                    v-model="options.agent_tag"
-                    placeholder="使用推荐版本"
-                  />
-                </el-form-item>
-              </div>
-              <div v-if="options.mode === 'full'" class="field-grid">
-                <el-form-item label="kube-state-metrics">
-                  <el-select v-model="options.ksm">
-                    <el-option label="自动检测" value="auto" />
-                    <el-option label="安装" value="install" />
-                    <el-option label="复用已有" value="reuse" />
-                  </el-select>
-                </el-form-item>
-                <el-form-item label="node-exporter">
-                  <el-select v-model="options.node_exporter">
-                    <el-option label="自动检测" value="auto" />
-                    <el-option label="安装" value="install" />
-                    <el-option label="复用已有" value="reuse" />
-                  </el-select>
-                </el-form-item>
-              </div>
-            </el-collapse-item>
-            <el-collapse-item name="notify" title="消息通知（可选）">
+          <el-form-item label="目标集群可访问的 KubeDoor 地址" required>
+            <el-input
+              v-model="options.master_url"
+              placeholder="https://kubedoor.example.com"
+            />
+            <div class="field-hint">
+              Agent 通过这个地址连接控制端。请勿填写本机端口转发地址。
+            </div>
+          </el-form-item>
+          <div class="field-grid">
+            <el-form-item label="命名空间">
+              <el-input v-model="options.namespace" :disabled="targetFixed" />
+            </el-form-item>
+            <el-form-item label="Agent 镜像版本">
+              <el-input
+                v-model="options.agent_tag"
+                placeholder="使用推荐版本"
+              />
+            </el-form-item>
+          </div>
+          <el-collapse v-model="expanded" class="notify-section">
+            <el-collapse-item name="notify">
+              <template #title>
+                <span class="notify-title">消息通知（可选）</span>
+              </template>
               <el-alert
                 v-if="existingText"
                 :title="existingText"
@@ -1029,8 +1068,44 @@ onBeforeUnmount(() => {
   overflow-wrap: anywhere;
 }
 
-.advanced-options {
-  margin-top: 8px;
+.env-input {
+  width: min(100%, 360px);
+}
+
+/* external_labels 里要有的「集群指标标签 key: 集群唯一标识」 */
+.label-pair {
+  padding: 1px 6px;
+  font-family: var(--el-font-family-mono, Menlo, Consolas, monospace);
+  color: var(--el-color-primary);
+  white-space: nowrap;
+  background: var(--el-fill-color-light);
+  border-radius: 4px;
+}
+
+/* 三个采集组件一行 */
+.collector-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 0 16px;
+}
+
+.collector-grid .el-select {
+  width: 100%;
+}
+
+.collector-hint {
+  margin: -10px 0 14px;
+}
+
+.notify-section {
+  margin-top: 4px;
+}
+
+/* 消息通知（可选）：比折叠栏默认的 13px 大一号并加粗，像一节的标题 */
+.notify-title {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--el-text-color-primary);
 }
 
 /* 正在使用的通用配置：远程写地址、对象存储上传地址（脱敏）、镜像仓库 */
@@ -1139,7 +1214,8 @@ onBeforeUnmount(() => {
 }
 
 @media (width <= 640px) {
-  .field-grid {
+  .field-grid,
+  .collector-grid {
     grid-template-columns: minmax(0, 1fr);
   }
 

@@ -17,7 +17,7 @@ PG_DATABASE="kubedoor"
 PROM_URL=""                    # 必填，例如 http://monit:<口令>@<VM主机IP>:8428
 PROM_TYPE="Victoria-Metrics-Single" # 或 Prometheus / Victoria-Metrics-Cluster
 # 网页安装 Agent 时各集群 vmagent 默认直连的写入地址（带账号口令）；单机 VM 在上述地址后加 /api/v1/write。
-# 须能从各业务集群访问。使用已有采集链路、仅安装 Agent 时可留空；不能用查询地址代替完整写入地址。
+# 须能从各业务集群访问。使用已有采集链路、不安装 vmagent 时可留空；不能用查询地址代替完整写入地址。
 METRICS_WRITE_URL=""
 
 # 集群区分标签（重要）：这是指标标签的键名，KubeDoor 靠它查询各集群的监控数据。

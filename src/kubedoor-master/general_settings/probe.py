@@ -69,9 +69,11 @@ async def _query_one(session, base, headers):
         raise ProbeError('时序库查询验证失败：测试表达式 vector(1) 没有返回预期结果')
 
 
-async def _label_values(session, base, headers, tag_key):
-    """最近一天出现过的标签值（任何指标都算）；VictoriaMetrics 走索引，不扫描数据"""
+async def _label_values(session, base, headers, tag_key, match=None):
+    """最近一天出现过的标签值（任何指标都算；给了 match 只看匹配的序列）；VictoriaMetrics 走索引，不扫描数据"""
     params = {'start': str(int(time.time()) - 86400), 'limit': str(LABEL_VALUES_LIMIT)}
+    if match:
+        params['match[]'] = match
     data = await _api_data(session, f'{base}/api/v1/label/{tag_key}/values', params, headers)
     if not isinstance(data, list) or not all(isinstance(item, str) for item in data):
         raise ProbeError('时序库标签值接口返回的格式不正确，请检查查询地址')
@@ -116,3 +118,29 @@ async def check_metrics(url, tag_key, *, session_factory=aiohttp.ClientSession):
     except Exception as exc:
         return _failure(f'测试失败：{type(exc).__name__}')
     return label_message(tag_key, values)
+
+
+async def find_cluster(url, tag_key, env, *, session_factory=aiohttp.ClientSession):
+    """安装 Agent 时不装 vmagent（用已有的 Prometheus / vmagent 采集）：时序库最近一天有没有 <tag_key>="<env>" 的数据。
+
+    返回 (有没有, 最近一天出现过的 tag_key 标签值)，有的话第二项是空列表：先用 match[] 只查这个集群，
+    没有再查全部标签值（列出来方便核对拼写）。连不上、认证失败、返回格式不对抛 ProbeError（说明里不带地址）。
+    url 是带账号密码的查询地址；tag_key、env 已校验过（只有字母、数字、下划线和中划线）
+    """
+    try:
+        base, user, password = fields.url_credentials(url)
+        base = base.rstrip('/')
+        headers = basic_auth_header(user, password) if user else None
+        async with session_factory(timeout=aiohttp.ClientTimeout(total=TIMEOUT)) as session:
+            selector = '{' + tag_key + '=' + json.dumps(env) + '}'
+            if env in await _label_values(session, base, headers, tag_key, selector):
+                return True, []
+            return False, await _label_values(session, base, headers, tag_key)
+    except ProbeError:
+        raise
+    except (aiohttp.ClientSSLError, ssl.SSLError):
+        raise ProbeError('时序库 TLS 证书验证失败，请检查服务证书') from None
+    except (aiohttp.ClientError, asyncio.TimeoutError, OSError):
+        raise ProbeError(f'连接时序库失败或超时（{TIMEOUT} 秒），请检查地址和 master 到时序库的网络') from None
+    except (ValueError, TypeError, KeyError, IndexError):
+        raise ProbeError('时序库查询结果格式不正确') from None

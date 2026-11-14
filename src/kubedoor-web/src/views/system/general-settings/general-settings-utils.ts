@@ -199,7 +199,7 @@ export const FIELDS: Record<GeneralSettingKey, FieldMeta> = {
     wide: true,
     secret: true,
     placeholder: "例如 http://192.0.2.11:8428/api/v1/write",
-    hint: "以后网页安装 Agent 时，vmagent 把指标写到这里，要能从各 K8S 集群访问到；没有远程写地址时，安装 Agent 只能选「仅安装 Agent」。"
+    hint: "以后网页安装 Agent 时，vmagent 把指标写到这里，要能从各 K8S 集群访问到；没有远程写地址时，安装 Agent 不能安装 vmagent（只能选「仅安装 kubedoor-agent」）。"
   },
   prom_k8s_tag_key: {
     label: "集群指标标签 key",
@@ -251,7 +251,7 @@ export const FIELDS: Record<GeneralSettingKey, FieldMeta> = {
     rule: "image",
     input: "text",
     wide: true,
-    hint: "选「完整接入」时安装的 vmagent，填完整镜像地址（可带 tag）。"
+    hint: "安装 Agent 时选了安装 vmagent 用的镜像，填完整镜像地址（可带 tag）。"
   },
   image_kube_state_metrics: {
     label: "kube-state-metrics 镜像",

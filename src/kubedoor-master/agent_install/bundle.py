@@ -19,11 +19,15 @@ from urllib.parse import quote, unquote, urlsplit, urlunsplit
 import yaml
 
 
+# 采集组件：vmagent 是 install（安装）/ reuse（不安装，用已有的 Prometheus / vmagent 采集）；
+# kube-state-metrics、node-exporter 是 auto（自动检测：已有就复用，没有就安装）/ install / reuse（不安装，用集群里已有的）。
+# mode 是页面上的安装方式，只决定三个组件的默认值：full 完整安装（vmagent 安装，其余自动检测），
+# agent 仅安装 kubedoor-agent（三个都不装）。只传 mode 不传 vmagent（安装向导、本次改动前的安装任务）时按 mode 定三个组件
 BASE = {
     "namespace": "kubedoor", "master_url": "", "env": "", "aliases": [],
     "mode": "full", "image_repo": "swr.cn-south-1.myhuaweicloud.com/starsl.cn",
     "agent_tag": "2.6.0", "oss_url": "", "remote_write_url": "",
-    "ksm": "auto", "node_exporter": "auto", "image_pull_secret": "",
+    "vmagent": "install", "ksm": "auto", "node_exporter": "auto", "image_pull_secret": "",
     "prom_k8s_tag_key": "origin_prometheus",
     # 与 deploy/install.sh 的 IMAGE_VMAGENT 一致（网页安装用的就是它；不一致时安装向导会把它当成改过的值存进通用配置）
     "image_vmagent": "registry.cn-shenzhen.aliyuncs.com/starsl/vmagent",
@@ -37,7 +41,7 @@ WRITE_KEY = "metrics_write_url"
 # 页面（安装 Agent 对话框、安装向导第 6 步）能提交的参数；notification 是可选的通知配置（master 校验，见 service.py）。
 # 镜像仓库、对象存储地址、指标写入地址覆盖不在这里：网页安装用通用配置（镜像仓库经 defaults 传入，对象存储地址
 # 由 master 每次转发 /api/pod/* 时带给 Agent，不写进 Agent 的 Secret），旧脚本命令行从变量取（_from_vars）
-FIELDS = {"namespace", "master_url", "env", "aliases", "mode", "agent_tag", "ksm", "node_exporter",
+FIELDS = {"namespace", "master_url", "env", "aliases", "mode", "agent_tag", "vmagent", "ksm", "node_exporter",
           "image_pull_secret", "notification"}
 # 必须是字符串、去掉首尾空白的参数
 STRINGS = (FIELDS - {"aliases", "notification"}) | {"image_repo", "oss_url", "remote_write_url"}
@@ -50,7 +54,7 @@ FILES = ("00-namespace.yaml", "10-agent.yaml", "20-vmagent.yaml", "21-kube-state
 def defaults(settings: dict | None = None) -> dict:
     """网页安装的默认参数：BASE 加上 master 从通用配置取来的控制端设置（键见 SETTINGS，空值沿用 BASE）。
 
-    能否完整接入（metrics_available）按有没有远程写地址判断。不读环境变量：控制端的配置都在通用配置里。
+    能不能安装 vmagent（metrics_available）按有没有远程写地址判断。不读环境变量：控制端的配置都在通用配置里。
     """
     result = copy.deepcopy(BASE)
     result[WRITE_KEY] = ""
@@ -88,6 +92,8 @@ def normalize_options(raw: dict, default: dict | None = None) -> dict:
         raise ValueError("安装参数必须为对象")
     result = copy.deepcopy(default if default is not None else defaults())
     result.update({k: v for k, v in raw.items() if k in FIELDS})
+    if "mode" in raw and "vmagent" not in raw:
+        result["vmagent"] = ""  # 只给了安装方式：下面按安装方式定三个采集组件
     for key in STRINGS:
         if not isinstance(result.get(key, ""), str):
             raise ValueError(f"安装参数 {key} 必须为字符串")
@@ -107,6 +113,13 @@ def normalize_options(raw: dict, default: dict | None = None) -> dict:
         result["master_url"] = clean_url(result["master_url"], base=True)
     if result["mode"] not in ("full", "agent"):
         raise ValueError("安装方式必须为 full 或 agent")
+    if not result["vmagent"]:
+        # 安装向导、本次改动前的安装任务只有安装方式：完整安装装 vmagent，仅安装 kubedoor-agent 什么采集组件都不装
+        result["vmagent"] = "install" if result["mode"] == "full" else "reuse"
+        if result["mode"] == "agent":
+            result["ksm"] = result["node_exporter"] = "reuse"
+    if result["vmagent"] not in ("install", "reuse"):
+        raise ValueError("vmagent 必须为 install / reuse")
     for key in ("ksm", "node_exporter"):
         if result[key] not in ("auto", "install", "reuse"):
             raise ValueError(f"{key} 必须为 auto / install / reuse")
@@ -132,8 +145,13 @@ def normalize_options(raw: dict, default: dict | None = None) -> dict:
     return result
 
 
+def installs_vmagent(options: dict) -> bool:
+    """这次安装装不装 vmagent。本次改动前的安装任务没有 vmagent 这一项：按安装方式，完整安装才装"""
+    return (options.get("vmagent") or ("install" if options.get("mode") == "full" else "reuse")) == "install"
+
+
 def public_options(options: dict) -> dict:
-    """给页面看的安装参数：只有 FIELDS 和能否完整接入；通知配置只给 IM 类型、@ 人和是否填了机器人地址"""
+    """给页面看的安装参数：只有 FIELDS 和能不能安装 vmagent；通知配置只给 IM 类型、@ 人和是否填了机器人地址"""
     result = {k: copy.deepcopy(v) for k, v in options.items() if k in FIELDS}
     if "metrics_available" in options:
         result["metrics_available"] = bool(options["metrics_available"])
@@ -180,8 +198,9 @@ def render_agent(options: dict, *, username: str, password: str) -> list[dict]:
     # vmagent 直连时序库：旧脚本填了 REMOTE_WRITE_URL 就用它，网页安装用通用配置里的远程写地址（WRITE_KEY）。
     # 账号密码从地址里拆出来放进 Secret，不出现在 vmagent 的启动参数里
     rw = options["remote_write_url"] or options.get(WRITE_KEY, "")
-    if options["mode"] == "full" and not rw:
-        raise ValueError("没有时序库写入地址：完整接入请先在系统管理 → 通用配置填写远程写地址，或选择仅安装 Agent")
+    vmagent = options["vmagent"] == "install"
+    if vmagent and not rw:
+        raise ValueError("没有时序库写入地址：安装 vmagent 要先在系统管理 → 通用配置填写远程写地址，或选择不安装 vmagent")
     rp = urlsplit(rw)
     rw_user = unquote(rp.username or "")
     rw_pass = unquote(rp.password or "")
@@ -199,13 +218,14 @@ def render_agent(options: dict, *, username: str, password: str) -> list[dict]:
         if "'" in value or "\n" in value or "\r" in value:
             raise ValueError(f"安装模板变量 {key} 包含无效字符")
     selected = list(FILES[:2])
-    if options["mode"] == "full":
+    if vmagent:
         selected.append(FILES[2])
-        if options["ksm"] != "reuse":
-            selected.append(FILES[3])
-        if options["node_exporter"] != "reuse":
-            selected.append(FILES[4])
-    # 旧脚本允许独立启停三个采集组件；网页的「仅 Agent」仍然不安装采集组件。
+    # 三个采集组件各自决定装不装；自动检测（auto）在预检时已换成 install 或 reuse，没检测过的按安装处理
+    if options["ksm"] != "reuse":
+        selected.append(FILES[3])
+    if options["node_exporter"] != "reuse":
+        selected.append(FILES[4])
+    # 旧脚本按 ENABLE_* 变量启停三个采集组件
     if options.get("_legacy_components"):
         selected = list(FILES[:2]) + options["_legacy_components"]
     resources = [obj for filename in selected for obj in _load_file(filename, variables, options["ksm"] != "reuse")]
@@ -214,7 +234,7 @@ def render_agent(options: dict, *, username: str, password: str) -> list[dict]:
     secret_data = {"KUBEDOOR_MASTER": ws, "OSS_URL": options.get("oss_url", "")}
     secret = {"apiVersion": "v1", "kind": "Secret", "metadata": {"name": "kubedoor-agent-credentials", "namespace": options["namespace"]}, "type": "Opaque", "data": {k: base64.b64encode(v.encode()).decode() for k, v in secret_data.items()}}
     resources.insert(1, secret)
-    if options["mode"] == "full" and (rw_user or rw_pass or rp.query):
+    if vmagent and (rw_user or rw_pass or rp.query):
         metrics_data = {"password": base64.b64encode(rw_pass.encode()).decode()}
         if rp.query:
             metrics_data["url"] = base64.b64encode(rw_clean.encode()).decode()
@@ -263,6 +283,7 @@ def _from_vars(variables: dict) -> tuple[dict, str, str]:
     p = urlsplit(variables.get("MASTER_WS", ""))
     d["master_url"] = urlunsplit(("https" if p.scheme == "wss" else "http", p.netloc.rsplit("@", 1)[-1], "", "", ""))
     d["mode"] = "agent" if variables.get("ENABLE_VMAGENT", "true") != "true" else "full"
+    d["vmagent"] = "install" if d["mode"] == "full" else "reuse"
     d["ksm"] = "reuse" if variables.get("ENABLE_KUBE_STATE_METRICS", "true") != "true" else "install"
     d["node_exporter"] = "reuse" if variables.get("ENABLE_NODE_EXPORTER", "true") != "true" else "install"
     d["_legacy_components"] = [name for name, flag in zip(FILES[2:], ("ENABLE_VMAGENT", "ENABLE_KUBE_STATE_METRICS", "ENABLE_NODE_EXPORTER")) if variables.get(flag, "true") == "true"]

@@ -42,6 +42,7 @@ const options = (extra = {}) => ({
   master_url: "https://kubedoor.example.com",
   mode: "agent",
   agent_tag: "2.3.0",
+  vmagent: "reuse",
   ksm: "auto",
   node_exporter: "auto",
   ...extra
@@ -201,6 +202,7 @@ test("每个安装参数和 context 的变更都会使已检测的计划失效",
     master_url: "https://other.example.com",
     mode: "full",
     agent_tag: "new",
+    vmagent: "install",
     ksm: "reuse",
     node_exporter: "install"
   }))
@@ -240,6 +242,136 @@ test("对话框不提交别名、镜像仓库、镜像拉取 Secret 和地址，
   assert.equal(vm.canInstall, true);
   vm.newInstall();
   assert.deepEqual({ ...vm.options }, options());
+});
+
+test("安装方式只决定三个采集组件的默认值，以前没有 vmagent 的任务按安装方式推", () => {
+  assert.deepEqual(utils.collectorPreset("full"), {
+    vmagent: "install",
+    ksm: "auto",
+    node_exporter: "auto"
+  });
+  assert.deepEqual(utils.collectorPreset("agent"), {
+    vmagent: "reuse",
+    ksm: "reuse",
+    node_exporter: "reuse"
+  });
+  // 新建安装默认是完整安装
+  assert.deepEqual(
+    { ...utils.emptyInstallOptions(), env: "x" },
+    {
+      env: "x",
+      namespace: "kubedoor",
+      master_url: "",
+      mode: "full",
+      agent_tag: "",
+      vmagent: "install",
+      ksm: "auto",
+      node_exporter: "auto"
+    }
+  );
+  const pick = source => {
+    const { vmagent, ksm, node_exporter } = utils.pickInstallOptions(source);
+    return [vmagent, ksm, node_exporter];
+  };
+  // 以前的仅安装 Agent 什么采集组件都不装；以前的完整接入装 vmagent，另外两个保留检测出的结果
+  assert.deepEqual(
+    pick({ mode: "agent", ksm: "auto", node_exporter: "auto" }),
+    ["reuse", "reuse", "reuse"]
+  );
+  assert.deepEqual(
+    pick({ mode: "full", ksm: "install", node_exporter: "reuse" }),
+    ["install", "install", "reuse"]
+  );
+  // 新任务按保存的原样恢复：仅安装 kubedoor-agent 也可以单独装某个组件
+  assert.deepEqual(
+    pick({
+      mode: "agent",
+      vmagent: "reuse",
+      ksm: "reuse",
+      node_exporter: "install"
+    }),
+    ["reuse", "reuse", "install"]
+  );
+  assert.deepEqual(
+    utils.COLLECTOR_CHOICES.component.map(item => item.label),
+    ["自动检测", "安装", "不安装"]
+  );
+  assert.deepEqual(
+    utils.COLLECTOR_CHOICES.vmagent.map(item => item.value),
+    ["install", "reuse"]
+  );
+});
+
+test("集群唯一标识的说明里显示 external_labels 要有的实际键值对", async t => {
+  assert.equal(
+    utils.clusterLabelPair("cluster", " tx-flink-prod "),
+    "cluster: tx-flink-prod"
+  );
+  assert.equal(
+    utils.clusterLabelPair(undefined, ""),
+    "origin_prometheus: <集群唯一标识>"
+  );
+  const { vm } = await harness(t, {
+    defaults: async () => ({
+      ...served(),
+      metrics_available: true,
+      settings: settings({ prom_k8s_tag_key: "origin_prometheus" })
+    })
+  });
+  vm.options.env = "tx-flink-prod";
+  assert.equal(vm.labelPair, "origin_prometheus: tx-flink-prod");
+});
+
+test("切换安装方式时三个采集组件换成默认值，之后每个还能单独改并随检测提交", async t => {
+  const sent = [];
+  const { vm } = await harness(t, {
+    list: async () => [task()],
+    preflight: async (id, context, selected) => {
+      sent.push(selected);
+      return task({
+        id,
+        context,
+        options: selected,
+        status: "ready",
+        revision: 2
+      });
+    }
+  });
+  vm.changeMode("full");
+  assert.deepEqual(
+    [
+      vm.options.mode,
+      vm.options.vmagent,
+      vm.options.ksm,
+      vm.options.node_exporter
+    ],
+    ["full", "install", "auto", "auto"]
+  );
+  assert.match(vm.collectorHint, /^自动检测：集群里已有就复用/);
+  vm.changeMode("agent");
+  assert.deepEqual(
+    [
+      vm.options.mode,
+      vm.options.vmagent,
+      vm.options.ksm,
+      vm.options.node_exporter
+    ],
+    ["agent", "reuse", "reuse", "reuse"]
+  );
+  assert.match(
+    vm.collectorHint,
+    /^不安装 vmagent 时用已有的 Prometheus \/ vmagent 采集/
+  );
+  vm.options.node_exporter = "install";
+  await vm.preflight();
+  assert.deepEqual(
+    [sent[0].mode, sent[0].vmagent, sent[0].ksm, sent[0].node_exporter],
+    ["agent", "reuse", "reuse", "install"]
+  );
+  assert.equal(vm.canInstall, true);
+  // 改了任何一个组件都要重新检测
+  vm.options.vmagent = "install";
+  assert.equal(vm.canInstall, false);
 });
 
 test("检查地址和命名空间，不能将带口令的 master URL 当作普通连接地址", () => {
@@ -431,7 +563,7 @@ test("API 将后端业务错误显示为失败，并将预检 revision 用于安
   await assert.rejects(api.inspect("secret"), /权限不足/);
 });
 
-test("通用配置缺的项给出提醒，没有远程写地址时只能仅安装 Agent", () => {
+test("通用配置缺的项给出提醒，没有远程写地址时只能仅安装 kubedoor-agent", () => {
   assert.deepEqual(utils.missingSettings(settings()), [
     { key: "oss_url", label: "对象存储上传地址", required: false }
   ]);
@@ -452,7 +584,7 @@ test("通用配置缺的项给出提醒，没有远程写地址时只能仅安�
   assert.equal(utils.GENERAL_SETTINGS_URL, "#/system/general-settings");
 });
 
-test("没有远程写地址：完整接入不可选；去通用配置填写后「重新读取」，计划要重新检测", async t => {
+test("没有远程写地址：完整安装不可选；去通用配置填写后「重新读取」，计划要重新检测", async t => {
   let current = {
     ...served({ mode: "full" }),
     metrics_available: false,
@@ -481,7 +613,7 @@ test("没有远程写地址：完整接入不可选；去通用配置填写后�
   vm.task = task();
   await vm.preflight();
   assert.equal(vm.canInstall, true);
-  // 在通用配置填好远程写地址后重新读取：完整接入可选，已检测的计划失效
+  // 在通用配置填好远程写地址后重新读取：完整安装可选，已检测的计划失效
   current = { ...current, metrics_available: true, settings: settings() };
   await vm.reloadDefaults();
   assert.equal(vm.metricsAvailable, true);
@@ -490,8 +622,9 @@ test("没有远程写地址：完整接入不可选；去通用配置填写后�
     ["oss_url"]
   );
   assert.equal(vm.canInstall, false);
-  // 又被删掉了：正在选的完整接入退回仅安装 Agent
-  vm.options.mode = "full";
+  // 又被删掉了：正在选的完整安装退回仅安装 kubedoor-agent，vmagent 跟着不装
+  vm.changeMode("full");
+  assert.equal(vm.options.vmagent, "install");
   current = {
     ...current,
     metrics_available: false,
@@ -499,6 +632,10 @@ test("没有远程写地址：完整接入不可选；去通用配置填写后�
   };
   await vm.reloadDefaults();
   assert.equal(vm.options.mode, "agent");
+  assert.deepEqual(
+    [vm.options.vmagent, vm.options.ksm, vm.options.node_exporter],
+    ["reuse", "reuse", "reuse"]
+  );
 });
 
 test("通知配置：填了就随检测提交，机器人地址只在服务端，重新检测留空沿用", async t => {
@@ -534,7 +671,7 @@ test("通知配置：填了就随检测提交，机器人地址只在服务端�
   await vm.preflight();
   assert.equal(sent.length, 0);
   assert.equal(vm.error, "通知配置请填写机器人地址");
-  assert.ok(vm.advanced.includes("notify"));
+  assert.ok(vm.expanded.includes("notify"));
 
   vm.notify.token = ` ${WECOM_URL} `;
   await vm.preflight();
@@ -658,7 +795,7 @@ test("恢复带通知配置的任务：表单显示已填写，未改动时可�
     { ...vm.notify },
     { type: "slack", token: "", at: "U012AB3CD" }
   );
-  assert.ok(vm.advanced.includes("notify"));
+  assert.ok(vm.expanded.includes("notify"));
   assert.equal(vm.canInstall, true);
   vm.notify.at = "U999";
   assert.equal(vm.canInstall, false);

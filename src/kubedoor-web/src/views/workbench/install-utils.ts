@@ -39,9 +39,41 @@ export function emptyInstallOptions(): AgentInstallOptions {
     master_url: "",
     mode: "full",
     agent_tag: "",
-    ksm: "auto",
-    node_exporter: "auto"
+    ...collectorPreset("full")
   };
+}
+
+type Collectors = Pick<
+  AgentInstallOptions,
+  "vmagent" | "ksm" | "node_exporter"
+>;
+
+/** 安装方式对应的三个采集组件默认值：完整安装装 vmagent、另外两个自动检测；仅安装 kubedoor-agent 三个都不装 */
+export function collectorPreset(mode: AgentInstallOptions["mode"]): Collectors {
+  return mode === "full"
+    ? { vmagent: "install", ksm: "auto", node_exporter: "auto" }
+    : { vmagent: "reuse", ksm: "reuse", node_exporter: "reuse" };
+}
+
+/** 三个采集组件的选项；reuse 显示为「不安装」：装 vmagent 时它去抓集群里已有的，不装时由已有的采集去抓 */
+export const COLLECTOR_CHOICES = {
+  component: [
+    { value: "auto", label: "自动检测" },
+    { value: "install", label: "安装" },
+    { value: "reuse", label: "不安装" }
+  ],
+  vmagent: [
+    { value: "install", label: "安装" },
+    { value: "reuse", label: "不安装" }
+  ]
+} as const;
+
+/** 集群唯一标识在 external_labels 里的键值对（key 是通用配置的集群指标标签 key），例如 origin_prometheus: prod-k8s */
+export function clusterLabelPair(
+  tagKey: string | null | undefined,
+  env: string
+): string {
+  return `${tagKey?.trim() || "origin_prometheus"}: ${env.trim() || "<集群唯一标识>"}`;
 }
 
 /** 从安装任务或默认值里只取对话框能修改的参数：服务端返回的其他参数（别名、镜像仓库等）不再提交回去 */
@@ -54,6 +86,11 @@ export function pickInstallOptions(
   for (const key of Object.keys(result) as Array<keyof AgentInstallOptions>) {
     const value = source?.[key];
     if (value !== undefined && value !== null) target[key] = value;
+  }
+  // 以前的安装任务没有 vmagent 这一项：和服务端一样按安装方式推，仅安装 kubedoor-agent 什么采集组件都不装
+  if (source && !source.vmagent) {
+    result.vmagent = result.mode === "full" ? "install" : "reuse";
+    if (result.mode === "agent") result.ksm = result.node_exporter = "reuse";
   }
   return result;
 }
@@ -75,13 +112,14 @@ export function installFingerprint(
     options.master_url,
     options.mode,
     options.agent_tag,
+    options.vmagent,
     options.ksm,
     options.node_exporter,
     extra ?? null
   ]);
 }
 
-/** 安装要用、通用配置里还没有的项（中文名称与通用配置页一致）；required 为 true 的缺了不能完整接入 */
+/** 安装要用、通用配置里还没有的项（中文名称与通用配置页一致）；required 为 true 的缺了不能安装 vmagent */
 export function missingSettings(
   settings: AgentInstallSettings | null | undefined
 ): Array<{

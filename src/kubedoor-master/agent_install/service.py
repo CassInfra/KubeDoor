@@ -19,12 +19,13 @@ import general_settings
 from auth import audit
 from auth.crypto import decrypt_secret, encrypt_secret
 from auth.store import hash_password, store as auth_store, verify_local
+from general_settings import probe
 from kubedoor_tools.config import parse_kubeconfig
 from loguru import logger
 from notify import api as notify_api
 from notify import channels
 
-from .bundle import WRITE_KEY, defaults, normalize_options, public_options, render_agent
+from .bundle import WRITE_KEY, defaults, installs_vmagent, normalize_options, public_options, render_agent
 from .kubernetes import InstallError, Kubernetes
 from .repository import Repository
 
@@ -33,7 +34,7 @@ MANAGED = 'kubedoor.io/managed-by'
 MAX_CONFIG = 1024 * 1024
 STEP_NAMES = ['验证安装计划', '创建命名空间和凭据', '应用安装资源', '等待工作负载就绪', '等待 Agent 上线', '验证指标采集']
 METRICS_STEP = len(STEP_NAMES) - 1
-# 完整接入要验证的抓取任务：vmagent 自采集、对象状态、节点、容器，都要有 Agent 上线后的成功样本
+# 安装了 vmagent 时要验证的抓取任务：vmagent 自采集、对象状态、节点、容器，都要有 Agent 上线后的成功样本
 METRICS_JOBS = ('vmagent', 'kube-state-metrics', 'k8s-node-exporter', 'k8s-cadvisor')
 # 安装向导在本集群安装 Agent 时生成的 kubeconfig 的 context 名（kubedoor_setup.agent.CONTEXT）
 SETUP_CONTEXT = 'in-cluster'
@@ -44,7 +45,11 @@ AI_CONTEXT = 'kubedoor-agent'
 AI_URL = 'http://kubedoor-ai:8000'
 AI_MANUAL_HINT = 'AI 仍可经 Agent 执行，需要时可在 Agent 管理的「AI Kubeconfig」列手动上传'
 NOTIFY_MANUAL_HINT = '可以在系统管理 → 消息通知手动配置'
-NO_WRITE_URL = '通用配置里还没有时序库远程写地址，请在系统管理 → 通用配置填写，或选择仅安装 Agent'
+NO_WRITE_URL = '安装 vmagent 要用通用配置里的时序库远程写地址，现在还没有：请在系统管理 → 通用配置填写，或选择不安装 vmagent'
+COLLECTOR_CHECK = '采集组件'
+METRICS_LABEL_CHECK = '时序库里的集群指标'
+# 预检说明里列出的时序库已有集群名个数
+SHOWN_CLUSTERS = 5
 
 
 def utcnow():
@@ -72,6 +77,8 @@ def public_defaults():
         'oss_url': general_settings.masked(general_settings.value('oss_url')),
         'image_repo': general_settings.value('image_repo'),
         'kubedoor_exturl': general_settings.value('kubedoor_exturl'),
+        # 集群指标标签 key：对话框据此说明 external_labels 里要有的「key: 集群唯一标识」
+        'prom_k8s_tag_key': general_settings.value('prom_k8s_tag_key'),
     }
     return result
 
@@ -108,6 +115,45 @@ def check_notification(raw, previous=None):
 def conflict(kind, name, namespace, reason):
     """目标集群里已有、需要强制覆盖才能接管的资源"""
     return {'kind': kind, 'name': name, 'namespace': namespace or '', 'reason': reason}
+
+
+def collector_summary(options):
+    """预检「采集组件」的说明：自动检测已换成安装或复用之后，三个组件各自装不装"""
+    vmagent = installs_vmagent(options)
+
+    def state(key):
+        if options[key] == 'install':
+            return '安装'
+        return '复用集群里已有的' if vmagent else '不安装'
+
+    parts = [f'kube-state-metrics：{state("ksm")}', f'node-exporter：{state("node_exporter")}',
+             'vmagent：' + ('安装，写入通用配置里的远程写地址' if vmagent else '不安装，用已有的 Prometheus / vmagent 采集')]
+    return '；'.join(parts) + ('；抓取结果在安装后验证' if vmagent else '')
+
+
+async def metrics_label_check(options):
+    """不装 vmagent（用已有的 Prometheus / vmagent 采集）时的预检：时序库最近一天要有
+    <集群指标标签 key>="<集群唯一标识>" 的数据。没有或查不了都只提醒（warning），不挡安装：
+    Agent 本身不依赖指标，也可以装好后再去改已有的采集配置"""
+    key, env = options['prom_k8s_tag_key'], options['env']
+    url = general_settings.value('prom_url')
+    if not url:
+        return {'name': METRICS_LABEL_CHECK, 'status': 'warning',
+                'message': '通用配置里还没有时序库查询地址，没法检查已有的 Prometheus / vmagent 有没有写入这个集群的指标'}
+    try:
+        found, others = await probe.find_cluster(url, key, env)
+    except probe.ProbeError as exc:
+        return {'name': METRICS_LABEL_CHECK, 'status': 'warning', 'message': f'没能检查时序库里这个集群的指标：{exc}'}
+    if found:
+        return {'name': METRICS_LABEL_CHECK, 'status': 'success', 'message': f'时序库里已有 {key}="{env}" 的指标'}
+    fix = (f'已有的 Prometheus / vmagent 要在 external_labels 下配置 {key}: {env}，并把指标远程写入这个时序库，'
+           '否则这个集群的监控没有数据')
+    if not others:
+        return {'name': METRICS_LABEL_CHECK, 'status': 'warning', 'message': f'时序库最近一天没有带 {key} 标签的指标。{fix}'}
+    shown = '、'.join(''.join(ch for ch in value[:63] if ch.isprintable()) for value in others[:SHOWN_CLUSTERS])
+    more = f' 等 {len(others)} 个' if len(others) > SHOWN_CLUSTERS else ''
+    return {'name': METRICS_LABEL_CHECK, 'status': 'warning',
+            'message': f'时序库最近一天没有 {key}="{env}" 的指标（{key} 现有的值：{shown}{more}）。{fix}'}
 
 
 def merge_conflicts(*groups):
@@ -213,7 +259,7 @@ def normalize(raw, default):
 
 
 def render(options, **credential):
-    """渲染安装资源；参数问题（例如完整接入却没有指标写入地址）按安装错误返回给页面。"""
+    """渲染安装资源；参数问题（例如安装 vmagent 却没有远程写地址）按安装错误返回给页面。"""
     try:
         return render_agent(options, **credential)
     except ValueError as exc:
@@ -319,14 +365,16 @@ class Service:
                 raise InstallError('任务已开始安装，不能更换目标 context、集群标识或命名空间；请新建安装任务', 409)
             if not options.get('env') or not options.get('master_url'):
                 raise InstallError('请填写集群唯一标识和目标集群可访问的 KubeDoor 地址')
-            if options['mode'] == 'full' and not options.get(WRITE_KEY):
+            if installs_vmagent(options) and not options.get(WRITE_KEY):
                 raise InstallError(NO_WRITE_URL)
             # 机器人地址只放进加密的安装材料：页面只看到 IM 类型、@ 人和「已填写」，留空表示沿用上次检测填的
             options['notification'] = check_notification(options.get('notification'), previous.get('notification'))
             options['installation_id'] = task['id']
+            # 页面上显示用户选的（例如「自动检测」）；检测出的安装还是复用只进加密的计划，写在「采集组件」的说明里
+            requested = public_options(options)
             checks = []
             task['status'] = 'draft'
-            task['payload'].update(context=context, options=public_options(options), checks=checks, error='', takeover=[], force=False)
+            task['payload'].update(context=context, options=requested, checks=checks, error='', takeover=[], force=False)
             try:
                 parsed = await asyncio.to_thread(parse, material['kubeconfig'], context)
                 async with asyncio.timeout(100), self.kubernetes(parsed) as kube:
@@ -337,6 +385,8 @@ class Service:
                     task['env'], task['target_uid'] = options['env'], target_uid
                     existing = await self.check_identity(task, options, kube)
                     await self.components(options, kube, checks)
+                    if not installs_vmagent(options):
+                        checks.append(await metrics_label_check(options))
                     resources = render(options, username='preflight', password='preflight')
                     task['payload']['resources'] = [summary(item) for item in resources]
                     takeover = merge_conflicts(existing, await self.resource_conflicts(task, kube, resources))
@@ -359,7 +409,7 @@ class Service:
             material['options'] = options
             task['encrypted'] = seal(material)
             task['expires_at'] = utcnow() + timedelta(minutes=30)
-            task['payload']['options'] = public_options(options)
+            task['payload']['options'] = requested
             await self.repo.save(task)
             return task
 
@@ -390,15 +440,18 @@ class Service:
         return []
 
     async def components(self, options, kube, checks):
-        if options['mode'] == 'agent':
-            return
-        if options.get('ksm') in ('auto', 'reuse'):
+        """三个采集组件：自动检测换成安装或复用。装 vmagent 时，选了不安装（复用已有）的组件要确认集群里有，
+        不然 vmagent 采不到；不装 vmagent 时选了不安装就不检查（已有的采集自己去抓）"""
+        vmagent = installs_vmagent(options)
+        if options['ksm'] == 'auto' or (options['ksm'] == 'reuse' and vmagent):
             services = await kube.list('/api/v1/services', {'labelSelector': 'app.kubernetes.io/name=kube-state-metrics'})
             found = [s for s in services if any(p.get('port') == 8080 for p in s['spec'].get('ports', []))]
             if options['ksm'] == 'reuse' and not found:
-                raise InstallError('未找到监听 8080 且带兼容标签的 kube-state-metrics Service')
+                raise InstallError('选择了不安装 kube-state-metrics，但集群里没有可以复用的（监听 8080、带 '
+                                   'app.kubernetes.io/name=kube-state-metrics 标签的 Service），vmagent 采不到对象状态指标；'
+                                   '请改成自动检测或安装')
             options['ksm'] = 'reuse' if found else 'install'
-        if options.get('node_exporter') in ('auto', 'reuse'):
+        if options['node_exporter'] == 'auto' or (options['node_exporter'] == 'reuse' and vmagent):
             nodes = await kube.list('/api/v1/nodes')
             pods = await kube.list('/api/v1/pods', {'fieldSelector': 'status.phase=Running'})
             covered = {p['spec'].get('nodeName') for p in pods if p['spec'].get('hostNetwork') and any(
@@ -407,12 +460,12 @@ class Service:
                       if n['metadata'].get('labels', {}).get('kubernetes.io/os', 'linux') == 'linux'}
             existing = bool(needed and needed <= covered)
             if options['node_exporter'] == 'reuse' and not existing:
-                raise InstallError('未在所有目标节点检测到使用主机网络和 9100 端口的 node-exporter')
+                raise InstallError('选择了不安装 node-exporter，但没有在所有节点上找到使用主机网络和 9100 端口的 node-exporter，'
+                                   'vmagent 采不到节点指标；请改成自动检测或安装')
             if covered and not existing:
                 raise InstallError('部分节点已有 9100 采集器，自动安装可能冲突；请先统一节点采集配置')
             options['node_exporter'] = 'reuse' if existing else 'install'
-        checks.append({'name': '采集组件', 'status': 'success',
-                       'message': f'kube-state-metrics：{options["ksm"]}；node-exporter：{options["node_exporter"]}；抓取结果将在安装后验证'})
+        checks.append({'name': COLLECTOR_CHECK, 'status': 'success', 'message': collector_summary(options)})
 
     async def resource_conflicts(self, task, kube, resources):
         """目标集群里已有、但不属于这次安装的资源：没有确认强制覆盖时不能接管"""
@@ -601,7 +654,7 @@ class Service:
                     await self.repo.save(task)
                     task['payload']['metrics_started_at'] = time.time()
                     index = 5
-                    if options['mode'] == 'full':
+                    if installs_vmagent(options):
                         await self.step(task, index, 'running')
                         try:
                             await self.wait_for(lambda: self.metrics_received(task, options), self.metrics_timeout, '')
@@ -609,7 +662,7 @@ class Service:
                             raise InstallError(await self.metrics_diagnosis(task, options, kube)) from None
                         await self.step(task, index, 'success')
                     else:
-                        await self.step(task, index, 'skipped', '仅安装 Agent，使用既有监控采集')
+                        await self.step(task, index, 'skipped', '没有安装 vmagent，指标由已有的 Prometheus / vmagent 采集')
                     await self.finish_success(task)
         except asyncio.CancelledError:
             task['status'] = 'interrupted'

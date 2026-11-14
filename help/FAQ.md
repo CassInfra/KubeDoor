@@ -418,7 +418,7 @@ KubeDoor 自带的 vmagent 用 `role: node` 发现节点，直接按 HTTP 抓每
 # 控制端
 PROM_URL="http://<用户>:<密码>@<时序库地址>:<端口>"   # 读地址；VM 集群版填 vmselect 的 .../select/0/prometheus
 PROM_TYPE="Prometheus"                               # 或 Victoria-Metrics-Single / Victoria-Metrics-Cluster
-METRICS_WRITE_URL="<完整写入URL>"                     # 网页完整接入使用；已有完整采集链路时可留空
+METRICS_WRITE_URL="<完整写入URL>"                     # 网页安装 Agent 时安装的 vmagent 使用；已有完整采集链路时可留空
 ENABLE_VMALERT="false"                               # 告警规则也用自己的时
 
 # 集群端（已有完整采集时）

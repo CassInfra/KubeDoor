@@ -19,8 +19,12 @@ export interface AgentInstallOptions {
   env: string;
   namespace: string;
   master_url: string;
+  /** 安装方式：完整安装 / 仅安装 kubedoor-agent，只决定下面三个采集组件的默认值 */
   mode: "full" | "agent";
   agent_tag: string;
+  /** install 安装；reuse 不安装，用已有的 Prometheus / vmagent 采集 */
+  vmagent: "install" | "reuse";
+  /** auto 自动检测（集群里已有就复用，没有就安装）；install 安装；reuse 不安装 */
   ksm: "auto" | "install" | "reuse";
   node_exporter: "auto" | "install" | "reuse";
 }
@@ -43,10 +47,12 @@ export interface AgentInstallSettings {
   oss_url: string;
   image_repo: string;
   kubedoor_exturl: string;
+  /** 集群指标标签 key：external_labels 里要有「key: 集群唯一标识」 */
+  prom_k8s_tag_key?: string;
 }
 
 export interface AgentInstallDefaults extends Partial<AgentInstallOptions> {
-  /** 通用配置里有时序库远程写地址，可以完整接入 */
+  /** 通用配置里有时序库远程写地址，可以安装 vmagent */
   metrics_available: boolean;
   settings?: AgentInstallSettings;
 }

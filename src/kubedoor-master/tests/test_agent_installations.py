@@ -4,6 +4,7 @@ import asyncio
 import base64
 import copy
 import json
+import re
 import sys
 import time
 from datetime import timedelta
@@ -46,6 +47,9 @@ WECOM = 'a1b2c3d4-0000-4bc4-97a0-0ec2c3f5a1b2'
 WECOM_URL = f'https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key={WECOM}'
 DING = '0123456789abcdef' * 4
 FEISHU = '3f8c1a2b-1111-2222-3333-444455556666'
+# 页面切换安装方式时三个采集组件一起换成的默认值（完整安装 / 仅安装 kubedoor-agent）
+PRESETS = {'full': {'mode': 'full', 'vmagent': 'install', 'ksm': 'auto', 'node_exporter': 'auto'},
+           'agent': {'mode': 'agent', 'vmagent': 'reuse', 'ksm': 'reuse', 'node_exporter': 'reuse'}}
 
 
 def masked(url):
@@ -254,7 +258,7 @@ def logs():
 
 async def plan(service, mode='agent'):
     task = await service.inspect(CONFIG, 'admin')
-    task = await service.preflight(task['id'], 'production', {**task['payload']['options'], 'mode': mode})
+    task = await service.preflight(task['id'], 'production', {**task['payload']['options'], **PRESETS[mode]})
     assert task['status'] == 'ready', task['payload']['checks']
     return task
 
@@ -293,7 +297,7 @@ async def test_aliases_written_only_when_given_and_image_repo_from_general_setti
     task = await service.inspect(CONFIG, 'admin')
     assert 'image_repo' not in task['payload']['options']
     page = {k: v for k, v in task['payload']['options'].items() if k not in ('aliases', 'image_pull_secret')}
-    task = await service.preflight(task['id'], 'production', {**page, 'mode': 'agent', 'image_repo': 'evil.example.test/x', **extra})
+    task = await service.preflight(task['id'], 'production', {**page, **PRESETS['agent'], 'image_repo': 'evil.example.test/x', **extra})
     assert task['status'] == 'ready', task['payload']['checks']
     await service.start(task['id'], task['revision'])
     await service.tasks[task['id']]
@@ -424,7 +428,7 @@ async def test_preflight_denies_permission_without_changes(environment):
     service.clients.clear()
     cluster.permitted = False
     task = await service.inspect(CONFIG, 'admin')
-    task = await service.preflight(task['id'], 'production', {**task['payload']['options'], 'mode': 'agent'})
+    task = await service.preflight(task['id'], 'production', {**task['payload']['options'], **PRESETS['agent']})
     assert task['status'] == 'draft'
     assert any('权限' in check['message'] for check in task['payload']['checks'])
     assert not cluster.applied
@@ -436,7 +440,7 @@ async def test_existing_foreign_resource_not_overwritten(environment):
     service.clients.clear()
     cluster.resources['Service', 'kubedoor-agent'] = {'metadata': {'name': 'kubedoor-agent'}}
     task = await service.inspect(CONFIG, 'admin')
-    task = await service.preflight(task['id'], 'production', {**task['payload']['options'], 'mode': 'agent'})
+    task = await service.preflight(task['id'], 'production', {**task['payload']['options'], **PRESETS['agent']})
     assert task['status'] == 'draft'
     assert any('不是网页安装创建的' in c['message'] for c in task['payload']['checks'])
     assert not cluster.applied
@@ -456,7 +460,7 @@ async def test_existing_agent_resources_are_listed_then_taken_over_after_confirm
     cluster.resources['ConfigMap', 'kubedoor-agent-config'] = {'metadata': {'name': 'kubedoor-agent-config', 'labels': dict(foreign)},
                                                               'data': {'PROM_K8S_TAG_VALUE': 'old-name'}}
     task = await service.inspect(CONFIG, 'admin')
-    options = {**task['payload']['options'], 'mode': 'agent'}
+    options = {**task['payload']['options'], **PRESETS['agent']}
     task = await service.preflight(task['id'], 'production', options)
     assert task['status'] == 'draft' and task['payload']['force'] is False
     [error] = [check for check in task['payload']['checks'] if check['status'] == 'error']
@@ -489,7 +493,7 @@ async def test_takeover_is_not_offered_for_conflicts_in_the_control_plane_record
     # 这个集群名称已被另一个在线的集群使用（目标集群里没有 Agent 配置）：强制覆盖也不能解决
     service.clients['production'] = {'online': True}
     task = await service.inspect(CONFIG, 'admin')
-    task = await service.preflight(task['id'], 'production', {**task['payload']['options'], 'mode': 'agent'}, force=True)
+    task = await service.preflight(task['id'], 'production', {**task['payload']['options'], **PRESETS['agent']}, force=True)
     assert task['status'] == 'draft' and task['payload']['force'] is False
     [error] = [check for check in task['payload']['checks'] if check['status'] == 'error']
     assert '已有 Agent 登记' in error['message'] and 'forceable' not in error
@@ -766,7 +770,7 @@ async def test_oss_url_is_not_written_into_the_agent_secret(environment, setting
     settings['oss_url'] = 'https://oss:oss-secret@objects.example.test/upload'
     task = await service.inspect(CONFIG, 'admin')
     task = await service.preflight(task['id'], 'production', {
-        **task['payload']['options'], 'mode': 'agent', 'oss_url': 'https://page:page-secret@page.example.test/upload'})
+        **task['payload']['options'], **PRESETS['agent'], 'oss_url': 'https://page:page-secret@page.example.test/upload'})
     assert task['status'] == 'ready', task['payload']['checks']
     assert 'oss_url' not in task['payload']['options']
     assert module.unseal(task)['options']['oss_url'] == ''
@@ -795,7 +799,7 @@ async def test_install_parameters_come_from_general_settings(environment, settin
     options = task['payload']['options']
     assert options['master_url'] == 'https://kd.example.test' and options['mode'] == 'full'
     assert options['agent_tag'] == module.defaults()['agent_tag']
-    task = await service.preflight(task['id'], 'production', {**options, 'mode': 'full'})
+    task = await service.preflight(task['id'], 'production', {**options, **PRESETS['full']})
     assert task['status'] == 'ready', task['payload']['checks']
     monkeypatch.setattr(service, 'metrics_received', AsyncMock(return_value=True))
     await service.start(task['id'], task['revision'])
@@ -819,12 +823,16 @@ async def test_install_parameters_come_from_general_settings(environment, settin
 @pytest.mark.asyncio
 async def test_defaults_show_settings_in_use_without_passwords(environment, settings):
     settings['oss_url'] = 'https://oss:oss-secret@objects.example.test/upload'
+    settings['prom_k8s_tag_key'] = 'cluster'
     data = module.public_defaults()
     assert data['settings'] == {
         'metrics_write_url': 'http://monit:******@vm.example.test:8428/api/v1/write',
         'oss_url': 'https://oss:******@objects.example.test/upload',
         'image_repo': SETTINGS['image_repo'], 'kubedoor_exturl': 'https://kubedoor.example.test',
+        'prom_k8s_tag_key': 'cluster',
     }
+    # 默认是完整安装：vmagent 安装，另外两个自动检测
+    assert {key: data[key] for key in ('mode', 'vmagent', 'ksm', 'node_exporter')} == PRESETS['full']
     assert data['metrics_available'] is True and data['master_url'] == 'https://kubedoor.example.test'
     for key in ('oss_url', 'remote_write_url', 'image_repo', 'metrics_write_url'):
         assert key not in data
@@ -837,7 +845,7 @@ async def test_defaults_show_settings_in_use_without_passwords(environment, sett
 async def preflight_with(service, notification, mode='agent', task=None):
     task = task or await service.inspect(CONFIG, 'admin')
     options = {key: value for key, value in task['payload']['options'].items() if key != 'notification'}
-    return await service.preflight(task['id'], 'production', {**options, 'mode': mode, 'notification': notification})
+    return await service.preflight(task['id'], 'production', {**options, **PRESETS[mode], 'notification': notification})
 
 
 @pytest.mark.asyncio
@@ -1019,11 +1027,12 @@ async def test_full_mode_needs_the_write_url_in_general_settings(environment, se
     override = 'https://writer:w%21x@other.example.test/api/v1/write'
     with pytest.raises(InstallError) as error:
         await service.preflight(task['id'], 'production',
-                                {**task['payload']['options'], 'mode': 'full', 'remote_write_url': override})
-    assert str(error.value) == '通用配置里还没有时序库远程写地址，请在系统管理 → 通用配置填写，或选择仅安装 Agent'
-    # 在通用配置填好后重新检测就能完整接入（检测时取当时的通用配置）
+                                {**task['payload']['options'], **PRESETS['full'], 'remote_write_url': override})
+    assert str(error.value) == module.NO_WRITE_URL
+    assert '选择不安装 vmagent' in module.NO_WRITE_URL
+    # 在通用配置填好后重新检测就能安装 vmagent（检测时取当时的通用配置）
     settings['metrics_write_url'] = WRITE_URL
-    task = await service.preflight(task['id'], 'production', {**task['payload']['options'], 'mode': 'full'})
+    task = await service.preflight(task['id'], 'production', {**task['payload']['options'], **PRESETS['full']})
     assert task['status'] == 'ready', task['payload']['checks']
     resources = module.render_agent(module.unseal(task)['options'], username='preflight', password='preflight')
     vmagent = next(r for r in resources if r['kind'] == 'Deployment' and r['metadata']['name'] == 'vmagent')
@@ -1046,3 +1055,154 @@ async def test_plan_made_by_older_master_must_be_checked_again(environment, mode
     assert done['status'] == 'failed'
     assert '重新检测' in done['payload']['error']
     assert not cluster.applied
+
+
+def workloads(task):
+    """检测通过的计划里要装的 Deployment / DaemonSet"""
+    resources = module.render_agent(module.unseal(task)['options'], username='preflight', password='preflight')
+    return {r['metadata']['name'] for r in resources if r['kind'] in ('Deployment', 'DaemonSet')}
+
+
+def check(task, name):
+    return next((row for row in task['payload']['checks'] if row['name'] == name), None)
+
+
+@pytest.mark.asyncio
+async def test_each_collector_is_chosen_on_its_own(environment):
+    """不装 vmagent 也可以只装 node-exporter（给已有的采集抓）；不装 vmagent 时不验证指标采集"""
+    service, cluster, repo = environment
+    service.clients.clear()
+    task = await service.inspect(CONFIG, 'admin')
+    task = await service.preflight(task['id'], 'production', {**task['payload']['options'], **PRESETS['agent'],
+                                                              'node_exporter': 'install'})
+    assert task['status'] == 'ready', task['payload']['checks']
+    assert workloads(task) == {'kubedoor-agent', 'node-exporter'}
+    assert check(task, '采集组件')['message'] == ('kube-state-metrics：不安装；node-exporter：安装；'
+                                                 'vmagent：不安装，用已有的 Prometheus / vmagent 采集')
+    assert task['payload']['options']['vmagent'] == 'reuse'
+    await service.start(task['id'], task['revision'])
+    await service.tasks[task['id']]
+    done = await repo.get(task['id'])
+    assert done['status'] == 'succeeded', done['payload']
+    assert done['payload']['steps'][module.METRICS_STEP] == {
+        'name': '验证指标采集', 'status': 'skipped', 'message': '没有安装 vmagent，指标由已有的 Prometheus / vmagent 采集'}
+
+
+@pytest.mark.asyncio
+async def test_vmagent_needs_the_components_it_does_not_install(environment):
+    """装 vmagent 时选了不装 kube-state-metrics：集群里要有可以复用的，不然 vmagent 采不到；不装 vmagent 时不检查"""
+    service, cluster, _ = environment
+    service.clients.clear()
+    task = await service.inspect(CONFIG, 'admin')
+    task = await service.preflight(task['id'], 'production', {**task['payload']['options'], **PRESETS['full'], 'ksm': 'reuse'})
+    assert task['status'] == 'draft'
+    assert '选择了不安装 kube-state-metrics，但集群里没有可以复用的' in check(task, '安装预检')['message']
+    task = await service.preflight(task['id'], 'production', {**task['payload']['options'], **PRESETS['full'],
+                                                              'node_exporter': 'reuse'})
+    assert '选择了不安装 node-exporter，但没有在所有节点上找到' in check(task, '安装预检')['message']
+    task = await service.preflight(task['id'], 'production', {**task['payload']['options'], **PRESETS['full']})
+    assert task['status'] == 'ready', task['payload']['checks']
+    assert workloads(task) == {'kubedoor-agent', 'vmagent', 'kube-state-metrics', 'node-exporter'}
+    assert check(task, '采集组件')['message'] == ('kube-state-metrics：安装；node-exporter：安装；'
+                                                 'vmagent：安装，写入通用配置里的远程写地址；抓取结果在安装后验证')
+    # 页面上还是用户选的「自动检测」（不会变成「安装」或「不安装」），检测出的结果只在加密的计划里
+    assert task['payload']['options']['ksm'] == task['payload']['options']['node_exporter'] == 'auto'
+    assert module.unseal(task)['options']['ksm'] == module.unseal(task)['options']['node_exporter'] == 'install'
+    # 装 vmagent 时不查时序库里已有的指标（这个集群的指标要装好以后才有）
+    assert check(task, module.METRICS_LABEL_CHECK) is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('mode, expected', [
+    ('agent', {'kubedoor-agent'}),
+    ('full', {'kubedoor-agent', 'vmagent', 'kube-state-metrics', 'node-exporter'}),
+])
+async def test_install_wizard_only_sends_the_mode(environment, mode, expected):
+    """安装向导第 6 步只传安装方式（ksm / node_exporter 默认 auto）：仅安装 kubedoor-agent 什么采集组件都不装，和以前一样"""
+    service, cluster, _ = environment
+    service.clients.clear()
+    task = await service.inspect(CONFIG, 'admin')
+    raw = {'env': 'production', 'aliases': [], 'namespace': 'kubedoor', 'mode': mode, 'ksm': 'auto',
+           'node_exporter': 'auto', 'master_url': 'http://kubedoor-master.kubedoor'}
+    task = await service.preflight(task['id'], 'production', raw)
+    assert task['status'] == 'ready', task['payload']['checks']
+    assert workloads(task) == expected
+    assert task['payload']['options']['vmagent'] == ('install' if mode == 'full' else 'reuse')
+
+
+@pytest.mark.parametrize('mode, ksm, expected', [('full', 'install', 'install'), ('agent', 'auto', 'reuse')])
+def test_plans_saved_before_the_vmagent_option_render_the_same(mode, ksm, expected):
+    """本次改动前保存的安装计划没有 vmagent 这一项：按安装方式推，渲染结果和摘要都不变（不用重新检测）"""
+    base = {**module.defaults({module.WRITE_KEY: WRITE_URL}), 'env': 'production',
+            'master_url': 'https://kubedoor.example.test', 'installation_id': 'task-1'}
+    old = {key: value for key, value in base.items() if key != 'vmagent'} | {'mode': mode, 'ksm': ksm, 'node_exporter': ksm}
+    new = {**base, 'mode': mode, 'vmagent': expected, 'ksm': ksm if mode == 'full' else 'reuse',
+           'node_exporter': ksm if mode == 'full' else 'reuse'}
+    assert module.installs_vmagent(old) is (expected == 'install')
+    rendered = [module.render_agent(item, username='agent-1', password='secret-1') for item in (old, new)]
+    assert rendered[0] == rendered[1]
+
+
+class LabelVM:
+    """假的时序库标签值接口：带 match[] 时只返回这个集群（如果有）"""
+
+    def __init__(self, clusters=(), status=None):
+        self.clusters, self.status, self.requests = list(clusters), status, []
+
+    def app(self):
+        app = web.Application()
+        app.router.add_get('/{tail:.*}', self.handle)
+        return app
+
+    async def handle(self, request):
+        self.requests.append({'path': request.path, 'query': dict(request.query),
+                              'auth': request.headers.get('Authorization')})
+        if self.status:
+            return web.Response(status=self.status)
+        values = self.clusters
+        if 'match[]' in request.query:
+            wanted = re.fullmatch(r'\{origin_prometheus="([^"]*)"\}', request.query['match[]']).group(1)
+            values = [value for value in values if value == wanted]
+        return web.json_response({'status': 'success', 'data': values})
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('clusters, status, level, message', [
+    (['production', 'staging'], None, 'success', '时序库里已有 origin_prometheus="production" 的指标'),
+    (['prod', 'staging'] + [f'c{index}' for index in range(5)], None, 'warning',
+     '时序库最近一天没有 origin_prometheus="production" 的指标（origin_prometheus 现有的值：prod、staging、c0、c1、c2 等 7 个）。'
+     '已有的 Prometheus / vmagent 要在 external_labels 下配置 origin_prometheus: production'),
+    ([], None, 'warning', '时序库最近一天没有带 origin_prometheus 标签的指标。已有的 Prometheus / vmagent 要在 external_labels 下配置'),
+    ([], 401, 'warning', '没能检查时序库里这个集群的指标：时序库认证失败（HTTP 401）'),
+])
+async def test_agent_only_looks_for_the_cluster_label_in_the_time_series_db(environment, settings, clusters, status, level,
+                                                                          message):
+    """不装 vmagent：检测时查时序库最近一天有没有 <标签 key>="<集群唯一标识>"；没有、查不了都只提醒，不挡安装"""
+    service, cluster, _ = environment
+    service.clients.clear()
+    vm = LabelVM(clusters, status)
+    async with TestServer(vm.app()) as server:
+        settings['prom_url'] = f'http://monit:vm%40secret@{server.host}:{server.port}/select/0/prometheus'
+        task = await service.inspect(CONFIG, 'admin')
+        task = await service.preflight(task['id'], 'production', {**task['payload']['options'], **PRESETS['agent']})
+    assert task['status'] == 'ready', task['payload']['checks']
+    row = check(task, module.METRICS_LABEL_CHECK)
+    assert row['status'] == level and row['message'].startswith(message), row
+    first = vm.requests[0]
+    assert first['path'] == '/select/0/prometheus/api/v1/label/origin_prometheus/values'
+    assert first['query']['match[]'] == '{origin_prometheus="production"}' and first['query']['start'].isdigit()
+    assert first['auth'] == 'Basic ' + base64.b64encode(b'monit:vm@secret').decode()
+    # 只查到这个集群就不再列全部集群名
+    assert len(vm.requests) == (1 if level == 'success' or status else 2)
+    assert 'vm@secret' not in json.dumps(task['payload']) and 'vm%40secret' not in json.dumps(task['payload'])
+
+
+@pytest.mark.asyncio
+async def test_agent_only_without_a_query_address_is_only_a_reminder(environment, settings):
+    service, cluster, _ = environment
+    service.clients.clear()
+    settings['prom_url'] = ''
+    task = await plan(service, 'agent')
+    assert check(task, module.METRICS_LABEL_CHECK) == {
+        'name': module.METRICS_LABEL_CHECK, 'status': 'warning',
+        'message': '通用配置里还没有时序库查询地址，没法检查已有的 Prometheus / vmagent 有没有写入这个集群的指标'}

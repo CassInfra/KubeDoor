@@ -127,9 +127,10 @@ async def test_defaults_show_general_settings_in_use_without_passwords(fake, mon
             'metrics_write_url': 'http://monit:******@vm.example.com:8428/api/v1/write',
             'oss_url': 'https://oss:******@objects.example.com/upload',
             'image_repo': 'registry.example.com/kd', 'kubedoor_exturl': 'https://kubedoor.example.com',
+            'prom_k8s_tag_key': 'origin_prometheus',
         }
         assert data['master_url'] == 'https://kubedoor.example.com' and data['metrics_available'] is True
-        assert {'namespace', 'mode', 'agent_tag', 'ksm', 'node_exporter', 'env'} <= set(data)
+        assert {'namespace', 'mode', 'agent_tag', 'vmagent', 'ksm', 'node_exporter', 'env'} <= set(data)
         # 这几项不再是页面参数，也不在顶层返回；密码一律不出现
         for key in ('oss_url', 'remote_write_url', 'image_repo', 'metrics_write_url'):
             assert key not in data

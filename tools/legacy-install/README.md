@@ -131,9 +131,9 @@ PROM_K8S_TAG_KEY="origin_prometheus"
 
 已有部署启用此功能时，需要更新 master 和 Web 镜像，并重新执行 `./install.sh master` 应用新增的安装配置（`METRICS_WRITE_URL` 会写进数据库的通用配置，已有的不覆盖）；master 启动时自动创建安装任务表。master 镜像现在从仓库根目录构建（`build.sh` 已处理）；本地运行 master 时还需在仓库根目录执行 `pip install -e src/kubedoor-tools` 安装共享库。
 
-管理员打开「Agent 管理」→「安装 Agent」，上传 kubeconfig、选择目标 context，确认集群标识后检测并安装。默认完整接入包含 Agent 和指标采集；已有完整监控链路时可选择「仅安装 Agent」。安装进度和失败原因都显示在页面，关闭弹窗不取消后台安装。
+管理员打开「Agent 管理」→「安装 Agent」，上传 kubeconfig、选择目标 context，确认集群标识后检测并安装。默认「完整安装」包含 Agent 和指标采集；已有完整监控链路时可选择「仅安装 kubedoor-agent」，vmagent、kube-state-metrics、node-exporter 也可以单独选装不装。安装进度和失败原因都显示在页面，关闭弹窗不取消后台安装。
 
-控制端需能访问 kubeconfig 中的 API Server；目标集群需能访问 KubeDoor 和时序库。通用配置里的 KubeDoor 访问地址（首次安装时来自 `KUBEDOOR_EXTURL`）会预填这个外部连接地址。完整接入的 vmagent 默认直连通用配置里的远程写地址（首次安装时来自 `METRICS_WRITE_URL`；完整写入路径，不能用查询用的 `PROM_URL` 代替），账号口令放进目标集群的 Secret。
+控制端需能访问 kubeconfig 中的 API Server；目标集群需能访问 KubeDoor 和时序库。通用配置里的 KubeDoor 访问地址（首次安装时来自 `KUBEDOOR_EXTURL`）会预填这个外部连接地址。安装的 vmagent 默认直连通用配置里的远程写地址（首次安装时来自 `METRICS_WRITE_URL`；完整写入路径，不能用查询用的 `PROM_URL` 代替），账号口令放进目标集群的 Secret。
 
 kubeconfig 仅在本次安装期间加密保存，成功后清理。只支持内嵌 token 或证书，不执行 kubeconfig 的 `exec` 插件或读取其中引用的本地文件；这种配置需要先导出可在控制端使用的版本。Agent 本身仍用集群内 ServiceAccount。
 
@@ -195,7 +195,7 @@ ENABLE_MCP="false"          # 关闭外部 MCP 入口
 ```bash
 PROM_URL="http://user:pass@<host>:8428"        # 你的时序库读地址
 PROM_TYPE="Prometheus"                          # VictoriaMetrics 填 Victoria-Metrics-Single 或 Victoria-Metrics-Cluster
-METRICS_WRITE_URL="http://user:pass@<host>:8428/api/v1/write" # 网页完整接入时各集群 vmagent 直连；按实际写入接口修改
+METRICS_WRITE_URL="http://user:pass@<host>:8428/api/v1/write" # 网页安装 Agent 时各集群 vmagent 直连；按实际写入接口修改
 ENABLE_VMALERT="false"                          # 如果告警规则也用你自己的
 ```
 
