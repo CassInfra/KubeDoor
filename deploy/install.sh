@@ -925,6 +925,7 @@ upgrade_control() {
         [ -z "$LEGACY_CONFIG" ] || printf '%s\n' '    - kubedoor-config 删除已迁入数据库的配置项，只保留数据库连接（PG_*）'
     fi
     printf '%s\n' '升级会重建相关 Pod，master 重启期间 Agent 会重连；请安排维护窗口并先备份 PostgreSQL。'
+    printf '%s\n' '补丁没有改动 Deployment 时（例如同一版本号重新构建了镜像），会滚动重启该组件，拉取这个版本最新的镜像。'
     if [ "$DRY_RUN" = true ]; then
         for entry in $UPGRADE_PLAN; do
             deployment=${entry%%=*}
@@ -977,14 +978,23 @@ upgrade_control() {
     for entry in $UPGRADE_PLAN; do
         deployment=${entry%%=*}
         target=${entry#*=}
+        # 补丁前后比较 generation：Deployment 的部署规范变了才会加一、才会滚动出新 Pod
+        generation=$(kc -n "$NAMESPACE" get deployment "$deployment" -o 'jsonpath={.metadata.generation}') ||
+            die "读取 $deployment 失败，尚未修改它；备份：$BACKUP_FILE"
         # 同版本重试也等待 rollout，避免把上次 ImagePullBackOff 当作成功。
         if ! kc -n "$NAMESPACE" patch deployment "$deployment" --type=strategic \
             --patch "$(deployment_upgrade_patch "$deployment")"; then
             die "更新 $deployment Deployment 失败；升级可能部分完成。备份：$BACKUP_FILE；修复后用新的 --backup 文件重试"
         fi
-        # 即使上次在更新 Nginx 后中断，同版本重试也必须让 Web 重新载入配置。
         if [ "$deployment" = kubedoor-web ]; then
+            # 即使上次在更新 Nginx 后中断，同版本重试也必须让 Web 重新载入配置。
             kc -n "$NAMESPACE" rollout restart deployment/kubedoor-web || die "重启 Web 失败；备份：$BACKUP_FILE"
+        elif ! updated=$(kc -n "$NAMESPACE" get deployment "$deployment" -o 'jsonpath={.metadata.generation}') ||
+            [ "$updated" = "$generation" ]; then
+            # 补丁没有改动 Deployment（镜像版本号相同，例如同一版本重新构建了镜像）就不会出新 Pod，
+            # 旧 Pod 继续跑旧镜像：主动滚动重启，按 imagePullPolicy: Always 拉取这个版本最新的镜像
+            printf '%s 的部署规范没有变化，滚动重启以拉取最新镜像\n' "$deployment"
+            kc -n "$NAMESPACE" rollout restart "deployment/$deployment" || die "重启 $deployment 失败；备份：$BACKUP_FILE"
         fi
         if ! kc -n "$NAMESPACE" rollout status "deployment/$deployment" --timeout=300s; then
             die "$deployment 升级未就绪；检查 describe/logs。升级可能部分完成，备份：$BACKUP_FILE；修复后用新的 --backup 文件重试"

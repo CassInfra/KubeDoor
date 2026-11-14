@@ -95,7 +95,7 @@ sh install.sh upgrade --context production --namespace kubedoor \
 
 `--context` 可以省略，默认使用当前 context；命名空间默认 `kubedoor`。脚本会打印实际位置和组件版本供确认。升级适用于旧脚本和网页向导创建的 Kubernetes 控制端；网页安装必须已经完成收尾。Docker 或自行改名的控制端 Deployment 需要按原部署方式维护。
 
-升级同步更新已有的 `kubedoor-master`、`kubedoor-ai`、`kubedoor-alarm`、`kubedoor-web` 的**镜像和新版 Deployment 部署规范**，通过按名称合并的 strategic merge patch 加入卷、挂载、探针、更新策略等变更。例如从 2.3.0 升级后，AI 会新增：
+升级同步更新已有的 `kubedoor-master`、`kubedoor-ai`、`kubedoor-alarm`、`kubedoor-web` 的**镜像和新版 Deployment 部署规范**，通过按名称合并的 strategic merge patch 加入卷、挂载、探针、更新策略等变更。镜像版本号没变时（例如同一版本重新构建了镜像），补丁不会改动 Deployment，脚本会滚动重启该组件，按 `imagePullPolicy: Always` 拉取这个版本最新的镜像。例如从 2.3.0 升级后，AI 会新增：
 
 ```yaml
 # kubedoor-ai 的 spec.template.spec

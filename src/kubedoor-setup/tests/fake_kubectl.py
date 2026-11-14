@@ -247,7 +247,12 @@ elif verb == "patch":
         if error == key(kind, name) or (error == key(kind, name) + " $patch" and "$patch" in json.dumps(patch)):
             fail("simulated invalid Deployment")
     else:
-        objects[key(kind, name)] = strategic_merge(objects[key(kind, name)], patch)
+        old = objects[key(kind, name)]
+        new = strategic_merge(old, patch)
+        if kind_name(kind) == "deployment" and new.get("spec") != old.get("spec"):
+            # 和 apiserver 一样：部署规范变了 generation 才加一，没改动的补丁不会滚动出新 Pod
+            new["metadata"] = {**new["metadata"], "generation": int(old["metadata"].get("generation", 1)) + 1}
+        objects[key(kind, name)] = new
 elif verb == "exec":
     # 容器里的命令：exec_result 注入退出码和输出，默认是迁移成功（日志一行 + 汇总一行）
     call["exec"] = raw[raw.index("--") + 1:] if "--" in raw else []
@@ -262,6 +267,12 @@ elif verb == "exec":
     save()
     raise SystemExit(result.get("code", 0))
 elif verb in ("rollout", "wait"):
+    if verb == "rollout" and args[1] == "restart":
+        # 真实 kubectl 改 Pod 模板注解触发滚动；这里只把 generation 加一并记下重启了谁（不改模板，便于比较升级前后）
+        kind, name = args[2].split("/", 1)
+        obj = objects[key(kind, name)]
+        obj["metadata"] = {**obj["metadata"], "generation": int(obj["metadata"].get("generation", 1)) + 1}
+        cluster.setdefault("restarted", []).append(args[2])
     if verb == "rollout" and args[1] == "status":
         # "deployment/x#2" 只让这个 Deployment 的第 2 次 rollout status 失败
         seen = cluster.setdefault("rollout_seen", {})

@@ -301,6 +301,27 @@ def test_rerun_after_fixing_migration_cleans_up_and_later_runs_are_noops(tmp_pat
     assert cluster.read()["objects"]["configmap/kubedoor-config"]["data"] == PG_KEYS
 
 
+def test_same_version_upgrade_restarts_components_to_pull_rebuilt_images(tmp_path):
+    """镜像版本号没变（同一版本重新构建了镜像）时补丁不改动 Deployment，不会出新 Pod：
+    脚本要滚动重启 master / ai / alarm 拉取最新镜像，否则旧 Pod 继续跑旧镜像，新版才有的迁移命令也执行不了"""
+    cluster = ShellCluster(tmp_path, legacy_objects())
+    first = cluster.run("upgrade", "--yes")
+    assert first.returncode == 0, first.stderr
+    # 第一次升级换了镜像版本号：部署规范变了，自然会滚动；只有 Web 照旧重启以重新载入 Nginx 配置
+    assert cluster.read()["restarted"] == ["deployment/kubedoor-web"]
+    calls = len(cluster.read()["calls"])
+    second = cluster.run("upgrade", "--yes", "--backup", "again.yaml")
+    assert second.returncode == 0, second.stderr
+    state = cluster.read()
+    assert state["restarted"][1:] == ["deployment/kubedoor-" + name for name in ("master", "ai", "alarm", "web")]
+    assert "kubedoor-master 的部署规范没有变化，滚动重启以拉取最新镜像" in second.stdout
+    later = [call["command"] for call in state["calls"][calls:]]
+    restart = later.index(["rollout", "restart", "deployment/kubedoor-master"])
+    ready = later.index(["rollout", "status", "deployment/kubedoor-master", "--timeout=300s"])
+    migrate = next(i for i, command in enumerate(later) if command[0] == "exec")
+    assert restart < ready < migrate
+
+
 def test_master_not_ready_after_removing_rules_mount_fails_and_rerun_finishes_cleanup(tmp_path):
     # 去掉规则挂载后 master 没有就绪：脚本非零退出、提示备份，规则 ConfigMap 和 kubedoor-config 都还没动
     cluster = ShellCluster(tmp_path, legacy_objects(), rollout_error="deployment/kubedoor-master#2")
