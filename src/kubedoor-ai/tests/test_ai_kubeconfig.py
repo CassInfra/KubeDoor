@@ -188,3 +188,44 @@ async def test_resource_menus_follow_the_same_order(cluster, configured, failing
     result = await service.resources(Identity("operator", "rw", MappingProxyType({})), {"env": "prod", "kind": "namespaces"})
     assert result["items"] == [{"name": "team"}] and result["source"] == used
     assert service.gateway.calls == calls
+
+
+# ---- 修复 Agent：master 取回保存的 kubeconfig（内部接口，明文） ----
+
+SAVED = {"apiVersion": "v1", "kind": "Config", "current-context": "kubedoor-agent",
+         "contexts": [{"name": "kubedoor-agent", "context": {"cluster": "kubedoor-agent", "user": "kubedoor-agent"}}],
+         "clusters": [{"name": "kubedoor-agent", "cluster": {"server": "https://k8s.example.test"}}],
+         "users": [{"name": "kubedoor-agent", "user": {"token": "agent-sa-token"}}]}
+
+
+def saved_service(row):
+    cipher = CredentialCipher("ab" * 32)
+    table = ConnectionTable(row and {**row, "encrypted_config": row.get("encrypted_config", cipher.encrypt("prod", SAVED))})
+    return SimpleNamespace(store=table, gateway=SimpleNamespace(cipher=cipher))
+
+
+def fetch(service, headers=ADMIN, env="prod"):
+    with TestClient(create_app(service, token="internal")) as client:
+        return client.get(f"/api/ai/internal/connections/{env}/kubeconfig", headers=headers)
+
+
+def test_master_gets_the_saved_kubeconfig_in_plain_text_for_repair():
+    service = saved_service({"env": "prod", "context": "kubedoor-agent", "origin": "agent-install", "revision": 2})
+    response = fetch(service)
+    assert response.status_code == 200, response.text
+    data = response.json()
+    assert data["env"] == "prod" and data["context"] == "kubedoor-agent" and data["origin"] == "agent-install"
+    # 原样给 master 重装用：令牌不能被脱敏成 [redacted]
+    assert json.loads(data["content"]) == SAVED
+
+
+def test_saved_kubeconfig_is_only_for_administrators_and_reports_why_it_is_missing():
+    row = {"env": "prod", "context": "admin@prod", "origin": "upload", "revision": 1}
+    assert fetch(saved_service(row), headers={**ADMIN, "X-User-Permission": "rw"}).status_code == 403
+    assert fetch(saved_service(row), headers={**ADMIN, "X-Kubedoor-Token": "wrong"}).status_code == 401
+    missing = fetch(saved_service(None))
+    assert missing.status_code == 404 and missing.json()["error"]["code"] == "connection_missing"
+    # 密钥换了解不开：说明原因，不返回内容
+    broken = fetch(saved_service({**row, "encrypted_config": b"x" * 40}))
+    assert broken.status_code == 409 and broken.json()["error"]["code"] == "connection_broken"
+    assert "content" not in broken.json()

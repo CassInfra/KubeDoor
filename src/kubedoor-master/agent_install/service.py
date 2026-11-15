@@ -25,6 +25,7 @@ from loguru import logger
 from notify import api as notify_api
 from notify import channels
 
+from . import health
 from .bundle import KSM_PORT, WRITE_KEY, defaults, installs_vmagent, normalize_options, public_options, render_agent
 from .kubernetes import InstallError, Kubernetes
 from .repository import Repository
@@ -50,6 +51,15 @@ COLLECTOR_CHECK = '采集组件'
 METRICS_LABEL_CHECK = '时序库里的集群指标'
 # 预检说明里列出的时序库已有集群名个数
 SHOWN_CLUSTERS = 5
+# 修复：目标集群里现有 Agent 的配置（集群名在 PROM_K8S_TAG_VALUE），按它找 Agent 装在哪个命名空间
+AGENT_CONFIG = 'kubedoor-agent-config'
+REPAIR_CHECK = '现有 Agent'
+# 修复任务从哪来：用 AI Kubeconfig 列保存的 / 页面上传的
+REPAIR_SOURCES = ('ai-connection', 'upload')
+# 修复时沿用上次网页安装的这几个参数（Agent 版本用推荐版本，集群标识固定）
+REPAIR_KEEP = ('namespace', 'mode', 'vmagent', 'ksm', 'node_exporter', 'master_url')
+# 修复时目标集群里没有找到这个集群的 Agent：放进强制覆盖清单的一项（kind），确认后才继续
+MISSING_AGENT = 'Agent'
 
 
 def utcnow():
@@ -175,12 +185,18 @@ def merge_conflicts(*groups):
 
 
 class TakeoverRequired(InstallError):
-    """目标集群里已有 Agent 资源：管理员确认后可以强制覆盖安装（页面据 forceable 显示按钮）"""
+    """目标集群里已有 Agent 资源（修复时还可能是找不到这个集群的 Agent）：管理员确认后可以强制覆盖安装
+    （页面据 forceable 显示按钮）"""
 
     def __init__(self, items):
-        listed = '、'.join(f'{item["kind"]}/{item["name"]}（{item["reason"]}）' for item in items[:6])
-        more = f' 等 {len(items)} 个资源' if len(items) > 6 else ''
-        super().__init__(f'目标集群已有 Agent 资源，不会直接覆盖：{listed}{more}。确认可以接管这些资源后，选择「强制覆盖安装」', 409)
+        resources = [item for item in items if item['kind'] != MISSING_AGENT]
+        parts = [item['reason'] for item in items if item['kind'] == MISSING_AGENT]
+        if resources:
+            listed = '、'.join(f'{item["kind"]}/{item["name"]}（{item["reason"]}）' for item in resources[:6])
+            more = f' 等 {len(resources)} 个资源' if len(resources) > 6 else ''
+            parts.append(f'目标集群已有 Agent 资源，不会直接覆盖：{listed}{more}')
+        what = '可以接管这些资源' if resources else '没有问题'
+        super().__init__(f'{"。".join(parts)}。确认{what}后，选择「强制覆盖安装」', 409)
         self.items = items
 
 
@@ -272,11 +288,25 @@ def render(options, **credential):
         raise InstallError(str(exc)) from None
 
 
+def repair_target(value):
+    """要修复的集群标识（和安装参数的集群标识同样的规则）"""
+    if not isinstance(value, str) or not re.fullmatch(r'[A-Za-z0-9_-]{1,100}', value):
+        raise InstallError('要修复的集群标识无效')
+    return value
+
+
+def agent_cluster_name(config):
+    """现有 Agent 配置里的集群名"""
+    return str(((config or {}).get('data') or {}).get('PROM_K8S_TAG_VALUE') or '')
+
+
 class Service:
-    def __init__(self, clients, repository=None, kubernetes=Kubernetes):
+    def __init__(self, clients, repository=None, kubernetes=Kubernetes, call_agent=None):
         self.clients = clients
         self.repo = repository or Repository()
         self.kubernetes = kubernetes
+        # master 内部调 Agent 的函数（修复弹框的检查用，见 health.py）
+        self.call_agent = call_agent
         self.tasks = {}
         self.locks = {}
         self.slots = asyncio.Semaphore(2)
@@ -339,23 +369,111 @@ class Service:
             raise InstallError('安装任务不存在', 404)
         return task
 
-    async def inspect(self, raw, username):
+    async def inspect(self, raw, username, repair=None, context=None):
+        """上传 kubeconfig，建安装任务（草稿）。
+
+        repair：修复任务（覆盖安装已接入的集群）{'env', 'source'（REPAIR_SOURCES）, 'origin'（AI Kubeconfig 的来源）}，
+        集群标识固定为 env，其余参数按上次网页安装预填；context：要用的 context（AI Kubeconfig 保存时选定的）
+        """
         if not isinstance(raw, str) or not raw.strip() or len(raw.encode()) > MAX_CONFIG:
             raise InstallError('请上传不超过 1 MiB 的 kubeconfig YAML / JSON 文件')
-        parsed = await asyncio.to_thread(parse, raw)
+        parsed = await asyncio.to_thread(parse, raw, context)
         selected = parsed['context'] or parsed['contexts'][0]['name']
         base = install_defaults()
-        env = re.sub(r'[^A-Za-z0-9_-]', '-', selected).strip('-')[:63] or 'cluster'
-        options = normalize({'env': env, 'mode': 'full' if base['metrics_available'] else 'agent'}, base)
+        if repair:
+            options = await self.repair_options(repair['env'], base)
+        else:
+            env = re.sub(r'[^A-Za-z0-9_-]', '-', selected).strip('-')[:63] or 'cluster'
+            options = normalize({'env': env, 'mode': 'full' if base['metrics_available'] else 'agent'}, base)
         now = utcnow()
         task = {'id': str(uuid.uuid4()), 'status': 'draft', 'revision': 0, 'env': '', 'target_uid': '',
                 'encrypted': seal({'kubeconfig': raw, 'options': options}),
                 'expires_at': now + timedelta(minutes=30), 'created_at': now, 'updated_at': now,
                 'payload': {'created_by': username, 'context': selected, 'contexts': parsed['contexts'],
                             'options': public_options(options), 'checks': [], 'steps': [], 'resources': []}}
+        if repair:
+            task['payload']['repair'] = dict(repair)
         await self.repo.create(task)
-        audit.record_bg(username, 'agent.install.upload', target=task['id'])
+        if repair:
+            audit.record_bg(username, 'agent.repair.start', env=repair['env'], target=task['id'],
+                            detail={'source': repair['source']})
+        else:
+            audit.record_bg(username, 'agent.install.upload', target=task['id'])
         return task
+
+    async def repair_options(self, env, base):
+        """修复的预填参数：集群标识固定为 env；命名空间、安装方式、采集组件、KubeDoor 地址沿用这个集群上次网页安装的
+        （脚本装的没有记录，用默认值）；Agent 版本用推荐版本。命名空间在预检时再以目标集群里现有 Agent 所在的为准"""
+        default = {'env': env, 'mode': 'full' if base['metrics_available'] else 'agent'}
+        picked = dict(default)
+        previous = await self.repo.installed(env)
+        for key in REPAIR_KEEP:
+            value = ((previous or {}).get('payload', {}).get('options') or {}).get(key)
+            if isinstance(value, str) and value:
+                picked[key] = value
+        if not base['metrics_available'] and installs_vmagent(picked):
+            # 通用配置里已经没有远程写地址，装不了 vmagent：不装采集组件（集群里已有的不动）
+            picked.update(mode='agent', vmagent='reuse', ksm='reuse', node_exporter='reuse')
+        try:
+            return normalize_options(picked, base)
+        except ValueError:
+            return normalize(default, base)  # 以前记录里的值现在不合规：用默认值
+
+    async def repair(self, env, username):
+        """修复 Agent：用这个集群在「AI Kubeconfig」列保存的 kubeconfig 建修复任务（覆盖安装）。
+
+        返回 {'task', 'message'}：这个集群正在安装 / 修复时直接返回那个任务；没有能用的 kubeconfig 时 task 为
+        None，message 说明原因（页面改为上传）。集群没接入过 KubeDoor 抛 404。
+        """
+        env = repair_target(env)
+        if not await health.registered(env, self.clients):
+            raise InstallError(f'集群 {env} 还没有接入 KubeDoor，请用「安装 Agent」', 404)
+        for task in await self.repo.list():
+            if task['env'] == env and task['status'] == 'running':
+                return {'task': task, 'message': '这个集群正在安装或修复，下面是当前进度'}
+        saved = await self.saved_kubeconfig(env, username)
+        if 'error' in saved:
+            return {'task': None, 'message': saved['error']}
+        try:
+            task = await self.inspect(saved['content'], username, context=saved['context'],
+                                      repair={'env': env, 'source': 'ai-connection', 'origin': saved['origin']})
+        except InstallError as exc:
+            if exc.status == 503:
+                raise
+            return {'task': None, 'message': f'保存的 AI Kubeconfig 不能用来安装（{exc}）'}
+        return {'task': task, 'message': ''}
+
+    async def saved_kubeconfig(self, env, username):
+        """从 kubedoor-ai 取这个集群保存的 AI Kubeconfig（内部接口，明文只在 master 和 kubedoor-ai 之间传，
+        随后和上传的一样只放进加密的安装材料）。返回 {'content', 'context', 'origin'}，取不到返回 {'error': 原因}"""
+        internal = os.environ.get('AI_INTERNAL_TOKEN', '')
+        if not internal:
+            return {'error': '控制端没有配置 AI 内部令牌（AI_INTERNAL_TOKEN），取不到保存的 AI Kubeconfig'}
+        headers = {'X-Kubedoor-Token': internal, 'X-User-Name': username or 'kubedoor', 'X-User-Permission': 'admin'}
+        url = f'{AI_URL}/api/ai/internal/connections/{quote(env, safe="")}/kubeconfig'
+        try:
+            async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=20, connect=5)) as session:
+                async with session.get(url, headers=headers, allow_redirects=False) as response:
+                    status, text = response.status, await response.text()
+        except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+            logger.warning(f'修复 Agent 时连不上 kubedoor-ai：{type(exc).__name__}')
+            return {'error': '连不上 kubedoor-ai，取不到保存的 AI Kubeconfig'}
+        try:
+            data = json.loads(text)
+        except ValueError:
+            data = None
+        if status == 200 and isinstance(data, dict) and isinstance(data.get('content'), str) and data.get('context'):
+            return {'content': data['content'], 'context': data['context'],
+                    'origin': 'agent-install' if data.get('origin') == 'agent-install' else 'upload'}
+        error = data.get('error') if isinstance(data, dict) else None
+        code = error.get('code') if isinstance(error, dict) else None
+        if status == 404 and code == 'connection_missing':
+            return {'error': '这个集群还没有保存 AI Kubeconfig'}
+        if status == 404:
+            return {'error': 'kubedoor-ai 版本较旧，不支持取回 AI Kubeconfig（要和控制端一起升级）'}
+        reason = error.get('message') if isinstance(error, dict) else None
+        reason = ' '.join(str(reason or f'HTTP {status}').split())[:200]
+        return {'error': f'取不到保存的 AI Kubeconfig（{reason}）'}
 
     async def preflight(self, task_id, context, raw_options, force=False):
         """force：管理员已确认可以接管目标集群里已有的 Agent 资源（强制覆盖安装）"""
@@ -366,6 +484,9 @@ class Service:
             material = unseal(task)
             options = normalize(raw_options, install_defaults())
             previous = material['options']
+            repair = task['payload'].get('repair')
+            if repair and options.get('env') != repair['env']:
+                raise InstallError(f'修复时集群唯一标识不能修改，要和现在的一样：{repair["env"]}', 409)
             if (task['payload'].get('applied') or task['payload'].get('target_reserved')) and (
                     context != task['payload']['context'] or any(options[k] != previous[k] for k in ('env', 'namespace'))):
                 raise InstallError('任务已开始安装，不能更换目标 context、集群标识或命名空间；请新建安装任务', 409)
@@ -389,7 +510,7 @@ class Service:
                     target_uid = identity['metadata']['uid']
                     checks.append({'name': '集群连接', 'status': 'success', 'message': version.get('gitVersion', '已连接')})
                     task['env'], task['target_uid'] = options['env'], target_uid
-                    existing = await self.check_identity(task, options, kube)
+                    existing = await self.check_identity(task, options, kube, checks)
                     await self.components(options, kube, checks)
                     if not installs_vmagent(options):
                         checks.append(await metrics_label_check(options))
@@ -402,9 +523,13 @@ class Service:
                     task['payload']['force'] = bool(takeover)
                     await self.check_resources(kube, resources, force=bool(takeover))
                     checks.append({'name': '安装权限与资源', 'status': 'success', 'message': '权限、资源归属与可用的服务端预检通过'})
-                    if takeover:
+                    taken = [item for item in takeover if item['kind'] != MISSING_AGENT]
+                    if taken:
                         checks.append({'name': '强制覆盖', 'status': 'warning',
-                                       'message': f'将接管目标集群里已有的 {len(takeover)} 个 Agent 资源，原来的 Agent 会改连当前控制端'})
+                                       'message': f'将接管目标集群里已有的 {len(taken)} 个 Agent 资源，原来的 Agent 会改连当前控制端'})
+                    if len(taken) < len(takeover):
+                        checks.append({'name': '强制覆盖', 'status': 'warning',
+                                       'message': f'目标集群里没有找到集群 {options["env"]} 的 Agent，已确认用这个 kubeconfig 覆盖安装'})
                     checks.append({'name': '返回控制端的网络', 'status': 'warning',
                                    'message': '安装后将从 Agent 实际连接确认，请确保目标集群可访问所填 KubeDoor 地址'})
                     task['payload']['plan_digest'] = fingerprint(resources)
@@ -415,35 +540,84 @@ class Service:
             material['options'] = options
             task['encrypted'] = seal(material)
             task['expires_at'] = utcnow() + timedelta(minutes=30)
+            # 修复时命名空间以目标集群里现有 Agent 所在的为准（check_identity 可能改了它）
+            requested['namespace'] = options['namespace']
             task['payload']['options'] = requested
             await self.repo.save(task)
             return task
 
-    async def check_identity(self, task, options, kube):
+    async def check_identity(self, task, options, kube, checks=None):
         """核对集群标识和目标命名空间里已有的 Agent。控制端自己记录里的冲突直接报错；
-        目标集群里已有、不属于这次安装的 Agent 返回成「需要强制覆盖才能接管」的清单。"""
-        if options.get('image_pull_secret'):
-            existing_secret = await kube.request('GET', f'/api/v1/namespaces/{options["namespace"]}/secrets/{options["image_pull_secret"]}',
-                                                 missing_ok=True)
-            if not existing_secret:
-                raise InstallError('指定的镜像拉取 Secret 不存在，请先在目标命名空间创建它或使用可公开拉取的镜像')
+        目标集群里已有、不属于这次安装的 Agent 返回成「需要强制覆盖才能接管」的清单。
+
+        修复任务（payload.repair）见 repair_identity。checks：预检时传入，修复任务在里面写一行「现有 Agent」
+        """
         for other in await self.repo.same_cluster(options['env'], task['target_uid'], task['id']):
             if other['env'] != options['env'] or other['target_uid'] != task['target_uid']:
                 raise InstallError('集群标识已被其它集群使用，或目标集群已使用另一标识接入', 409)
             if other['status'] == 'running':
                 raise InstallError('目标集群已有安装任务正在执行', 409)
-        cfg = await kube.request('GET', f'/api/v1/namespaces/{options["namespace"]}/configmaps/kubedoor-agent-config', missing_ok=True)
+        repair = task['payload'].get('repair')
+        found = await self.repair_identity(task, options, kube, checks) if repair else None
+        if options.get('image_pull_secret'):
+            existing_secret = await kube.request('GET', f'/api/v1/namespaces/{options["namespace"]}/secrets/{options["image_pull_secret"]}',
+                                                 missing_ok=True)
+            if not existing_secret:
+                raise InstallError('指定的镜像拉取 Secret 不存在，请先在目标命名空间创建它或使用可公开拉取的镜像')
+        if repair:
+            return found
+        cfg = await kube.request('GET', f'/api/v1/namespaces/{options["namespace"]}/configmaps/{AGENT_CONFIG}', missing_ok=True)
         if cfg:
             reasons = []
-            name = str(cfg.get('data', {}).get('PROM_K8S_TAG_VALUE') or '')
+            name = agent_cluster_name(cfg)
             if name != options['env']:
                 reasons.append(f'现有 Agent 的集群名称是 {name[:64] or "（空）"}')
             if cfg['metadata'].get('labels', {}).get(MANAGED) != 'web-installer':
                 reasons.append('脚本安装的 Agent')
-            return [conflict('ConfigMap', 'kubedoor-agent-config', options['namespace'], '；'.join(reasons))] if reasons else []
+            return [conflict('ConfigMap', AGENT_CONFIG, options['namespace'], '；'.join(reasons))] if reasons else []
         if options['env'] in self.clients:
             raise InstallError('这个集群标识已有 Agent 登记，请选择其它标识或核对目标集群', 409)
         return []
+
+    async def repair_identity(self, task, options, kube, checks):
+        """修复任务核对目标集群：这个集群标识本来就登记过，不按「已有 Agent 登记」拒绝，改为在目标集群里找集群名
+        为它的 Agent（全集群找 ConfigMap kubedoor-agent-config）：
+
+        - 找到：命名空间以它所在的为准（预检时改掉页面上的；安装时和检测时不一样就停下），脚本装的要强制覆盖确认；
+        - 没找到：命名空间里放着别的集群的 Agent 不能拿来修复；以前在这个集群网页安装过（集群 UID 已由
+          check_identity 核对）就按记录重装，否则要强制覆盖确认 kubeconfig 连的确实是这个集群。
+        """
+        env = options['env']
+        configs = await kube.list('/api/v1/configmaps', {'fieldSelector': f'metadata.name={AGENT_CONFIG}'})
+        mine = sorted((c for c in configs if agent_cluster_name(c) == env), key=lambda c: c['metadata'].get('namespace') or '')
+        if len(mine) > 1:
+            spaces = '、'.join(c['metadata'].get('namespace') or '' for c in mine)
+            raise InstallError(f'目标集群里有 {len(mine)} 套集群名为 {env} 的 Agent（命名空间 {spaces}），请先删掉多余的再修复', 409)
+        if mine:
+            namespace = mine[0]['metadata'].get('namespace') or options['namespace']
+            if namespace != options['namespace']:
+                if checks is None:
+                    raise InstallError(f'目标集群里集群 {env} 的 Agent 现在在命名空间 {namespace}，和检测时不同，请重新检测', 409)
+                options['namespace'] = namespace
+            script = mine[0]['metadata'].get('labels', {}).get(MANAGED) != 'web-installer'
+            if checks is not None:
+                checks.append({'name': REPAIR_CHECK, 'status': 'success',
+                               'message': f'命名空间 {namespace} 里有集群 {env} 的 Agent（{"脚本" if script else "网页"}安装），修复会覆盖安装它'})
+            return [conflict('ConfigMap', AGENT_CONFIG, namespace, '脚本安装的 Agent')] if script else []
+        other = await kube.request('GET', f'/api/v1/namespaces/{options["namespace"]}/configmaps/{AGENT_CONFIG}', missing_ok=True)
+        if other:
+            raise InstallError(f'命名空间 {options["namespace"]} 里是集群 {agent_cluster_name(other)[:64] or "（空）"} 的 Agent，'
+                               f'不是 {env}，不能拿来修复；请确认 kubeconfig 连的是集群 {env}', 409)
+        if await self.repo.installed(env):
+            if checks is not None:
+                checks.append({'name': REPAIR_CHECK, 'status': 'warning',
+                               'message': f'目标集群里没有找到集群 {env} 的 Agent（可能被删掉了），'
+                                          f'按上次的安装记录重新安装到命名空间 {options["namespace"]}'})
+            return []
+        if checks is not None:
+            checks.append({'name': REPAIR_CHECK, 'status': 'warning',
+                           'message': f'目标集群里没有找到集群 {env} 的 Agent，也没有这个集群的网页安装记录'})
+        return [conflict(MISSING_AGENT, env, '', f'目标集群里没有找到集群 {env} 的 Agent，请确认 kubeconfig 连的是集群 {env}')]
 
     async def components(self, options, kube, checks):
         """三个采集组件：自动检测换成安装或复用。装 vmagent 时，选了不安装（复用已有）的组件要确认集群里有，

@@ -1078,7 +1078,8 @@ code_info.register_routes(app, call_agent_api)
 
 # ==================== 获取运行配置(Deployment / Pod 页;配置在 /api/admin/runtime-config,见 func_manager/runtime_config.py) ====================
 runtime_config.register_routes(app)
-agent_install_api.register_routes(app, clients)
+# 网页安装 / 修复 Agent(/api/admin/agent-installations/*,修复弹框的检查 /api/admin/agent-health)
+agent_install_api.register_routes(app, clients, call_agent_api)
 
 # ==================== 消息通知(系统管理 → 消息通知 /api/admin/notification;kubedoor-alarm 取通道 /api/internal/notification) ====================
 notify_api.register_routes(app)

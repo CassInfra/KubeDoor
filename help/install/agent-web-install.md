@@ -80,7 +80,37 @@ Agent 上线后（第 5 步之后）顺带做两件事，结果各显示一行�
 
 - 部分成功的重试按钮是「重新验证指标采集」：Agent 已经上线，前几步不再执行，只重新查询时序库，不连接目标集群，也不需要安装凭据。
 - 其他失败的重试按钮是「核对状态并重试」：用还没过期的临时凭据重新连接集群，复用同一个 Agent 账号。目标集群返回 401 时说明凭据已失效，提示重新上传 kubeconfig。
-- 安装向导第 6 步在本集群安装的记录（kubeconfig 的 context 为 `in-cluster`）用的是安装向导签发的临时令牌，安装收尾时安装账号 `kubedoor-agent-installer` 连同令牌一起撤销，不能再用这条记录连接集群（已安装的 Agent 不受影响）。要重装或调整本集群的 Agent，点「安装新集群」上传 kubeconfig。
+- 安装向导第 6 步在本集群安装的记录（kubeconfig 的 context 为 `in-cluster`）用的是安装向导签发的临时令牌，安装收尾时安装账号 `kubedoor-agent-installer` 连同令牌一起撤销，不能再用这条记录连接集群（已安装的 Agent 不受影响）。要重装或调整本集群的 Agent，点「安装新集群」上传 kubeconfig，或在 Agent 列表里对这个集群用「修复」。
+
+### 修复 Agent（覆盖安装）
+
+Agent 列表的版本号是一个菜单：更新、重启、修复。「修复」在 Agent 离线时也能用：先弹出检查，看各项是否正常，再从检查弹框的「修复（覆盖安装）」进入安装对话框的修复模式。
+
+检查（`GET /api/admin/agent-health?env=`，master `agent_install/health.py`）都是只读的，每一项单独限时、单独兜底，一项出错不影响其他项。经 Agent 的几项用的都是现有接口，旧版 Agent 也能检查；Agent 离线时这几项跳过。
+
+| 分组 | 检查 | 怎么查 |
+| --- | --- | --- |
+| Agent 与连接 | 连接控制端 | 是否在线、最后心跳 |
+| | Agent 版本 | 和推荐版本比；旧版说明缺哪些功能（AI 经 Agent 执行、AI 查询数据库 / Redis / ES、运维通知按集群选群） |
+| | K8S API 访问 | 经 Agent 列出命名空间 |
+| | Pod 管理服务 | 经 Agent 调一次 pod-mgr；没有响应时 Pod 日志下载、删除 / 隔离 Pod、Java 诊断不可用 |
+| | 准入控制 | 页面上开着时，核对集群里的 `kubedoor-admis-configuration` 还在；不在时提示把开关关掉再打开 |
+| 组件 | kubedoor-agent、vmagent、kube-state-metrics、node-exporter | 经 Agent 查 Agent 命名空间（这个集群上次网页安装的命名空间，没有记录时 `kubedoor`）里各组件 Pod 的就绪数、累计重启次数和卡住的原因（CrashLoopBackOff、ImagePullBackOff、上次退出原因等）；没有某个组件的 Pod 时算没随 Agent 安装 |
+| 数据上报 | K8S 事件上报 | 数据库里最近 24 小时这个集群最新事件的时间，1 小时内算正常（集群很安静时也可能很久没有事件） |
+| | 指标采集 | 时序库最近 10 分钟有没有这个集群的 `kube_pod_info`（kube-state-metrics）、`node_uname_info`（node-exporter）、`container_cpu_usage_seconds_total`（cAdvisor），一次查询，带 `nocache=1` |
+| 修复 | AI Kubeconfig | 有没有保存，修复时直接用它连接集群 |
+
+覆盖安装：
+
+- 集群唯一标识固定为这个集群，命名空间由服务端定，页面上都不能改；预检时服务端也拒绝改了集群标识的请求。
+- 集群在「AI Kubeconfig」列保存了 kubeconfig 时（`POST /api/admin/agent-installations/repair`），master 经 kubedoor-ai 的内部接口 `GET /api/ai/internal/connections/{env}/kubeconfig`（nginx 对外一律 404，只认系统管理员身份）取回明文，和上传的一样只放进加密的安装材料，对话框直接进入「确认信息」。每个集群只存一份，不管是安装时自动配置的（Agent 服务账号，集群管理员权限）还是手动上传的都用；权限不够或令牌失效（例如坏的正是 Agent 服务账号）时检测会报错，回到第一步上传另一份。没有保存、kubedoor-ai 连不上或解不开时停在第一步上传（`inspect` 带 `repair_env`）。
+- 预填参数沿用这个集群上次网页安装的命名空间、安装方式、采集组件和 KubeDoor 地址，Agent 版本用推荐版本；脚本装的集群没有记录，用默认值。通用配置里已经没有远程写地址时不装采集组件（集群里已有的不动）。
+- 预检不按「这个集群标识已有 Agent 登记」拒绝，改为在目标集群里找集群名为它的 Agent（全集群按名称列出 ConfigMap `kubedoor-agent-config`）：
+  - 找到：命名空间以它所在的为准，检测结果多一行「现有 Agent」；脚本装的照常要「强制覆盖安装」确认。同名的有两套时要先删掉多余的。
+  - 没找到：命名空间里放着别的集群的 Agent 时拒绝；以前在这个集群网页安装过（集群 UID 一致）就按记录重装；都没有时列进强制覆盖清单，确认 kubeconfig 连的确实是这个集群后才继续。
+  - 这个集群标识以前装在另一个集群（kube-system UID 不同）上时照旧拒绝。
+- 之后的检测、安装、等待上线和普通安装一样。开始安装前会再核对一次，Agent 在这期间换了命名空间就停下，要求重新检测。
+- 这个集群有正在执行的安装或修复时，点「修复」直接显示那个任务的进度。建修复任务记审计 `agent.repair.start`（detail 带来源 `ai-connection` / `upload`），之后的开始、结束和安装一样记 `agent.install.start` / `agent.install.finish`。
 
 ## 2. 只填一个 master 地址
 
@@ -142,7 +172,9 @@ master 当前未安装 Kubernetes SDK / kubedoor-tools，落地时需要补齐�
 
 | 接口 | 作用 |
 | --- | --- |
-| `POST /api/admin/agent-installations/inspect` | 上传 kubeconfig，创建有时效的草稿，返回 context 与非敏感摘要 |
+| `POST /api/admin/agent-installations/inspect` | 上传 kubeconfig，创建有时效的草稿，返回 context 与非敏感摘要；带 `repair_env` 时建修复任务 |
+| `POST /api/admin/agent-installations/repair` | 修复：用这个集群的 AI Kubeconfig 建修复任务；正在安装时返回那个任务；没有能用的 kubeconfig 返回 `task: null` 和原因 |
+| `GET /api/admin/agent-health?env=` | 修复弹框里的检查 |
 | `POST /api/admin/agent-installations/{id}/preflight` | 确认 context/参数，检测权限、冲突，生成安装计划 |
 | `POST /api/admin/agent-installations/{id}/start` | 按已确认的计划启动安装；使用幂等键 |
 | `GET /api/admin/agent-installations/{id}` | 获取状态、逐步进度和脱敏错误 |

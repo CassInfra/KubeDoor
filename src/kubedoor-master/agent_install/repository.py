@@ -54,6 +54,12 @@ class Repository:
             'SELECT * FROM agent_installations WHERE id<>$1::uuid AND (env=$2 OR target_uid=$3) '
             "AND status NOT IN ('draft','expired') ORDER BY created_at DESC", exclude, env, target_uid)]
 
+    async def installed(self, env):
+        """这个集群最近一次装上了的网页安装记录（成功，或 Agent 已上线只差指标验证）；没有返回 None"""
+        return unpack(await db.pg_fetchrow(
+            "SELECT * FROM agent_installations WHERE env=$1 AND status IN ('succeeded','partial') "
+            'ORDER BY created_at DESC LIMIT 1', env))
+
     async def expire(self):
         await db.pg_execute(
             "UPDATE agent_installations SET encrypted='',status=CASE WHEN status IN ('draft','ready') "

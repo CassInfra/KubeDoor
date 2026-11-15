@@ -144,3 +144,40 @@ async def find_cluster(url, tag_key, env, *, session_factory=aiohttp.ClientSessi
         raise ProbeError(f'连接时序库失败或超时（{TIMEOUT} 秒），请检查地址和 master 到时序库的网络') from None
     except (ValueError, TypeError, KeyError, IndexError):
         raise ProbeError('时序库查询结果格式不正确') from None
+
+
+def sources_query(tag_key, env, sources, window):
+    """sources 里每个 (来源名, 指标名) 统计这个集群最近 window 里的序列数，用 label_replace 标上来源名后 or 起来：
+    一次查询得到全部来源"""
+    selector = '{' + tag_key + '=' + json.dumps(env) + '}'
+    return ' or '.join(
+        f'label_replace(count(last_over_time({metric}{selector}[{window}])), "kubedoor_source", {json.dumps(name)}, "", "")'
+        for name, metric in sources)
+
+
+async def cluster_sources(url, tag_key, env, sources, *, window='10m', session_factory=aiohttp.ClientSession):
+    """Agent 管理「修复」里的指标采集检查：这个集群最近 window 里有哪些来源的指标，返回查到的来源名集合。
+
+    sources 是 [(来源名, 指标名), ...]。带 nocache=1：VictoriaMetrics 默认隐藏最近 30 秒的数据，也不读结果缓存
+    （Prometheus 忽略这个参数）。连不上、认证失败、返回格式不对抛 ProbeError（说明里不带地址）。
+    url、tag_key、env 同 find_cluster
+    """
+    try:
+        base, user, password = fields.url_credentials(url)
+        base = base.rstrip('/')
+        headers = basic_auth_header(user, password) if user else None
+        params = {'query': sources_query(tag_key, env, sources, window), 'nocache': '1'}
+        async with session_factory(timeout=aiohttp.ClientTimeout(total=TIMEOUT)) as session:
+            data = await _api_data(session, base + '/api/v1/query', params, headers)
+        rows = data.get('result') if isinstance(data, dict) else None
+        if not isinstance(rows, list):
+            raise ValueError
+        return {row['metric'].get('kubedoor_source') for row in rows if float(row['value'][1]) > 0}
+    except ProbeError:
+        raise
+    except (aiohttp.ClientSSLError, ssl.SSLError):
+        raise ProbeError('时序库 TLS 证书验证失败，请检查服务证书') from None
+    except (aiohttp.ClientError, asyncio.TimeoutError, OSError):
+        raise ProbeError(f'连接时序库失败或超时（{TIMEOUT} 秒），请检查地址和 master 到时序库的网络') from None
+    except (ValueError, TypeError, KeyError, IndexError, AttributeError):
+        raise ProbeError('时序库查询结果格式不正确') from None

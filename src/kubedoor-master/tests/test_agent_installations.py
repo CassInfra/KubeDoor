@@ -92,6 +92,10 @@ class MemoryRepository:
         return [t for t in await self.list() if t['id'] != exclude and (t['env'] == env or t['target_uid'] == target_uid)
                 and t['status'] not in ('draft', 'expired')]
 
+    async def installed(self, env):
+        done = [t for t in await self.list() if t['env'] == env and t['status'] in ('succeeded', 'partial')]
+        return max(done, key=lambda t: t['created_at']) if done else None
+
     async def expire(self):
         for task in self.data.values():
             if task['expires_at'] < module.utcnow() and task['status'] != 'running':

@@ -91,6 +91,19 @@ def create_app(service=None, token=None):
                 data = await body(request)
                 tested, _, _ = await svc.test_connection(identity, env, data)
                 return JSONResponse(redact(tested), status_code=200 if tested.get("success", True) else 422)
+            elif endpoint == "connection-kubeconfig":
+                # 修复 Agent:master 用这个集群保存的 kubeconfig 覆盖安装。只在集群内可达(nginx 对外把 /api/ai/internal/
+                # 一律 404),返回明文凭据,所以不经过下面的 redact;和保存一样只认系统管理员
+                identity.require_admin()
+                row = await svc.store.connection(env)
+                if not row:
+                    raise AIError("这个集群还没有保存 AI Kubeconfig", 404, "connection_missing")
+                try:
+                    config = svc.gateway.cipher.decrypt(env, bytes(row["encrypted_config"]))
+                except Exception:
+                    raise AIError("保存的 AI Kubeconfig 无法解密（AI_ENCRYPTION_KEY 变了？），请重新上传", 409, "connection_broken") from None
+                return JSONResponse({"env": env, "context": row["context"], "origin": row.get("origin") or "upload",
+                                     "content": json.dumps(config)})
             elif endpoint == "connection":
                 identity.require_admin()
                 if request.method == "DELETE":
@@ -313,6 +326,7 @@ def create_app(service=None, token=None):
     route("/bootstrap", "bootstrap", ["GET"])
     route("/resources", "resources", ["GET"])
     route("/internal/connections-summary", "connections-summary", ["GET"])
+    route("/internal/connections/{env}/kubeconfig", "connection-kubeconfig", ["GET"])
     route("/connections", "connections", ["GET"])
     route("/connections/parse", "parse", ["POST"])
     route("/connections/{env}/test", "connection-test", ["POST"])

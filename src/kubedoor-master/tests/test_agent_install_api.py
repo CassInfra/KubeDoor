@@ -4,6 +4,7 @@ import copy
 import json
 import pathlib
 import sys
+from unittest.mock import AsyncMock
 
 import pytest
 from aiohttp import web
@@ -40,6 +41,9 @@ class MemoryRepository:
 
     async def list(self):
         return copy.deepcopy(list(self.rows.values()))
+
+    async def installed(self, env):
+        return None
 
 
 def kubeconfig():
@@ -152,5 +156,59 @@ async def test_install_upload_size_and_invalid_body(fake, monkeypatch):
         invalid = await client.post(endpoint, headers={**headers, 'Content-Type': 'application/json'}, data='{')
         assert invalid.status == 400
         assert not repository.rows
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_repair_and_health_endpoints_are_admin_only_and_need_a_connected_cluster(fake, monkeypatch):
+    """修复 Agent：只给系统管理员；集群要接入过；没有能用的 AI Kubeconfig 时返回 task: null 让页面改为上传"""
+    from agent_install import health
+
+    client, repository = await make_api(fake, monkeypatch)
+    try:
+        service = client.server.app[api.KEY]
+        service.clients['prod'] = {'online': False, 'ver': '2.5.0', 'last_heartbeat': 0}
+        monkeypatch.setattr(health.db, 'pg_fetchval', AsyncMock(return_value=None))
+        await add_user(fake, 'reader', 'read', 'Reader-pass-1')
+        read = {'Authorization': basic('reader', 'Reader-pass-1')}
+        assert (await client.post('/api/admin/agent-installations/repair', headers=read, json={'env': 'prod'})).status == 403
+        assert (await client.get('/api/admin/agent-health', headers=read, params={'env': 'prod'})).status == 403
+        await add_user(fake, 'installer', 'admin', 'Installer-pass-1')
+        admin = {'Authorization': basic('installer', 'Installer-pass-1')}
+
+        missing = await client.post('/api/admin/agent-installations/repair', headers=admin, json={'env': 'nowhere'})
+        assert missing.status == 404 and (await missing.json())['success'] is False
+        bad = await client.post('/api/admin/agent-installations/repair', headers=admin, json={'env': '../x'})
+        assert bad.status == 400
+
+        monkeypatch.delenv('AI_INTERNAL_TOKEN', raising=False)
+        none = await client.post('/api/admin/agent-installations/repair', headers=admin, json={'env': 'prod'})
+        assert none.status == 200
+        data = (await none.json())['data']
+        assert data['task'] is None and 'AI_INTERNAL_TOKEN' in data['message']
+
+        # 上传 kubeconfig 修复：集群标识固定，任务带 repair；没接入过的集群不行
+        unknown = await client.post('/api/admin/agent-installations/inspect', headers=admin,
+                                    json={'kubeconfig': kubeconfig(), 'repair_env': 'nowhere'})
+        assert unknown.status == 404 and not repository.rows
+        uploaded = await client.post('/api/admin/agent-installations/inspect', headers=admin,
+                                     json={'kubeconfig': kubeconfig(), 'repair_env': 'prod'})
+        assert uploaded.status == 200, await uploaded.text()
+        task = (await uploaded.json())['data']
+        assert task['repair'] == {'env': 'prod', 'source': 'upload'} and task['options']['env'] == 'prod'
+        assert 'private-install-token' not in await uploaded.text()
+
+        # 检查：没有提供 Agent 调用时说明原因；提供了就返回各项结果
+        assert (await client.get('/api/admin/agent-health', headers=admin, params={'env': 'prod'})).status == 503
+        service.call_agent = AsyncMock(side_effect=RuntimeError('目标客户端 prod 不在线'))
+        monkeypatch.setattr(health.HealthCheck, 'connection', AsyncMock(return_value=None))
+        monkeypatch.setattr(health.db, 'pg_fetchrow', AsyncMock(return_value=None))
+        checked = await client.get('/api/admin/agent-health', headers=admin, params={'env': 'prod'})
+        assert checked.status == 200, await checked.text()
+        result = (await checked.json())['data']
+        assert result['env'] == 'prod' and result['online'] is False and result['namespace'] == 'kubedoor'
+        assert result['checks'][0]['key'] == 'connection' and result['kubeconfig'] == {'configured': False}
+        assert (await client.get('/api/admin/agent-health', headers=admin, params={'env': 'nowhere'})).status == 404
     finally:
         await client.close()
