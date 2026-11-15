@@ -599,7 +599,19 @@ async def cron_peak_data(request):
 
 
 async def init_peak_data(request):
-    """初始化/更新原始资源表k8s_resources，初始化/更新资源管控表k8s_res_control"""
+    """初始化/更新原始资源表k8s_resources，初始化/更新资源管控表k8s_res_control
+
+    同一个集群同时只跑一轮：两轮一起跑会把同一天的数据写两遍，管控表初始化时同一个服务出现两次，写入失败
+    """
+    env_value = request.query.get("env")
+    lock = utils.peak_collect_lock(env_value)
+    if lock.locked():
+        return web.json_response({"message": f"{env_value}: 正在采集高峰期数据，请等这一轮结束再试"}, status=409)
+    async with lock:
+        return await collect_peak_data(request)
+
+
+async def collect_peak_data(request):
     try:
         env_key = utils.tag_key()  # 集群标签 key(通用配置)，每轮采集取一次
         env_value = request.query.get("env")

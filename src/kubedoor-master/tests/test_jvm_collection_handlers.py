@@ -16,7 +16,7 @@ from loguru import logger
 
 def load_handlers():
     master_path = pathlib.Path(__file__).resolve().parent.parent / 'kubedoor-master.py'
-    names = {'call_agent_api', 'handle_admis_request', 'init_peak_data'}
+    names = {'call_agent_api', 'handle_admis_request', 'init_peak_data', 'collect_peak_data'}
     parsed = ast.parse(master_path.read_text(encoding='utf-8'))
     module = ast.Module(body=[node for node in parsed.body if isinstance(node, ast.AsyncFunctionDef) and node.name in names], type_ignores=[])
     namespace = {
@@ -148,6 +148,8 @@ def prepare_peak_handlers(jvm_result, write_succeeded=True):
         init_control_data=AsyncMock(return_value=write_succeeded),
         update_control_data=AsyncMock(return_value=write_succeeded),
         invalidate_admis_cache=Mock(),
+        # 同一个集群同时只跑一轮采集（真实的锁见 utils.peak_collect_lock）
+        peak_collect_lock=lambda env: asyncio.Lock(),
     )
     collect = AsyncMock(return_value=jvm_result)
     handlers.update(utils=utils, jvm_config=types.SimpleNamespace(collect_current_configs=collect))
@@ -196,3 +198,22 @@ def test_control_write_failure_does_not_collect_jvm():
 
     assert response.status == 500
     collect.assert_not_awaited()
+
+
+def test_a_second_collection_for_the_same_cluster_is_refused_while_one_runs():
+    """两轮一起跑会把同一天的数据写两遍（管控表初始化时同一个服务出现两次，写入失败）：正在采集时直接拒绝"""
+    handlers, utils, collect, _ = prepare_peak_handlers({'success': True})
+
+    async def scenario():
+        running = asyncio.Lock()
+        utils.peak_collect_lock = lambda env: running
+        await running.acquire()
+        refused = await handlers['init_peak_data'](types.SimpleNamespace(query={'env': 'prod', 'days': '1'}))
+        running.release()
+        done = await handlers['init_peak_data'](types.SimpleNamespace(query={'env': 'prod', 'days': '1'}))
+        return refused, done
+
+    refused, done = asyncio.run(scenario())
+    assert refused.status == 409 and '正在采集高峰期数据' in json.loads(refused.body)['message']
+    assert done.status == 200
+    utils.metrics_to_pg.assert_awaited_once()

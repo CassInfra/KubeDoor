@@ -537,7 +537,40 @@ async def get_list_from_resources(env_value):
     logger.info("提取最近10天cpu最高的一天的数据：")
     for i in result:
         logger.debug(tuple(i))
-    return [tuple(row) for row in result]
+    return merge_deployment_rows([tuple(row) for row in result])
+
+
+def merge_deployment_rows(rows):
+    """管控表一个服务（Deployment）一行，但高峰期数据里同一天同一个服务可能有多行，要合成一行。
+
+    采集按 ReplicaSet 分组（kube_pod_owner 的 owner_name，去掉末尾的 hash 得到服务名）：高峰时段里发版 / 回滚、
+    滚动更新没走完时，新旧两个 ReplicaSet 都有就绪的 Pod，各算一行。合成时指标和规格取 Pod 数最多的那一行
+    （一样多时取 CPU 负载高的），Pod 数取各行之和（新旧 ReplicaSet 加起来才是服务实际的 Pod 数，宁多勿少：
+    管控表的 Pod 数会被准入控制用来改副本数）。完全相同的行（同一天被重复写入）只算一次。
+
+    rows 是 get_list_from_resources 查询的列顺序（第 2~4 列是集群、命名空间、服务，第 5 列 Pod 数、
+    第 12 列 CPU 负载），返回的服务按第一次出现的顺序排列
+    """
+    groups = {}
+    for row in dict.fromkeys(rows):  # 去掉完全相同的行，保留顺序
+        groups.setdefault(row[1:4], []).append(row)
+    merged = []
+    for same in groups.values():
+        main = max(same, key=lambda row: (row[4], row[11]))
+        if len(same) > 1:
+            logger.info(f"{main[1]}/{main[2]}/{main[3]} 这一天有 {len(same)} 份数据（多个 ReplicaSet），"
+                        f"Pod 数合计 {sum(row[4] for row in same)}，指标取 Pod 数最多的一份")
+            main = (*main[:4], sum(row[4] for row in same), *main[5:])
+        merged.append(main)
+    return merged
+
+
+# 同一个集群同时只跑一轮高峰期采集（「采集历史数据」和每天的定时采集共用）：两轮一起跑会把同一天的数据写两遍
+_peak_collect_locks = {}
+
+
+def peak_collect_lock(env_value):
+    return _peak_collect_locks.setdefault(env_value, asyncio.Lock())
 
 
 async def is_init_or_update(env_value):
