@@ -4,6 +4,7 @@ import json
 import os
 from pathlib import Path
 import re
+import subprocess
 import sys
 
 import yaml
@@ -12,6 +13,8 @@ import yaml
 OWNER = "setup.kubedoor.io/installation-id"
 ID = "718df732-9671-4144-8033-1c531ee41813"
 STATE_FILE = Path(os.environ["KUBEDOOR_FAKE_CLUSTER"])
+# 升级时同步 Grafana 看板的命令（python3 -m grafana_dashboards）在仓库的 master 目录里真的执行
+MASTER = Path(__file__).resolve().parents[2] / "kubedoor-master"
 cluster = json.loads(STATE_FILE.read_text(encoding="utf-8"))
 # master 容器里 python3 -m general_settings migrate 成功时 stdout 最后一行的汇总（只有配置项名称和状态）
 MIGRATE_OK = {"ok": True, "general_settings": {"imported": ["prom_url", "kubedoor_exturl"], "present": [], "invalid": []},
@@ -254,8 +257,27 @@ elif verb == "patch":
             new["metadata"] = {**new["metadata"], "generation": int(old["metadata"].get("generation", 1)) + 1}
         objects[key(kind, name)] = new
 elif verb == "exec":
-    # 容器里的命令：exec_result 注入退出码和输出，默认是迁移成功（日志一行 + 汇总一行）
     call["exec"] = raw[raw.index("--") + 1:] if "--" in raw else []
+    module = call["exec"][2] if call["exec"][:2] == ["python3", "-m"] and len(call["exec"]) > 2 else ""
+    if module == "grafana_dashboards":
+        # 看板命令默认真的执行（stdin 照传，输出按字节原样转出）；exec_results["grafana_dashboards"] 可以注入结果
+        stdin = sys.stdin.buffer.read() if ("-i" in args or "--stdin" in args) else b""
+        call["stdin"] = stdin.decode("utf-8", "replace")
+        injected = (cluster.get("exec_results") or {}).get(module)
+        if injected is None:
+            done = subprocess.run([sys.executable, "-m", module, *call["exec"][3:]], cwd=MASTER, input=stdin,
+                                  capture_output=True, env={**os.environ, "PYTHONIOENCODING": "utf-8"})
+            out, err, code = done.stdout, done.stderr, done.returncode
+        else:
+            out, err = injected.get("stdout", "").encode(), injected.get("stderr", "").encode()
+            code = injected.get("code", 0)
+        sys.stdout.buffer.write(out)
+        sys.stdout.flush()
+        sys.stderr.buffer.write(err)
+        sys.stderr.flush()
+        save()
+        raise SystemExit(code)
+    # 其他命令（迁移）：exec_result 注入退出码和输出，默认是迁移成功（日志一行 + 汇总一行）
     if "-i" in args or "--stdin" in args:
         call["stdin"] = sys.stdin.read()
     result = cluster.get("exec_result") or {}

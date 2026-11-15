@@ -79,7 +79,7 @@ sh install.sh --render     # 只预览引导资源，不连接集群、不生成
 
 每次升级先取得目标发布版本对应的新版 `deploy/install.sh`，单独复制到能访问控制端集群的机器。脚本内的固定版本就是默认升级目标；当前为 **2.6.0**，不会在运行时查询远程版本或使用浮动 `latest` 镜像。
 
-先查看升级计划、实际使用的 Deployment 补丁，以及旧配置的迁移和清理步骤：
+先查看升级计划、实际使用的 Deployment 补丁、旧配置的迁移和清理步骤，以及 Grafana 看板的同步：
 
 ```sh
 sh install.sh upgrade --context production --namespace kubedoor --dry-run
@@ -112,7 +112,7 @@ containers:
 
 `emptyDir` 是 Pod 临时缓存，重建 Pod 后清空。master 和 AI 使用新版模板中的 `Recreate` 策略，先停止旧 Pod；升级期间会有服务短暂中断及 Agent 重连，请安排维护窗口。
 
-升级保留现有副本数、资源 requests/limits、环境变量和 `envFrom`、配置摘要、调度配置、拉取 Secret、自定义卷和 sidecar。数据库连接、账号密码、加密密钥、Service/NodePort 均沿用现有资源，不重新运行初始化。未安装的 AI / alarm 会跳过；master 和 web 必须存在。Grafana、监控/告警第三方服务及业务集群 Agent 不在此命令的升级范围内，Agent 可在控制台按集群单独升级。
+升级保留现有副本数、资源 requests/limits、环境变量和 `envFrom`、配置摘要、调度配置、拉取 Secret、自定义卷和 sidecar。数据库连接、账号密码、加密密钥、Service/NodePort 均沿用现有资源，不重新运行初始化。未安装的 AI / alarm 会跳过；master 和 web 必须存在。Grafana 只同步看板（见下文「Grafana 看板」），Grafana 镜像、监控/告警第三方服务及业务集群 Agent 不在此命令的升级范围内，Agent 可在控制台按集群单独升级。
 
 2.3.0 的 Nginx 配置会补充 Agent 安装接口专用代理和安全日志，避免新接口收到的 kubeconfig 被旧通用 API 日志记录；其他 Nginx 配置保留。无法识别的自定义 Nginx 配置会在修改前停止，需先人工核对。
 
@@ -141,6 +141,17 @@ containers:
 
 不清理时旧值留在 ConfigMap 里也没有副作用：配置以数据库为准，在控制台清空的项不会被旧值导回来。中途失败重跑是安全的：补丁可以重复打，迁移只导入还没有的项，清理时键或资源已经不存在也不报错。
 
+### Grafana 看板
+
+装了 Grafana（`deployment/kubedoor-dash`）时，`upgrade` 在全部组件升级完成后、清理旧配置之前，用新版 master 镜像里的看板覆盖看板 ConfigMap（一个看板一个，例如 `kubedoor-dash-dash`、`kubedoor-dash-k8s`）：
+
+1. 读取 `kubedoor-dash` 挂载的 `kubedoor-dash-*` ConfigMap，连同 `kubedoor-dash` 一起写进升级备份。
+2. 把它们交给 master 容器里的 `python3 -m grafana_dashboards render`（同样需要 `pods/exec` 权限），生成有变化的看板。看板里的集群指标标签 key 沿用现有看板里的值，和已装集群的采集保持一致；现有看板里取不到时，才用「系统管理 → 通用配置」里的值。
+3. 用 `kubectl apply --server-side` 写入（看板有几百 KB，普通 `kubectl apply` 会超过注解 256KB 的上限）。Grafana 约 1 分钟内自动加载，不用重启。
+4. 新版本新增的看板，在 `kubedoor-dash` 的看板卷里补上挂载（`python3 -m grafana_dashboards mounts` 生成补丁，先由 API Server 试运行），Grafana 会重启一次；原有的挂载（包括自己加的）原样保留。
+
+在集群里直接改过的看板会被覆盖，旧内容在升级备份里；在 Grafana 页面上改的看板本来就保存不了（看板由 ConfigMap 下发）。看板没有变化时不写入。同步失败时只提示，不影响升级结果，看板保持原样，处理后再执行一次 `upgrade` 即可。`--dry-run` 会列出要执行的命令和现有的看板 ConfigMap。
+
 默认保留各组件当前的镜像仓库。使用镜像同步仓库或自定义构建 tag 时，可以显式指定：
 
 ```sh
@@ -150,7 +161,7 @@ sh install.sh upgrade --image-repo registry.example.com/kubedoor --tag 2.6.0 \
 
 `--tag` 只覆盖镜像版本，Deployment 模板始终来自所执行的脚本；请使用同一发布版本的脚本和镜像，不用于降级。`--web-tag` 可以覆盖 Web 镜像；首装参数 `--setup-tag`、`--nodeport`、`--image-pull-secret`、`--render`、`--export` 不适用于升级。
 
-实际修改前，脚本先让 Kubernetes API Server 校验全部 Deployment 补丁，再保存所有目标 Deployment、Nginx ConfigMap 和上面列出的旧配置。默认备份为当前目录的 `kubedoor-upgrade-backup-<日期时间>.yaml`（机器上没有 `date` 命令时为 `kubedoor-upgrade-backup.yaml`）；同名文件已存在时自动加 `-2`、`-3` 等序号，绝不覆盖已有备份，也可以用 `--backup` 指定文件名。资源备份包含数据库连接等 Secret 和原有内联配置，应妥善保管；它**不包含数据库备份**。
+实际修改前，脚本先让 Kubernetes API Server 校验全部 Deployment 补丁，再保存所有目标 Deployment、Nginx ConfigMap、Grafana 看板和上面列出的旧配置。默认备份为当前目录的 `kubedoor-upgrade-backup-<日期时间>.yaml`（机器上没有 `date` 命令时为 `kubedoor-upgrade-backup.yaml`）；同名文件已存在时自动加 `-2`、`-3` 等序号，绝不覆盖已有备份，也可以用 `--backup` 指定文件名。资源备份包含数据库连接等 Secret 和原有内联配置，应妥善保管；它**不包含数据库备份**。
 
 每个组件更新后均等待 Deployment 就绪。失败时脚本返回非零状态并停止后续组件；已完成的组件不会自动回退。检查镜像、Pod 事件和日志，修复后重新执行 `upgrade` 即可（备份会自动换一个新文件名）。相同版本重试也会核对 Deployment 并重新载入 Web 配置。恢复旧版前需同时核对资源备份和数据库迁移兼容性，不能仅凭旧镜像保证回退。
 

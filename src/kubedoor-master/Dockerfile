@@ -9,5 +9,7 @@ RUN sed -i 's/dl-cdn.alpinelinux.org/repo.huaweicloud.com/g' /etc/apk/repositori
     pip3 install -r requirements.txt /tmp/kubedoor-tools -i https://mirrors.aliyun.com/pypi/simple/ --no-cache-dir && \
     rm -rf /tmp/kubedoor-tools
 COPY src/kubedoor-master/ /
+# Grafana 看板：安装时由 kubedoor-setup 下发；升级控制端时 deploy/install.sh 经 python3 -m grafana_dashboards 重新下发
+COPY src/kubedoor-setup/resources/dashboards/ /grafana-dashboards/
 EXPOSE 80
 CMD ["python3", "/kubedoor-master.py"]

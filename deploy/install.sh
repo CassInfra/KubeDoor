@@ -43,8 +43,8 @@ usage() {
     printf '%s\n' \
         '用法：sh install.sh [web|upgrade] [选项]（也支持 bash）' \
         '  upgrade                升级已有控制端，默认使用本脚本内的发布版本' \
-        '  --dry-run              查看版本、Deployment 变更及旧配置迁移和清理计划，不修改集群、不写备份' \
-        '  --backup FILE          升级前保存 Deployment、Nginx 及旧配置（含 Secret），默认 kubedoor-upgrade-backup-<日期时间>.yaml；同名文件已存在时自动加序号，不覆盖' \
+        '  --dry-run              查看版本、Deployment 变更、旧配置迁移和清理计划及 Grafana 看板同步，不修改集群、不写备份' \
+        '  --backup FILE          升级前保存 Deployment、Nginx、Grafana 看板及旧配置（含 Secret），默认 kubedoor-upgrade-backup-<日期时间>.yaml；同名文件已存在时自动加序号，不覆盖' \
         '  --namespace NAME       命名空间，默认 kubedoor' \
         '  --context NAME         kubectl context，默认当前 context' \
         '  --image-repo REPO      KubeDoor 镜像仓库' \
@@ -60,7 +60,8 @@ usage() {
         '首次安装在网页填写数据库及管理员信息；重复运行保留原安装。' \
         '升级示例：sh install.sh upgrade --dry-run；sh install.sh upgrade --tag 2.6.0' \
         'upgrade 保留现有镜像仓库；--image-repo 可覆盖。请先备份 PostgreSQL。' \
-        'upgrade 会把 ConfigMap 里的旧配置和事件告警规则迁入数据库（需要 pods/exec 权限），成功后清理旧配置。'
+        'upgrade 会把 ConfigMap 里的旧配置和事件告警规则迁入数据库（需要 pods/exec 权限），成功后清理旧配置。' \
+        'upgrade 还会用新版看板覆盖 Grafana 看板（kubedoor-dash-* ConfigMap；自己改过的也会被覆盖，旧内容在备份里）。'
 }
 need_value() { [ "$#" -ge 2 ] && [ -n "$2" ] || die "参数 $1 缺少值"; }
 while [ "$#" -gt 0 ]; do
@@ -731,6 +732,9 @@ EOF
 # 升级时先把旧配置迁入数据库，迁移命令确认成功后才清理旧 ConfigMap 和规则挂载；中途失败重跑是安全的。
 RULES_CONFIGMAP=kubedoor-master-file-cfg
 MIGRATE_COMMAND='python3 -m general_settings migrate'
+# Grafana 看板随 kubedoor-master 镜像发布，升级时由 master 里的这个命令生成；server-side apply 用独立的 field-manager
+DASHBOARD_COMMAND='python3 -m grafana_dashboards'
+DASHBOARD_MANAGER=kubedoor-upgrade
 # kubedoor-config 里已迁入数据库的配置项；PG_* 保留（master、alarm、ai 仍从这里取数据库连接）
 MIGRATED_KEYS='PROM_TYPE PROM_URL METRICS_WRITE_URL PROM_K8S_TAG_KEY AGENT_INSTALL_DEFAULTS ALERTMANAGER_EXTURL
 KUBEDOOR_EXTURL LOG_LEVEL ALERT_DEDUP_WINDOW SILENCE_CACHE_TTL ADMIS_CACHE_TTL RETENTION_EVENTS_DAYS
@@ -874,6 +878,58 @@ cleanup_legacy_config() {
         die "清理 kubedoor-config 失败；升级已完成，可稍后再执行一次 upgrade 完成清理"
     printf '%s\n' '旧配置已清理：事件告警规则改从数据库读取，kubedoor-config 只保留数据库连接（PG_*）。'
 }
+# 全部组件升级完成后同步 Grafana 看板：现有的 deployment/kubedoor-dash 和看板 ConfigMap 交给新版 master 里的命令，
+# 它输出有变化的看板（集群指标标签 key 沿用现有看板），用 server-side apply 写入：看板几百 KB，普通 apply 会把整个
+# 对象再存进注解，超过 256KB 上限；独立的 field-manager 也不会让 API Server 去同步那个注解。缺少的看板再补上挂载。
+# 失败只警告：升级本身已经完成，看板保持原样，处理后再执行一次 upgrade 即可。
+sync_dashboards() {
+    printf '%s\n' '同步 Grafana 看板：用新版 kubedoor-master 镜像里的看板覆盖 kubedoor-dash-* ConfigMap'
+    retry='看板保持原样；确认 kubedoor-master 为 2.6.0 及以上版本、kubectl 有 pods/exec 权限后，再执行一次 upgrade 即可'
+    if ! dash_current=$(kc -n "$NAMESPACE" get deployment kubedoor-dash -o json); then
+        warn "读取 deployment/kubedoor-dash 失败，$retry"
+        return 0
+    fi
+    for name in $DASH_MAPS; do
+        if ! dash_map=$(kc -n "$NAMESPACE" get configmap "$name" -o json); then
+            warn "读取 ConfigMap $name 失败，$retry"
+            return 0
+        fi
+        dash_current="$dash_current$NL$dash_map"
+    done
+    if ! dash_manifest=$(printf '%s\n' "$dash_current" |
+        kc -n "$NAMESPACE" exec -i deploy/kubedoor-master -c kubedoor-master -- python3 -m grafana_dashboards render); then
+        warn "生成看板失败（见上面 $DASHBOARD_COMMAND render 的输出），$retry"
+        return 0
+    fi
+    dash_manifest=${dash_manifest%"$CR"}
+    if [ -z "$dash_manifest" ]; then
+        printf '%s\n' '看板没有变化。'
+    elif ! printf '%s\n' "$dash_manifest" |
+        kc -n "$NAMESPACE" apply --server-side --force-conflicts --field-manager="$DASHBOARD_MANAGER" -f -; then
+        warn "写入看板 ConfigMap 失败，$retry"
+        return 0
+    fi
+    if ! dash_patch=$(printf '%s\n' "$dash_current" |
+        kc -n "$NAMESPACE" exec -i deploy/kubedoor-master -c kubedoor-master -- python3 -m grafana_dashboards mounts); then
+        warn "检查看板挂载失败（见上面 $DASHBOARD_COMMAND mounts 的输出），新增的看板暂时不会显示；$retry"
+        return 0
+    fi
+    dash_patch=${dash_patch%"$CR"}
+    if [ -n "$dash_patch" ]; then
+        if ! kc -n "$NAMESPACE" patch deployment kubedoor-dash --type=strategic --patch "$dash_patch" \
+            --dry-run=server -o name >/dev/null; then
+            warn "给 kubedoor-dash 补看板挂载的试运行未通过，新增的看板暂时不会显示；请核对 deployment/kubedoor-dash 的 grafana-dash 卷，$retry"
+            return 0
+        fi
+        if ! kc -n "$NAMESPACE" patch deployment kubedoor-dash --type=strategic --patch "$dash_patch"; then
+            warn "给 kubedoor-dash 补看板挂载失败，新增的看板暂时不会显示；$retry"
+            return 0
+        fi
+        kc -n "$NAMESPACE" rollout status deployment/kubedoor-dash --timeout=300s ||
+            warn "kubedoor-dash 补上看板挂载后未就绪，检查 describe/logs；备份：$BACKUP_FILE"
+    fi
+    printf '%s\n' 'Grafana 看板已同步：约 1 分钟内自动加载，不用重启 Grafana。'
+}
 upgrade_control() {
     upgrade_state=$(field ConfigMap kubedoor-setup-state '{.metadata.uid}')
     if [ -n "$upgrade_state" ]; then
@@ -930,6 +986,22 @@ upgrade_control() {
             ;;
     esac
     UPGRADE_RESOURCES="$UPGRADE_RESOURCES configmap/nginx-config"
+    # Grafana 看板：装了 Grafana（kubedoor-dash）才同步；它和挂载着的 kubedoor-dash-* ConfigMap 都进备份
+    DASH_MAPS=
+    DASH_UID=$(field Deployment kubedoor-dash '{.metadata.uid}') || die '无法读取 deployment/kubedoor-dash，尚未修改集群'
+    if [ -n "$DASH_UID" ]; then
+        dash_sources=$(field Deployment kubedoor-dash \
+            '{.spec.template.spec.volumes[?(@.name=="grafana-dash")].projected.sources[*].configMap.name}') ||
+            die '无法读取 deployment/kubedoor-dash 的看板挂载，尚未修改集群'
+        for name in $dash_sources; do
+            case "$name" in kubedoor-dash-*) ;; *) continue ;; esac
+            dash_uid=$(field ConfigMap "$name" '{.metadata.uid}') || die "无法读取 ConfigMap $name，尚未修改集群"
+            [ -z "$dash_uid" ] || DASH_MAPS="$DASH_MAPS $name"
+        done
+        UPGRADE_RESOURCES="$UPGRADE_RESOURCES deployment/kubedoor-dash"
+        for name in $DASH_MAPS; do UPGRADE_RESOURCES="$UPGRADE_RESOURCES configmap/$name"; done
+        printf '%s\n' '  Grafana 看板：全部组件升级完成后用新版 kubedoor-master 镜像里的看板覆盖 kubedoor-dash-* ConfigMap（集群指标标签 key 沿用现有看板；自己改过的看板也会被覆盖，旧内容在备份里），缺少的看板补上挂载'
+    fi
     # 旧配置：存在的才备份（kubectl get 多个资源时有一个不存在就失败）
     LEGACY_CONFIG=$(field ConfigMap kubedoor-config '{.metadata.uid}')
     legacy_connection=$(field Secret kubedoor-connection '{.metadata.uid}')
@@ -967,6 +1039,15 @@ upgrade_control() {
         if [ -n "$LEGACY_CONFIG" ]; then
             printf '\n# configmap/kubedoor-config merge patch（删除已迁入数据库的配置项，保留 PG_*）\n'
             legacy_config_patch
+        fi
+        if [ -n "$DASH_UID" ]; then
+            printf '\n# Grafana 看板：全部组件升级完成后、清理旧配置之前执行；输入是现有的 deployment/kubedoor-dash 和看板 ConfigMap（kubectl get -o json）\n'
+            printf '# ... | %s exec -i deploy/kubedoor-master -c kubedoor-master -- %s render \\\n' "$kubectl_hint" "$DASHBOARD_COMMAND"
+            printf '#     | %s apply --server-side --force-conflicts --field-manager=%s -f -\n' "$kubectl_hint" "$DASHBOARD_MANAGER"
+            printf '# ... | %s exec -i deploy/kubedoor-master -c kubedoor-master -- %s mounts（有输出时用它 patch deployment kubedoor-dash 补上缺少的看板挂载）\n' "$kubectl_hint" "$DASHBOARD_COMMAND"
+            if [ -n "$DASH_MAPS" ]; then
+                printf '# 现有的看板 ConfigMap：%s\n' "${DASH_MAPS# }"
+            fi
         fi
         printf '%s\n' '预览结束，未修改集群。目标版本来自当前脚本；升级到新发布版本请先下载新版脚本。'
         return
@@ -1025,6 +1106,7 @@ upgrade_control() {
         [ "$deployment" != kubedoor-master ] || run_migration
     done
     printf '%s\n' '控制端镜像及 Deployment 升级完成，所有目标 Deployment 已就绪。'
+    [ -z "$DASH_UID" ] || sync_dashboards
     if [ "$MIGRATE_STATUS" = 0 ]; then
         cleanup_legacy_config
     else

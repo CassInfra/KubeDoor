@@ -677,7 +677,7 @@ kubectl -n kubedoor rollout restart deploy/kubedoor-web
 - Grafana 用 auth proxy 方式接入 KubeDoor 的登录：**KubeDoor 系统管理员在 Grafana 里是 Admin，其他账号（包括集群管理员）都是 Viewer**（只能看看板，不能改看板）。
 - Grafana 看板做不到按集群隔离，所以**只对能看到全部集群的账号开放**：对任何集群设了「无」的账号看不到这三个看板菜单，直接打开 `/grafana/` 会返回 403。
 - Grafana 的 PostgreSQL 数据源用的是 `PG_USER`，Viewer 也能借数据源查询库里的数据（本地账号口令哈希加了 pepper、LDAP 绑定口令加密存储，拿到也用不了）。对此敏感时，给 Grafana 单独建一个只读 PG 账号，只授权看板用到的 `k8s_*` 表。
-- 在 Grafana 页面上改的看板，Pod 重启后会丢失（看板由 ConfigMap 下发）；要长期修改请改 `src/kubedoor-setup/resources/dashboards/*.json` 后重跑 `./install.sh master`。
+- 在 Grafana 页面上改的看板，Pod 重启后会丢失（看板由 ConfigMap 下发）；要长期修改请改 `src/kubedoor-setup/resources/dashboards/*.json`，看板随 master 镜像发布，执行 `sh install.sh upgrade` 时下发（会覆盖集群里的 `kubedoor-dash-*` ConfigMap，直接在集群里改过的也会被覆盖，旧内容在升级备份里）；旧脚本部署也可以重跑 `./install.sh master`。
 
 ### Q：生产环境需要 HTTPS 吗？
 

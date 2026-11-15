@@ -504,3 +504,164 @@ def test_upgrade_rejects_mixed_install_flags(tmp_path, args):
     result = cluster.run(*args)
     assert result.returncode != 0
     assert cluster.read()["calls"] == []
+
+
+# ---------------------------------------------------------------------------
+# Grafana 看板：全部组件升级完成后，新版 master 里的 python3 -m grafana_dashboards 生成看板（假 kubectl 在仓库的
+# master 目录里真的执行它），server-side apply 覆盖 kubedoor-dash-* ConfigMap，缺少的看板补上挂载
+# ---------------------------------------------------------------------------
+DASHBOARDS = sorted((ROOT / "src/kubedoor-setup/resources/dashboards").glob("*.json"))
+PLACEHOLDER = "__PROM_K8S_TAG_KEY__"
+TAG_KEY = "cluster_name"
+DASHBOARD_EXEC = ["python3", "-m", "grafana_dashboards"]
+DASHBOARD_EXEC_PREFIX = ["exec", "-i", "deploy/kubedoor-master", "-c", "kubedoor-master", "--"]
+
+
+def dashboard_name(path):
+    return "kubedoor-dash-" + path.stem.lower().removeprefix("kubedoor-")
+
+
+def installed_dashboard(path):
+    return path.read_text(encoding="utf-8").replace(PLACEHOLDER, TAG_KEY)
+
+
+def with_grafana(objects, *, stale=True, skip=(), extra_sources=()):
+    """加上 Grafana：kubedoor-dash 的 projected 卷挂着看板 ConfigMap（安装时集群指标标签 key 填的是 TAG_KEY）。
+    stale=True 时集群里是旧版看板（标题不同）；skip 里的看板集群里没有、也没挂（更早版本装的）"""
+    sources = []
+    for path in DASHBOARDS:
+        if path.name in skip:
+            continue
+        text = installed_dashboard(path)
+        if stale:
+            dashboard = json.loads(text)
+            dashboard["title"] += "（旧版）"
+            text = json.dumps(dashboard, ensure_ascii=False, indent=2)
+        name = dashboard_name(path)
+        objects["configmap/" + name] = {"apiVersion": "v1", "kind": "ConfigMap", "metadata": {"name": name},
+                                       "data": {path.name: text}}
+        sources.append({"configMap": {"name": name}})
+    objects["deployment/kubedoor-dash"] = {
+        "apiVersion": "apps/v1", "kind": "Deployment", "metadata": {"name": "kubedoor-dash"},
+        "spec": {"selector": {"matchLabels": {"app": "grafana"}}, "template": {"spec": {
+            "containers": [{"name": "grafana", "image": "grafana-oss:11.4.0"}],
+            "volumes": [{"name": "grafana-storage", "emptyDir": {}},
+                        {"name": "grafana-dash", "projected": {"defaultMode": 420,
+                                                               "sources": sources + list(extra_sources)}}]}}}}
+    return objects
+
+
+def dashboard_maps(objects):
+    return {key: obj for key, obj in objects.items() if key.startswith("configmap/kubedoor-dash-")}
+
+
+def test_upgrade_syncs_grafana_dashboards_keeping_the_installed_tag_key(tmp_path):
+    cluster = ShellCluster(tmp_path, with_grafana(legacy_objects()))
+    before = cluster.read()["objects"]
+    result = cluster.run("upgrade", "--yes")
+    assert result.returncode == 0, result.stderr
+    after = cluster.read()["objects"]
+    for path in DASHBOARDS:
+        current = after["configmap/" + dashboard_name(path)]
+        assert current["data"] == {path.name: installed_dashboard(path)}
+        assert current["metadata"]["labels"] == {"app.kubernetes.io/part-of": "kubedoor"}
+    assert f"{TAG_KEY}（沿用集群里现有的看板）" in result.stderr
+    assert after["deployment/kubedoor-dash"] == before["deployment/kubedoor-dash"]  # 挂载齐全，不动
+    calls = cluster.read()["calls"]
+    applies = [call for call in calls if call["command"][0] == "apply"]
+    assert len(applies) == 1
+    assert {"--server-side", "--force-conflicts", "--field-manager=kubedoor-upgrade"} <= set(applies[0]["command"])
+    assert sorted(obj["metadata"]["name"] for obj in applies[0]["objects"]) == [dashboard_name(p) for p in DASHBOARDS]
+    # master 就绪后迁移；全部组件就绪后先生成并写入看板、再检查挂载，最后才清理旧配置
+    execs = [call for call in calls if call["command"][0] == "exec"]
+    assert [call["exec"] for call in execs] == [MIGRATE, DASHBOARD_EXEC + ["render"], DASHBOARD_EXEC + ["mounts"]]
+    for call in execs[1:]:
+        assert call["command"][:6] == DASHBOARD_EXEC_PREFIX
+        # 输入是现有的 kubedoor-dash 和看板 ConfigMap（kubectl get -o json 依次拼接）
+        assert '"name": "kubedoor-dash"' in call["stdin"] and '"name": "kubedoor-dash-k8s"' in call["stdin"]
+    render, mounts = calls.index(execs[1]), calls.index(execs[2])
+    assert index_of(calls, lambda c, _: c[:3] == ["rollout", "status", "deployment/kubedoor-web"]) < render
+    assert render < calls.index(applies[0]) < mounts < index_of(calls, lambda c, call: is_rules_patch(c, call))
+    # 升级前的看板和 kubedoor-dash 进了备份，自己改过的看板可以从这里找回
+    backup = documents(latest_backup(tmp_path).read_text(encoding="utf-8"))
+    saved = {obj["metadata"]["name"]: obj for obj in backup}
+    assert saved["kubedoor-dash"] == before["deployment/kubedoor-dash"]
+    for key, obj in dashboard_maps(before).items():
+        assert saved[obj["metadata"]["name"]] == obj
+    assert "Grafana 看板已同步" in result.stdout
+    assert "configmap/" + RULES not in after  # 旧配置照常清理
+
+
+def test_upgrade_adds_missing_dashboards_and_their_mounts(tmp_path):
+    custom = [{"configMap": {"name": "my-dashboards"}}, {"secret": {"name": "extra"}}]
+    objects = with_grafana(legacy_objects(migrated=True), skip={"KubeDoor-AI.json"}, extra_sources=custom)
+    cluster = ShellCluster(tmp_path, objects)
+    result = cluster.run("upgrade", "--yes")
+    assert result.returncode == 0, result.stderr
+    after = cluster.read()["objects"]
+    ai = next(path for path in DASHBOARDS if path.name == "KubeDoor-AI.json")
+    assert after["configmap/kubedoor-dash-ai"]["data"] == {ai.name: installed_dashboard(ai)}
+    # sources 整体替换：原有的看板和自定义来源按原顺序保留，缺的追加在最后；defaultMode 不变
+    volume = after["deployment/kubedoor-dash"]["spec"]["template"]["spec"]["volumes"][1]
+    assert volume["projected"] == {"defaultMode": 420, "sources": [
+        *[{"configMap": {"name": dashboard_name(p)}} for p in DASHBOARDS if p != ai], *custom,
+        {"configMap": {"name": "kubedoor-dash-ai"}}]}
+    calls = cluster.read()["calls"]
+    patches = [call for call in calls if call["command"][:3] == ["patch", "deployment", "kubedoor-dash"]]
+    assert ["--dry-run=server" in call["command"] for call in patches] == [True, False]
+    assert calls.index(patches[1]) < index_of(calls, lambda c, _: c[:3] == ["rollout", "status", "deployment/kubedoor-dash"])
+    # 自定义的 ConfigMap 不进备份、不交给看板命令
+    backup = documents(latest_backup(tmp_path).read_text(encoding="utf-8"))
+    assert "my-dashboards" not in {obj["metadata"]["name"] for obj in backup}
+    assert "补上看板挂载：kubedoor-dash-ai" in result.stderr
+
+
+def test_unchanged_dashboards_are_not_rewritten(tmp_path):
+    cluster = ShellCluster(tmp_path, with_grafana(legacy_objects(migrated=True), stale=False))
+    before = cluster.read()["objects"]
+    result = cluster.run("upgrade", "--yes")
+    assert result.returncode == 0, result.stderr
+    assert "看板没有变化" in result.stdout
+    assert not any(call["command"][0] == "apply" for call in cluster.read()["calls"])
+    assert dashboard_maps(cluster.read()["objects"]) == dashboard_maps(before)
+
+
+@pytest.mark.parametrize("failure", ["old-master", "apply"])
+def test_dashboard_sync_failure_only_warns_and_the_upgrade_finishes(tmp_path, failure):
+    options = {"apply_error": "configmap/kubedoor-dash-dash"} if failure == "apply" else {
+        "exec_results": {"grafana_dashboards": {"code": 1, "stderr": "python3: No module named grafana_dashboards\n"}}}
+    cluster = ShellCluster(tmp_path, with_grafana(legacy_objects()), **options)
+    before = cluster.read()["objects"]
+    result = cluster.run("upgrade", "--yes")
+    assert result.returncode == 0, result.stderr
+    assert "看板保持原样" in result.stderr and "Grafana 看板已同步" not in result.stdout
+    after = cluster.read()["objects"]
+    assert "configmap/" + RULES not in after  # 升级和旧配置清理照常完成
+    assert after["deployment/kubedoor-dash"] == before["deployment/kubedoor-dash"]
+    if failure == "old-master":
+        assert dashboard_maps(after) == dashboard_maps(before)
+        assert not any(call["command"][0] == "apply" for call in cluster.read()["calls"])
+
+
+def test_preview_shows_dashboard_sync_without_mutations(tmp_path):
+    cluster = ShellCluster(tmp_path, with_grafana(legacy_objects(migrated=True)))
+    before = cluster.read()["objects"]
+    result = cluster.run("upgrade", "--dry-run", "--context", "production")
+    assert result.returncode == 0, result.stderr
+    assert "Grafana 看板：全部组件升级完成后用新版 kubedoor-master 镜像里的看板覆盖" in result.stdout
+    assert ("# ... | kubectl --context production -n kubedoor exec -i deploy/kubedoor-master -c kubedoor-master -- "
+            "python3 -m grafana_dashboards render") in result.stdout
+    assert "apply --server-side --force-conflicts --field-manager=kubedoor-upgrade -f -" in result.stdout
+    assert "python3 -m grafana_dashboards mounts" in result.stdout
+    assert "# 现有的看板 ConfigMap：" + " ".join(dashboard_name(p) for p in DASHBOARDS) in result.stdout
+    assert cluster.mutations() == []
+    assert not any(call["command"][0] == "exec" for call in cluster.read()["calls"])
+    assert cluster.read()["objects"] == before
+
+
+def test_unreadable_grafana_deployment_stops_before_any_change(tmp_path):
+    cluster = ShellCluster(tmp_path, with_grafana(legacy_objects()), get_error="deployment/kubedoor-dash")
+    result = cluster.run("upgrade", "--yes")
+    assert result.returncode != 0 and "deployment/kubedoor-dash" in result.stderr
+    assert cluster.mutations() == []
+    assert not backups(tmp_path)
