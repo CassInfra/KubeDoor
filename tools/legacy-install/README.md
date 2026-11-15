@@ -383,6 +383,30 @@ nginx 启动时要解析上游 service 的域名。如果是刚部署的瞬间 s
   ```
 - 外部 MCP 客户端的地址改为 `http://<节点IP>:<Web的NodePort>/mcp`(Streamable HTTP),原来的 `/sse` 仍然兼容。需要批准的操作会返回待批准动作和 Web 链接,在 Web 上批准后才执行。
 
+## 从 2.1.x 升级到 2.2
+
+2.2 把登录与权限从 nginx basic auth 改为由 master 统一管理（本地账号 + LDAP，按 K8S 集群授权）。
+
+1. 切到 `2.2.0` 标签的代码（`git checkout 2.2.0`，当时的旧脚本在 `deploy/` 目录），在 `kubedoor.conf` 中追加或更新 `TAG_MASTER`、`TAG_AGENT`、`TAG_WEB`、`TAG_AI` 为 `2.2.0`（告警服务这一版没有变化，`TAG_ALARM` 保持 `2.1.0`）。
+2. 原 `WEB_AUTH_USERS` / `WEB_RW_USERS` 不再生效（安装时会提示）。执行 `./install.sh master` 后用内置管理员 `kubedoor` 登录，在「系统管理 → 用户与权限」重新建账号，或在「LDAP 设置」接入 LDAP 后按集群授权。
+3. agent 一律要带内置 Agent 账号 `Up4biLko1dNh`：同集群 agent 的 `MASTER_WS` 改成 `ws://Up4biLko1dNh:<口令>@kubedoor-master.kubedoor`，再到各集群执行 `./install.sh agent`。跨集群 agent 如果沿用出厂口令，`MASTER_WS` 不用改；以前改过这个账号口令的，升级前在 `kubedoor.conf` 里把 `KUBEDOOR_INIT_AGENT_PASSWORD` 设为原口令（只在首次创建账号时生效）。来不及一起改时，可先设 `AGENT_AUTH_REQUIRED="false"` 过渡，改完再改回 `true` 并重跑 `./install.sh master`。
+4. Grafana 改为 auth proxy 接入：KubeDoor 系统管理员是 Admin、其他人是 Viewer，并且只对能看到全部集群的账号开放。
+
+详见上文[账号与权限](#账号与权限)。
+
+## 从 2.2.x 升级到 2.3
+
+2.3 新增 CoreDNS 管理和企微智能机器人，重构了 Istio VirtualService 管理，并增强了 AI 助手；`kubedoor.conf` 不需要新增配置。
+
+1. 切到 `2.3.0` 标签的代码（`git checkout 2.3.0`，当时的旧脚本在 `deploy/` 目录），在 `kubedoor.conf` 中追加或更新 `TAG_MASTER`、`TAG_AGENT`、`TAG_WEB`、`TAG_AI` 为 `2.3.0`（告警服务没有变化，`TAG_ALARM` 保持 `2.1.0`），执行 `./install.sh master`。master、web 和 AI 这一版要一起升级（新的 AI 依赖 master 的新接口），这一步会一起完成；同时会在 `kubedoor-config` 里加上 `RETENTION_AI_CHECKPOINT_DAYS`（企微旧对话的检查点保留天数，默认 7），并给 Grafana 导入「KubeDoor-AI」用量看板。
+2. agent 只需更换镜像：在「Agent管理」勾选集群「批量更新」到 `2.3.0`，或到各集群重跑 `./install.sh agent`。CoreDNS 管理与网络测试、Istio 的从集群删除 VirtualService 和查看完整现状都需要新版 agent（旧版会提示先升级）；定时 / 周期执行的「临时扩容」、准入控制对直接改副本数的改写也需要新版 agent（旧版不会提示：定时任务到点按普通扩缩容处理，直接改副本数仍会放行）。
+3. Istio VirtualService 管理改为按「Istio组」管理：master 启动时会删除 2.2 试用版的旧表（`vs_global`、`vs_http_routes`、`k8s_cluster`），集群里的 VirtualService 不受影响；升级后在「ISTIO管理」菜单的全局 VirtualService 管理页建组，「刷新现状」后重新纳管即可。
+4. 企微智能机器人由 kubedoor-ai 主动连接企业微信，需要能出站访问企业微信；不配置不影响其他功能。
+5. **准入控制的行为变化**：管控命名空间里用 `kubectl edit/patch/apply` 直接改受管控服务的 `spec.replicas`，以前按请求的值放行、到下次发布或重启才恢复，升级 agent 后会立即改回管控值（和 `kubectl scale` 一样）。要长期改副本数请修改「指定Pod」，短时扩容用「临时扩容」。
+6. AI 助手的系统提示和工具有变化，升级后每个已有会话的下一次请求不会命中模型的前缀缓存（只发生一次）。
+
+从 2.3 起，已有 Kubernetes 控制端可以直接用 [deploy/install.sh](../../deploy/install.sh) 的 `upgrade` 升级（见[部署文档](../../deploy/README.md#更新已有控制端包括-230)）。
+
 ---
 
 ## 和旧版 Helm 安装的区别
