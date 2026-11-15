@@ -2,7 +2,11 @@
 
 都是只读的：经在线的 Agent 查集群（Agent 离线时这几项跳过），另外查数据库里收到的 K8S 事件、时序库里这个集群的
 指标，以及 kubedoor-ai 里有没有保存 AI Kubeconfig（修复时直接用它连接集群）。每一项单独限时、单独兜底，
-一项出错只记在这一项里，不影响其他项。经 Agent 的调用都是现有接口，旧版 Agent 也能检查。
+一项出错只记在这一项里，不影响其他项。经 Agent 的调用都是现有接口（和页面转发一样带 env），旧版 Agent 也能检查。
+
+组件不只看 Agent 的命名空间：采集组件可能没随 Agent 安装、用的是集群里已有的（例如 monitoring 里的
+kube-state-metrics），所以全集群列一次 Pod、按名字认，说明装在哪个命名空间、Pod 是否就绪，再对照时序库里
+有没有它的指标判断是否正常。
 """
 
 import asyncio
@@ -20,14 +24,21 @@ from loguru import logger
 from .bundle import BASE
 
 AI_URL = 'http://kubedoor-ai:8000'
-# 没有网页安装记录（脚本装的）时，Agent 所在的命名空间按默认的算（Agent 管理的更新 / 重启也固定用它）
+# 没有网页安装记录（脚本装的）、集群里也没找到 kubedoor-agent 的 Pod 时，Agent 的命名空间按默认的算
 DEFAULT_NAMESPACE = 'kubedoor'
-# 组件：(检查名, Pod 名前缀)。kubedoor-agent、vmagent、kube-state-metrics 是 Deployment，node-exporter 是 DaemonSet
-COMPONENTS = (('kubedoor-agent', 'kubedoor-agent-'), ('vmagent', 'vmagent-'),
-              ('kube-state-metrics', 'kube-state-metrics-'), ('node-exporter', 'node-exporter-'))
+# 检查的组件（按 Pod 名认，见 component_of）；vmagent 那一行在没有 vmagent 时说明用的是哪个 Prometheus
+COMPONENTS = ('kubedoor-agent', 'vmagent', 'kube-state-metrics', 'node-exporter')
+# Prometheus 服务端的 Pod：名字带 prometheus，但不是各种 exporter / operator / adapter 之类
+PROMETHEUS_EXCLUDE = ('exporter', 'operator', 'adapter', 'alertmanager', 'pushgateway', 'kube-state-metrics',
+                      'blackbox', 'grafana', 'webhook')
 # 时序库里各来源的代表指标（不管是网页安装的 vmagent 还是已有的 Prometheus 采的，指标名都一样）
 METRIC_SOURCES = (('kube-state-metrics', 'kube_pod_info'), ('node-exporter', 'node_uname_info'),
                   ('cAdvisor', 'container_cpu_usage_seconds_total'))
+# 组件和它在时序库里对应的来源
+COMPONENT_SOURCES = {'kube-state-metrics': 'kube-state-metrics', 'node-exporter': 'node-exporter'}
+COMPONENT_ROLES = {'kube-state-metrics': 'K8S 对象（Pod 数、副本数等）', 'node-exporter': '节点'}
+# 一个组件在集群里有多套时最多列几套
+SHOWN_WORKLOADS = 3
 METRICS_WINDOW = '10m'
 # 只看最近这么久的事件：表可能很大，限定时间才能走 lasttimestamp 的索引
 EVENTS_WINDOW_HOURS = 24
@@ -41,6 +52,7 @@ POD_MGR_PROBE = '/api/pod/task_status/kubedoor-health-check'
 
 GROUP_AGENT, GROUP_COMPONENT, GROUP_DATA, GROUP_REPAIR = 'agent', 'component', 'data', 'repair'
 OFFLINE_SKIP = 'Agent 离线，没法检查'
+STATUS_ORDER = {'success': 0, 'skipped': 0, 'warning': 1, 'error': 2}
 
 
 def item(key, group, name, status, message):
@@ -49,7 +61,7 @@ def item(key, group, name, status, message):
 
 def components_row(status, message):
     """四个组件都查不了时合成的一行"""
-    return item('components', GROUP_COMPONENT, '各组件', status, f'{message}（{"、".join(name for name, _ in COMPONENTS)}）')
+    return item('components', GROUP_COMPONENT, '各组件', status, f'{message}（{"、".join(COMPONENTS)}）')
 
 
 def ago(seconds):
@@ -137,24 +149,140 @@ def pod_problem(pod):
     return f'{pod.get("name")}：{detail}'
 
 
-def component_check(name, pods, namespace):
-    key = f'component:{name}'
-    if not pods:
-        if name == 'kubedoor-agent':
-            return item(key, GROUP_COMPONENT, name, 'warning',
-                        f'命名空间 {namespace} 里没有找到 kubedoor-agent 的 Pod（Agent 可能装在别的命名空间）')
-        return item(key, GROUP_COMPONENT, name, 'skipped',
-                    f'命名空间 {namespace} 里没有：没有随 Agent 安装（用集群里已有的，或者不需要）')
+def component_of(pod_name):
+    """Pod 属于哪个组件（按名字认，不管装在哪个命名空间）：COMPONENTS 里的名字，或者 'prometheus'
+    （没有 vmagent 时用作采集的 Prometheus 服务端）；都不是返回 None。
+
+    例如 prometheus-kube-state-metrics-xxx 是 kube-state-metrics，prometheus-node-exporter-xxx 是 node-exporter，
+    prometheus-k8s-0 是 prometheus，prometheus-operator-xxx 不算
+    """
+    name = str(pod_name or '').lower()
+    if name.startswith('kubedoor-agent-'):
+        return 'kubedoor-agent'
+    for component in ('vmagent', 'kube-state-metrics', 'node-exporter'):
+        if component in name:
+            return component
+    if 'prometheus' in name and not any(word in name for word in PROMETHEUS_EXCLUDE):
+        return 'prometheus'
+    return None
+
+
+def workload_of(pod):
+    """Pod 所属的工作负载名：Deployment 的 Pod 去掉 ReplicaSet 和 Pod 的两段后缀，DaemonSet / StatefulSet 去掉一段"""
+    name = str(pod.get('name') or '')
+    kind = pod.get('controlled_by')
+    if kind == 'ReplicaSet':
+        return name.rsplit('-', 2)[0]
+    if kind in ('DaemonSet', 'StatefulSet'):
+        return name.rsplit('-', 1)[0]
+    return name
+
+
+def locate(pods):
+    """集群里的 Pod → {组件: {(命名空间, 工作负载): [Pod, ...]}}"""
+    found = {}
+    for pod in pods:
+        component = component_of(pod.get('name'))
+        if component:
+            key = (str(pod.get('namespace') or ''), workload_of(pod))
+            found.setdefault(component, {}).setdefault(key, []).append(pod)
+    return found
+
+
+def agent_namespace(found, default):
+    """Agent 实际装在哪个命名空间：集群里只有一个命名空间有 kubedoor-agent 的 Pod 就是它，否则用 default"""
+    spaces = sorted({namespace for namespace, _ in (found or {}).get('kubedoor-agent', {})})
+    return spaces[0] if len(spaces) == 1 else default
+
+
+def workload_state(namespace, workload, pods):
+    """一套工作负载的状态：(说明, 没就绪的 Pod 卡在哪, 累计重启次数)"""
     ready = sum(1 for pod in pods if pod_ready(pod))
     restarts = sum(int(pod.get('restart_count') or 0) for pod in pods)
-    text = f'{ready}/{len(pods)} 个 Pod 就绪' + (f'，累计重启 {restarts} 次' if restarts else '')
-    problems = [pod_problem(pod) for pod in pods if not pod_ready(pod)]
+    text = f'{namespace}/{workload} {ready}/{len(pods)} 个 Pod 就绪' + (f'，累计重启 {restarts} 次' if restarts else '')
+    return text, [pod_problem(pod) for pod in pods if not pod_ready(pod)], restarts
+
+
+def worse(status, other):
+    return other if STATUS_ORDER[other] > STATUS_ORDER[status] else status
+
+
+def describe(groups, own_namespace):
+    """组件在集群里的各套（Agent 的命名空间里的排前面）→ (状态, 说明)"""
+    ordered = sorted(groups.items(), key=lambda pair: (pair[0][0] != own_namespace, pair[0]))
+    texts, problems, restarts = [], [], 0
+    for (namespace, workload), pods in ordered[:SHOWN_WORKLOADS]:
+        text, stuck, count = workload_state(namespace, workload, pods)
+        texts.append(text)
+        problems += stuck
+        restarts = max(restarts, count)
+    message = '；'.join(texts) + (f' 等 {len(ordered)} 套' if len(ordered) > SHOWN_WORKLOADS else '')
+    if not any(namespace == own_namespace for namespace, _ in groups):
+        message = f'不在 Agent 的命名空间 {own_namespace}，集群里已有的：{message}'
     if problems:
         shown = '；'.join(problems[:3]) + (f' 等 {len(problems)} 个' if len(problems) > 3 else '')
-        return item(key, GROUP_COMPONENT, name, 'error', f'{text}。{shown}')
-    if restarts >= RESTART_WARNING:
-        return item(key, GROUP_COMPONENT, name, 'warning', text)
-    return item(key, GROUP_COMPONENT, name, 'success', text)
+        return 'error', f'{message}。没就绪：{shown}'
+    return ('warning' if restarts >= RESTART_WARNING else 'success'), message
+
+
+def component_check(name, found, own_namespace, sources):
+    """一个组件一行：装在哪、Pod 是否就绪，再对照时序库里有没有它的指标。
+
+    found 是 locate 的结果；sources 是时序库里查到的指标来源（查不了为 None）
+    """
+    key = f'component:{name}'
+    groups = found.get(name) or {}
+    source = COMPONENT_SOURCES.get(name)
+    if name == 'vmagent' and not groups and found.get('prometheus'):
+        # 没有 vmagent：指标由集群里已有的 Prometheus 采集
+        status, message = describe(found['prometheus'], own_namespace)
+        message = f'集群里没有 vmagent，采集用的是 Prometheus：{message}'
+        return item(key, GROUP_COMPONENT, name, *with_collector_metrics(status, message, sources))
+    if not groups:
+        return item(key, GROUP_COMPONENT, name, *missing_component(name, sources))
+    status, message = describe(groups, own_namespace)
+    if name == 'kubedoor-agent':
+        spaces = sorted({namespace for namespace, _ in groups})
+        if len(spaces) > 1:
+            status = worse(status, 'warning')
+            message += f'。集群里有 {len(spaces)} 个命名空间装了 kubedoor-agent（{"、".join(spaces)}），可能同时连着两套控制端'
+        return item(key, GROUP_COMPONENT, name, status, message)
+    if name == 'vmagent':
+        return item(key, GROUP_COMPONENT, name, *with_collector_metrics(status, message, sources))
+    if sources is not None and source not in sources:
+        status = worse(status, 'warning')
+        message += (f'；但时序库最近 10 分钟没有它的指标：采集没有抓它，或采集的 external_labels '
+                    f'里集群名不对，{COMPONENT_ROLES[name]}的监控没有数据')
+    elif sources is not None:
+        message += '；时序库里有它的指标'
+    return item(key, GROUP_COMPONENT, name, status, message)
+
+
+def with_collector_metrics(status, message, sources):
+    """采集器（vmagent / Prometheus）：时序库里一个来源都没有时说明它没把这个集群的指标写进来"""
+    if sources is not None and not sources:
+        return worse(status, 'warning'), message + '；但时序库最近 10 分钟没有这个集群的指标：检查它的远程写地址和 external_labels'
+    if sources:
+        return status, message + '；时序库里有这个集群的指标'
+    return status, message
+
+
+def missing_component(name, sources):
+    """集群里没找到这个组件的 Pod → (状态, 说明)"""
+    if name == 'kubedoor-agent':
+        return 'warning', '集群里没有找到名为 kubedoor-agent-* 的 Pod（Agent 在线，可能部署时改了名字）'
+    if name == 'vmagent':
+        if sources:
+            return 'success', '集群里没有 vmagent 或 Prometheus 的 Pod：指标由集群外的采集写入（时序库里有这个集群的指标）'
+        if sources is None:
+            return 'warning', '集群里没有 vmagent 或 Prometheus 的 Pod：指标要由集群外的采集抓取，时序库查不了，没法确认'
+        return 'warning', '集群里没有 vmagent 或 Prometheus 的 Pod，时序库里也没有这个集群的指标：没有采集在工作'
+    source = COMPONENT_SOURCES[name]
+    if sources and source in sources:
+        return 'success', f'集群里没有找到 {name} 的 Pod，但时序库里有它的指标（由集群外的采集提供）'
+    if sources is None:
+        return 'warning', f'集群里没有找到 {name} 的 Pod，时序库查不了，没法确认{COMPONENT_ROLES[name]}的指标有没有来源'
+    return 'warning', f'集群里没有找到 {name} 的 Pod，时序库里也没有它的指标：{COMPONENT_ROLES[name]}的监控没有数据'
 
 
 def events_check(latest, now):
@@ -205,12 +333,14 @@ class HealthCheck:
         self.online = bool(self.client and self.client.get('online'))
 
     async def agent(self, path, query=None):
-        """经 Agent 调一次；失败抛 RuntimeError（说明给页面看）"""
+        """经 Agent 调一次；和页面经 master 转发一样带上 env（Agent 的不少接口没有 env 直接报「缺少必要参数」）。
+        失败抛 RuntimeError（说明给页面看）"""
         try:
-            response = await self.call_agent(self.env, path, query=query or {}, timeout=AGENT_TIMEOUT)
+            response = await self.call_agent(self.env, path, query={'env': self.env, **(query or {})}, timeout=AGENT_TIMEOUT)
         except Exception as exc:
             raise RuntimeError(str(exc) or type(exc).__name__) from None
-        if isinstance(response, dict) and response.get('success') is False:
+        if isinstance(response, dict) and (response.get('success') is False
+                                           or (response.get('error') and 'data' not in response)):
             raise RuntimeError(agent_error(response))
         return response
 
@@ -259,19 +389,38 @@ class HealthCheck:
                         '资源管控不生效：把「准入控制」开关关掉再打开可以恢复')
         return item('admission', GROUP_AGENT, name, 'error', f'查不到 webhook 配置：{agent_error(response)}')
 
-    async def components(self):
-        """每个组件一行；查不了（Agent 离线、查 Pod 失败）时合成一行，免得四行写同一句话"""
+    async def cluster_pods(self):
+        """各组件要看的 Pod：全集群列一次（组件不一定在 Agent 的命名空间）。返回 (Pod 列表, 说明)；
+        全集群列不出来（例如 Pod 太多超过回包上限）时退回只列 Agent 的命名空间，说明里写明；都不行抛 RuntimeError"""
+        try:
+            response = await self.agent('/api/agent/pods')
+            note = ''
+        except RuntimeError as exc:
+            response = await self.agent('/api/agent/pods', {'namespaces': self.namespace})
+            note = f'全集群的 Pod 列不出来（{exc}），只查了命名空间 {self.namespace}'
+        pods = response.get('data') if isinstance(response, dict) else None
+        if not isinstance(pods, list):
+            raise RuntimeError(agent_error(response))
+        return pods, note
+
+    async def components(self, sources):
+        """每个组件一行；查不了（Agent 离线、列不出 Pod）时合成一行，免得四行写同一句话。
+        sources 是时序库里查到的指标来源（查不了为 None），用来判断组件是否在正常工作"""
         if not self.online:
             return [components_row('skipped', OFFLINE_SKIP)]
         try:
-            response = await self.agent('/api/agent/pods', {'namespaces': self.namespace})
+            pods, note = await asyncio.wait_for(self.cluster_pods(), CHECK_TIMEOUT)
         except RuntimeError as exc:
-            return [components_row('error', f'查不到命名空间 {self.namespace} 里的 Pod：{exc}')]
-        pods = response.get('data') if isinstance(response, dict) else None
-        if not isinstance(pods, list):
-            return [components_row('error', f'查不到命名空间 {self.namespace} 里的 Pod：{agent_error(response)}')]
-        return [component_check(name, [p for p in pods if str(p.get('name') or '').startswith(prefix)], self.namespace)
-                for name, prefix in COMPONENTS]
+            return [components_row('error', f'查不到 Pod：{exc}')]
+        except asyncio.TimeoutError:
+            return [components_row('error', f'查 Pod 超时（{CHECK_TIMEOUT} 秒）')]
+        found = locate(pods)
+        self.namespace = agent_namespace(found, self.namespace)
+        rows = [component_check(name, found, self.namespace, sources) for name in COMPONENTS]
+        if note:
+            for row in rows:
+                row['message'] += f'（{note}）'
+        return rows
 
     async def events(self):
         try:
@@ -285,14 +434,15 @@ class HealthCheck:
         return events_check(latest, time.time())
 
     async def metrics(self):
+        """返回 (检查结果, 查到的指标来源)；来源在查不了时为 None，组件检查用它判断组件是否在正常工作"""
         url, tag_key = general_settings.value('prom_url'), general_settings.value('prom_k8s_tag_key')
         if not url:
-            return item('metrics', GROUP_DATA, '指标采集', 'skipped', '通用配置里还没有时序库查询地址')
+            return item('metrics', GROUP_DATA, '指标采集', 'skipped', '通用配置里还没有时序库查询地址'), None
         try:
             found = await probe.cluster_sources(url, tag_key, self.env, METRIC_SOURCES, window=METRICS_WINDOW)
         except probe.ProbeError as exc:
-            return item('metrics', GROUP_DATA, '指标采集', 'warning', f'没能查询时序库：{exc}')
-        return metrics_check(found, tag_key, self.env)
+            return item('metrics', GROUP_DATA, '指标采集', 'warning', f'没能查询时序库：{exc}'), None
+        return metrics_check(found, tag_key, self.env), found
 
     async def connection(self):
         """kubedoor-ai 里这个集群保存的 AI Kubeconfig 摘要（不取内容）：dict / None（没保存）/ 查不到的原因"""
@@ -315,23 +465,32 @@ class HealthCheck:
         return next((row for row in rows if isinstance(row, dict) and row.get('env') == self.env), None)
 
     async def run(self):
-        """全部检查，按显示顺序返回；kubeconfig 是修复时要用的 AI Kubeconfig 摘要"""
+        """全部检查，按显示顺序返回 (检查结果, AI Kubeconfig 摘要, Agent 实际所在的命名空间)。
+        组件要对照时序库的结果，和指标检查一起跑：时序库那边先查完再判断组件"""
         settings = await agent_settings(self.env)
+
+        async def metrics_and_components():
+            try:
+                metrics, sources = await asyncio.wait_for(self.metrics(), CHECK_TIMEOUT)
+            except Exception as exc:
+                metrics, sources = failure('metrics', GROUP_DATA, '指标采集', exc), None
+            components = await guarded(self.components(sources), 'components', GROUP_COMPONENT, '各组件')
+            return metrics, components
+
         results = await asyncio.gather(
             guarded(self.k8s_api(), 'k8s_api', GROUP_AGENT, 'K8S API 访问'),
             guarded(self.pod_mgr(), 'pod_mgr', GROUP_AGENT, 'Pod 管理服务'),
             guarded(self.admission(settings), 'admission', GROUP_AGENT, '准入控制'),
-            guarded(self.components(), 'components', GROUP_COMPONENT, '各组件'),
+            metrics_and_components(),
             guarded(self.events(), 'events', GROUP_DATA, 'K8S 事件上报'),
-            guarded(self.metrics(), 'metrics', GROUP_DATA, '指标采集'),
             self.connection_summary())
-        k8s_api, pod_mgr, admission, components, events, metrics, connection = results
+        k8s_api, pod_mgr, admission, (metrics, components), events, connection = results
         now = time.time()
         checks = [connection_check(self.client, now), version_check(self.client, BASE['agent_tag']),
                   k8s_api, pod_mgr, admission, *components, events, metrics, kubeconfig_check(connection)]
         kubeconfig = ({'configured': True, 'origin': connection.get('origin') or 'upload', 'context': connection.get('context') or ''}
                       if isinstance(connection, dict) else {'configured': False})
-        return checks, kubeconfig
+        return checks, kubeconfig, self.namespace
 
     async def connection_summary(self):
         try:
@@ -340,18 +499,23 @@ class HealthCheck:
             return f'查询 kubedoor-ai 失败（{type(exc).__name__}）'
 
 
+def failure(key, group, name, exc):
+    """一项检查超时或意外出错时的结果"""
+    if isinstance(exc, asyncio.TimeoutError):
+        return item(key, group, name, 'error', f'检查超时（{CHECK_TIMEOUT} 秒）')
+    logger.warning(f'检查 Agent 的「{name}」出错：{type(exc).__name__}: {exc}')
+    return item(key, group, name, 'error', f'检查出错（{type(exc).__name__}）')
+
+
 async def guarded(coroutine, key, group, name):
     """一项检查单独限时、单独兜底：超时或意外出错只记在这一项"""
     try:
         return await asyncio.wait_for(coroutine, CHECK_TIMEOUT)
-    except asyncio.TimeoutError:
-        failure = item(key, group, name, 'error', f'检查超时（{CHECK_TIMEOUT} 秒）')
     except Exception as exc:
-        logger.warning(f'检查 Agent 的「{name}」出错：{type(exc).__name__}: {exc}')
-        failure = item(key, group, name, 'error', f'检查出错（{type(exc).__name__}）')
+        row = failure(key, group, name, exc)
     if key == 'components':
-        return [components_row(failure['status'], failure['message'])]
-    return failure
+        return [components_row(row['status'], row['message'])]
+    return row
 
 
 async def agent_settings(env):
@@ -373,7 +537,7 @@ async def registered(env, clients):
 
 async def check(env, clients, call_agent, namespace, username):
     """GET /api/admin/agent-health 的返回"""
-    checks, kubeconfig = await HealthCheck(env, clients, call_agent, namespace, username).run()
+    checks, kubeconfig, namespace = await HealthCheck(env, clients, call_agent, namespace, username).run()
     client = clients.get(env) or {}
     return {
         'env': env, 'online': bool(client.get('online')), 'version': str(client.get('ver') or ''),

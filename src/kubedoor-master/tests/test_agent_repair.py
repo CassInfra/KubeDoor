@@ -322,24 +322,79 @@ def test_connection_and_version_checks():
     assert health.version_check({'ver': 'my-build'}, '2.6.0')['status'] == 'warning'
 
 
-def pod(name, ready=True, restarts=0, reason=''):
+def pod(name, ready=True, restarts=0, reason='', namespace='kubedoor', kind='ReplicaSet'):
+    """Agent /api/agent/pods 返回的一项"""
     container = {'name': 'main', 'ready': ready, 'is_init': False, 'restart_count': restarts,
                  'state': 'Running' if ready else 'Waiting', 'state_info': {'reason': reason} if reason else {},
                  'last_state': {'terminated': {'reason': 'OOMKilled'}} if restarts else {}}
-    return {'name': name, 'status': 'Running', 'containers': [container], 'restart_count': restarts}
+    return {'name': name, 'namespace': namespace, 'status': 'Running', 'containers': [container],
+            'restart_count': restarts, 'controlled_by': kind}
 
 
-def test_component_check_reports_readiness_restarts_and_why_pods_are_stuck():
-    ok = health.component_check('vmagent', [pod('vmagent-1')], 'kubedoor')
-    assert ok['status'] == 'success' and ok['message'] == '1/1 个 Pod 就绪'
-    restarted = health.component_check('vmagent', [pod('vmagent-1', restarts=6)], 'kubedoor')
+ALL_SOURCES = {'kube-state-metrics', 'node-exporter', 'cAdvisor'}
+
+
+def test_components_are_recognised_by_pod_name_wherever_they_run():
+    assert health.component_of('kubedoor-agent-7d9f8c6b5-x2x7k') == 'kubedoor-agent'
+    assert health.component_of('vmagent-vm-k8s-stack-5c6d-x2x7k') == 'vmagent'
+    assert health.component_of('prometheus-kube-state-metrics-6f7d8-x2x7k') == 'kube-state-metrics'
+    assert health.component_of('kps-prometheus-node-exporter-x2x7k') == 'node-exporter'
+    assert health.component_of('prometheus-k8s-0') == 'prometheus'
+    assert health.component_of('prometheus-server-7c9d-x2x7k') == 'prometheus'
+    for other in ('prometheus-operator-55f-x2x7k', 'prometheus-adapter-1-x', 'alertmanager-main-0', 'kubedoor-master-1'):
+        assert health.component_of(other) is None
+    assert health.workload_of(pod('kube-state-metrics-6b8f9c-x7k2p')) == 'kube-state-metrics'
+    assert health.workload_of(pod('node-exporter-x7k2p', kind='DaemonSet')) == 'node-exporter'
+    assert health.workload_of(pod('prometheus-k8s-0', kind='StatefulSet')) == 'prometheus-k8s'
+
+
+def check_component(name, pods, sources=ALL_SOURCES, own='kubedoor'):
+    return health.component_check(name, health.locate(pods), own, sources)
+
+
+def test_component_in_another_namespace_says_where_it_is_and_whether_it_works():
+    own = check_component('kube-state-metrics', [pod('kube-state-metrics-6b8f9c-x7k2p')])
+    assert own['status'] == 'success'
+    assert own['message'] == 'kubedoor/kube-state-metrics 1/1 个 Pod 就绪；时序库里有它的指标'
+    elsewhere = check_component('node-exporter', [pod('prometheus-node-exporter-a1b2c', namespace='monitoring', kind='DaemonSet'),
+                                                  pod('prometheus-node-exporter-d3e4f', namespace='monitoring', kind='DaemonSet')])
+    assert elsewhere['status'] == 'success'
+    assert elsewhere['message'] == ('不在 Agent 的命名空间 kubedoor，集群里已有的：monitoring/prometheus-node-exporter '
+                                    '2/2 个 Pod 就绪；时序库里有它的指标')
+    # Pod 正常但时序库里没有它的指标：采集没抓它
+    unscraped = check_component('kube-state-metrics', [pod('kube-state-metrics-6b8f9c-x7k2p', namespace='monitoring')],
+                                sources={'cAdvisor'})
+    assert unscraped['status'] == 'warning' and '但时序库最近 10 分钟没有它的指标' in unscraped['message']
+    # 时序库查不了：只说 Pod 的情况
+    unknown = check_component('kube-state-metrics', [pod('kube-state-metrics-6b8f9c-x7k2p')], sources=None)
+    assert unknown['message'] == 'kubedoor/kube-state-metrics 1/1 个 Pod 就绪'
+
+
+def test_component_readiness_restarts_and_why_pods_are_stuck():
+    restarted = check_component('vmagent', [pod('vmagent-7c9d-x2x7k', restarts=6)])
     assert restarted['status'] == 'warning' and '累计重启 6 次' in restarted['message']
-    stuck = health.component_check('kubedoor-agent', [pod('kubedoor-agent-a', ready=False, restarts=2, reason='CrashLoopBackOff')],
-                                   'kubedoor')
+    stuck = check_component('kubedoor-agent', [pod('kubedoor-agent-5f6-a1b2c', ready=False, restarts=2, reason='CrashLoopBackOff')])
     assert stuck['status'] == 'error'
-    assert 'kubedoor-agent-a：main CrashLoopBackOff，上次退出：OOMKilled' in stuck['message']
-    assert health.component_check('node-exporter', [], 'kubedoor')['status'] == 'skipped'
-    assert health.component_check('kubedoor-agent', [], 'kubedoor')['status'] == 'warning'
+    assert '没就绪：kubedoor-agent-5f6-a1b2c：main CrashLoopBackOff，上次退出：OOMKilled' in stuck['message']
+    two = check_component('kubedoor-agent', [pod('kubedoor-agent-5f6-a1b2c'), pod('kubedoor-agent-7d8-c3d4e', namespace='old')])
+    assert two['status'] == 'warning' and '2 个命名空间装了 kubedoor-agent（kubedoor、old）' in two['message']
+
+
+def test_missing_components_and_the_collector_in_use():
+    prometheus = check_component('vmagent', [pod('prometheus-k8s-0', namespace='monitoring', kind='StatefulSet'),
+                                             pod('prometheus-k8s-1', namespace='monitoring', kind='StatefulSet')])
+    assert prometheus['status'] == 'success'
+    assert prometheus['message'] == ('集群里没有 vmagent，采集用的是 Prometheus：不在 Agent 的命名空间 kubedoor，集群里已有的：'
+                                     'monitoring/prometheus-k8s 2/2 个 Pod 就绪；时序库里有这个集群的指标')
+    outside = check_component('vmagent', [])
+    assert outside['status'] == 'success' and '由集群外的采集写入' in outside['message']
+    nothing = check_component('vmagent', [], sources=set())
+    assert nothing['status'] == 'warning' and '没有采集在工作' in nothing['message']
+    external = check_component('kube-state-metrics', [])
+    assert external['status'] == 'success' and '由集群外的采集提供' in external['message']
+    absent = check_component('node-exporter', [], sources={'cAdvisor'})
+    assert absent['status'] == 'warning' and absent['message'].endswith('节点的监控没有数据')
+    assert check_component('kubedoor-agent', [])['status'] == 'warning'
 
 
 def test_events_metrics_and_kubeconfig_checks():
@@ -367,17 +422,38 @@ def test_metrics_sources_are_counted_in_one_query():
 
 
 class Agent:
-    """假的 master → Agent 调用：按路径回复，记下调用"""
+    """假的 master → Agent 调用：和真的 Agent 一样，没带 env 的请求回「缺少必要参数: env」。
+    replies 的值是回包、异常，或者按 query 决定回包的函数"""
 
     def __init__(self, replies):
         self.replies, self.calls = replies, []
 
     async def __call__(self, env, path, query=None, timeout=None):
+        query = dict(query or {})
         self.calls.append((path, query))
+        if query.get('env') != env:
+            return {'error': '缺少必要参数: env'}
         reply = self.replies[path]
+        if callable(reply):
+            reply = reply(query)
         if isinstance(reply, Exception):
             raise reply
         return copy.deepcopy(reply)
+
+
+CLUSTER_PODS = [pod('kubedoor-agent-5f6c7d-a1b2c', namespace='ops'), pod('vmagent-7c9d8e-x2x7k', namespace='ops'),
+                pod('kube-state-metrics-6b8f9c-x7k2p', namespace='monitoring'),
+                pod('node-exporter-a1b2c', namespace='monitoring', kind='DaemonSet'),
+                pod('node-exporter-d3e4f', ready=False, reason='ImagePullBackOff', namespace='monitoring', kind='DaemonSet'),
+                pod('kubedoor-master-7d8e9f-c3d4e', namespace='kubedoor'), pod('order-6f7-x1y2z', namespace='b2c')]
+
+
+def prepare(monkeypatch, settings, sources=ALL_SOURCES):
+    monkeypatch.setattr(health.db, 'pg_fetchrow', AsyncMock(return_value={'admission': True, 'admission_namespace': '["a"]'}))
+    monkeypatch.setattr(health.db, 'pg_fetchval', AsyncMock(return_value=datetime.now(timezone.utc)))
+    settings['prom_url'] = 'http://vm.example.test:8428'
+    monkeypatch.setattr(probe, 'cluster_sources', AsyncMock(return_value=sources))
+    monkeypatch.setattr(health.HealthCheck, 'connection', AsyncMock(return_value={'env': ENV, 'origin': 'upload', 'context': 'admin@prod'}))
 
 
 @pytest.mark.asyncio
@@ -386,32 +462,52 @@ async def test_health_check_for_an_online_agent(monkeypatch, settings):
                      'data_tools': True, 'notify': True}}
     agent = Agent({
         '/api/agent/namespaces': {'success': True, 'data': ['default', 'kubedoor']},
-        '/api/agent/pods': {'success': True, 'data': [pod('kubedoor-agent-x'), pod('vmagent-y'),
-                                                      pod('node-exporter-1', ready=False, reason='ImagePullBackOff'),
-                                                      pod('kubedoor-master-z')]},
+        '/api/agent/pods': {'success': True, 'data': CLUSTER_PODS},
         health.POD_MGR_PROBE: {'success': False, 'error': 'Cannot connect to host 127.0.0.1:81'},
         '/api/admis_switch': {'is_on': False},
     })
-    monkeypatch.setattr(health.db, 'pg_fetchrow', AsyncMock(return_value={'admission': True, 'admission_namespace': '["a"]'}))
-    monkeypatch.setattr(health.db, 'pg_fetchval', AsyncMock(return_value=datetime.now(timezone.utc)))
-    settings['prom_url'] = 'http://vm.example.test:8428'
-    monkeypatch.setattr(probe, 'cluster_sources', AsyncMock(return_value={'kube-state-metrics', 'node-exporter', 'cAdvisor'}))
-    monkeypatch.setattr(health.HealthCheck, 'connection', AsyncMock(return_value={'env': ENV, 'origin': 'upload', 'context': 'admin@prod'}))
+    prepare(monkeypatch, settings)
     result = await health.check(ENV, clients, agent, 'kubedoor', 'admin')
     rows = {row['key']: row for row in result['checks']}
     assert [row['key'] for row in result['checks']] == [
         'connection', 'version', 'k8s_api', 'pod_mgr', 'admission', 'component:kubedoor-agent', 'component:vmagent',
         'component:kube-state-metrics', 'component:node-exporter', 'events', 'metrics', 'kubeconfig']
+    # 每次调 Agent 都和页面转发一样带 env（以前没带，「列出命名空间」总是报缺少参数）
+    assert agent.calls and all(query.get('env') == ENV for _, query in agent.calls)
     assert rows['k8s_api']['status'] == 'success' and '2 个命名空间' in rows['k8s_api']['message']
     assert rows['pod_mgr']['status'] == 'error' and 'Cannot connect' in rows['pod_mgr']['message']
     assert rows['admission']['status'] == 'error' and '关掉再打开' in rows['admission']['message']
-    assert rows['component:kubedoor-agent']['status'] == 'success'
-    assert rows['component:kube-state-metrics']['status'] == 'skipped'
-    assert rows['component:node-exporter']['status'] == 'error' and 'ImagePullBackOff' in rows['component:node-exporter']['message']
+    # 全集群列一次 Pod：Agent 实际在 ops，kube-state-metrics、node-exporter 在 monitoring
+    assert ('/api/agent/pods', {'env': ENV}) in agent.calls and result['namespace'] == 'ops'
+    assert rows['component:kubedoor-agent']['message'] == 'ops/kubedoor-agent 1/1 个 Pod 就绪'
+    assert rows['component:vmagent']['message'] == 'ops/vmagent 1/1 个 Pod 就绪；时序库里有这个集群的指标'
+    assert rows['component:kube-state-metrics']['status'] == 'success'
+    assert '集群里已有的：monitoring/kube-state-metrics 1/1 个 Pod 就绪' in rows['component:kube-state-metrics']['message']
+    node = rows['component:node-exporter']
+    assert node['status'] == 'error' and 'monitoring/node-exporter 1/2 个 Pod 就绪' in node['message']
+    assert 'node-exporter-d3e4f：main ImagePullBackOff' in node['message']
     assert rows['events']['status'] == 'success' and rows['metrics']['status'] == 'success'
     assert result['kubeconfig'] == {'configured': True, 'origin': 'upload', 'context': 'admin@prod'}
-    assert ('/api/agent/pods', {'namespaces': 'kubedoor'}) in agent.calls
-    assert result['online'] is True and result['version'] == '2.6.0' and result['namespace'] == 'kubedoor'
+    assert result['online'] is True and result['version'] == '2.6.0'
+
+
+@pytest.mark.asyncio
+async def test_too_many_pods_falls_back_to_the_agent_namespace(monkeypatch, settings):
+    clients = {ENV: {'online': True, 'ver': '2.6.0', 'last_heartbeat': time.time()}}
+
+    def pods(query):
+        if 'namespaces' not in query:
+            return {'success': False, 'error': '响应过大(17.2 MB)'}
+        return {'success': True, 'data': [p for p in CLUSTER_PODS if p['namespace'] == query['namespaces']]}
+
+    agent = Agent({'/api/agent/namespaces': {'success': True, 'data': []}, '/api/agent/pods': pods,
+                   health.POD_MGR_PROBE: {'status': '未找到'}, '/api/admis_switch': {'is_on': True}})
+    prepare(monkeypatch, settings)
+    rows = {row['key']: row for row in (await health.check(ENV, clients, agent, 'ops', 'admin'))['checks']}
+    assert ('/api/agent/pods', {'env': ENV, 'namespaces': 'ops'}) in agent.calls
+    message = rows['component:kubedoor-agent']['message']
+    assert message.startswith('ops/kubedoor-agent 1/1 个 Pod 就绪')
+    assert message.endswith('（全集群的 Pod 列不出来（响应过大(17.2 MB)），只查了命名空间 ops）')
 
 
 @pytest.mark.asyncio
@@ -431,7 +527,7 @@ async def test_health_check_for_an_offline_agent_skips_what_needs_the_agent(monk
     assert [row['key'] for row in result['checks'] if row['group'] == 'component'] == ['components']
     assert rows['components']['message'] == 'Agent 离线，没法检查（kubedoor-agent、vmagent、kube-state-metrics、node-exporter）'
     assert rows['events']['status'] == 'warning' and rows['kubeconfig']['status'] == 'warning'
-    assert result['kubeconfig'] == {'configured': False}
+    assert result['kubeconfig'] == {'configured': False} and result['namespace'] == 'kubedoor'
 
 
 @pytest.mark.asyncio
@@ -445,7 +541,7 @@ async def test_one_broken_check_does_not_break_the_others(monkeypatch, settings)
     monkeypatch.setattr(health.HealthCheck, 'connection', AsyncMock(return_value='连不上 kubedoor-ai，查不到'))
     rows = {row['key']: row for row in (await health.check(ENV, clients, agent, 'kubedoor', 'admin'))['checks']}
     assert rows['pod_mgr']['status'] == 'success' and rows['admission']['status'] == 'skipped'
-    assert rows['components']['status'] == 'error' and '查不到命名空间 kubedoor 里的 Pod：等待超时' in rows['components']['message']
+    assert rows['components']['status'] == 'error' and rows['components']['message'].startswith('查不到 Pod：等待超时')
     assert rows['events']['status'] == 'warning' and rows['metrics']['message'] == '检查出错（ValueError）'
     assert rows['kubeconfig']['status'] == 'warning'
 

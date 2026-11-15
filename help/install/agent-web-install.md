@@ -86,7 +86,7 @@ Agent 上线后（第 5 步之后）顺带做两件事，结果各显示一行�
 
 Agent 列表的版本号是一个菜单：更新、重启、修复。「修复」在 Agent 离线时也能用：先弹出检查，看各项是否正常，再从检查弹框的「修复（覆盖安装）」进入安装对话框的修复模式。
 
-检查（`GET /api/admin/agent-health?env=`，master `agent_install/health.py`）都是只读的，每一项单独限时、单独兜底，一项出错不影响其他项。经 Agent 的几项用的都是现有接口，旧版 Agent 也能检查；Agent 离线时这几项跳过。
+检查（`GET /api/admin/agent-health?env=`，master `agent_install/health.py`）都是只读的，每一项单独限时、单独兜底，一项出错不影响其他项。经 Agent 的几项用的都是现有接口（和页面经 master 转发一样带 `env`，Agent 的不少接口没有它会报「缺少必要参数」），旧版 Agent 也能检查；Agent 离线时这几项跳过。
 
 | 分组 | 检查 | 怎么查 |
 | --- | --- | --- |
@@ -95,7 +95,7 @@ Agent 列表的版本号是一个菜单：更新、重启、修复。「修复�
 | | K8S API 访问 | 经 Agent 列出命名空间 |
 | | Pod 管理服务 | 经 Agent 调一次 pod-mgr；没有响应时 Pod 日志下载、删除 / 隔离 Pod、Java 诊断不可用 |
 | | 准入控制 | 页面上开着时，核对集群里的 `kubedoor-admis-configuration` 还在；不在时提示把开关关掉再打开 |
-| 组件 | kubedoor-agent、vmagent、kube-state-metrics、node-exporter | 经 Agent 查 Agent 命名空间（这个集群上次网页安装的命名空间，没有记录时 `kubedoor`）里各组件 Pod 的就绪数、累计重启次数和卡住的原因（CrashLoopBackOff、ImagePullBackOff、上次退出原因等）；没有某个组件的 Pod 时算没随 Agent 安装 |
+| 组件 | kubedoor-agent、vmagent、kube-state-metrics、node-exporter | 经 Agent 全集群列一次 Pod，按名字认出各组件（不管装在哪个命名空间、是不是随 Agent 安装的，例如 `monitoring/prometheus-node-exporter`），说明在哪个命名空间、Pod 就绪数、累计重启次数和卡住的原因（CrashLoopBackOff、ImagePullBackOff、上次退出原因等）。kube-state-metrics、node-exporter 再对照时序库里有没有它的指标：Pod 正常但没有指标，说明采集没抓它或 external_labels 的集群名不对；集群里找不到但时序库有指标，说明在集群外采集。没有 vmagent 时说明采集用的是哪个 Prometheus。Agent 实际所在的命名空间按 kubedoor-agent 的 Pod 定；Pod 太多、全集群列不出来时只查 Agent 的命名空间 |
 | 数据上报 | K8S 事件上报 | 数据库里最近 24 小时这个集群最新事件的时间，1 小时内算正常（集群很安静时也可能很久没有事件） |
 | | 指标采集 | 时序库最近 10 分钟有没有这个集群的 `kube_pod_info`（kube-state-metrics）、`node_uname_info`（node-exporter）、`container_cpu_usage_seconds_total`（cAdvisor），一次查询，带 `nocache=1` |
 | 修复 | AI Kubeconfig | 有没有保存，修复时直接用它连接集群 |
