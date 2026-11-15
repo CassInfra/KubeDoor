@@ -347,7 +347,17 @@ test("切换安装方式时三个采集组件换成默认值，之后每个还�
     ],
     ["full", "install", "auto", "auto"]
   );
-  assert.match(vm.collectorHint, /^自动检测：集群里已有就复用/);
+  // 选了自动检测就说明怎么判断：kube-state-metrics 看 Service，node-exporter 看每个节点的 9100
+  assert.equal(vm.autoDetecting, true);
+  assert.match(
+    utils.AUTO_DETECT_HINT,
+    /app\.kubernetes\.io\/name=kube-state-metrics 标签、端口 8080 的 Service/
+  );
+  assert.match(
+    utils.AUTO_DETECT_HINT,
+    /每个 Linux 节点上都有使用主机网络、声明 9100 端口的运行中 Pod/
+  );
+  assert.match(vm.collectorHint, /^vmagent 把指标写入通用配置里的远程写地址/);
   vm.changeMode("agent");
   assert.deepEqual(
     [
@@ -358,6 +368,7 @@ test("切换安装方式时三个采集组件换成默认值，之后每个还�
     ],
     ["agent", "reuse", "reuse", "reuse"]
   );
+  assert.equal(vm.autoDetecting, false);
   assert.match(
     vm.collectorHint,
     /^不安装 vmagent 时用已有的 Prometheus \/ vmagent 采集/

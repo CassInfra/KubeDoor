@@ -168,7 +168,7 @@ def normalize_options(raw, defaults, write_url):
         raise SetupError('请填写在本集群安装 Agent 的选项', 422)
     env = raw.get('env', '')
     if not isinstance(env, str) or not ENV.fullmatch(env.strip()):
-        raise SetupError('请填写集群名称：1 至 100 个字母、数字、下划线或中划线', 422)
+        raise SetupError('请填写集群唯一标识：1 至 100 个字母、数字、下划线或中划线', 422)
     namespace = raw.get('namespace') or defaults.get('namespace', '')
     if not isinstance(namespace, str) or not NAMESPACE.fullmatch(namespace.strip()):
         raise SetupError('命名空间需为有效的 Kubernetes 名称：小写字母、数字或中划线，不超过 63 个字符', 422)
@@ -179,15 +179,15 @@ def normalize_options(raw, defaults, write_url):
         raise SetupError('集群别名最多 20 个，每个不超过 100 个字符', 422)
     mode = raw.get('mode') or defaults.get('mode') or 'agent'
     if mode not in ('full', 'agent'):
-        raise SetupError('安装方式只能选择 full（Agent 和指标采集）或 agent（仅 Agent）', 422)
+        raise SetupError('安装方式只能选择 full（完整安装）或 agent（仅安装 kubedoor-agent）', 422)
     if mode == 'full' and not write_url:
-        raise SetupError('第 3 步没有保存时序库远程写地址，只能选择仅安装 Agent', 422)
+        raise SetupError('第 3 步没有保存时序库远程写地址，只能选择仅安装 kubedoor-agent', 422)
     result = {'env': env.strip(), 'aliases': list(dict.fromkeys(alias.strip() for alias in aliases if alias.strip())),
               'namespace': namespace.strip(), 'mode': mode}
     for key, title in (('ksm', 'kube-state-metrics'), ('node_exporter', 'node-exporter')):
         value = raw.get(key) or 'auto'
         if value not in ('auto', 'install', 'reuse'):
-            raise SetupError(f'{title} 只能选择 auto（自动检测）、install（安装）或 reuse（复用已有）', 422)
+            raise SetupError(f'{title} 只能选择 auto（自动检测）、install（安装）或 reuse（不安装）', 422)
         result[key] = value
     return result
 
@@ -457,7 +457,7 @@ class AgentInstall:
             agent = state['agent']
             env = (agent.get('options') or {}).get('env', '')
             if status == 'succeeded':
-                message = f'Agent 已在本集群安装并上线，集群名称 {env}'
+                message = f'Agent 已在本集群安装并上线，集群唯一标识 {env}'
             else:
                 message = ('Agent 已上线，但指标采集验证未通过' + ('：' + detail if detail else '')
                            + '。安装完成后可在控制台查看该集群的指标，或在 Agent 管理的安装记录里点「重新验证指标采集」'

@@ -857,10 +857,13 @@ test("Agent 安装选项按安装服务的规则校验，别名去重去空", ()
   });
   assert.throws(
     () => utils.agentPayload({ ...form, env: " " }),
-    /请填写集群名称/
+    /请填写集群唯一标识/
   );
   for (const env of ["prod k8s", "prod.k8s", "生产", "a".repeat(101)])
-    assert.throws(() => utils.agentPayload({ ...form, env }), /集群名称只能/);
+    assert.throws(
+      () => utils.agentPayload({ ...form, env }),
+      /集群唯一标识只能/
+    );
   assert.equal(
     utils.agentPayload({ ...form, env: "A_b-1".padEnd(100, "x") }).env.length,
     100
@@ -902,7 +905,7 @@ test("Agent 安装选项按安装服务的规则校验，别名去重去空", ()
   );
   assert.throws(
     () => utils.agentPayload({ ...form, mode: "vmagent" }),
-    /指标采集/
+    /请选择安装方式/
   );
   assert.throws(
     () => utils.agentPayload({ ...form, ksm: "yes" }),
@@ -1034,7 +1037,7 @@ test("第 6 步勾选安装时校验选项后提交，之后锁定页面、不�
   vm.agentForm.install = true;
   assert.equal(vm.actionText, "安装 Agent");
   await vm.advance();
-  assert.match(vm.error, /请填写集群名称/);
+  assert.match(vm.error, /请填写集群唯一标识/);
   assert.deepEqual(calls.installAgent, []);
   vm.agentForm.env = "prod-k8s";
   vm.agentForm.aliases = "生产，prod\n生产";

@@ -430,7 +430,7 @@ async def test_agent_result_mentions_the_ai_kubeconfig(tmp_path, ai_connection, 
             state = await current(client)
             await client.post('/setup-api/agent/install', json={'revision': state['revision'], 'options': OPTIONS})
             final = await settle(repo, lambda s: s['phase'] == 'finalizing')
-    assert final['agent']['message'] == 'Agent 已在本集群安装并上线，集群名称 prod-k8s' + note
+    assert final['agent']['message'] == 'Agent 已在本集群安装并上线，集群唯一标识 prod-k8s' + note
 
 
 @pytest.mark.asyncio
@@ -494,8 +494,8 @@ async def test_agent_only_mode_sends_no_remote_write_and_full_needs_write_url(tm
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize('options,field', [
-    (None, '选项'), ({**OPTIONS, 'env': ''}, '集群名称'), ({**OPTIONS, 'env': 'prod k8s'}, '集群名称'),
-    ({**OPTIONS, 'env': 'x' * 101}, '集群名称'), ({**OPTIONS, 'env': 7}, '集群名称'),
+    (None, '选项'), ({**OPTIONS, 'env': ''}, '集群唯一标识'), ({**OPTIONS, 'env': 'prod k8s'}, '集群唯一标识'),
+    ({**OPTIONS, 'env': 'x' * 101}, '集群唯一标识'), ({**OPTIONS, 'env': 7}, '集群唯一标识'),
     ({**OPTIONS, 'namespace': 'Bad_NS'}, '命名空间'), ({**OPTIONS, 'namespace': 'a' * 64}, '命名空间'),
     ({**OPTIONS, 'aliases': 'prod'}, '别名'), ({**OPTIONS, 'aliases': ['a'] * 21}, '别名'),
     ({**OPTIONS, 'aliases': ['x' * 101]}, '别名'), ({**OPTIONS, 'aliases': ['line\nbreak']}, '别名'),

@@ -31,6 +31,7 @@ import {
   typeHint
 } from "@/views/system/notification/notification-utils";
 import {
+  AUTO_DETECT_HINT,
   COLLECTOR_CHOICES,
   GENERAL_SETTINGS_URL,
   INSTALL_STATUS_TEXT,
@@ -93,8 +94,12 @@ const labelPair = computed(() =>
 );
 const collectorHint = computed(() =>
   options.vmagent === "install"
-    ? "自动检测：集群里已有就复用，没有就安装。vmagent 把指标写入通用配置里的远程写地址，装好后验证能采到指标；它要抓取的 kube-state-metrics、node-exporter 选了不安装时，集群里要已有。"
+    ? "vmagent 把指标写入通用配置里的远程写地址，装好后验证能采到指标；kube-state-metrics、node-exporter 选了不安装时，vmagent 抓集群里已有的，检测时确认存在。"
     : "不安装 vmagent 时用已有的 Prometheus / vmagent 采集，检测时会查时序库里有没有这个集群的指标；这里安装的 kube-state-metrics、node-exporter 要由已有的采集去抓取。"
+);
+/** 有组件选了「自动检测」时，说明怎么判断 */
+const autoDetecting = computed(
+  () => options.ksm === "auto" || options.node_exporter === "auto"
 );
 /** 这个集群在消息通知里已有的单独配置 */
 const existingChannel = computed(() => {
@@ -729,7 +734,10 @@ onBeforeUnmount(() => {
               </el-select>
             </el-form-item>
           </div>
-          <div class="field-hint collector-hint">{{ collectorHint }}</div>
+          <div class="field-hint collector-hint">
+            <div v-if="autoDetecting">{{ AUTO_DETECT_HINT }}</div>
+            <div>{{ collectorHint }}</div>
+          </div>
           <div class="settings-panel">
             <div class="settings-head">
               <span class="settings-title">正在使用的通用配置</span>

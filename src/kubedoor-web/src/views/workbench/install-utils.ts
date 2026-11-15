@@ -68,6 +68,13 @@ export const COLLECTOR_CHOICES = {
   ]
 } as const;
 
+/**
+ * 「自动检测」怎么判断（master agent_install/service.py 的 components，每次检测都重新判断）。
+ * 安装向导第 6 步（views/setup/index.vue）写着同样的说明，改规则时两处一起改
+ */
+export const AUTO_DETECT_HINT =
+  "自动检测：kube-state-metrics 看集群里有没有带 app.kubernetes.io/name=kube-state-metrics 标签、端口 8080 的 Service；node-exporter 看是不是每个 Linux 节点上都有使用主机网络、声明 9100 端口的运行中 Pod。有就复用，没有就安装；node-exporter 只有部分节点有时检测不通过（再装会端口冲突）。检测结果的「采集组件」一行写明是复用还是安装。";
+
 /** 集群唯一标识在 external_labels 里的键值对（key 是通用配置的集群指标标签 key），例如 origin_prometheus: prod-k8s */
 export function clusterLabelPair(
   tagKey: string | null | undefined,

@@ -28,12 +28,15 @@ Agent 管理页增加管理员可见的「安装 Agent」按钮，打开三步�
 
 三个采集组件：
 
-- kube-state-metrics、node-exporter：「自动检测」集群里已有可用的就复用，没有就安装（部分节点已有 9100 采集器时停止，避免端口冲突）；「安装」装发布模板里的；「不安装」用集群里已有的。已有组件必须确认抓取配置兼容，检测不明确时显示原因，不能仅凭同名 Deployment 就认定可复用。
+- kube-state-metrics、node-exporter：「安装」装发布模板里的；「不安装」用集群里已有的；「自动检测」每次点「检测」时重新判断，结果写在检测结果的「采集组件」一行：
+  - kube-state-metrics：在所有命名空间里找带 `app.kubernetes.io/name=kube-state-metrics` 标签、Service 端口有 8080 的 Service，找到就复用（不安装，vmagent 的 kube-state-metrics 抓取任务改为在全集群按这个标签找），找不到就安装发布模板里的（vmagent 只抓本命名空间里的这个，免得重复采集）。
+  - node-exporter：看每个 Linux 节点（`kubernetes.io/os=linux`，没有这个标签的也算）上有没有运行中、使用主机网络（`hostNetwork: true`）、容器声明了 9100 端口的 Pod。每个节点都有就复用；一个都没有就安装（DaemonSet，主机网络 9100 端口）；只有部分节点有时检测不通过，提示先统一节点采集配置，因为再装一份会在这些节点上端口冲突。vmagent 都是按「节点 IP:9100」去抓。
+  - 只看 Service 标签、端口和 Pod 声明的端口，不看名字：同名 Deployment 不算已有。已有的 node-exporter 如果 Pod 里没声明 9100 端口，会被当成没有（装 vmagent 时选「不安装」也用同样的规则确认，同样过不了），给它的容器补上 `containerPort: 9100` 后再检测。
 - vmagent：「安装」把指标写入通用配置里的远程写地址，装好后验证采集。装 vmagent 时选了不安装的 kube-state-metrics / node-exporter，检测时要确认集群里已有，不然 vmagent 采不到，检测不通过。「不安装」用已有的 Prometheus / vmagent 采集，不等待本次指标写入。
 - 不装 vmagent 时，检测会查时序库（通用配置的查询地址）最近一天有没有 `<集群指标标签 key>="<集群唯一标识>"` 的数据。有就通过；没有时列出时序库里这个标签已有的值（方便发现拼写不一致），提醒在已有的 Prometheus / vmagent 的 external_labels 下配置这个键值对；没有查询地址、连不上、认证失败时也只是提醒。这几种情况都不挡安装：Agent 本身不依赖指标，可以装好以后再改采集配置。
 - 仅安装 kubedoor-agent 时也可以单独装 kube-state-metrics 或 node-exporter，由已有的采集去抓取。
 
-安装向导第 6 步（在本集群安装）只传安装方式：「安装 vmagent 采集指标」等于完整安装，「只安装 Agent」三个采集组件都不装，和以前一样。
+安装向导第 6 步（在本集群安装）的选项名称和这里一致（集群唯一标识；安装方式「完整安装 / 仅安装 kubedoor-agent」；kube-state-metrics、node-exporter「自动检测 / 安装 / 不安装」），但没有单独的 vmagent 选项，只传安装方式：完整安装装 vmagent，仅安装 kubedoor-agent 三个采集组件都不装。
 
 对话框显示「正在使用的通用配置」：远程写地址、对象存储上传地址（密码显示为 `******`）和镜像仓库，这些都不在对话框里填写。通用配置里还没有某一项时显示提醒「通用配置里还没有……。在系统管理 → 通用配置填写一次，以后安装 Agent 自动使用」；「去通用配置填写」在新标签页打开「系统管理 → 通用配置」，填完回到对话框点「重新读取」。没有远程写地址时不能安装 vmagent（「完整安装」不可选）；检测之后重新读取到的通用配置变了，要重新检测。
 

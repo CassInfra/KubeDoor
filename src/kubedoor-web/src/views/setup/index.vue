@@ -1257,8 +1257,8 @@ onBeforeUnmount(() => {
                   </p>
                   <p>
                     例如
-                    <code>origin_prometheus="prod-k8s"</code>：这里只填
-                    key，value（集群名称 <code>prod-k8s</code>）在第 6
+                    <code>origin_prometheus: prod-k8s</code>：这里只填
+                    key，value（集群唯一标识 <code>prod-k8s</code>）在第 6
                     步安装本集群 Agent 或之后接入其他集群时填写。
                   </p>
                 </div>
@@ -1778,7 +1778,7 @@ onBeforeUnmount(() => {
                   >
                     <div class="field-grid">
                       <div>
-                        <label for="agent-env">集群名称</label
+                        <label for="agent-env">集群唯一标识</label
                         ><input
                           id="agent-env"
                           v-model="agentForm.env"
@@ -1787,12 +1787,13 @@ onBeforeUnmount(() => {
                           placeholder="例如 prod-k8s"
                         />
                         <p class="field-hint">
-                          也是集群标签的值：每个指标都会带上
-                          <code
-                            >{{ metrics.tag_key || "origin_prometheus" }}="{{
-                              agentForm.env.trim() || "prod-k8s"
-                            }}"</code
-                          >，用来区分集群，安装后请保持不变。
+                          用来区分各集群的指标，安装后请保持不变。会作为 vmagent
+                          配置里 external_labels 的值：<code
+                            >{{ metrics.tag_key || "origin_prometheus" }}:
+                            {{ agentForm.env.trim() || "prod-k8s" }}</code
+                          >（key 是第 3 步的集群指标标签）；使用已有的
+                          Prometheus / vmagent 时，它们配置的 external_labels
+                          下也要有这个键值对。
                         </p>
                       </div>
                       <div>
@@ -1821,18 +1822,16 @@ onBeforeUnmount(() => {
                         </p>
                       </div>
                       <div>
-                        <label for="agent-mode">指标采集</label
+                        <label for="agent-mode">安装方式</label
                         ><select id="agent-mode" v-model="agentForm.mode">
-                          <option value="full">
-                            安装 vmagent 采集指标（推荐）
-                          </option>
-                          <option value="agent">只安装 Agent</option>
+                          <option value="full">完整安装（推荐）</option>
+                          <option value="agent">仅安装 kubedoor-agent</option>
                         </select>
                         <p class="field-hint">
                           {{
                             agentForm.mode === "full"
-                              ? "指标由 vmagent 直接写入第 3 步的远程写地址。"
-                              : "已有指标采集时选择，现有指标需要带上同样的集群标签。"
+                              ? "安装 kubedoor-agent 和指标采集组件，vmagent 把指标直接写入第 3 步的远程写地址。"
+                              : "不安装采集组件，用已有的 Prometheus / vmagent 采集指标，它们的 external_labels 下要有上面的键值对。"
                           }}
                         </p>
                       </div>
@@ -1842,7 +1841,7 @@ onBeforeUnmount(() => {
                           ><select id="agent-ksm" v-model="agentForm.ksm">
                             <option value="auto">自动检测（推荐）</option>
                             <option value="install">安装</option>
-                            <option value="reuse">复用已有</option>
+                            <option value="reuse">不安装</option>
                           </select>
                         </div>
                         <div>
@@ -1853,12 +1852,19 @@ onBeforeUnmount(() => {
                           >
                             <option value="auto">自动检测（推荐）</option>
                             <option value="install">安装</option>
-                            <option value="reuse">复用已有</option>
+                            <option value="reuse">不安装</option>
                           </select>
                         </div>
+                        <!-- 自动检测的说明和「Agent管理 → 安装 Agent」对话框（workbench/install-utils 的 AUTO_DETECT_HINT）一致，改规则时两处一起改 -->
                         <p class="field-hint full">
-                          自动检测：集群里已有可用的组件就复用，没有就安装。安装
-                          node-exporter 需要主机网络和特权容器权限。
+                          自动检测：kube-state-metrics 看集群里有没有带
+                          app.kubernetes.io/name=kube-state-metrics 标签、端口
+                          8080 的 Service；node-exporter 看是不是每个 Linux
+                          节点上都有使用主机网络、声明 9100 端口的运行中
+                          Pod。有就复用，没有就安装；node-exporter
+                          只有部分节点有时检测不通过（再装会端口冲突）。不安装：vmagent
+                          抓集群里已有的，检测时确认存在。安装 node-exporter
+                          需要主机网络和特权容器权限。
                         </p>
                       </template>
                     </div>

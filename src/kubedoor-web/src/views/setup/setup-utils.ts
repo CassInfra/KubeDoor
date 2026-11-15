@@ -168,10 +168,10 @@ export function agentAliases(text: string): string[] {
 /** 校验第 6 步的安装选项，规则与安装服务一致 */
 export function agentPayload(form: AgentForm): SetupAgentOptions {
   const env = form.env.trim();
-  if (!env) throw new Error("请填写集群名称。");
+  if (!env) throw new Error("请填写集群唯一标识。");
   if (!/^[A-Za-z0-9_-]{1,100}$/.test(env))
     throw new Error(
-      "集群名称只能含字母、数字、下划线和中划线，最长 100 个字符。"
+      "集群唯一标识只能含字母、数字、下划线和中划线，最长 100 个字符。"
     );
   const aliases = agentAliases(form.aliases);
   if (aliases.length > 20) throw new Error("集群别名最多 20 个。");
@@ -184,7 +184,7 @@ export function agentPayload(form: AgentForm): SetupAgentOptions {
       "命名空间只能含小写字母、数字和中划线，以字母或数字开头和结尾，最长 63 个字符。"
     );
   if (form.mode !== "full" && form.mode !== "agent")
-    throw new Error("请选择是否安装指标采集。");
+    throw new Error("请选择安装方式。");
   if (!componentChoices.includes(form.ksm))
     throw new Error("请选择 kube-state-metrics 的处理方式。");
   if (!componentChoices.includes(form.node_exporter))

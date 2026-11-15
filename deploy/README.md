@@ -27,7 +27,7 @@ sh install.sh
 3. **时序库**：选择 VictoriaMetrics 单机版或集群版，连接地址只填主机名或 IP（不填端口），自动生成可修改的远程读 / 写地址；“测试连接”检查查询，并查找带集群标签的数据，通过后再点“继续”。
 4. **基础设置**：设置 `kubedoor` 管理员密码；KubeDoor 访问地址自动获取（当前打开页面的地址，端口转发打开时用 Web 的 NodePort 地址），有域名或负载均衡时可修改；按需填写对象存储上传地址（可选，各集群的 Agent 上传 jstack / jmap 等诊断文件用，可以带“账号:密码@”）；选择是否安装告警组件（vmalert、Alertmanager、kubedoor-alarm，默认安装）。Grafana 看板固定安装。
 5. **自动安装**：分别显示 Web、控制服务、AI、Grafana 和告警组件的实际状态。控制服务就绪后，安装服务把时序库类型和地址、集群标签名、访问地址、对象存储地址、网页安装 Agent 用的镜像写进控制台的「系统管理 → 通用配置」，再做健康检查。
-6. **安装 Agent（可选）**：控制端全部就绪后，可以直接在本集群安装 Agent（填写集群名称，选择是否安装 vmagent、kube-state-metrics、node-exporter），也可以跳过直接完成。本集群的 Agent 直连控制服务，vmagent 直接写入通用配置里的远程写地址（即第 3 步填写的地址）。
+6. **安装 Agent（可选）**：控制端全部就绪后，可以直接在本集群安装 Agent（填写集群唯一标识，安装方式选「完整安装」或「仅安装 kubedoor-agent」，完整安装时 kube-state-metrics、node-exporter 可选自动检测 / 安装 / 不安装），也可以跳过直接完成。本集群的 Agent 直连控制服务，vmagent 直接写入通用配置里的远程写地址（即第 3 步填写的地址）。
 
 全部所选服务就绪、最终连接检查及安装收尾通过后，才会通知成功。数据库凭据和时序库地址存放在 K8S Secret 中（vmalert、Grafana 使用）；其余配置在数据库里，见下面的[控制端配置](#控制端配置通用配置)。网页安装不再创建 ConfigMap `kubedoor-config` 和事件告警规则 ConfigMap。完成后临时安装服务停用并撤销部署权限；其他集群通过“接入第一个集群”进入 Agent 管理页，上传 kubeconfig 安装 Agent。
 

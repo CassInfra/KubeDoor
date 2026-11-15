@@ -122,15 +122,15 @@ export type SetupAgentStatus =
   | "skipped"
   | "unavailable";
 
-/** kube-state-metrics / node-exporter：自动检测、安装或复用已有 */
+/** kube-state-metrics / node-exporter：自动检测、安装或不安装（reuse：用集群里已有的） */
 export type AgentComponentChoice = "auto" | "install" | "reuse";
 
 export interface SetupAgentOptions {
-  /** 集群名称，同时是指标集群标签（external_labels）的值 */
+  /** 集群唯一标识，同时是指标集群标签（external_labels）的值 */
   env: string;
   aliases: string[];
   namespace: string;
-  /** full：安装 vmagent 采集指标；agent：只安装 Agent */
+  /** full：完整安装（装 vmagent 采集指标）；agent：仅安装 kubedoor-agent */
   mode: "full" | "agent";
   ksm: AgentComponentChoice;
   node_exporter: AgentComponentChoice;
