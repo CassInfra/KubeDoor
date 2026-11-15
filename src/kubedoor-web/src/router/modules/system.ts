@@ -3,7 +3,7 @@ export default {
   path: "/system",
   redirect: "/system/users",
   meta: {
-    icon: "ep:user",
+    icon: "ep:setting",
     title: "系统管理",
     rank: 65,
     roles: ["admin"]

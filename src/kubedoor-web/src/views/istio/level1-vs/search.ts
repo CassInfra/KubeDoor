@@ -1,4 +1,4 @@
-/** 全局VS管理矩阵的全文搜索(纯函数,不 import 别的模块;单测见 tests/istio-search.test.cjs) */
+/** ISTIO管理矩阵的全文搜索(纯函数,不 import 别的模块;单测见 tests/istio-search.test.cjs) */
 
 /** 关键字按空白拆开、转小写:每个都要命中(VS 名称、hosts、规则内容任一处都算) */
 export function searchTerms(keyword: string): string[] {

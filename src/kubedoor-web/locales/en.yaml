@@ -90,7 +90,6 @@ menus:
   resourceMonitnode: Resource Node
   resourceWorkbench: Workbench
   istioManagement: ISTIO Management
-  level1VirtualService: Level1 VirtualService
   level2VirtualService: Level2 VirtualService
   pureFourZeroFour: "404"
   pureFourZeroOne: "403"

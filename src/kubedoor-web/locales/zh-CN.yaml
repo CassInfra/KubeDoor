@@ -90,7 +90,6 @@ menus:
   resourceMonitnode: 节点监控看板📊
   resourceWorkbench: Agent管理
   istioManagement: ISTIO管理
-  level1VirtualService: 全局VS管理
   level2VirtualService: 委托VS管理
   pureFourZeroFour: "404"
   pureFourZeroOne: "403"

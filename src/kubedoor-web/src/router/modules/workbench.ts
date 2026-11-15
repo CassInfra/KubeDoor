@@ -6,7 +6,7 @@ export default {
   path: "/workbench",
   redirect: "/workbench/index",
   meta: {
-    icon: "ep:setting",
+    icon: "ep:cpu",
     title: $t("menus.resourceWorkbench"),
     rank: 60,
     // Agent 管理只对管理员开放

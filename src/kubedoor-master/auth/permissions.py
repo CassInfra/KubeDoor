@@ -122,7 +122,7 @@ OPERATIONS = (
     _op('network.tcp', '网络', '端口测试',
         '从集群内向任意地址发起 TCP 连接(CoreDNS 管理页的端口测试)。', WEB, na=True),
     _op('network.istio', '网络', 'Istio 修改',
-        '全局VS管理里的所有修改,以及通过资源 YAML / AI 修改 Istio 资源。'
+        'ISTIO管理里的所有修改,以及通过资源 YAML / AI 修改 Istio 资源。'
         '组级修改(组、组标准、规则)要求组内每个集群都有此权限。', WEB_AI, rw=False, approval=True),
     # ---- 告警 ----
     _op('alert.operate', '告警', '告警处理状态', '修改告警的处理状态。', WEB, na=True),

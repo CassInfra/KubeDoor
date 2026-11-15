@@ -279,7 +279,7 @@ const OP_HINTS: Record<string, string> = {
   "network.coredns":
     "CoreDNS 页面的保存,以及通过编辑 YAML、删除资源、AI 改 kube-system/coredns,都按这一行判断,不能绕过。",
   "network.istio":
-    "全局VS管理的修改,以及通过编辑 YAML、AI 改 Istio 资源(VirtualService、DestinationRule、Gateway 等),都按这一行判断,不能绕过。全局VS管理里,改组、改组标准这类组级修改要求组内每个集群都有这个权限;下发、回退、删除集群里的 VirtualService、刷新现状只看目标集群。",
+    "ISTIO管理的修改,以及通过编辑 YAML、AI 改 Istio 资源(VirtualService、DestinationRule、Gateway 等),都按这一行判断,不能绕过。ISTIO管理里,改组、改组标准这类组级修改要求组内每个集群都有这个权限;下发、回退、删除集群里的 VirtualService、刷新现状只看目标集群。",
   "alert.silence":
     "限定了集群的屏蔽规则按该集群的权限判断;没限定集群的规则和具体集群无关,按全局角色查这一行。"
 };

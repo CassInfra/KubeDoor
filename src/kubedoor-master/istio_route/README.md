@@ -1,6 +1,6 @@
-# Istio VirtualService 管理(全局VS管理)
+# Istio VirtualService 管理(菜单「ISTIO管理」)
 
-页面:ISTIO管理 → 全局VS管理(`/istio/level1-vs`)。代码:
+页面:ISTIO管理(`/istio/level1-vs`;委托VirtualService管理在「实验功能」里)。代码:
 
 | 文件 | 内容 |
 | --- | --- |
