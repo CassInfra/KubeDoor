@@ -1,16 +1,5 @@
 <template>
   <div>
-    <!-- 警告提示 -->
-    <div style="max-width: 600px; margin: 0 auto">
-      <el-alert
-        title="【固定节点均衡】模式还在内部开发测试阶段，请勿开启！"
-        type="error"
-        center
-        show-icon
-        effect="dark"
-        style="margin-bottom: 16px"
-      />
-    </div>
     <div class="agent-management-container">
       <!-- 搜索表单 -->
       <div class="search-section">
@@ -49,25 +38,30 @@
           <el-table
             ref="tableRef"
             :data="filteredTableData"
+            class="agent-table"
             style="width: 100%"
             stripe
             :default-sort="{ prop: 'key', order: 'ascending' }"
             @selection-change="handleSelectionChange"
           >
+            <!-- 列宽都是最小宽度（表头一行放得下，内容较长的列按内容算），屏幕宽时按比例加宽；
+                 屏幕窄时横向滚动，勾选列和 K8S 列固定在左边 -->
             <el-table-column
               type="selection"
               width="46"
               align="center"
+              fixed="left"
               :selectable="isSelectable"
             />
             <el-table-column
               prop="key"
               label="K8S"
-              min-width="120"
+              :min-width="columnWidth.name"
+              fixed="left"
               show-overflow-tooltip
               sortable
             />
-            <el-table-column label="别名" min-width="160">
+            <el-table-column label="别名" :min-width="COLUMN_WIDTH.aliases">
               <template #header>
                 <span class="ai-connection-header">
                   别名
@@ -106,7 +100,7 @@
             <el-table-column
               prop="online"
               label="状态"
-              min-width="80"
+              :min-width="COLUMN_WIDTH.online"
               align="center"
               sortable
             >
@@ -120,43 +114,59 @@
               prop="last_heartbeat"
               label="心跳"
               align="center"
-              min-width="160"
+              :min-width="columnWidth.heartbeat"
               show-overflow-tooltip
               sortable
             />
+            <!-- 版本号就是操作菜单：点开有更新、重启、修复 -->
             <el-table-column
               prop="ver"
               label="版本"
-              min-width="100"
+              :min-width="columnWidth.ver"
               align="center"
-              show-overflow-tooltip
               sortable
-            />
-            <el-table-column label="操作" min-width="150" align="center">
+            >
               <template #default="scope">
-                <el-button
-                  type="primary"
-                  size="small"
-                  plain
-                  :disabled="!scope.row.online"
-                  @click="handleUpdate(scope.row)"
+                <el-dropdown
+                  trigger="click"
+                  @command="command => handleAgentCommand(command, scope.row)"
                 >
-                  更新
-                </el-button>
-                <el-button
-                  type="warning"
-                  size="small"
-                  plain
-                  :disabled="!scope.row.online"
-                  @click="handleRestart(scope.row)"
-                >
-                  重启
-                </el-button>
+                  <el-button link type="primary" class="version-trigger">
+                    {{ scope.row.ver || "未知" }}
+                    <el-icon class="el-icon--right"><ArrowDown /></el-icon>
+                  </el-button>
+                  <template #dropdown>
+                    <el-dropdown-menu>
+                      <el-dropdown-item
+                        command="update"
+                        :icon="Upload"
+                        :disabled="!scope.row.online"
+                      >
+                        更新
+                      </el-dropdown-item>
+                      <el-dropdown-item
+                        command="restart"
+                        :icon="RefreshRight"
+                        :disabled="!scope.row.online"
+                      >
+                        重启
+                      </el-dropdown-item>
+                      <!-- 检查各组件，按需用 kubeconfig 覆盖安装；Agent 离线时也能用 -->
+                      <el-dropdown-item
+                        command="repair"
+                        :icon="FirstAidKit"
+                        divided
+                      >
+                        修复
+                      </el-dropdown-item>
+                    </el-dropdown-menu>
+                  </template>
+                </el-dropdown>
               </template>
             </el-table-column>
             <el-table-column
               label="AI Kubeconfig"
-              min-width="230"
+              :min-width="columnWidth.aiConnection"
               align="center"
             >
               <template #header>
@@ -193,16 +203,7 @@
                       "
                       effect="plain"
                     >
-                      {{
-                        connections[scope.row.key]?.configured
-                          ? connections[scope.row.key].origin ===
-                            "agent-install"
-                            ? "自动配置"
-                            : connections[scope.row.key].context || "已配置"
-                          : aiAvailable
-                            ? "未配置"
-                            : "AI 未启用"
-                      }}
+                      {{ connectionLabel(scope.row.key) }}
                     </el-tag>
                   </el-tooltip>
                   <el-button
@@ -222,7 +223,7 @@
             <el-table-column
               prop="collect"
               label="自动采集"
-              min-width="85"
+              :min-width="COLUMN_WIDTH.collect"
               align="center"
               sortable
             >
@@ -238,14 +239,14 @@
             <el-table-column
               prop="peak_hours"
               label="高峰时段"
-              min-width="120"
+              :min-width="columnWidth.peakHours"
               align="center"
               show-overflow-tooltip
               sortable
             />
             <el-table-column
               label="采集历史数据"
-              min-width="100"
+              :min-width="COLUMN_WIDTH.collectHistory"
               align="center"
             >
               <template #default="scope">
@@ -265,7 +266,7 @@
             <el-table-column
               prop="admission"
               label="准入控制"
-              min-width="85"
+              :min-width="COLUMN_WIDTH.admission"
               align="center"
               sortable
             >
@@ -281,14 +282,14 @@
             <el-table-column
               prop="admission_namespace"
               label="管控命名空间"
-              min-width="100"
+              :min-width="columnWidth.admissionNamespace"
               align="center"
               show-overflow-tooltip
             />
             <el-table-column
               prop="nms_not_confirm"
               label="新服务免确认"
-              min-width="110"
+              :min-width="COLUMN_WIDTH.nmsNotConfirm"
               align="center"
               sortable
             >
@@ -303,9 +304,10 @@
               </template>
             </el-table-column>
             <el-table-column
+              v-if="SCHEDULER_VISIBLE"
               prop="scheduler"
               label="固定节点均衡"
-              min-width="110"
+              :min-width="COLUMN_WIDTH.scheduler"
               align="center"
               sortable
             >
@@ -324,10 +326,19 @@
         </el-card>
       </div>
 
+      <!-- repair-env 有值时是修复这个集群的 Agent（覆盖安装），否则是安装新集群 -->
       <AgentInstallDialog
         v-if="installDialogMounted && isAdmin"
         v-model="installDialogVisible"
+        :repair-env="repairEnv"
+        :repair-connection="repairEnv ? connections[repairEnv] : null"
         @changed="getAgentData"
+      />
+      <AgentHealthDialog
+        v-if="healthDialogMounted && isAdmin"
+        v-model="healthDialogVisible"
+        :env="healthEnv"
+        @repair="openRepair"
       />
 
       <!-- 采集历史数据对话框 -->
@@ -502,7 +513,11 @@
       </el-dialog>
 
       <!-- 更新对话框 -->
-      <el-dialog v-model="updateDialogVisible" title="更新镜像" width="500px">
+      <el-dialog
+        v-model="updateDialogVisible"
+        :title="`更新镜像：${updateForm.env}`"
+        width="500px"
+      >
         <el-form :model="updateForm" label-width="80px">
           <el-form-item label="镜像标签">
             <el-input
@@ -582,7 +597,13 @@ import {
   ElMessageBox,
   type TableInstance
 } from "element-plus";
-import { QuestionFilled } from "@element-plus/icons-vue";
+import {
+  ArrowDown,
+  FirstAidKit,
+  QuestionFilled,
+  RefreshRight,
+  Upload
+} from "@element-plus/icons-vue";
 import {
   getAgentStatus,
   initPeakData,
@@ -603,6 +624,7 @@ import { message } from "@/utils/message";
 import { usePermission } from "@/utils/usePermission";
 import { transformI18n } from "@/plugins/i18n";
 import { aiApi, type AIConnection } from "@/api/ai";
+import { estimateTextWidth, fitColumnWidth, headerWidth } from "./table-layout";
 
 const KubeconfigDialog = defineAsyncComponent(
   () => import("@/components/AI/KubeconfigDialog.vue")
@@ -610,9 +632,30 @@ const KubeconfigDialog = defineAsyncComponent(
 const AgentInstallDialog = defineAsyncComponent(
   () => import("./AgentInstallDialog.vue")
 );
+const AgentHealthDialog = defineAsyncComponent(
+  () => import("./AgentHealthDialog.vue")
+);
 const installDialogMounted = ref(false);
 const installDialogVisible = ref(false);
+/** 修复哪个集群的 Agent；空 = 安装新集群 */
+const repairEnv = ref("");
 function openAgentInstall() {
+  repairEnv.value = "";
+  installDialogMounted.value = true;
+  installDialogVisible.value = true;
+}
+// 版本号菜单「修复」：先打开检查弹框，在里面点「修复（覆盖安装）」再打开修复模式的安装对话框
+const healthDialogMounted = ref(false);
+const healthDialogVisible = ref(false);
+const healthEnv = ref("");
+function openHealth(env: string) {
+  healthEnv.value = env;
+  healthDialogMounted.value = true;
+  healthDialogVisible.value = true;
+}
+function openRepair(env: string) {
+  healthDialogVisible.value = false;
+  repairEnv.value = env;
   installDialogMounted.value = true;
   installDialogVisible.value = true;
 }
@@ -644,6 +687,15 @@ function manageConnection(env: string) {
   connectionEnv.value = env;
   connectionDialogMounted.value = true;
   connectionDialogVisible.value = true;
+}
+/** 「AI Kubeconfig」列标签上的文字 */
+function connectionLabel(env: string) {
+  const connection = connections.value[env];
+  if (!connection?.configured)
+    return aiAvailable.value ? "未配置" : "AI 未启用";
+  return connection.origin === "agent-install"
+    ? "自动配置"
+    : connection.context || "已配置";
 }
 function connectionSummary(env: string) {
   const connection = connections.value[env];
@@ -695,6 +747,79 @@ const filteredTableData = computed(() => {
     return item.key.toLowerCase().includes(keyword);
   });
 });
+
+// ---- 列宽:表头文字不换行(样式里 nowrap),每列的最小宽度至少放得下表头 ----
+// 固定节点均衡还在内部开发测试,先隐藏这一列(开放时改成 true)
+const SCHEDULER_VISIBLE = false;
+// 内容长度固定或可以换行的列
+const COLUMN_WIDTH = {
+  // 别名多了换行
+  aliases: Math.max(headerWidth("别名", { hint: true }), 120),
+  online: headerWidth("状态", { sortable: true }),
+  collect: headerWidth("自动采集", { sortable: true }),
+  collectHistory: headerWidth("采集历史数据"),
+  admission: headerWidth("准入控制", { sortable: true }),
+  nmsNotConfirm: headerWidth("新服务免确认", { sortable: true }),
+  scheduler: headerWidth("固定节点均衡", { sortable: true })
+};
+/** 按表格实际字体量文字宽度(表格字号 14px);浏览器量不了时用估算 */
+function textMeasurer(): (text: string) => number {
+  const context = document.createElement("canvas").getContext("2d");
+  if (!context) return estimateTextWidth;
+  context.font = `14px ${getComputedStyle(document.body).fontFamily}`;
+  return text => Math.ceil(context.measureText(text).width);
+}
+// 内容长度不定的列按最长的一项算:集群名完整显示;心跳、版本、高峰时段一般也能完整显示,太长的截断(悬停看全文)
+const columnWidth = computed(() => {
+  const rows = tableData.value;
+  const measure = textMeasurer();
+  return {
+    name: fitColumnWidth(
+      rows.map(row => row.key),
+      headerWidth("K8S", { sortable: true }),
+      measure
+    ),
+    heartbeat: fitColumnWidth(
+      rows.map(row => row.last_heartbeat),
+      headerWidth("心跳", { sortable: true }),
+      measure,
+      200
+    ),
+    // 版本号后面还有下拉箭头(图标 14 + 间距 6)和链接按钮的内边距,留足 32
+    ver: fitColumnWidth(
+      rows.map(row => row.ver || "未知"),
+      headerWidth("版本", { sortable: true }),
+      text => measure(text) + 32,
+      180
+    ),
+    // 状态标签(小号字,左右留白)+ 间距 + 「管理 / 上传」按钮;手动上传的显示 context 名,太长的省略(悬停看全文)
+    aiConnection: fitColumnWidth(
+      rows.map(row => connectionLabel(row.key)),
+      headerWidth("AI Kubeconfig", { hint: true }),
+      text => Math.ceil((measure(text) * 12) / 14) + 60,
+      220
+    ),
+    peakHours: fitColumnWidth(
+      rows.map(row => row.peak_hours),
+      headerWidth("高峰时段", { sortable: true }),
+      measure,
+      200
+    ),
+    admissionNamespace: fitColumnWidth(
+      rows.map(row => row.admission_namespace),
+      headerWidth("管控命名空间"),
+      measure,
+      180
+    )
+  };
+});
+
+// 版本号的下拉菜单
+function handleAgentCommand(command: unknown, row: AgentData) {
+  if (command === "update") handleUpdate(row);
+  else if (command === "restart") void handleRestart(row);
+  else if (command === "repair") openHealth(row.key);
+}
 
 const loadNamespaceOptions = async (env: string) => {
   try {
@@ -1267,6 +1392,16 @@ onMounted(() => {
   border-radius: 8px;
 }
 
+/* 表头不换行：各列的最小宽度都按表头文字算过（table-layout.ts） */
+.agent-table :deep(th.el-table__cell > .cell) {
+  white-space: nowrap;
+}
+
+/* 版本号：点开是更新、重启菜单 */
+.version-trigger {
+  font-variant-numeric: tabular-nums;
+}
+
 .warning-box {
   padding: 10px 15px;
   margin: 10px 0;
@@ -1287,6 +1422,20 @@ onMounted(() => {
   gap: 10px;
   align-items: center;
   justify-content: center;
+}
+
+/* 手动上传的 kubeconfig 显示 context 名：列宽有上限，太长的省略（悬停提示里有全名） */
+.ai-connection-cell .el-tag {
+  min-width: 0;
+}
+
+.ai-connection-cell :deep(.el-tag__content) {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.ai-connection-cell .el-button {
+  flex-shrink: 0;
 }
 
 .ai-connection-header {

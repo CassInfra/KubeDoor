@@ -106,6 +106,55 @@ export interface AgentInstallTask {
     status: "saved" | "failed";
     message: string;
   };
+  /** 修复任务：覆盖安装哪个已接入集群的 Agent。集群唯一标识固定为 env，命名空间由服务端定为现有 Agent 所在的 */
+  repair?: AgentInstallRepair;
+}
+
+/** 修复任务的目标集群，以及连接集群用的 kubeconfig 从哪来 */
+export interface AgentInstallRepair {
+  env: string;
+  /** ai-connection：Agent 管理「AI Kubeconfig」列保存的那份；upload：修复时上传的 */
+  source: "ai-connection" | "upload";
+}
+
+/** 开始修复：有正在执行的安装 / 修复任务就是它；没有可用的 AI Kubeconfig 时 task 为 null，message 说明原因 */
+export interface AgentRepairStart {
+  task: AgentInstallTask | null;
+  message: string;
+}
+
+export type HealthStatus = "success" | "warning" | "error" | "skipped";
+
+/** 一项健康检查的结果 */
+export interface AgentHealthCheck {
+  /** connection / version / k8s_api / pod_mgr / admission / component:<组件> / events / metrics / kubeconfig */
+  key: string;
+  /** 分组：agent Agent 与连接 / component 组件 / data 数据上报 / repair 修复 */
+  group: "agent" | "component" | "data" | "repair";
+  name: string;
+  status: HealthStatus;
+  message: string;
+}
+
+/** 「修复」弹框里的健康检查结果 */
+export interface AgentHealth {
+  env: string;
+  online: boolean;
+  /** Agent 版本；空串表示不知道 */
+  version: string;
+  recommended_version: string;
+  /** 检查组件用的 Agent 命名空间 */
+  namespace: string;
+  /** 检查时间（ISO） */
+  checked_at: string;
+  /** 已按显示顺序排好；Agent 离线时要经 Agent 查的几项是 skipped */
+  checks: AgentHealthCheck[];
+  /** 这个集群的 AI Kubeconfig：有就能直接用它修复 */
+  kubeconfig: {
+    configured: boolean;
+    origin?: "agent-install" | "upload";
+    context?: string;
+  };
 }
 
 interface Result<T> {
@@ -135,13 +184,37 @@ async function request<T>(
   return result.data;
 }
 
+/** 健康检查：几项并行，最慢的要等 Agent 回包（各限 20 秒）、时序库、kubedoor-ai，最坏 20~30 秒 */
+async function health(env: string): Promise<AgentHealth> {
+  const result = await http.request<Result<AgentHealth>>(
+    "get",
+    "/api/admin/agent-health",
+    { params: { env } },
+    { silent: true, timeout: 60000 }
+  );
+  if (!result.success) {
+    throw new Error(result.message || result.error || "健康检查失败，请重试");
+  }
+  return result.data;
+}
+
 export const agentInstallApi = {
   defaults: () => request<AgentInstallDefaults>("get", "/defaults"),
   list: () => request<AgentInstallTask[]>("get", ""),
   get: (id: string) =>
     request<AgentInstallTask>("get", `/${encodeURIComponent(id)}`),
-  inspect: (kubeconfig: string) =>
-    request<AgentInstallTask>("post", "/inspect", { kubeconfig }),
+  /** repairEnv：修复这个已接入集群的 Agent（新建的是修复任务，集群唯一标识固定为它） */
+  inspect: (kubeconfig: string, repairEnv?: string) =>
+    request<AgentInstallTask>(
+      "post",
+      "/inspect",
+      repairEnv ? { kubeconfig, repair_env: repairEnv } : { kubeconfig }
+    ),
+  /** 修复：用这个集群保存的 AI Kubeconfig 新建修复任务（有正在执行的任务就返回它；没有可用的 kubeconfig 时 task 为 null） */
+  repair: (env: string) =>
+    request<AgentRepairStart>("post", "/repair", { env }),
+  /** 「修复」弹框里的健康检查 */
+  health,
   /** force：确认接管目标集群里已有的 Agent 资源（预检报「已有 Agent 资源」后的强制覆盖安装） */
   preflight: (
     id: string,

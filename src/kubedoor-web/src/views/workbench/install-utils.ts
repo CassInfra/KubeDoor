@@ -1,8 +1,10 @@
 import type {
   AgentInstallOptions,
+  AgentInstallRepair,
   AgentInstallSettings,
   AgentInstallTask,
-  InstallStatus
+  InstallStatus,
+  InstallTakeover
 } from "@/api/agent-install";
 
 export const MAX_KUBECONFIG_BYTES = 1024 * 1024;
@@ -170,14 +172,22 @@ export function installValidation(options: AgentInstallOptions): string {
   return "";
 }
 
+/** 打开「安装 Agent」时恢复的任务：没结束的普通安装，优先记住的那个。修复任务不恢复（在任务列表里仍可选） */
 export function recoverableInstall(
   tasks: AgentInstallTask[],
   preferredId?: string | null
 ): AgentInstallTask | undefined {
-  const unfinished = tasks.filter(task =>
-    ["draft", "ready", "running", "interrupted", "failed", "partial"].includes(
-      task.status
-    )
+  const unfinished = tasks.filter(
+    task =>
+      !task.repair &&
+      [
+        "draft",
+        "ready",
+        "running",
+        "interrupted",
+        "failed",
+        "partial"
+      ].includes(task.status)
   );
   return (
     unfinished.find(task => task.id === preferredId) ||
@@ -187,6 +197,47 @@ export function recoverableInstall(
       )
     )[0]
   );
+}
+
+/**
+ * 「AI Kubeconfig」那一份怎么称呼，和 Agent 列表那一列一样：网页安装时自动配置的叫「自动配置」，
+ * 手动上传的显示 context 名；不知道来源时用 fallback（任务里的 context）
+ */
+export function connectionLabel(
+  connection?: { origin?: string; context?: string } | null,
+  fallback = ""
+): string {
+  if (connection?.origin === "agent-install") return "自动配置";
+  return connection?.context || fallback || "已保存";
+}
+
+/** 修复时「确认信息」顶部的说明：用哪份 kubeconfig 连接集群、覆盖安装哪个集群的 Agent */
+export function repairNotice(
+  repair: Pick<AgentInstallRepair, "env"> & {
+    source?: AgentInstallRepair["source"];
+  },
+  connection: string
+): string {
+  const via =
+    repair.source === "ai-connection"
+      ? `用保存的 AI Kubeconfig（${connection}）连接集群`
+      : "用上传的 kubeconfig 连接集群";
+  return `${via}，覆盖安装集群 ${repair.env} 的 Agent；集群唯一标识和命名空间沿用现有的，不能修改。`;
+}
+
+/**
+ * 强制覆盖确认框的内容：kind 为 Agent 的一项是修复时目标集群里没有找到这个集群的 Agent（reason 是说明），
+ * 其余是要接管的已有资源
+ */
+export function takeoverParts(items: InstallTakeover[] | undefined): {
+  missing: InstallTakeover[];
+  resources: InstallTakeover[];
+} {
+  const list = items || [];
+  return {
+    missing: list.filter(item => item.kind === "Agent"),
+    resources: list.filter(item => item.kind !== "Agent")
+  };
 }
 
 export function installError(reason: unknown): string {

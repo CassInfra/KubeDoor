@@ -38,6 +38,7 @@ import {
   MAX_KUBECONFIG_BYTES,
   clusterLabelPair,
   collectorPreset,
+  connectionLabel,
   emptyInstallOptions,
   installError,
   installFingerprint,
@@ -45,11 +46,19 @@ import {
   missingSettings,
   pickInstallOptions,
   recoverableInstall,
+  repairNotice,
   settingsReminder,
-  suggestedClusterName
+  suggestedClusterName,
+  takeoverParts
 } from "./install-utils";
 
 const visible = defineModel<boolean>({ default: false });
+const props = defineProps<{
+  /** 修复这个已接入集群的 Agent（Agent 列表版本号菜单的「修复」）；不传是普通安装 */
+  repairEnv?: string;
+  /** 这个集群的 AI Kubeconfig（Agent 列表取到的）：修复说明里显示它是自动配置的还是哪个 context */
+  repairConnection?: { origin?: string; context?: string } | null;
+}>();
 const emit = defineEmits<{ changed: [] }>();
 const options = reactive<AgentInstallOptions>(emptyInstallOptions());
 const defaults = ref<AgentInstallDefaults>();
@@ -77,12 +86,50 @@ const notifyTest = reactive<{ testing: boolean; result: TestView | null }>({
 });
 /** 消息通知已保存的配置，用来看这个集群是否已有单独配置；读不到时为 null */
 const notifySettings = ref<NotificationSettings | null>(null);
+/** 修复时没有可用的 AI Kubeconfig 的原因（服务端给的），这时要上传 kubeconfig */
+const repairMessage = ref("");
 let generation = 0;
 let pollTimer: ReturnType<typeof setTimeout> | undefined;
 const storageKey = () =>
   `kubedoor-agent-install:${useUserStoreHook().username}`;
 const locked = computed(() => working.value || loading.value);
 const isRunning = computed(() => task.value?.status === "running");
+/** 修复模式：从版本号菜单的「修复」打开，或者在任务列表里选了修复任务 */
+const isRepair = computed(() => !!props.repairEnv || !!task.value?.repair);
+/** 修复的是哪个集群 */
+const repairTarget = computed(
+  () => props.repairEnv || task.value?.repair?.env || ""
+);
+/** 集群唯一标识和命名空间不能改：已开始安装，或者是修复（沿用现有 Agent 的） */
+const identityLocked = computed(() => targetFixed.value || isRepair.value);
+const dialogTitle = computed(() =>
+  isRepair.value ? `修复 Agent：${repairTarget.value}` : "安装 Agent"
+);
+/** 修复任务用的是保存的 AI Kubeconfig（不是这次上传的） */
+const usingSavedConnection = computed(
+  () => task.value?.repair?.source === "ai-connection"
+);
+const savedConnectionLabel = computed(() =>
+  connectionLabel(props.repairConnection, task.value?.context)
+);
+const repairText = computed(() =>
+  repairNotice(
+    { env: repairTarget.value, source: task.value?.repair?.source },
+    savedConnectionLabel.value
+  )
+);
+/** 修复时没有可用的 AI Kubeconfig：服务端给的原因 + 请上传 */
+const uploadForRepair = computed(
+  () =>
+    `${repairMessage.value.replace(/[。.]+$/, "")}。请上传集群 ${repairTarget.value} 的 kubeconfig（要能在集群里创建、修改 Agent 的资源），用它覆盖安装。`
+);
+/** 失败后不能再重试（临时凭据过期、或用不了）：要重新上传 kubeconfig / 重新开始修复 */
+const needsRestart = computed(
+  () =>
+    task.value?.status === "expired" ||
+    (["failed", "interrupted"].includes(task.value?.status || "") &&
+      task.value?.retryable === false)
+);
 /** 正在使用的通用配置（地址已脱敏） */
 const settings = computed(() => defaults.value?.settings);
 /** 通用配置里有远程写地址才能安装 vmagent */
@@ -207,6 +254,8 @@ function changeMode(value: unknown) {
 }
 
 function remember(id?: string) {
+  // 修复不读也不写：下次普通安装不应恢复修复任务
+  if (props.repairEnv) return;
   try {
     if (id) localStorage.setItem(storageKey(), id);
     else localStorage.removeItem(storageKey());
@@ -235,7 +284,9 @@ function applyTask(next: AgentInstallTask) {
   if (notifyKept.value) openSection("notify");
   checkedFingerprint.value = next.status === "ready" ? fingerprint() : "";
   stage.value = ["draft", "ready"].includes(next.status) ? 1 : 2;
-  remember(next.id);
+  repairMessage.value = "";
+  // 修复任务不记住：普通安装打开时不恢复它
+  if (!next.repair) remember(next.id);
   recentTasks.value = [
     next,
     ...recentTasks.value.filter(item => item.id !== next.id)
@@ -271,9 +322,14 @@ async function open() {
   const current = ++generation;
   stopPolling();
   error.value = "";
+  repairMessage.value = "";
   loading.value = true;
   void loadNotifySettings(current);
   try {
+    if (props.repairEnv) {
+      await openRepair(current, props.repairEnv);
+      return;
+    }
     const [configuration, tasks] = await Promise.all([
       agentInstallApi.defaults(),
       agentInstallApi.list()
@@ -298,6 +354,30 @@ async function open() {
   }
 }
 
+/**
+ * 修复：不列出、不恢复别的安装任务。服务端用这个集群保存的 AI Kubeconfig 建修复任务（参数已预填）
+ * 直接到「确认信息」；这个集群正在安装 / 修复时给的是那个任务；没有可用的 AI Kubeconfig 时停在上传这一步
+ */
+async function openRepair(current: number, env: string) {
+  // 取不到时显示「重新加载」
+  defaults.value = undefined;
+  newInstall();
+  recentTasks.value = [];
+  const [configuration, started] = await Promise.all([
+    agentInstallApi.defaults(),
+    agentInstallApi.repair(env)
+  ]);
+  if (generation !== current || !visible.value) return;
+  defaults.value = configuration;
+  if (started.task) {
+    applyTask(started.task);
+    schedulePoll();
+  } else {
+    newInstall();
+    repairMessage.value = started.message || "这个集群没有可用的 AI Kubeconfig";
+  }
+}
+
 function newInstall() {
   stopPolling();
   task.value = undefined;
@@ -306,6 +386,7 @@ function newInstall() {
   checkedFingerprint.value = "";
   targetFixed.value = false;
   error.value = "";
+  repairMessage.value = "";
   stage.value = 0;
   expanded.value = [];
   Object.assign(options, pickInstallOptions(defaults.value));
@@ -414,12 +495,18 @@ async function upload(event: Event) {
   working.value = true;
   error.value = "";
   const current = generation;
+  // 修复时上传的 kubeconfig 建的是这个集群的修复任务（参数由服务端预填）
+  const repairEnv = repairTarget.value;
   try {
-    const inspected = await agentInstallApi.inspect(await file.text());
+    const inspected = await agentInstallApi.inspect(
+      await file.text(),
+      repairEnv || undefined
+    );
     if (generation !== current || !visible.value) return;
     applyTask(inspected);
     filename.value = file.name;
-    if (!options.env) options.env = suggestedClusterName(selectedContext.value);
+    if (!options.env)
+      options.env = repairEnv || suggestedClusterName(selectedContext.value);
     stage.value = 0;
   } catch (reason) {
     if (generation === current) error.value = installError(reason);
@@ -433,12 +520,15 @@ function continueToOptions() {
     error.value = "请选择目标集群的 context";
     return;
   }
-  if (!options.env) options.env = suggestedClusterName(selectedContext.value);
+  if (!options.env)
+    options.env =
+      repairTarget.value || suggestedClusterName(selectedContext.value);
   error.value = "";
   stage.value = 1;
 }
 
-// 预检报「目标集群已有 Agent 资源」：确认要接管的资源后可以强制覆盖安装
+// 预检报「目标集群已有 Agent 资源」：确认要接管的资源后可以强制覆盖安装。
+// 修复时目标集群里没有找到这个集群的 Agent 也走这里（takeover 里 kind 为 Agent 的一项），确认 kubeconfig 连对了集群再继续
 const forceable = computed(
   () =>
     task.value?.status === "draft" &&
@@ -446,27 +536,51 @@ const forceable = computed(
       check => check.status === "error" && check.forceable
     )
 );
+const takeover = computed(() => takeoverParts(task.value?.takeover));
+const takeoverText = computed(() =>
+  takeover.value.missing.length && !takeover.value.resources.length
+    ? `目标集群里没有找到集群 ${repairTarget.value || options.env} 的 Agent。确认 kubeconfig 连接的就是这个集群后，可以继续覆盖安装。`
+    : "这些资源是之前的安装留下的（例如重装控制端前装的 Agent）。确认可以接管后，可以强制覆盖安装。"
+);
 
 async function forcePreflight() {
   if (!task.value || locked.value || !forceable.value) return;
-  const items = task.value.takeover || [];
+  const { missing, resources } = takeover.value;
+  const env = repairTarget.value || options.env;
   try {
     await ElMessageBox.confirm(
       h("div", { class: "takeover-confirm" }, [
-        h("p", "将接管目标集群里已有的这些 Agent 资源，改成这次安装的配置："),
-        h(
-          "ul",
-          items.map(item =>
-            h(
-              "li",
-              `${item.kind}/${item.name}${item.namespace ? `（${item.namespace}）` : ""}：${item.reason}`
-            )
-          )
-        ),
-        h(
-          "p",
-          "原来的 Agent 会改连当前控制端；如果另一套 KubeDoor 还在使用它，那套会失去这个集群。"
-        )
+        // 没找到 Agent 的那一项不是要接管的资源：只显示服务端的说明（里面已经请用户确认集群）
+        ...missing.map(item => h("p", item.reason)),
+        ...(missing.length
+          ? [
+              h(
+                "p",
+                `确认后会在这个集群里重新安装 Agent，以 ${env} 的名义接入控制端。`
+              )
+            ]
+          : []),
+        ...(resources.length
+          ? [
+              h(
+                "p",
+                "将接管目标集群里已有的这些 Agent 资源，改成这次安装的配置："
+              ),
+              h(
+                "ul",
+                resources.map(item =>
+                  h(
+                    "li",
+                    `${item.kind}/${item.name}${item.namespace ? `（${item.namespace}）` : ""}：${item.reason}`
+                  )
+                )
+              ),
+              h(
+                "p",
+                "原来的 Agent 会改连当前控制端；如果另一套 KubeDoor 还在使用它，那套会失去这个集群。"
+              )
+            ]
+          : [])
       ]),
       "强制覆盖安装",
       {
@@ -572,13 +686,14 @@ onBeforeUnmount(() => {
 <template>
   <el-dialog
     v-model="visible"
-    title="安装 Agent"
+    :title="dialogTitle"
     width="min(780px, 96vw)"
     append-to-body
     :close-on-click-modal="false"
   >
     <div v-loading="loading" class="agent-install">
-      <div v-if="recentTasks.length" class="task-picker">
+      <!-- 修复时只处理这一个集群，不列出别的安装任务 -->
+      <div v-if="recentTasks.length && !repairEnv" class="task-picker">
         <el-select
           :model-value="task?.id"
           placeholder="查看最近安装任务"
@@ -589,7 +704,7 @@ onBeforeUnmount(() => {
             v-for="item in recentTasks"
             :key="item.id"
             :value="item.id"
-            :label="`${item.options?.env || item.context || '待配置'} · ${INSTALL_STATUS_TEXT[item.status]}`"
+            :label="`${item.repair ? '修复 ' : ''}${item.options?.env || item.context || '待配置'} · ${INSTALL_STATUS_TEXT[item.status]}`"
           />
         </el-select>
         <el-button :disabled="locked" @click="newInstall">安装新集群</el-button>
@@ -611,6 +726,22 @@ onBeforeUnmount(() => {
       />
 
       <template v-if="stage === 0">
+        <el-alert
+          v-if="repairMessage"
+          :title="uploadForRepair"
+          type="warning"
+          show-icon
+          :closable="false"
+          class="section-space"
+        />
+        <el-alert
+          v-else-if="usingSavedConnection"
+          :title="`当前用保存的 AI Kubeconfig（${savedConnectionLabel}）连接集群 ${repairTarget}，也可以上传一份替换。`"
+          type="info"
+          show-icon
+          :closable="false"
+          class="section-space"
+        />
         <div class="upload-area">
           <input
             ref="fileInput"
@@ -625,7 +756,13 @@ onBeforeUnmount(() => {
             :disabled="loading || targetFixed"
             @click="fileInput?.click()"
           >
-            {{ task ? "重新上传 kubeconfig" : "上传 kubeconfig" }}
+            {{
+              usingSavedConnection
+                ? "上传 kubeconfig 替换"
+                : task
+                  ? "重新上传 kubeconfig"
+                  : "上传 kubeconfig"
+            }}
           </el-button>
           <span class="muted">{{ filename || "YAML / JSON，最大 1 MiB" }}</span>
         </div>
@@ -664,6 +801,13 @@ onBeforeUnmount(() => {
           <span v-if="selectedServer">{{ selectedServer }}</span>
         </div>
         <el-alert
+          v-if="isRepair"
+          :title="repairText"
+          type="warning"
+          :closable="false"
+          class="repair-notice"
+        />
+        <el-alert
           v-if="targetFixed"
           title="已创建安装资源，目标集群、集群标识和命名空间已固定。可以调整连接和采集配置后重新检测。"
           type="info"
@@ -675,7 +819,7 @@ onBeforeUnmount(() => {
             <el-input
               v-model="options.env"
               class="env-input"
-              :disabled="targetFixed"
+              :disabled="identityLocked"
               placeholder="例如 production-k8s"
               maxlength="64"
             />
@@ -791,7 +935,10 @@ onBeforeUnmount(() => {
           </el-form-item>
           <div class="field-grid">
             <el-form-item label="命名空间">
-              <el-input v-model="options.namespace" :disabled="targetFixed" />
+              <el-input
+                v-model="options.namespace"
+                :disabled="identityLocked"
+              />
             </el-form-item>
             <el-form-item label="Agent 镜像版本">
               <el-input
@@ -850,10 +997,7 @@ onBeforeUnmount(() => {
             <span>{{ check.message }}</span>
           </div>
           <div v-if="forceable" class="takeover-row">
-            <span
-              >这些资源是之前的安装留下的（例如重装控制端前装的
-              Agent）。确认可以接管后，可以强制覆盖安装。</span
-            >
+            <span>{{ takeoverText }}</span>
             <el-button
               type="danger"
               plain
@@ -945,15 +1089,12 @@ onBeforeUnmount(() => {
         <p v-if="isRunning" class="muted">
           可以关闭此窗口，后台安装会继续。再次打开可查看进度。
         </p>
-        <p
-          v-else-if="
-            task?.status === 'expired' ||
-            (['failed', 'interrupted'].includes(task?.status || '') &&
-              task?.retryable === false)
-          "
-          class="muted"
-        >
-          请重新上传 kubeconfig 后继续安装。
+        <p v-else-if="needsRestart" class="muted">
+          {{
+            repairEnv
+              ? "请点「重新开始修复」，用保存的 AI Kubeconfig 或重新上传的 kubeconfig 继续。"
+              : "请重新上传 kubeconfig 后继续安装。"
+          }}
         </p>
       </template>
     </div>
@@ -984,7 +1125,7 @@ onBeforeUnmount(() => {
               type="primary"
               :disabled="locked || !canInstall"
               @click="start(false)"
-              >安装 Agent</el-button
+              >{{ isRepair ? "覆盖安装 Agent" : "安装 Agent" }}</el-button
             >
           </template>
           <el-button
@@ -1003,8 +1144,16 @@ onBeforeUnmount(() => {
             @click="adjustOptions"
             >调整配置</el-button
           >
+          <!-- 修复只针对这一个集群：凭据用不了时重新开始修复，不提供「安装新集群」 -->
           <el-button
-            v-if="stage === 2 && !isRunning"
+            v-if="stage === 2 && repairEnv && needsRestart"
+            type="primary"
+            :disabled="locked"
+            @click="open"
+            >重新开始修复</el-button
+          >
+          <el-button
+            v-if="stage === 2 && !isRunning && !repairEnv"
             :disabled="locked"
             @click="newInstall"
             >安装新集群</el-button
@@ -1171,6 +1320,11 @@ onBeforeUnmount(() => {
 
 .section-space {
   margin-top: 20px;
+}
+
+/* 修复：用哪份 kubeconfig、覆盖安装哪个集群（紧跟在目标集群下面） */
+.repair-notice {
+  margin-bottom: 18px;
 }
 
 .section-title {
