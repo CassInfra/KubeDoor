@@ -25,7 +25,7 @@ from loguru import logger
 from notify import api as notify_api
 from notify import channels
 
-from .bundle import WRITE_KEY, defaults, installs_vmagent, normalize_options, public_options, render_agent
+from .bundle import KSM_PORT, WRITE_KEY, defaults, installs_vmagent, normalize_options, public_options, render_agent
 from .kubernetes import InstallError, Kubernetes
 from .repository import Repository
 
@@ -124,6 +124,12 @@ def collector_summary(options):
     def state(key):
         if options[key] == 'install':
             return '安装'
+        target = options.get('ksm_target') if key == 'ksm' else None
+        if isinstance(target, dict):
+            where = f'{target["namespace"]}/{target["name"]}'
+            if not vmagent:
+                return f'不安装（集群里已有 {where}）'
+            return f'复用 {where}' + (f'（集群里共有 {target["count"]} 个，只抓这一个）' if target['count'] > 1 else '')
         return '复用集群里已有的' if vmagent else '不安装'
 
     parts = [f'kube-state-metrics：{state("ksm")}', f'node-exporter：{state("node_exporter")}',
@@ -445,12 +451,20 @@ class Service:
         vmagent = installs_vmagent(options)
         if options['ksm'] == 'auto' or (options['ksm'] == 'reuse' and vmagent):
             services = await kube.list('/api/v1/services', {'labelSelector': 'app.kubernetes.io/name=kube-state-metrics'})
-            found = [s for s in services if any(p.get('port') == 8080 for p in s['spec'].get('ports', []))]
+            # 找到多个时 vmagent 只抓选中的那个（bundle.pin_ksm_job）：优先 Agent 命名空间里的（以前装的自带的），
+            # 其余按命名空间、名称排序取第一个，每次检测结果一样
+            found = sorted({(s['metadata'].get('namespace') or '', s['metadata']['name']) for s in services
+                            if any(p.get('port') == KSM_PORT for p in s['spec'].get('ports', []))},
+                           key=lambda item: (item[0] != options['namespace'], item))
             if options['ksm'] == 'reuse' and not found:
                 raise InstallError('选择了不安装 kube-state-metrics，但集群里没有可以复用的（监听 8080、带 '
                                    'app.kubernetes.io/name=kube-state-metrics 标签的 Service），vmagent 采不到对象状态指标；'
                                    '请改成自动检测或安装')
             options['ksm'] = 'reuse' if found else 'install'
+            if found:
+                namespace, name = found[0]
+                options['ksm_target'] = {'namespace': namespace, 'name': name, 'count': len(found),
+                                         'pin_name': sum(1 for item in found if item[0] == namespace) > 1}
         if options['node_exporter'] == 'auto' or (options['node_exporter'] == 'reuse' and vmagent):
             nodes = await kube.list('/api/v1/nodes')
             pods = await kube.list('/api/v1/pods', {'fieldSelector': 'status.phase=Running'})

@@ -29,7 +29,9 @@ Agent 管理页增加管理员可见的「安装 Agent」按钮，打开三步�
 三个采集组件：
 
 - kube-state-metrics、node-exporter：「安装」装发布模板里的；「不安装」用集群里已有的；「自动检测」每次点「检测」时重新判断，结果写在检测结果的「采集组件」一行：
-  - kube-state-metrics：在所有命名空间里找带 `app.kubernetes.io/name=kube-state-metrics` 标签、Service 端口有 8080 的 Service，找到就复用（不安装，vmagent 的 kube-state-metrics 抓取任务改为在全集群按这个标签找），找不到就安装发布模板里的（vmagent 只抓本命名空间里的这个，免得重复采集）。
+  - kube-state-metrics：在所有命名空间里找带 `app.kubernetes.io/name=kube-state-metrics` 标签、Service 端口有 8080 的 Service，找到就复用，找不到就安装发布模板里的。
+  - vmagent 只抓一个 kube-state-metrics 的 8080 端口（8081 是它自身的运行指标，不抓）：用自带的，只抓 Agent 命名空间里自带的 `kube-state-metrics` Service；复用已有的，锁定选中的那个所在的命名空间，同一个命名空间里还有别的 kube-state-metrics 时再按 Service 名锁定（只锁命名空间时，对方重装改了 Service 名也还能抓到）。找到多个时优先选 Agent 命名空间里的（通常是以前装的自带的），其余按命名空间、名称排序取第一个，检测结果写明选了哪个、集群里共有几个，例如「kube-state-metrics：复用 monitoring/prom-kube-state-metrics（集群里共有 2 个，只抓这一个）」。只抓一个是因为全集群都抓时，集群里有多个 kube-state-metrics 就会把同样的指标采两份，按 Pod 数之类的统计会翻倍。
+  - 以前（这次改动前）检测的安装计划复用已有的时，仍然全集群按标签找，重新检测后才只抓一个；已经装好的集群要重新安装 Agent 才会换成新的抓取配置。
   - node-exporter：看每个 Linux 节点（`kubernetes.io/os=linux`，没有这个标签的也算）上有没有运行中、使用主机网络（`hostNetwork: true`）、容器声明了 9100 端口的 Pod。每个节点都有就复用；一个都没有就安装（DaemonSet，主机网络 9100 端口）；只有部分节点有时检测不通过，提示先统一节点采集配置，因为再装一份会在这些节点上端口冲突。vmagent 都是按「节点 IP:9100」去抓。
   - 只看 Service 标签、端口和 Pod 声明的端口，不看名字：同名 Deployment 不算已有。已有的 node-exporter 如果 Pod 里没声明 9100 端口，会被当成没有（装 vmagent 时选「不安装」也用同样的规则确认，同样过不了），给它的容器补上 `containerPort: 9100` 后再检测。
 - vmagent：「安装」把指标写入通用配置里的远程写地址，装好后验证采集。装 vmagent 时选了不安装的 kube-state-metrics / node-exporter，检测时要确认集群里已有，不然 vmagent 采不到，检测不通过。「不安装」用已有的 Prometheus / vmagent 采集，不等待本次指标写入。

@@ -49,6 +49,11 @@ STRINGS = (FIELDS - {"aliases", "notification"}) | {"image_repo", "oss_url", "re
 SETTINGS = ("master_url", "prom_k8s_tag_key", "image_repo", "image_vmagent", "image_kube_state_metrics",
             "image_node_exporter", WRITE_KEY)
 FILES = ("00-namespace.yaml", "10-agent.yaml", "20-vmagent.yaml", "21-kube-state-metrics.yaml", "22-node-exporter.yaml")
+# 自带 kube-state-metrics 的 Service 名（21-kube-state-metrics.yaml）和它出对象指标的端口（8081 是它自身的运行指标）
+KSM_SERVICE = "kube-state-metrics"
+KSM_PORT = 8080
+# Service 名、命名空间都是 DNS-1035 / 1123 标签：只有小写字母、数字和中划线，写进抓取配置的正则不用转义
+DNS_LABEL = re.compile(r"[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?")
 
 
 def defaults(settings: dict | None = None) -> dict:
@@ -186,6 +191,36 @@ def _load_file(name: str, variables: dict, ksm: bool) -> list[dict]:
     return [obj for obj in yaml.safe_load_all(text) if obj]
 
 
+def pin_ksm_job(scrape: dict, options: dict) -> None:
+    """网页安装：vmagent 的 kube-state-metrics 抓取任务只抓一个 kube-state-metrics 的 8080 端口。
+
+    自带的：本命名空间里的 kube-state-metrics Service。复用已有的：预检选中的那个（ksm_target），锁定它所在的
+    命名空间；同一个命名空间里还有别的 kube-state-metrics 时再按 Service 名锁定（只锁命名空间，对方重装改了
+    Service 名也还能抓到）。集群里有多个 kube-state-metrics 时全集群都抓，指标会重复、按 Pod 数之类的统计会翻倍。
+    没有预检结果（以前的安装计划、不装 vmagent）时不改，和以前一样全集群找。
+    """
+    if options["ksm"] == "reuse":
+        target = options.get("ksm_target")
+        if not isinstance(target, dict):
+            return
+        namespace, name = target.get("namespace"), target.get("name") if target.get("pin_name") else None
+    else:
+        namespace, name = options["namespace"], KSM_SERVICE
+    if not isinstance(namespace, str) or not DNS_LABEL.fullmatch(namespace) or (
+            name is not None and (not isinstance(name, str) or not DNS_LABEL.fullmatch(name))):
+        raise ValueError("kube-state-metrics 的命名空间或 Service 名称无效，请重新检测")
+    job = next((item for item in scrape.get("scrape_configs") or [] if item.get("job_name") == "kube-state-metrics"), None)
+    if job is None:
+        return
+    job["kubernetes_sd_configs"] = [{"role": "service", "namespaces": {"names": [namespace]}}]
+    relabels = job.setdefault("relabel_configs", [])
+    # 按地址里的端口筛（role: service 的地址是「服务名.命名空间[.svc]:端口」）：__meta_kubernetes_service_port_number
+    # 要 vmagent v1.81 以上才有，通用配置里换成更老的 vmagent 镜像时会把目标全筛掉
+    relabels.append({"source_labels": ["__address__"], "regex": f".+:{KSM_PORT}", "action": "keep"})
+    if name:
+        relabels.append({"source_labels": ["__meta_kubernetes_service_name"], "regex": name, "action": "keep"})
+
+
 def render_agent(options: dict, *, username: str, password: str) -> list[dict]:
     options = normalize_options(options, default=options)
     if not options["env"] or not options["master_url"]:
@@ -247,6 +282,7 @@ def render_agent(options: dict, *, username: str, password: str) -> list[dict]:
             scrape = yaml.safe_load(obj["data"]["scrape.yml"])
             scrape["global"]["external_labels"][options["prom_k8s_tag_key"]] = options["env"]
             scrape["global"]["external_labels"]["kubedoor_installation"] = str(options["installation_id"])
+            pin_ksm_job(scrape, options)
             obj["data"]["scrape.yml"] = yaml.safe_dump(scrape, allow_unicode=True, sort_keys=False)
         if obj["kind"] not in ("Deployment", "DaemonSet"):
             continue

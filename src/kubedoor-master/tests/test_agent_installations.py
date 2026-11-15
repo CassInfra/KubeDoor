@@ -12,6 +12,7 @@ from pathlib import Path
 from unittest.mock import AsyncMock
 
 import pytest
+import yaml
 from aiohttp import web
 from aiohttp.test_utils import TestServer
 from loguru import logger
@@ -113,6 +114,8 @@ class FakeCluster:
         self.agent_token = 'agent-sa-token'
         # 带 force（强制接管其他字段管理器的字段）应用过的资源：(kind, name, dry_run)
         self.forced = []
+        # 集群里已有的 Service（自动检测 kube-state-metrics 时按标签列出）
+        self.services = []
 
     def __call__(self, parsed):
         assert parsed['config']['users'][0]['user']['token'] == 'private-kube-token'
@@ -143,6 +146,9 @@ class FakeCluster:
     async def list(self, path, params=None):
         if path == '/api/v1/nodes':
             return [{'metadata': {'name': 'worker'}}]
+        if path == '/api/v1/services':
+            assert params == {'labelSelector': 'app.kubernetes.io/name=kube-state-metrics'}
+            return copy.deepcopy(self.services)
         return []
 
     async def get(self, resource):
@@ -1206,3 +1212,96 @@ async def test_agent_only_without_a_query_address_is_only_a_reminder(environment
     assert check(task, module.METRICS_LABEL_CHECK) == {
         'name': module.METRICS_LABEL_CHECK, 'status': 'warning',
         'message': '通用配置里还没有时序库查询地址，没法检查已有的 Prometheus / vmagent 有没有写入这个集群的指标'}
+
+
+def ksm_service(namespace, name, *ports):
+    return {'metadata': {'namespace': namespace, 'name': name}, 'spec': {'ports': [{'port': port} for port in ports]}}
+
+
+def ksm_job(task):
+    """检测通过的计划里，vmagent 的 kube-state-metrics 抓取任务"""
+    resources = module.render_agent(module.unseal(task)['options'], username='preflight', password='preflight')
+    config = next(r for r in resources if r['kind'] == 'ConfigMap' and r['metadata']['name'] == 'vmagent-config')
+    return next(job for job in yaml.safe_load(config['data']['scrape.yml'])['scrape_configs']
+                if job['job_name'] == 'kube-state-metrics')
+
+
+def keeps(job):
+    """抓取任务里 keep 的条件：{来源标签: 正则}"""
+    return {rule['source_labels'][0]: rule['regex'] for rule in job['relabel_configs'] if rule.get('action') == 'keep'}
+
+
+@pytest.mark.asyncio
+async def test_reused_kube_state_metrics_is_the_only_one_scraped(environment):
+    """集群里有多个 kube-state-metrics：只抓选中的那个的 8080 端口，锁定它的命名空间，检测结果写明选了哪个"""
+    service, cluster, _ = environment
+    service.clients.clear()
+    cluster.services = [ksm_service('ops', 'kube-state-metrics', 8080),
+                        ksm_service('monitoring', 'prom-kube-state-metrics', 8080, 8081),
+                        ksm_service('secure', 'ksm-https', 8443)]  # 没有 8080 的不算
+    task = await service.inspect(CONFIG, 'admin')
+    task = await service.preflight(task['id'], 'production', {**task['payload']['options'], **PRESETS['full']})
+    assert task['status'] == 'ready', task['payload']['checks']
+    assert check(task, '采集组件')['message'].startswith(
+        'kube-state-metrics：复用 monitoring/prom-kube-state-metrics（集群里共有 2 个，只抓这一个）；node-exporter：安装；')
+    assert task['payload']['options']['ksm'] == 'auto'
+    assert 'kube-state-metrics' not in workloads(task)
+    job = ksm_job(task)
+    assert job['kubernetes_sd_configs'] == [{'role': 'service', 'namespaces': {'names': ['monitoring']}}]
+    # 命名空间里只有这一个：只锁命名空间，对方改了 Service 名也还能抓到
+    assert keeps(job) == {'__meta_kubernetes_service_label_app_kubernetes_io_name': 'kube-state-metrics',
+                          '__address__': '.+:8080'}
+
+
+@pytest.mark.asyncio
+async def test_kube_state_metrics_in_the_agent_namespace_is_preferred_and_pinned_by_name(environment):
+    """优先 Agent 命名空间里的（以前装的自带的）；同一个命名空间里有多个时再按 Service 名锁定"""
+    service, cluster, _ = environment
+    service.clients.clear()
+    cluster.services = [ksm_service('monitoring', 'a-ksm', 8080), ksm_service('kubedoor', 'other-ksm', 8080),
+                        ksm_service('kubedoor', 'kube-state-metrics', 8080, 8081)]
+    task = await service.inspect(CONFIG, 'admin')
+    task = await service.preflight(task['id'], 'production', {**task['payload']['options'], **PRESETS['full']})
+    assert check(task, '采集组件')['message'].startswith(
+        'kube-state-metrics：复用 kubedoor/kube-state-metrics（集群里共有 3 个，只抓这一个）')
+    job = ksm_job(task)
+    assert job['kubernetes_sd_configs'] == [{'role': 'service', 'namespaces': {'names': ['kubedoor']}}]
+    assert keeps(job)['__meta_kubernetes_service_name'] == 'kube-state-metrics'
+    # 不装 vmagent 时只说明集群里已有（没有 vmagent 的配置）
+    task = await service.preflight(task['id'], 'production',
+                                   {**task['payload']['options'], **PRESETS['agent'], 'ksm': 'auto'})
+    assert check(task, '采集组件')['message'].startswith('kube-state-metrics：不安装（集群里已有 kubedoor/kube-state-metrics）；')
+
+
+@pytest.mark.asyncio
+async def test_own_kube_state_metrics_is_the_only_one_scraped(environment):
+    """装自带的：只抓本命名空间里自带的 kube-state-metrics Service 的 8080 端口，别人的都不抓"""
+    service, cluster, _ = environment
+    service.clients.clear()
+    cluster.services = [ksm_service('monitoring', 'prom-kube-state-metrics', 8080)]
+    task = await service.inspect(CONFIG, 'admin')
+    task = await service.preflight(task['id'], 'production',
+                                   {**task['payload']['options'], **PRESETS['full'], 'ksm': 'install'})
+    assert task['status'] == 'ready', task['payload']['checks']
+    assert 'kube-state-metrics' in workloads(task)
+    job = ksm_job(task)
+    assert job['kubernetes_sd_configs'] == [{'role': 'service', 'namespaces': {'names': ['kubedoor']}}]
+    assert keeps(job) == {'__meta_kubernetes_service_label_app_kubernetes_io_name': 'kube-state-metrics',
+                          '__address__': '.+:8080',
+                          '__meta_kubernetes_service_name': 'kube-state-metrics'}
+
+
+def test_plans_without_a_chosen_kube_state_metrics_render_as_before():
+    """以前的安装计划（复用、没有 ksm_target）照旧全集群找；选中的名称不合法时不渲染"""
+    base = {**module.defaults({module.WRITE_KEY: WRITE_URL}), 'env': 'production',
+            'master_url': 'https://kubedoor.example.test', 'installation_id': 'task-1',
+            'mode': 'full', 'vmagent': 'install', 'ksm': 'reuse', 'node_exporter': 'reuse'}
+    resources = module.render_agent(base, username='agent-1', password='secret-1')
+    config = next(r for r in resources if r['kind'] == 'ConfigMap' and r['metadata']['name'] == 'vmagent-config')
+    job = next(j for j in yaml.safe_load(config['data']['scrape.yml'])['scrape_configs']
+               if j['job_name'] == 'kube-state-metrics')
+    assert job['kubernetes_sd_configs'] == [{'role': 'service'}]
+    assert '__address__' not in keeps(job)
+    bad = {**base, 'ksm_target': {'namespace': 'monitoring', 'name': 'x|.*', 'count': 2, 'pin_name': True}}
+    with pytest.raises(ValueError, match='kube-state-metrics 的命名空间或 Service 名称无效'):
+        module.render_agent(bad, username='agent-1', password='secret-1')
