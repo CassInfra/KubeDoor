@@ -5,10 +5,8 @@
 [![StarsL.cn](https://img.shields.io/badge/website-StarsL.cn-orange)](https://starsl.cn)
 [![官网](https://img.shields.io/badge/%E5%AE%98%E7%BD%91-KubeDoor-ff69b4)](https://cassinfra.github.io/KubeDoor/)
 [![Commits](https://img.shields.io/github/commit-activity/m/CassInfra/KubeDoor?color=ffff00)](https://github.com/CassInfra/KubeDoor/commits/main)
-[![open issues](https://img.shields.io/github/issues/CassInfra/KubeDoor)](https://github.com/CassInfra/KubeDoor/issues)
 [![Python](https://img.shields.io/badge/python-v3.14-3776ab)](https://www.python.org)
 [![Vue](https://img.shields.io/badge/vue-v3-42b883)](https://vuejs.org)
-[![PostgreSQL](https://img.shields.io/badge/postgresql-v18-336791)](https://www.postgresql.org)
 [![Kubernetes](https://img.shields.io/badge/kubernetes-1.21%2B-326ce5)](https://kubernetes.io)
 [![GitHub license](https://img.shields.io/badge/license-MIT-blueviolet)](LICENSE.txt)
 
