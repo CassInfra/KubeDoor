@@ -67,7 +67,7 @@
       "fieldConfig": {
         "defaults": {
           "color": {
-            "mode": "palette-classic-by-name"
+            "mode": "palette-classic"
           },
           "mappings": [],
           "thresholds": {
@@ -133,7 +133,7 @@
           "editorMode": "code",
           "format": "table",
           "rawQuery": true,
-          "rawSql": "SELECT count(DISTINCT namespace) AS \"命名空间\"\nFROM ${table}\nWHERE date = '${maxday}'::timestamptz AND ${env}",
+          "rawSql": "SELECT count(DISTINCT namespace) AS \"命名空间\"\nFROM ${table}\nWHERE date = NULLIF('${maxday}', '')::timestamptz AND env = '${env}'",
           "refId": "A",
           "sql": {
             "columns": [
@@ -154,7 +154,7 @@
           "editorMode": "code",
           "format": "table",
           "rawQuery": true,
-          "rawSql": "SELECT count(DISTINCT deployment) AS \"微服务\"\nFROM ${table}\nWHERE date = '${maxday}'::timestamptz AND ${env}",
+          "rawSql": "SELECT count(DISTINCT deployment) AS \"微服务\"\nFROM ${table}\nWHERE date = NULLIF('${maxday}', '')::timestamptz AND env = '${env}'",
           "refId": "B",
           "sql": {
             "columns": [
@@ -175,7 +175,7 @@
           "editorMode": "code",
           "format": "table",
           "rawQuery": true,
-          "rawSql": "SELECT sum(pod_count) AS \"Pod\"\nFROM ${table}\nWHERE date = '${maxday}'::timestamptz AND ${env}",
+          "rawSql": "SELECT sum(pod_count) AS \"Pod\"\nFROM ${table}\nWHERE date = NULLIF('${maxday}', '')::timestamptz AND env = '${env}'",
           "refId": "C",
           "sql": {
             "columns": [
@@ -265,7 +265,7 @@
           "editorMode": "code",
           "format": "table",
           "rawQuery": true,
-          "rawSql": "SELECT sum(request_pod_cpu_m * pod_count) / 1000 AS \"CPU需求\"\nFROM ${table}\nWHERE date = '${maxday}'::timestamptz AND ${env}",
+          "rawSql": "SELECT sum(request_pod_cpu_m * pod_count) / 1000 AS \"CPU需求\"\nFROM ${table}\nWHERE date = NULLIF('${maxday}', '')::timestamptz AND env = '${env}'",
           "refId": "H",
           "sql": {
             "columns": [
@@ -286,7 +286,7 @@
           "editorMode": "code",
           "format": "table",
           "rawQuery": true,
-          "rawSql": "SELECT sum(p95_pod_load * pod_count) AS \"负载使用\"\nFROM ${table}\nWHERE date = '${maxday}'::timestamptz AND ${env}",
+          "rawSql": "SELECT sum(p95_pod_load * pod_count) AS \"负载使用\"\nFROM ${table}\nWHERE date = NULLIF('${maxday}', '')::timestamptz AND env = '${env}'",
           "refId": "I",
           "sql": {
             "columns": [
@@ -307,7 +307,7 @@
           "editorMode": "code",
           "format": "table",
           "rawQuery": true,
-          "rawSql": "SELECT sum(limit_pod_cpu_m * pod_count) / 1000 AS \"CPU限制\"\nFROM ${table}\nWHERE date = '${maxday}'::timestamptz AND ${env}",
+          "rawSql": "SELECT sum(limit_pod_cpu_m * pod_count) / 1000 AS \"CPU限制\"\nFROM ${table}\nWHERE date = NULLIF('${maxday}', '')::timestamptz AND env = '${env}'",
           "refId": "A",
           "sql": {
             "columns": [
@@ -397,7 +397,7 @@
           "editorMode": "code",
           "format": "table",
           "rawQuery": true,
-          "rawSql": "SELECT sum(request_pod_mem_mb * pod_count) AS \"内存需求\"\nFROM ${table}\nWHERE date = '${maxday}'::timestamptz AND ${env}",
+          "rawSql": "SELECT sum(request_pod_mem_mb * pod_count) AS \"内存需求\"\nFROM ${table}\nWHERE date = NULLIF('${maxday}', '')::timestamptz AND env = '${env}'",
           "refId": "F",
           "sql": {
             "columns": [
@@ -418,7 +418,7 @@
           "editorMode": "code",
           "format": "table",
           "rawQuery": true,
-          "rawSql": "SELECT sum(p95_pod_wss_mb * pod_count) AS \"内存使用\"\nFROM ${table}\nWHERE date = '${maxday}'::timestamptz AND ${env}",
+          "rawSql": "SELECT sum(p95_pod_wss_mb * pod_count) AS \"内存使用\"\nFROM ${table}\nWHERE date = NULLIF('${maxday}', '')::timestamptz AND env = '${env}'",
           "refId": "A",
           "sql": {
             "columns": [
@@ -439,7 +439,7 @@
           "editorMode": "code",
           "format": "table",
           "rawQuery": true,
-          "rawSql": "SELECT sum(limit_pod_mem_mb * pod_count) AS \"内存限制\"\nFROM ${table}\nWHERE date = '${maxday}'::timestamptz AND ${env}",
+          "rawSql": "SELECT sum(limit_pod_mem_mb * pod_count) AS \"内存限制\"\nFROM ${table}\nWHERE date = NULLIF('${maxday}', '')::timestamptz AND env = '${env}'",
           "refId": "G",
           "sql": {
             "columns": [
@@ -526,7 +526,7 @@
           "editorMode": "code",
           "format": "table",
           "rawQuery": true,
-          "rawSql": "SELECT\n  concat(namespace, ':', deployment) AS name,\n  sum(p95_pod_load * pod_count) AS load\nFROM ${table}\nWHERE date = '${maxday}'::timestamptz AND ${env}\nGROUP BY name\nORDER BY load DESC\nLIMIT 10",
+          "rawSql": "SELECT\n  concat(namespace, ':', deployment) AS name,\n  sum(p95_pod_load * pod_count) AS load\nFROM ${table}\nWHERE date = NULLIF('${maxday}', '')::timestamptz AND env = '${env}'\nGROUP BY name\nORDER BY load DESC\nLIMIT 10",
           "refId": "A",
           "sql": {
             "columns": [
@@ -613,7 +613,7 @@
           "editorMode": "code",
           "format": "table",
           "rawQuery": true,
-          "rawSql": "SELECT\n  concat(namespace, ':', deployment) AS name,\n  sum(p95_pod_cpu_pct) AS load\nFROM ${table}\nWHERE date = '${maxday}'::timestamptz AND ${env}\nGROUP BY name\nORDER BY load DESC\nLIMIT 10",
+          "rawSql": "SELECT\n  concat(namespace, ':', deployment) AS name,\n  sum(p95_pod_cpu_pct) AS load\nFROM ${table}\nWHERE date = NULLIF('${maxday}', '')::timestamptz AND env = '${env}'\nGROUP BY name\nORDER BY load DESC\nLIMIT 10",
           "refId": "A",
           "sql": {
             "columns": [
@@ -701,7 +701,7 @@
           "editorMode": "code",
           "format": "table",
           "rawQuery": true,
-          "rawSql": "SELECT\n  concat(namespace, ':', deployment) AS name,\n  sum(p95_pod_wss_mb * pod_count) AS load\nFROM ${table}\nWHERE date = '${maxday}'::timestamptz AND ${env}\nGROUP BY name\nORDER BY load DESC\nLIMIT 10",
+          "rawSql": "SELECT\n  concat(namespace, ':', deployment) AS name,\n  sum(p95_pod_wss_mb * pod_count) AS load\nFROM ${table}\nWHERE date = NULLIF('${maxday}', '')::timestamptz AND env = '${env}'\nGROUP BY name\nORDER BY load DESC\nLIMIT 10",
           "refId": "A",
           "sql": {
             "columns": [
@@ -788,7 +788,7 @@
           "editorMode": "code",
           "format": "table",
           "rawQuery": true,
-          "rawSql": "SELECT\n  concat(namespace, ':', deployment) AS name,\n  sum(p95_pod_wss_pct) AS load\nFROM ${table}\nWHERE date = '${maxday}'::timestamptz AND ${env}\nGROUP BY name\nORDER BY load DESC\nLIMIT 10",
+          "rawSql": "SELECT\n  concat(namespace, ':', deployment) AS name,\n  sum(p95_pod_wss_pct) AS load\nFROM ${table}\nWHERE date = NULLIF('${maxday}', '')::timestamptz AND env = '${env}'\nGROUP BY name\nORDER BY load DESC\nLIMIT 10",
           "refId": "A",
           "sql": {
             "columns": [
@@ -875,7 +875,7 @@
           "editorMode": "code",
           "format": "table",
           "rawQuery": true,
-          "rawSql": "SELECT\n  concat(namespace, ':', deployment) AS name,\n  sum(pod_count) AS load\nFROM ${table}\nWHERE date = '${maxday}'::timestamptz AND ${env}\nGROUP BY name\nORDER BY load DESC\nLIMIT 10",
+          "rawSql": "SELECT\n  concat(namespace, ':', deployment) AS name,\n  sum(pod_count) AS load\nFROM ${table}\nWHERE date = NULLIF('${maxday}', '')::timestamptz AND env = '${env}'\nGROUP BY name\nORDER BY load DESC\nLIMIT 10",
           "refId": "A",
           "sql": {
             "columns": [
@@ -1286,7 +1286,7 @@
           "editorMode": "code",
           "format": "table",
           "rawQuery": true,
-          "rawSql": "-- 各命名空间在高峰时段的资源用量,以及占整体的比例\nWITH per_namespace AS (\n  SELECT\n    namespace,\n    count(DISTINCT deployment)              AS deployment,\n    sum(pod_count)                          AS pod,\n    sum(p95_pod_load * pod_count)           AS load,\n    sum(p95_pod_wss_mb * pod_count)         AS mem,\n    sum(request_pod_cpu_m * pod_count / 1000.0) AS cpu_request,\n    sum(limit_pod_cpu_m   * pod_count / 1000.0) AS cpu_limit,\n    sum(request_pod_mem_mb * pod_count)     AS mem_request,\n    sum(limit_pod_mem_mb   * pod_count)     AS mem_limit\n  FROM ${table}\n  WHERE date = '${maxday}'::timestamptz AND ${env}\n  GROUP BY namespace\n),\ntotals AS (\n  SELECT\n    sum(deployment)  AS total_deployment,\n    sum(pod)         AS total_pod,\n    sum(load)        AS total_load,\n    sum(mem)         AS total_mem,\n    sum(cpu_request) AS total_cpu_request,\n    sum(cpu_limit)   AS total_cpu_limit,\n    sum(mem_request) AS total_mem_request,\n    sum(mem_limit)   AS total_mem_limit\n  FROM per_namespace\n)\nSELECT\n  n.namespace,\n  n.deployment,\n  n.deployment::numeric  / NULLIF(t.total_deployment, 0)  AS deployment_percentage,\n  n.pod,\n  n.pod::numeric         / NULLIF(t.total_pod, 0)         AS pod_percentage,\n\n  n.cpu_request,\n  n.cpu_request          / NULLIF(t.total_cpu_request, 0) AS cpu_request_percentage,\n  n.load,\n  n.load                 / NULLIF(t.total_load, 0)        AS load_percentage,\n  n.cpu_limit,\n  n.cpu_limit            / NULLIF(t.total_cpu_limit, 0)   AS cpu_limit_percentage,\n\n  n.mem_request,\n  n.mem_request          / NULLIF(t.total_mem_request, 0) AS mem_request_percentage,\n  n.mem,\n  n.mem                  / NULLIF(t.total_mem, 0)         AS mem_percentage,\n  n.mem_limit,\n  n.mem_limit            / NULLIF(t.total_mem_limit, 0)   AS mem_limit_percentage\nFROM per_namespace n\nCROSS JOIN totals t",
+          "rawSql": "-- 各命名空间在高峰时段的资源用量,以及占整体的比例\nWITH per_namespace AS (\n  SELECT\n    namespace,\n    count(DISTINCT deployment)              AS deployment,\n    sum(pod_count)                          AS pod,\n    sum(p95_pod_load * pod_count)           AS load,\n    sum(p95_pod_wss_mb * pod_count)         AS mem,\n    sum(request_pod_cpu_m * pod_count / 1000.0) AS cpu_request,\n    sum(limit_pod_cpu_m   * pod_count / 1000.0) AS cpu_limit,\n    sum(request_pod_mem_mb * pod_count)     AS mem_request,\n    sum(limit_pod_mem_mb   * pod_count)     AS mem_limit\n  FROM ${table}\n  WHERE date = NULLIF('${maxday}', '')::timestamptz AND env = '${env}'\n  GROUP BY namespace\n),\ntotals AS (\n  SELECT\n    sum(deployment)  AS total_deployment,\n    sum(pod)         AS total_pod,\n    sum(load)        AS total_load,\n    sum(mem)         AS total_mem,\n    sum(cpu_request) AS total_cpu_request,\n    sum(cpu_limit)   AS total_cpu_limit,\n    sum(mem_request) AS total_mem_request,\n    sum(mem_limit)   AS total_mem_limit\n  FROM per_namespace\n)\nSELECT\n  n.namespace,\n  n.deployment,\n  n.deployment::numeric  / NULLIF(t.total_deployment, 0)  AS deployment_percentage,\n  n.pod,\n  n.pod::numeric         / NULLIF(t.total_pod, 0)         AS pod_percentage,\n\n  n.cpu_request,\n  n.cpu_request          / NULLIF(t.total_cpu_request, 0) AS cpu_request_percentage,\n  n.load,\n  n.load                 / NULLIF(t.total_load, 0)        AS load_percentage,\n  n.cpu_limit,\n  n.cpu_limit            / NULLIF(t.total_cpu_limit, 0)   AS cpu_limit_percentage,\n\n  n.mem_request,\n  n.mem_request          / NULLIF(t.total_mem_request, 0) AS mem_request_percentage,\n  n.mem,\n  n.mem                  / NULLIF(t.total_mem, 0)         AS mem_percentage,\n  n.mem_limit,\n  n.mem_limit            / NULLIF(t.total_mem_limit, 0)   AS mem_limit_percentage\nFROM per_namespace n\nCROSS JOIN totals t",
           "refId": "A",
           "sql": {
             "columns": [
@@ -1720,7 +1720,7 @@
               "editorMode": "code",
               "format": "table",
               "rawQuery": true,
-              "rawSql": "-- 各微服务在高峰时段的资源用量,以及占所选命名空间的比例\nWITH per_deployment AS (\n  SELECT\n    namespace,\n    deployment,\n    sum(pod_count)                          AS pod,\n    sum(p95_pod_load * pod_count)           AS load,\n    sum(p95_pod_wss_mb * pod_count)         AS mem,\n    sum(request_pod_cpu_m * pod_count / 1000.0) AS cpu_request,\n    sum(limit_pod_cpu_m   * pod_count / 1000.0) AS cpu_limit,\n    sum(request_pod_mem_mb * pod_count)     AS mem_request,\n    sum(limit_pod_mem_mb   * pod_count)     AS mem_limit\n  FROM ${table}\n  WHERE date = '${maxday}'::timestamptz AND ${env} AND ${namespace}\n  GROUP BY namespace, deployment\n),\ntotals AS (\n  SELECT\n    sum(pod)         AS total_pod,\n    sum(load)        AS total_load,\n    sum(mem)         AS total_mem,\n    sum(cpu_request) AS total_cpu_request,\n    sum(cpu_limit)   AS total_cpu_limit,\n    sum(mem_request) AS total_mem_request,\n    sum(mem_limit)   AS total_mem_limit\n  FROM per_deployment\n)\nSELECT\n  d.namespace,\n  d.deployment,\n  d.pod,\n  d.pod::numeric / NULLIF(t.total_pod, 0)         AS pod_percentage,\n  d.cpu_request,\n  d.cpu_request  / NULLIF(t.total_cpu_request, 0) AS cpu_request_percentage,\n  d.load,\n  d.load         / NULLIF(t.total_load, 0)        AS load_percentage,\n  d.cpu_limit,\n  d.cpu_limit    / NULLIF(t.total_cpu_limit, 0)   AS cpu_limit_percentage,\n\n  d.mem_request,\n  d.mem_request  / NULLIF(t.total_mem_request, 0) AS mem_request_percentage,\n  d.mem,\n  d.mem          / NULLIF(t.total_mem, 0)         AS mem_percentage,\n  d.mem_limit,\n  d.mem_limit    / NULLIF(t.total_mem_limit, 0)   AS mem_limit_percentage\nFROM per_deployment d\nCROSS JOIN totals t",
+              "rawSql": "-- 各微服务在高峰时段的资源用量,以及占所选命名空间的比例\nWITH per_deployment AS (\n  SELECT\n    namespace,\n    deployment,\n    sum(pod_count)                          AS pod,\n    sum(p95_pod_load * pod_count)           AS load,\n    sum(p95_pod_wss_mb * pod_count)         AS mem,\n    sum(request_pod_cpu_m * pod_count / 1000.0) AS cpu_request,\n    sum(limit_pod_cpu_m   * pod_count / 1000.0) AS cpu_limit,\n    sum(request_pod_mem_mb * pod_count)     AS mem_request,\n    sum(limit_pod_mem_mb   * pod_count)     AS mem_limit\n  FROM ${table}\n  WHERE date = NULLIF('${maxday}', '')::timestamptz AND env = '${env}' AND namespace IN (${namespace})\n  GROUP BY namespace, deployment\n),\ntotals AS (\n  SELECT\n    sum(pod)         AS total_pod,\n    sum(load)        AS total_load,\n    sum(mem)         AS total_mem,\n    sum(cpu_request) AS total_cpu_request,\n    sum(cpu_limit)   AS total_cpu_limit,\n    sum(mem_request) AS total_mem_request,\n    sum(mem_limit)   AS total_mem_limit\n  FROM per_deployment\n)\nSELECT\n  d.namespace,\n  d.deployment,\n  d.pod,\n  d.pod::numeric / NULLIF(t.total_pod, 0)         AS pod_percentage,\n  d.cpu_request,\n  d.cpu_request  / NULLIF(t.total_cpu_request, 0) AS cpu_request_percentage,\n  d.load,\n  d.load         / NULLIF(t.total_load, 0)        AS load_percentage,\n  d.cpu_limit,\n  d.cpu_limit    / NULLIF(t.total_cpu_limit, 0)   AS cpu_limit_percentage,\n\n  d.mem_request,\n  d.mem_request  / NULLIF(t.total_mem_request, 0) AS mem_request_percentage,\n  d.mem,\n  d.mem          / NULLIF(t.total_mem, 0)         AS mem_percentage,\n  d.mem_limit,\n  d.mem_limit    / NULLIF(t.total_mem_limit, 0)   AS mem_limit_percentage\nFROM per_deployment d\nCROSS JOIN totals t",
               "refId": "A",
               "sql": {
                 "columns": [
@@ -1866,7 +1866,7 @@
               "editorMode": "code",
               "format": "time_series",
               "rawQuery": true,
-              "rawSql": "SELECT\n  date AS \"time\",\n  deployment AS metric,\n  max(p95_pod_cpu_pct) AS value\nFROM ${table}\nWHERE $__timeFilter(date) AND ${env} AND ${namespace} AND ${deployment}\nGROUP BY \"time\", metric\nORDER BY \"time\"",
+              "rawSql": "SELECT\n  date AS \"time\",\n  deployment AS metric,\n  max(p95_pod_cpu_pct) AS value\nFROM ${table}\nWHERE $__timeFilter(date) AND env = '${env}' AND namespace IN (${namespace}) AND deployment IN (${deployment})\nGROUP BY \"time\", metric\nORDER BY \"time\"",
               "refId": "A",
               "sql": {
                 "columns": [
@@ -1987,7 +1987,7 @@
               "editorMode": "code",
               "format": "time_series",
               "rawQuery": true,
-              "rawSql": "SELECT\n  date AS \"time\",\n  deployment AS metric,\n  max(p95_pod_wss_pct) AS value\nFROM ${table}\nWHERE $__timeFilter(date) AND ${env} AND ${namespace} AND ${deployment}\nGROUP BY \"time\", metric\nORDER BY \"time\"",
+              "rawSql": "SELECT\n  date AS \"time\",\n  deployment AS metric,\n  max(p95_pod_wss_pct) AS value\nFROM ${table}\nWHERE $__timeFilter(date) AND env = '${env}' AND namespace IN (${namespace}) AND deployment IN (${deployment})\nGROUP BY \"time\", metric\nORDER BY \"time\"",
               "refId": "A",
               "sql": {
                 "columns": [
@@ -2107,7 +2107,7 @@
               "editorMode": "code",
               "format": "time_series",
               "rawQuery": true,
-              "rawSql": "SELECT\n  date AS \"time\",\n  deployment AS metric,\n  max(pod_count) AS value\nFROM ${table}\nWHERE $__timeFilter(date) AND ${env} AND ${namespace} AND ${deployment}\nGROUP BY \"time\", metric\nORDER BY \"time\"",
+              "rawSql": "SELECT\n  date AS \"time\",\n  deployment AS metric,\n  max(pod_count) AS value\nFROM ${table}\nWHERE $__timeFilter(date) AND env = '${env}' AND namespace IN (${namespace}) AND deployment IN (${deployment})\nGROUP BY \"time\", metric\nORDER BY \"time\"",
               "refId": "A",
               "sql": {
                 "columns": [
@@ -2470,7 +2470,7 @@
               "editorMode": "code",
               "format": "table",
               "rawQuery": true,
-              "rawSql": "-- 单个 Pod 维度的高峰时段用量与使用率(不乘 pod_count)\nWITH per_pod AS (\n  SELECT\n    namespace,\n    deployment,\n    sum(pod_count)                   AS pod,\n    sum(p95_pod_load)                AS load,\n    sum(p95_pod_wss_mb)              AS mem,\n    sum(p95_pod_cpu_pct)             AS cpu_pct,\n    sum(p95_pod_wss_pct)             AS mem_pct,\n    sum(request_pod_cpu_m / 1000.0)  AS cpu_request,\n    sum(limit_pod_cpu_m   / 1000.0)  AS cpu_limit,\n    sum(request_pod_mem_mb)          AS mem_request,\n    sum(limit_pod_mem_mb)            AS mem_limit\n  FROM ${table}\n  WHERE date = '${maxday}'::timestamptz AND ${env} AND ${namespace}\n  GROUP BY namespace, deployment\n),\ntotals AS (\n  SELECT sum(pod) AS total_pod FROM per_pod\n)\nSELECT\n  p.namespace,\n  p.deployment,\n  p.pod,\n  p.pod::numeric / NULLIF(t.total_pod, 0) * 100 AS pod_percentage,\n\n  p.cpu_request,\n  p.load,\n  p.cpu_pct,\n  p.cpu_limit,\n\n  p.mem_request,\n  p.mem,\n  p.mem_pct,\n  p.mem_limit\nFROM per_pod p\nCROSS JOIN totals t",
+              "rawSql": "-- 单个 Pod 维度的高峰时段用量与使用率(不乘 pod_count)\nWITH per_pod AS (\n  SELECT\n    namespace,\n    deployment,\n    sum(pod_count)                   AS pod,\n    sum(p95_pod_load)                AS load,\n    sum(p95_pod_wss_mb)              AS mem,\n    sum(p95_pod_cpu_pct)             AS cpu_pct,\n    sum(p95_pod_wss_pct)             AS mem_pct,\n    sum(request_pod_cpu_m / 1000.0)  AS cpu_request,\n    sum(limit_pod_cpu_m   / 1000.0)  AS cpu_limit,\n    sum(request_pod_mem_mb)          AS mem_request,\n    sum(limit_pod_mem_mb)            AS mem_limit\n  FROM ${table}\n  WHERE date = NULLIF('${maxday}', '')::timestamptz AND env = '${env}' AND namespace IN (${namespace})\n  GROUP BY namespace, deployment\n),\ntotals AS (\n  SELECT sum(pod) AS total_pod FROM per_pod\n)\nSELECT\n  p.namespace,\n  p.deployment,\n  p.pod,\n  p.pod::numeric / NULLIF(t.total_pod, 0) * 100 AS pod_percentage,\n\n  p.cpu_request,\n  p.load,\n  p.cpu_pct,\n  p.cpu_limit,\n\n  p.mem_request,\n  p.mem,\n  p.mem_pct,\n  p.mem_limit\nFROM per_pod p\nCROSS JOIN totals t",
               "refId": "A",
               "sql": {
                 "columns": [
@@ -2644,7 +2644,7 @@
               "editorMode": "code",
               "format": "time_series",
               "rawQuery": true,
-              "rawSql": "SELECT\n  date AS \"time\",\n  deployment AS metric,\n  max(p95_pod_load * pod_count) AS value\nFROM ${table}\nWHERE $__timeFilter(date) AND ${env} AND ${namespace} AND ${deployment}\nGROUP BY \"time\", metric\nORDER BY \"time\"",
+              "rawSql": "SELECT\n  date AS \"time\",\n  deployment AS metric,\n  max(p95_pod_load * pod_count) AS value\nFROM ${table}\nWHERE $__timeFilter(date) AND env = '${env}' AND namespace IN (${namespace}) AND deployment IN (${deployment})\nGROUP BY \"time\", metric\nORDER BY \"time\"",
               "refId": "A",
               "sql": {
                 "columns": [
@@ -2764,7 +2764,7 @@
               "editorMode": "code",
               "format": "time_series",
               "rawQuery": true,
-              "rawSql": "SELECT\n  date AS \"time\",\n  deployment AS metric,\n  max(request_pod_cpu_m * pod_count) / 1000 AS value\nFROM ${table}\nWHERE $__timeFilter(date) AND ${env} AND ${namespace} AND ${deployment}\nGROUP BY \"time\", metric\nORDER BY \"time\"",
+              "rawSql": "SELECT\n  date AS \"time\",\n  deployment AS metric,\n  max(request_pod_cpu_m * pod_count) / 1000 AS value\nFROM ${table}\nWHERE $__timeFilter(date) AND env = '${env}' AND namespace IN (${namespace}) AND deployment IN (${deployment})\nGROUP BY \"time\", metric\nORDER BY \"time\"",
               "refId": "A",
               "sql": {
                 "columns": [
@@ -2884,7 +2884,7 @@
               "editorMode": "code",
               "format": "time_series",
               "rawQuery": true,
-              "rawSql": "SELECT\n  date AS \"time\",\n  deployment AS metric,\n  max(limit_pod_cpu_m * pod_count) / 1000 AS value\nFROM ${table}\nWHERE $__timeFilter(date) AND ${env} AND ${namespace} AND ${deployment}\nGROUP BY \"time\", metric\nORDER BY \"time\"",
+              "rawSql": "SELECT\n  date AS \"time\",\n  deployment AS metric,\n  max(limit_pod_cpu_m * pod_count) / 1000 AS value\nFROM ${table}\nWHERE $__timeFilter(date) AND env = '${env}' AND namespace IN (${namespace}) AND deployment IN (${deployment})\nGROUP BY \"time\", metric\nORDER BY \"time\"",
               "refId": "A",
               "sql": {
                 "columns": [
@@ -3005,7 +3005,7 @@
               "editorMode": "code",
               "format": "time_series",
               "rawQuery": true,
-              "rawSql": "SELECT\n  date AS \"time\",\n  deployment AS metric,\n  max(p95_pod_wss_mb * pod_count) AS value\nFROM ${table}\nWHERE $__timeFilter(date) AND ${env} AND ${namespace} AND ${deployment}\nGROUP BY \"time\", metric\nORDER BY \"time\"",
+              "rawSql": "SELECT\n  date AS \"time\",\n  deployment AS metric,\n  max(p95_pod_wss_mb * pod_count) AS value\nFROM ${table}\nWHERE $__timeFilter(date) AND env = '${env}' AND namespace IN (${namespace}) AND deployment IN (${deployment})\nGROUP BY \"time\", metric\nORDER BY \"time\"",
               "refId": "A",
               "sql": {
                 "columns": [
@@ -3126,7 +3126,7 @@
               "editorMode": "code",
               "format": "time_series",
               "rawQuery": true,
-              "rawSql": "SELECT\n  date AS \"time\",\n  deployment AS metric,\n  max(request_pod_mem_mb * pod_count) AS value\nFROM ${table}\nWHERE $__timeFilter(date) AND ${env} AND ${namespace} AND ${deployment}\nGROUP BY \"time\", metric\nORDER BY \"time\"",
+              "rawSql": "SELECT\n  date AS \"time\",\n  deployment AS metric,\n  max(request_pod_mem_mb * pod_count) AS value\nFROM ${table}\nWHERE $__timeFilter(date) AND env = '${env}' AND namespace IN (${namespace}) AND deployment IN (${deployment})\nGROUP BY \"time\", metric\nORDER BY \"time\"",
               "refId": "A",
               "sql": {
                 "columns": [
@@ -3247,7 +3247,7 @@
               "editorMode": "code",
               "format": "time_series",
               "rawQuery": true,
-              "rawSql": "SELECT\n  date AS \"time\",\n  deployment AS metric,\n  max(limit_pod_mem_mb * pod_count) AS value\nFROM ${table}\nWHERE $__timeFilter(date) AND ${env} AND ${namespace} AND ${deployment}\nGROUP BY \"time\", metric\nORDER BY \"time\"",
+              "rawSql": "SELECT\n  date AS \"time\",\n  deployment AS metric,\n  max(limit_pod_mem_mb * pod_count) AS value\nFROM ${table}\nWHERE $__timeFilter(date) AND env = '${env}' AND namespace IN (${namespace}) AND deployment IN (${deployment})\nGROUP BY \"time\", metric\nORDER BY \"time\"",
               "refId": "A",
               "sql": {
                 "columns": [
@@ -3381,7 +3381,7 @@
               "editorMode": "code",
               "format": "time_series",
               "rawQuery": true,
-              "rawSql": "SELECT\n  date AS \"time\",\n  deployment AS metric,\n  max(p95_pod_load) AS value\nFROM ${table}\nWHERE $__timeFilter(date) AND ${env} AND ${namespace} AND ${deployment}\nGROUP BY \"time\", metric\nORDER BY \"time\"",
+              "rawSql": "SELECT\n  date AS \"time\",\n  deployment AS metric,\n  max(p95_pod_load) AS value\nFROM ${table}\nWHERE $__timeFilter(date) AND env = '${env}' AND namespace IN (${namespace}) AND deployment IN (${deployment})\nGROUP BY \"time\", metric\nORDER BY \"time\"",
               "refId": "A",
               "sql": {
                 "columns": [
@@ -3501,7 +3501,7 @@
               "editorMode": "code",
               "format": "time_series",
               "rawQuery": true,
-              "rawSql": "SELECT\n  date AS \"time\",\n  deployment AS metric,\n  max(request_pod_cpu_m) / 1000 AS value\nFROM ${table}\nWHERE $__timeFilter(date) AND ${env} AND ${namespace} AND ${deployment}\nGROUP BY \"time\", metric\nORDER BY \"time\"",
+              "rawSql": "SELECT\n  date AS \"time\",\n  deployment AS metric,\n  max(request_pod_cpu_m) / 1000 AS value\nFROM ${table}\nWHERE $__timeFilter(date) AND env = '${env}' AND namespace IN (${namespace}) AND deployment IN (${deployment})\nGROUP BY \"time\", metric\nORDER BY \"time\"",
               "refId": "A",
               "sql": {
                 "columns": [
@@ -3621,7 +3621,7 @@
               "editorMode": "code",
               "format": "time_series",
               "rawQuery": true,
-              "rawSql": "SELECT\n  date AS \"time\",\n  deployment AS metric,\n  max(limit_pod_cpu_m) / 1000 AS value\nFROM ${table}\nWHERE $__timeFilter(date) AND ${env} AND ${namespace} AND ${deployment}\nGROUP BY \"time\", metric\nORDER BY \"time\"",
+              "rawSql": "SELECT\n  date AS \"time\",\n  deployment AS metric,\n  max(limit_pod_cpu_m) / 1000 AS value\nFROM ${table}\nWHERE $__timeFilter(date) AND env = '${env}' AND namespace IN (${namespace}) AND deployment IN (${deployment})\nGROUP BY \"time\", metric\nORDER BY \"time\"",
               "refId": "A",
               "sql": {
                 "columns": [
@@ -3742,7 +3742,7 @@
               "editorMode": "code",
               "format": "time_series",
               "rawQuery": true,
-              "rawSql": "SELECT\n  date AS \"time\",\n  deployment AS metric,\n  max(p95_pod_wss_mb) AS value\nFROM ${table}\nWHERE $__timeFilter(date) AND ${env} AND ${namespace} AND ${deployment}\nGROUP BY \"time\", metric\nORDER BY \"time\"",
+              "rawSql": "SELECT\n  date AS \"time\",\n  deployment AS metric,\n  max(p95_pod_wss_mb) AS value\nFROM ${table}\nWHERE $__timeFilter(date) AND env = '${env}' AND namespace IN (${namespace}) AND deployment IN (${deployment})\nGROUP BY \"time\", metric\nORDER BY \"time\"",
               "refId": "A",
               "sql": {
                 "columns": [
@@ -3863,7 +3863,7 @@
               "editorMode": "code",
               "format": "time_series",
               "rawQuery": true,
-              "rawSql": "SELECT\n  date AS \"time\",\n  deployment AS metric,\n  max(request_pod_mem_mb) AS value\nFROM ${table}\nWHERE $__timeFilter(date) AND ${env} AND ${namespace} AND ${deployment}\nGROUP BY \"time\", metric\nORDER BY \"time\"",
+              "rawSql": "SELECT\n  date AS \"time\",\n  deployment AS metric,\n  max(request_pod_mem_mb) AS value\nFROM ${table}\nWHERE $__timeFilter(date) AND env = '${env}' AND namespace IN (${namespace}) AND deployment IN (${deployment})\nGROUP BY \"time\", metric\nORDER BY \"time\"",
               "refId": "A",
               "sql": {
                 "columns": [
@@ -3984,7 +3984,7 @@
               "editorMode": "code",
               "format": "time_series",
               "rawQuery": true,
-              "rawSql": "SELECT\n  date AS \"time\",\n  deployment AS metric,\n  max(limit_pod_mem_mb) AS value\nFROM ${table}\nWHERE $__timeFilter(date) AND ${env} AND ${namespace} AND ${deployment}\nGROUP BY \"time\", metric\nORDER BY \"time\"",
+              "rawSql": "SELECT\n  date AS \"time\",\n  deployment AS metric,\n  max(limit_pod_mem_mb) AS value\nFROM ${table}\nWHERE $__timeFilter(date) AND env = '${env}' AND namespace IN (${namespace}) AND deployment IN (${deployment})\nGROUP BY \"time\", metric\nORDER BY \"time\"",
               "refId": "A",
               "sql": {
                 "columns": [
@@ -4038,57 +4038,56 @@
         "type": "query"
       },
       {
-        "allValue": "1 = 1",
         "current": {},
         "datasource": {
           "type": "grafana-postgresql-datasource",
           "uid": "KubeDoor-Postgres"
         },
-        "definition": "SELECT concat(env, '#env = ''', env, '''')\nFROM ${table}\nWHERE $__timeFilter(date)\nGROUP BY env",
+        "definition": "SELECT DISTINCT env\nFROM ${table}\nWHERE $__timeFilter(date)\nORDER BY env",
         "includeAll": false,
         "label": "环境",
         "name": "env",
         "options": [],
-        "query": "SELECT concat(env, '#env = ''', env, '''')\nFROM ${table}\nWHERE $__timeFilter(date)\nGROUP BY env",
+        "query": "SELECT DISTINCT env\nFROM ${table}\nWHERE $__timeFilter(date)\nORDER BY env",
         "refresh": 1,
-        "regex": "/(?<text>.*)#(?<value>.*)/",
+        "regex": "",
         "sort": 5,
         "type": "query"
       },
       {
-        "allValue": "1=1",
+        "allValue": "namespace",
         "current": {},
         "datasource": {
           "type": "grafana-postgresql-datasource",
           "uid": "KubeDoor-Postgres"
         },
-        "definition": "SELECT concat(namespace, '#namespace = ''', namespace, '''')\nFROM ${table}\nWHERE $__timeFilter(date) AND ${env}\nGROUP BY namespace",
+        "definition": "SELECT DISTINCT namespace\nFROM ${table}\nWHERE $__timeFilter(date) AND env = '${env}'\nORDER BY namespace",
         "description": "",
         "includeAll": true,
         "label": "命名空间",
         "name": "namespace",
         "options": [],
-        "query": "SELECT concat(namespace, '#namespace = ''', namespace, '''')\nFROM ${table}\nWHERE $__timeFilter(date) AND ${env}\nGROUP BY namespace",
+        "query": "SELECT DISTINCT namespace\nFROM ${table}\nWHERE $__timeFilter(date) AND env = '${env}'\nORDER BY namespace",
         "refresh": 1,
-        "regex": "/(?<text>.*)#(?<value>.*)/",
+        "regex": "",
         "sort": 5,
         "type": "query"
       },
       {
-        "allValue": "1=1",
+        "allValue": "deployment",
         "current": {},
         "datasource": {
           "type": "grafana-postgresql-datasource",
           "uid": "KubeDoor-Postgres"
         },
-        "definition": "SELECT concat(deployment, '#deployment = ''', deployment, '''')\nFROM ${table}\nWHERE $__timeFilter(date) AND ${env} AND ${namespace}\nGROUP BY deployment",
+        "definition": "SELECT DISTINCT deployment\nFROM ${table}\nWHERE $__timeFilter(date) AND env = '${env}' AND namespace IN (${namespace})\nORDER BY deployment",
         "includeAll": true,
         "label": "微服务",
         "name": "deployment",
         "options": [],
-        "query": "SELECT concat(deployment, '#deployment = ''', deployment, '''')\nFROM ${table}\nWHERE $__timeFilter(date) AND ${env} AND ${namespace}\nGROUP BY deployment",
+        "query": "SELECT DISTINCT deployment\nFROM ${table}\nWHERE $__timeFilter(date) AND env = '${env}' AND namespace IN (${namespace})\nORDER BY deployment",
         "refresh": 1,
-        "regex": "/(?<text>.*)#(?<value>.*)/",
+        "regex": "",
         "sort": 5,
         "type": "query"
       },
@@ -4098,12 +4097,12 @@
           "type": "grafana-postgresql-datasource",
           "uid": "KubeDoor-Postgres"
         },
-        "definition": "SELECT concat(to_char(date AT TIME ZONE 'Asia/Shanghai', 'YYYY-MM-DD'), '#', date::text) AS formatted_date\nFROM ${table}\nWHERE $__timeFilter(date) AND ${env}\nGROUP BY formatted_date\nORDER BY SUM(pod_count * p95_pod_load) DESC\nLIMIT 1",
+        "definition": "SELECT concat(to_char(date AT TIME ZONE 'Asia/Shanghai', 'YYYY-MM-DD'), '#', date::text) AS formatted_date\nFROM ${table}\nWHERE $__timeFilter(date) AND env = '${env}'\nGROUP BY formatted_date\nORDER BY SUM(pod_count * p95_pod_load) DESC\nLIMIT 1",
         "description": "",
         "label": "最大资源使用的日期",
         "name": "maxday",
         "options": [],
-        "query": "SELECT concat(to_char(date AT TIME ZONE 'Asia/Shanghai', 'YYYY-MM-DD'), '#', date::text) AS formatted_date\nFROM ${table}\nWHERE $__timeFilter(date) AND ${env}\nGROUP BY formatted_date\nORDER BY SUM(pod_count * p95_pod_load) DESC\nLIMIT 1",
+        "query": "SELECT concat(to_char(date AT TIME ZONE 'Asia/Shanghai', 'YYYY-MM-DD'), '#', date::text) AS formatted_date\nFROM ${table}\nWHERE $__timeFilter(date) AND env = '${env}'\nGROUP BY formatted_date\nORDER BY SUM(pod_count * p95_pod_load) DESC\nLIMIT 1",
         "refresh": 2,
         "regex": "/(?<text>.*)#(?<value>.*)/",
         "type": "query"
