@@ -16,7 +16,7 @@ from .agent import CONCLUDED, installer_available, new_agent_state, unavailable_
 from .config import metrics_endpoints, redact_token, selected_components, url_credentials
 from .errors import SetupError
 from .kubernetes import OWNER, resource, resource_path, workload_ready
-from .probes import check_postgres, check_metrics, metrics_query_base, query_metrics, reserve_database
+from .probes import basic_auth, check_postgres, check_metrics, metrics_query_base, query_metrics, reserve_database
 from .render import general_settings_values, render_master, load_defaults
 from .repository import utcnow
 
@@ -42,6 +42,8 @@ HEALTH_DEPENDS = {'master': '数据库或时序库', 'ai': '数据库', 'alarm':
 GENERAL_SETTINGS_PATH = '/api/admin/general-settings'
 # 失败详情里最多列出的 Pod 数
 DETAIL_PODS = 5
+# 时序库服务器和本集群的时间相差超过这么多秒，就判定为没同步（刚写入的数据按时序库的「现在」查不到）
+CLOCK_SKEW_LIMIT = 30
 
 
 class ServiceCheckError(SetupError):
@@ -50,9 +52,63 @@ class ServiceCheckError(SetupError):
     status 为 422 表示对方明确拒绝了提交的内容，重试没有用，不再等到超时。
     """
 
-    def __init__(self, message, *, http_status=None, probe='', status=502):
+    def __init__(self, message, *, http_status=None, probe='', status=502, reason=''):
         super().__init__(message, status)
-        self.http_status, self.probe = http_status, probe
+        # reason：对方返回的原因（master 的 message、Grafana 的 message），没有就是空串
+        self.http_status, self.probe, self.reason = http_status, probe, reason
+
+
+def error_reason(raw):
+    """对方返回的 JSON 里说明原因的文字（master 的 message / error.message，Grafana 的 message）；不是 JSON 就不带"""
+    try:
+        body = json.loads(raw)
+    except (ValueError, TypeError):
+        return ''
+    if not isinstance(body, dict):
+        return ''
+    error = body.get('error')
+    value = body.get('message') or (error.get('message') if isinstance(error, dict) else error)
+    return ' '.join(str(value).split())[:200] if value else ''
+
+
+def _with_reason(status, reason):
+    return f'HTTP {status}' + (f'：{reason}' if reason else '')
+
+
+def login_failure(error):
+    """安装服务用第 4 步的密码登录被拒：按 master 给的原因说明"""
+    status, reason = error.http_status, error.reason
+    if status == 401:
+        return (f'管理员登录失败（{_with_reason(401, reason or "用户名或口令错误")}）：控制端里的 kubedoor 账号和第 4 步设置的密码对不上。'
+                'kubedoor 账号只在控制服务第一次连上数据库时创建，库里已经有这个账号时不会改成这次设置的密码；'
+                '常见原因是这个数据库以前装过 KubeDoor（例如旧表在和数据库账号同名的 schema 里），请换一个空数据库，或清理旧数据后重新安装')
+    if status == 429:
+        return f'管理员账号登录失败次数过多，已被临时锁定（{_with_reason(429, reason)}），请稍后再重试'
+    if status:
+        return f'管理员登录失败（{_with_reason(status, reason)}），请查看 kubedoor-master 日志'
+    return error.message
+
+
+def session_failure(error, base, target):
+    """登录成功后，带着登录 Cookie 的请求又被拒"""
+    status, reason = error.http_status, error.reason
+    if status == 401:
+        return (f'管理员登录成功，但随后访问 {target} 时登录状态没有带上（HTTP 401）。'
+                f'请检查访问地址 {base} 前面的代理或负载均衡是否丢掉了 Set-Cookie / Cookie 请求头，'
+                '或者访问地址是 http:// 但代理按 https 转发（X-Forwarded-Proto: https 会让登录 Cookie 只能经 https 发送）')
+    if status:
+        return f'访问 {target} 失败（{_with_reason(status, reason)}）'
+    return error.message
+
+
+def grafana_failure(uid, error, base):
+    status, reason = error.http_status, error.reason
+    if status == 401:
+        return session_failure(error, base, f'Grafana（数据源 {uid} 健康检查）')
+    source = '第 3 步的远程读地址和账号' if uid == 'KubeDoor-Prometheus' else '第 2 步的数据库连接'
+    if status:
+        return f'Grafana 数据源 {uid} 连接验证失败（{_with_reason(status, reason)}），Grafana 用的是{source}，请查看 kubedoor-dash 日志'
+    return error.message
 
 
 def pod_summary(pod):
@@ -508,8 +564,11 @@ class InstallRunner:
         try:
             async with self.http.request(method, url, allow_redirects=False, **options) as response:
                 if response.status not in expected:
-                    raise ServiceCheckError(f'服务连接或健康验证失败（HTTP {response.status}）',
-                                            http_status=response.status, probe=f'{probe} → HTTP {response.status}')
+                    # 带上对方给的原因（例如 master 登录接口的「用户名或口令错误」），只读一小段
+                    reason = error_reason(await response.content.read(64 * 1024))
+                    raise ServiceCheckError(f'服务连接或健康验证失败（{_with_reason(response.status, reason)}）',
+                                            http_status=response.status, probe=f'{probe} → HTTP {response.status}',
+                                            reason=reason)
                 chunks, size = [], 0
                 async for chunk in response.content.iter_chunked(65536):
                     size += len(chunk)
@@ -643,21 +702,35 @@ class InstallRunner:
         if marker.get('installation_id') != self.installation_id:
             raise SetupError('填写的对外地址未指向本次 KubeDoor，请检查代理或 DNS 后重试', 409)
         admin = self.config['admin']
-        result = await self.request('POST', base + '/api/auth/login', json={
-            'username': admin['username'], 'password': admin['password'], 'remember': False})
+        # 每一步失败都说清楚是哪一步、对方给的原因，不再只有一句「服务连接或健康验证失败（HTTP 401）」
+        try:
+            result = await self.request('POST', base + '/api/auth/login', json={
+                'username': admin['username'], 'password': admin['password'], 'remember': False})
+        except ServiceCheckError as error:
+            raise SetupError(self.scrub(login_failure(error)), 502) from None
         if result.get('success') is not True:
             raise SetupError('管理员登录验证失败', 502)
         try:
-            me = await self.request('GET', base + '/api/auth/me')
+            try:
+                me = await self.request('GET', base + '/api/auth/me')
+            except ServiceCheckError as error:
+                raise SetupError(self.scrub(session_failure(error, base, '/api/auth/me')), 502) from None
             if me.get('success') is not True:
                 raise SetupError('管理员登录会话验证失败', 502)
             for uid in ('KubeDoor-Postgres', 'KubeDoor-Prometheus'):
-                check = await self.request('GET', base + '/grafana/api/datasources/uid/' + uid + '/health')
+                try:
+                    check = await self.request('GET', base + '/grafana/api/datasources/uid/' + uid + '/health')
+                except ServiceCheckError as error:
+                    raise SetupError(self.scrub(grafana_failure(uid, error, base)), 502) from None
                 if str(check.get('status', '')).lower() != 'ok':
-                    raise SetupError('Grafana 数据源连接验证失败', 502)
+                    reason = ' '.join(str(check.get('message') or '').split())[:200]
+                    raise SetupError(self.scrub(f'Grafana 数据源 {uid} 连接验证失败' + (f'：{reason}' if reason else '')), 502)
             await self.save_notification(base)
         finally:
-            await self.request('POST', base + '/api/auth/logout', expected=(200, 204), json={})
+            try:
+                await self.request('POST', base + '/api/auth/logout', expected=(200, 204), json={})
+            except SetupError:
+                pass    # 退出登录只是收尾：失败了也不能盖住上面真正的原因
 
     def notification_configured(self):
         return bool((self.config.get('notification') or {}).get('token'))
@@ -713,7 +786,7 @@ class InstallRunner:
         target, user, password = url_credentials(write_url)
         try:
             async with session.post(target, data=probe_write(self.installation_id, timestamp),
-                                    auth=aiohttp.BasicAuth(user, password) if user else None,
+                                    auth=basic_auth(user, password) if user else None,
                                     headers={'Content-Type': 'application/x-protobuf', 'Content-Encoding': 'snappy',
                                              'X-Prometheus-Remote-Write-Version': '0.1.0'},
                                     allow_redirects=False) as response:
@@ -737,9 +810,44 @@ class InstallRunner:
             if probe_visible(data, timestamp):
                 return
             if time.monotonic() >= deadline:
-                raise SetupError('检测指标已写入但查询不到，请检查远程写地址和远程读地址是否指向同一个时序库', 504)
+                raise SetupError(await self.probe_diagnosis(session, query_base, auth, query, timestamp), 504)
             await self.update(check='write', status='running', message='已写入检测指标，等待查询可见')
             await asyncio.sleep(self.poll_interval)
+
+    async def probe_diagnosis(self, session, base, auth, query, timestamp):
+        """检测指标在等待时间内按当前时间查不到：分清是时间没同步、数据在库里但查不到，还是根本没进这个库。
+
+        时序库的「现在」用 vector(time()) 问（带 nocache=1，VictoriaMetrics 不再往前挪 30 秒）。
+        """
+        try:
+            data = await query_metrics(session, base, auth, 'vector(time())', {'nocache': '1'})
+            skew = float(data['result'][0]['value'][1]) - time.time()
+        except Exception:
+            skew = None
+        if skew is not None and abs(skew) > CLOCK_SKEW_LIMIT:
+            return (f'检测指标已写入，但时序库服务器的时间比本集群{"快" if skew > 0 else "慢"}约 {abs(skew):.0f} 秒，'
+                    '按时序库的当前时间查不到刚写入的数据。请先同步时序库服务器和 K8S 节点的时间（NTP）后重试；'
+                    '时间不同步时各集群的监控数据也会错位，安装 Agent 时的指标验证同样通不过')
+        try:
+            data = await query_metrics(session, base, auth, query, {'time': f'{timestamp / 1000:.3f}', 'nocache': '1'})
+            stored = probe_visible(data, timestamp)
+        except Exception:
+            stored = False
+        if stored:
+            return ('检测指标已经写进时序库，但按当前时间一直查不到：时序库的查询延迟可能设得较大'
+                    '（例如 VictoriaMetrics 的 -search.latencyOffset），请检查时序库的查询参数后重试')
+        return ('检测指标写入成功，但用远程读地址查不到它：请检查远程写地址和远程读地址是否指向同一个时序库'
+                '（VictoriaMetrics 集群版的租户要一致；经过 vmauth 等代理时，写和读要路由到同一个存储），'
+                '以及时序库或中间的 vmagent 有没有 relabel 规则丢掉了这条数据')
+
+    def scrub(self, text):
+        """报错文字里去掉各个密码（Grafana 等给的原因里可能带着地址）"""
+        secrets = [(self.config.get('admin') or {}).get('password', ''), (self.config.get('postgres') or {}).get('password', '')]
+        secrets += [url_credentials(url)[2] for url in metrics_endpoints(self.config.get('metrics') or {}) if url]
+        for secret in secrets:
+            if secret and len(secret) >= 4:
+                text = text.replace(secret, '***').replace(quote(secret, safe=''), '***')
+        return text
 
     async def fail(self, message):
         await self.update(phase='failed', error=message)

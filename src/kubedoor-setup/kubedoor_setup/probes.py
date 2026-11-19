@@ -17,6 +17,17 @@ from .errors import SetupError
 MAINTENANCE_DATABASES = ('postgres', 'template1')
 
 
+def basic_auth(user, password):
+    """Basic 认证：和 master 一样先按 latin-1 编码，编不了（例如密码里有中文）再用 UTF-8；
+    aiohttp 默认只用 latin-1，遇到这类密码会直接报编码错误"""
+    try:
+        f'{user}:{password}'.encode('latin-1')
+        encoding = 'latin-1'
+    except UnicodeEncodeError:
+        encoding = 'utf-8'
+    return aiohttp.BasicAuth(user, password, encoding=encoding)
+
+
 def pg_connect_options(config):
     return {'host': config['host'], 'port': config['port'], 'user': config['user'],
             'password': config['password'], 'database': config['database'],
@@ -76,13 +87,23 @@ def pg_error(error):
     return SetupError('数据库检测失败，请检查数据库状态、账号权限和连接参数', 422)
 
 
+# 已有 KubeDoor 表在哪个 schema。master 建表不写 schema，表落在 search_path 里第一个存在的 schema 上
+# （数据库里有和账号同名的 schema 时就在那里，不在 public），所以先按 search_path 解析，再兜底查 public
+EXISTING_TABLES_SQL = (
+    "SELECT n.nspname FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE c.oid = COALESCE("
+    "to_regclass('auth_users'), to_regclass('k8s_resources'), to_regclass('kubedoor_ai_sessions'), "
+    "to_regclass('public.auth_users'), to_regclass('public.k8s_resources'), to_regclass('public.kubedoor_ai_sessions'))")
+
+
 async def _check_database_owner(connection, installation_id):
-    existing = await connection.fetchval("SELECT to_regclass('public.auth_users') IS NOT NULL OR to_regclass('public.k8s_resources') IS NOT NULL OR to_regclass('public.kubedoor_ai_sessions') IS NOT NULL")
+    existing = await connection.fetchval(EXISTING_TABLES_SQL)
     marker_exists = await connection.fetchval("SELECT to_regclass('public.kubedoor_setup_installation') IS NOT NULL")
     rows = await connection.fetch('SELECT id FROM public.kubedoor_setup_installation') if marker_exists else []
     owned = len(rows) == 1 and str(rows[0]['id']) == installation_id
     if (existing or rows) and not owned:
-        raise SetupError('该数据库已有 KubeDoor 数据或其他安装标记，请使用原控制台或恢复流程，不会覆盖初始化', 409)
+        where = f'（schema {existing} 里已有 KubeDoor 的表）' if isinstance(existing, str) and existing else ''
+        raise SetupError(f'该数据库已有 KubeDoor 数据{where}或其他安装标记。沿用它会继续用旧的 kubedoor 账号和密码，'
+                         '请使用原控制台或恢复流程，或换一个空数据库；不会覆盖初始化', 409)
     return owned
 
 
@@ -149,7 +170,7 @@ def metrics_query_base(config):
     """远程读地址拆成 (不含账号密码的查询地址, BasicAuth)。"""
     read_url, _ = metrics_endpoints(config)
     base, user, password = url_credentials(read_url)
-    return base.rstrip('/'), (aiohttp.BasicAuth(user, password) if user else None)
+    return base.rstrip('/'), (basic_auth(user, password) if user else None)
 
 
 async def _api_data(session, url, params, auth):

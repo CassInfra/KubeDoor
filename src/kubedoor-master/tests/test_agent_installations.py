@@ -683,6 +683,33 @@ async def test_metrics_query_failure_is_reported_instead_of_missing_jobs(environ
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize('offset, word', [(240, '快'), (-240, '慢')])
+async def test_metrics_timeout_with_clock_skew_says_to_sync_time(environment, settings, offset, word):
+    """时序库服务器的时间和控制端差得多：抓取、写入都正常，只是按时序库的现在查不到，先说时间没同步"""
+    from urllib.parse import quote
+    service, _, _ = environment
+    seen = []
+
+    async def handler(request):
+        seen.append((dict(request.query), request.headers.get('Authorization')))
+        now = time.time() + offset
+        return web.json_response({'status': 'success', 'data': {'resultType': 'vector', 'result': [
+            {'metric': {}, 'value': [now, str(now)]}]}})
+
+    app = web.Application()
+    app.router.add_get('/api/v1/query', handler)
+    async with TestServer(app) as server:
+        settings['prom_url'] = f'http://monit:{quote("时序库密码", safe="")}@{server.host}:{server.port}'
+        service.metrics_seen['task-3'] = {'vmagent'}
+        message = await service.metrics_diagnosis({'id': 'task-3', 'payload': {}}, {'namespace': 'kubedoor'})
+    assert f'时序库服务器的时间比控制端{word}约 240 秒' in message and '重新验证指标采集' in message
+    query, authorization = seen[0]
+    assert query == {'query': 'vector(time())', 'nocache': '1'}
+    # 中文密码：和通用配置的「测试」一样按 UTF-8 编码（aiohttp 默认的 latin-1 编不了）
+    assert authorization == 'Basic ' + base64.b64encode('monit:时序库密码'.encode('utf-8')).decode()
+
+
+@pytest.mark.asyncio
 async def test_metrics_timeout_names_missing_jobs_with_vmagent_target_errors(environment):
     service, _, _ = environment
 

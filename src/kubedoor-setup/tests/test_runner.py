@@ -1,7 +1,9 @@
 import asyncio
+import base64
 import copy
 import json
 import struct
+import time
 from unittest.mock import AsyncMock
 from urllib.parse import quote
 
@@ -328,10 +330,15 @@ def probe_timestamp(raw):
 
 
 class FakeTimeSeries:
-    """假的 VictoriaMetrics：记录远程写请求，查询时按需返回刚写入的检测样本。"""
+    """假的 VictoriaMetrics：记录远程写请求，查询时按需返回刚写入的检测样本。
 
-    def __init__(self, write_status=204, visible_after=1):
+    clock_offset：服务器时间比本机快多少秒（vector(time()) 按它返回）；
+    stored：按检测样本自己的时间（带 time 参数）查询时能不能查到，模拟「数据在库里、只是按现在查不到」。
+    """
+
+    def __init__(self, write_status=204, visible_after=1, clock_offset=0, stored=False):
         self.write_status, self.visible_after = write_status, visible_after
+        self.clock_offset, self.stored = clock_offset, stored
         self.writes, self.queries, self.params = [], [], []
 
     def app(self):
@@ -349,8 +356,12 @@ class FakeTimeSeries:
     async def query(self, request):
         self.queries.append(request.query['query'])
         self.params.append(dict(request.query))
+        if request.query['query'] == 'vector(time())':
+            now = time.time() + self.clock_offset
+            return web.json_response({'status': 'success', 'data': {'resultType': 'vector', 'result': [{'metric': {}, 'value': [now, str(now)]}]}})
         rows = []
-        if self.writes and len(self.queries) >= self.visible_after:
+        found = ('time' in request.query and self.stored) or len(self.queries) >= self.visible_after
+        if self.writes and found:
             rows = [{'metric': {'installation_id': ID}, 'value': [1, str(self.writes[-1]['timestamp'])]}]
         return web.json_response({'status': 'success', 'data': {'resultType': 'vector', 'result': rows}})
 
@@ -409,6 +420,134 @@ async def test_invisible_probe_times_out_with_clear_reason():
         with pytest.raises(SetupError, match='远程写地址和远程读地址是否指向同一个时序库'):
             await runner.verify_metrics()
     assert check_row(runner.repo, 'write')['status'] == 'error'
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('offset, word', [(180, '快'), (-180, '慢')])
+async def test_invisible_probe_reports_clock_skew(offset, word):
+    """时序库服务器和本集群时间差得多：写进去的数据按时序库的「现在」查不到，直接说是时间没同步"""
+    tsdb = FakeTimeSeries(visible_after=10 ** 6, clock_offset=offset)
+    async with TestServer(tsdb.app()) as server:
+        runner = metrics_runner(server)
+        runner.health_timeout = 0
+        with pytest.raises(SetupError) as caught:
+            await runner.verify_metrics()
+    assert f'时序库服务器的时间比本集群{word}约 180 秒' in caught.value.message and 'NTP' in caught.value.message
+    assert {'query': 'vector(time())', 'nocache': '1'} in tsdb.params
+
+
+@pytest.mark.asyncio
+async def test_probe_stored_but_not_visible_now_points_at_query_latency():
+    tsdb = FakeTimeSeries(visible_after=10 ** 6, stored=True)
+    async with TestServer(tsdb.app()) as server:
+        runner = metrics_runner(server)
+        runner.health_timeout = 0
+        with pytest.raises(SetupError) as caught:
+            await runner.verify_metrics()
+    assert caught.value.message.startswith('检测指标已经写进时序库，但按当前时间一直查不到')
+    # 按检测样本自己的时间查过一次（带 nocache）
+    [at] = [params for params in tsdb.params if 'time' in params]
+    assert float(at['time']) * 1000 == pytest.approx(tsdb.writes[0]['timestamp'], abs=1) and at['nocache'] == '1'
+
+
+@pytest.mark.asyncio
+async def test_non_latin1_metrics_password_uses_utf8_basic_auth_like_master():
+    tsdb = FakeTimeSeries()
+    async with TestServer(tsdb.app()) as server:
+        runner = metrics_runner(server, password='时序库密码pw')
+        await runner.verify_metrics()
+    expected = 'Basic ' + base64.b64encode('monit:时序库密码pw'.encode('utf-8')).decode()
+    assert tsdb.writes[0]['authorization'] == expected
+
+
+class FakeConsole:
+    """假的 KubeDoor 对外入口：安装标记、登录、会话、Grafana 数据源健康检查、退出登录"""
+
+    def __init__(self, login=(200, None), me=200, grafana=(200, {'status': 'OK'}), logout=200):
+        self.login_reply, self.me_status, self.grafana_reply, self.logout_status = login, me, grafana, logout
+        self.calls = []
+
+    def app(self):
+        app = web.Application()
+        app.router.add_get('/setup-status.json', lambda request: web.json_response({'installation_id': ID}))
+        app.router.add_post('/api/auth/login', self.login)
+        app.router.add_get('/api/auth/me', self.me)
+        app.router.add_get('/grafana/api/datasources/uid/{uid}/health', self.grafana)
+        app.router.add_post('/api/auth/logout', self.logout)
+        return app
+
+    async def login(self, request):
+        self.calls.append('login')
+        status, body = self.login_reply
+        if status != 200:
+            return web.json_response(body, status=status)
+        response = web.json_response({'success': True})
+        response.set_cookie('kubedoor_session', 'token', path='/', httponly=True)
+        return response
+
+    async def me(self, request):
+        self.calls.append('me')
+        if self.me_status != 200 or 'kubedoor_session' not in request.cookies:
+            return web.json_response({'success': False, 'error': 'unauthorized', 'message': '请先登录'}, status=401)
+        return web.json_response({'success': True})
+
+    async def grafana(self, request):
+        self.calls.append('grafana:' + request.match_info['uid'])
+        status, body = self.grafana_reply
+        return web.json_response(body, status=status)
+
+    async def logout(self, request):
+        self.calls.append('logout')
+        return web.json_response({'success': self.logout_status == 200}, status=self.logout_status)
+
+
+async def check_endpoints_against(console):
+    async with TestServer(console.app()) as server:
+        runner = ObservedRunner(MemoryRepo(), FakeKubernetes())
+        runner.config, runner.installation_id = runner.repo.private['config'], ID
+        runner.config['public_url'] = f'http://{server.host}:{server.port}'
+        runner.config['admin'] = {'username': 'kubedoor', 'password': 'Admin@2026!x'}
+        runner.config['metrics'].update(user='monit', password='vm-secret-pw',
+                                        read_url=f"http://monit:vm-secret-pw@{server.host}:8428")
+        async with aiohttp.ClientSession(cookie_jar=aiohttp.CookieJar(unsafe=True)) as session:
+            runner.http = session
+            try:
+                await InstallRunner.verify_endpoints(runner)
+            except SetupError as error:
+                return error.message
+    return ''
+
+
+@pytest.mark.asyncio
+async def test_admin_login_rejected_says_which_step_and_master_reason():
+    console = FakeConsole(login=(401, {'success': False, 'error': 'invalid_credentials', 'message': '用户名或口令错误'}))
+    message = await check_endpoints_against(console)
+    assert message.startswith('管理员登录失败（HTTP 401：用户名或口令错误）')
+    assert '以前装过 KubeDoor' in message and 'Admin@2026!x' not in message
+    assert console.calls == ['login']
+
+
+@pytest.mark.asyncio
+async def test_locked_admin_says_wait():
+    console = FakeConsole(login=(429, {'success': False, 'error': 'locked', 'message': '失败次数过多,账号已临时锁定,请 15 分钟后再试'}))
+    assert '已被临时锁定' in await check_endpoints_against(console)
+
+
+@pytest.mark.asyncio
+async def test_lost_session_cookie_is_explained_and_logout_failure_does_not_hide_it():
+    console = FakeConsole(me=401, logout=401)
+    message = await check_endpoints_against(console)
+    assert message.startswith('管理员登录成功，但随后访问 /api/auth/me 时登录状态没有带上（HTTP 401）')
+    assert 'Set-Cookie' in message and console.calls[-1] == 'logout'
+
+
+@pytest.mark.asyncio
+async def test_grafana_datasource_failure_shows_grafana_reason_without_passwords():
+    reason = 'Post "http://monit:vm-secret-pw@vm:8428/api/v1/query": 401 Unauthorized'
+    console = FakeConsole(grafana=(400, {'status': 'ERROR', 'message': reason}))
+    message = await check_endpoints_against(console)
+    assert message.startswith('Grafana 数据源 KubeDoor-Postgres 连接验证失败（HTTP 400：Post')
+    assert '401 Unauthorized' in message and 'vm-secret-pw' not in message and '***' in message
 
 
 @pytest.mark.asyncio

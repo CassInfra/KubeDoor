@@ -26,6 +26,7 @@ from aiohttp import web
 from auth import audit, permissions
 from auth.context import client_ip
 from func_manager.deployment_control import deployment_control as control_status, valid_target
+from general_settings.probe import basic_auth_header
 
 # AI 只读查询 MySQL / Redis / ES(kubedoor-tools 的 data.py);参数里有服务端填入的明文密码,请求体不能写进日志
 DATA_OPERATIONS = ("mysql", "redis", "elasticsearch")
@@ -275,7 +276,8 @@ def register_routes(app, clients, utils):
         except (ValueError, TypeError) as exc:
             raise web.HTTPBadRequest(text=str(exc))
         upstream = urlsplit(prom_url)
-        auth = aiohttp.BasicAuth(unquote(upstream.username), unquote(upstream.password or "")) if upstream.username else None
+        # 和通用配置的「测试」一样：先按 latin-1 编码，编不了（例如中文密码）再用 UTF-8
+        headers = basic_auth_header(unquote(upstream.username), unquote(upstream.password or "")) if upstream.username else None
         host = upstream.hostname or ""
         if ":" in host:
             host = f"[{host}]"
@@ -285,7 +287,7 @@ def register_routes(app, clients, utils):
         limit = int(os.environ.get("AI_METRICS_MAX_BYTES", "2097152"))
         try:
             async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=30)) as session:
-                async with session.get(f"{base}/api/v1/{suffix}", params=params, auth=auth, allow_redirects=False) as response:
+                async with session.get(f"{base}/api/v1/{suffix}", params=params, headers=headers, allow_redirects=False) as response:
                     if response.status != 200:
                         raise web.HTTPBadGateway(text=f"指标服务返回 HTTP {response.status}")
                     raw = bytearray()

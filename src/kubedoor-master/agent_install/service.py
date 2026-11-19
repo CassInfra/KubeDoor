@@ -37,6 +37,8 @@ STEP_NAMES = ['验证安装计划', '创建命名空间和凭据', '应用安装
 METRICS_STEP = len(STEP_NAMES) - 1
 # 安装了 vmagent 时要验证的抓取任务：vmagent 自采集、对象状态、节点、容器，都要有 Agent 上线后的成功样本
 METRICS_JOBS = ('vmagent', 'kube-state-metrics', 'k8s-node-exporter', 'k8s-cadvisor')
+# 时序库服务器和控制端的时间相差超过这么多秒就判定为没同步：刚采到的指标按时序库的「现在」查不到
+CLOCK_SKEW_LIMIT = 30
 # 安装向导在本集群安装 Agent 时生成的 kubeconfig 的 context 名（kubedoor_setup.agent.CONTEXT）
 SETUP_CONTEXT = 'in-cluster'
 # Agent 清单里 Agent 服务账号的长期令牌（manifests/10-agent.yaml 的 Secret，权限与 Agent 相同）
@@ -259,6 +261,14 @@ def summary(resource):
 
 def fingerprint(resources):
     return hashlib.sha256(json.dumps(resources, sort_keys=True).encode()).hexdigest()
+
+
+def metrics_auth(url):
+    """地址里的账号密码做成 Basic 认证请求头：和通用配置的「测试」一样先按 latin-1 编码，编不了（例如中文密码）再用 UTF-8"""
+    parsed = urlsplit(url)
+    if not parsed.username:
+        return None
+    return probe.basic_auth_header(unquote(parsed.username), unquote(parsed.password or ''))
 
 
 def address_without_auth(value):
@@ -1010,14 +1020,13 @@ class Service:
         base = general_settings.value('prom_url')
         if not base:
             return None, '通用配置里还没有时序库查询地址'
-        parsed = urlsplit(base)
-        auth = aiohttp.BasicAuth(unquote(parsed.username or ''), unquote(parsed.password or '')) if parsed.username else None
         url = address_without_auth(base) + '/api/v1/query'
         query = metrics_query(options['prom_k8s_tag_key'], options['env'], task['id'])
         since = task['payload'].get('metrics_started_at', task['payload'].get('started_at', 0))
         try:
             async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10)) as session:
-                async with session.get(url, auth=auth, params={'query': query, 'nocache': '1'}, allow_redirects=False) as response:
+                async with session.get(url, headers=metrics_auth(base), params={'query': query, 'nocache': '1'},
+                                       allow_redirects=False) as response:
                     if response.status != 200:
                         return None, f'查询时序库返回 HTTP {response.status}'
                     body = await response.json()
@@ -1038,11 +1047,17 @@ class Service:
         return set(METRICS_JOBS) <= fresh
 
     async def metrics_diagnosis(self, task, options, kube=None):
-        """指标验证超时：说明哪些抓取任务没采到新指标；还能连接目标集群时，带上 vmagent 抓取目标的报错。"""
+        """指标验证超时：说明哪些抓取任务没采到新指标；还能连接目标集群时，带上 vmagent 抓取目标的报错。
+        时序库服务器的时间和控制端差得多时，先说时间没同步（这时抓取、写入都正常，只是按时序库的现在查不到）。"""
         fresh = self.metrics_seen.pop(task['id'], None)
         error = self.metrics_errors.pop(task['id'], '')
         if fresh is None:
             return f'Agent 已上线，但没能验证指标采集：{error or "查询时序库失败"}。可登录后在控制台查看监控，或稍后点「重新验证指标采集」'
+        skew = await self.clock_skew()
+        if skew is not None and abs(skew) > CLOCK_SKEW_LIMIT:
+            return (f'Agent 已上线，但时序库服务器的时间比控制端{"快" if skew > 0 else "慢"}约 {abs(skew):.0f} 秒，'
+                    '刚采到的指标按时序库的当前时间查不到。请先同步时序库服务器和各 K8S 节点的时间（NTP），'
+                    '再点「重新验证指标采集」')
         missing = [job for job in METRICS_JOBS if job not in fresh]
         reasons = await self.target_errors(kube, options.get('namespace') or 'kubedoor', missing) if kube else {}
         items = '、'.join(f'{job}（{reasons[job]}）' if reasons.get(job) else job for job in missing)
@@ -1051,6 +1066,22 @@ class Service:
         if normal:
             message += '；已正常：' + '、'.join(normal)
         return message + '。可登录后在控制台查看监控，或稍后点「重新验证指标采集」'
+
+    async def clock_skew(self):
+        """时序库服务器的时间比控制端快多少秒（vector(time())，带 nocache=1 不让 VictoriaMetrics 往前挪 30 秒）；查不了返回 None"""
+        base = general_settings.value('prom_url')
+        if not base:
+            return None
+        try:
+            async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10)) as session:
+                async with session.get(address_without_auth(base) + '/api/v1/query', headers=metrics_auth(base),
+                                       params={'query': 'vector(time())', 'nocache': '1'}, allow_redirects=False) as response:
+                    if response.status != 200:
+                        return None
+                    body = await response.json()
+            return float(body['data']['result'][0]['value'][1]) - time.time()
+        except (aiohttp.ClientError, asyncio.TimeoutError, ValueError, KeyError, TypeError, IndexError):
+            return None
 
     async def target_errors(self, kube, namespace, jobs):
         """经 apiserver 读 vmagent 的 /api/v1/targets，给没采到的抓取任务带上原因；读不到就不带。"""

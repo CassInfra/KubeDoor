@@ -67,6 +67,26 @@ async def test_existing_database_never_adopted(existing, markers):
 
 
 @pytest.mark.asyncio
+async def test_old_tables_in_a_schema_named_after_the_account_are_found():
+    """master 建表不写 schema：库里有和账号同名的 schema 时旧表在那里，也要认出来"""
+    connection = Connection(existing='kubedoor')
+    with pytest.raises(SetupError) as error:
+        await check_postgres(PG, 'mine', connect=AsyncMock(return_value=connection))
+    assert error.value.status == 409 and 'schema kubedoor' in error.value.message
+
+
+def test_existing_tables_are_resolved_through_search_path_and_public():
+    from kubedoor_setup.probes import EXISTING_TABLES_SQL
+    assert "to_regclass('auth_users')" in EXISTING_TABLES_SQL and "to_regclass('public.auth_users')" in EXISTING_TABLES_SQL
+
+
+def test_basic_auth_falls_back_to_utf8_like_master():
+    from kubedoor_setup.probes import basic_auth
+    assert basic_auth('monit', 'p@ss:w/rd').encode() == 'Basic ' + base64.b64encode(b'monit:p@ss:w/rd').decode()
+    assert basic_auth('monit', '密码').encode() == 'Basic ' + base64.b64encode('monit:密码'.encode('utf-8')).decode()
+
+
+@pytest.mark.asyncio
 async def test_own_database_can_resume_without_reinitialization():
     connection = Connection(existing=True, markers=('mine',))
     await reserve_database(PG, 'mine', connect=AsyncMock(return_value=connection))
