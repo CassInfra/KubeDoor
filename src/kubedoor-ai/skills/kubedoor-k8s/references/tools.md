@@ -88,6 +88,7 @@
 | 负载均衡 | `load_balance_analyze`：读取既有配置并生成待执行计划，会保存计划，属于修改操作；`load_balance_execute`：执行经过审阅的 `migrations`；`load_balance_isolated`：查询隔离旧 Pod；`load_balance_check_pods`：核验新 Pod Ready；`load_balance_cleanup`：确认新 Pod 正常后删除指定旧 Pod；`load_balance_node_cpu`：节点 CPU、内存和 Pod 状态 |
 | 华为 CCI | `cci_schedule_profile`：查询 Deployment 的 ScheduleProfile 和 maxNum |
 | 运行配置 | `runtime_config`：按 Deployment 或 Pod 取实际运行的配置（配置中心、环境变量、配置文件合并后的生效值），密码、密钥是占位符；先用 `keys` 缩小范围，用法见 `/skills/kubedoor-config/SKILL.md` |
+| 链路追踪 | `trace_services`、`trace_operations`：有链路数据的服务和接口；`trace_search`：按服务、接口、状态码、耗时等找链路；`trace_stats`：统计数量、错误和耗时分位（要管理员配置 ClickHouse 加速）；`trace_get`：按 Trace ID 取链路并分析根因、关键路径、N+1；`trace_spans`：看 Span 的完整属性和异常堆栈；`trace_fields`：链路里的字段和集群取值。都是只读查询，按 K8S 过滤的参数是 `k8s_namespace`、`k8s_pod`、`k8s_deployment`，用法见 `/skills/kubedoor-trace/SKILL.md` |
 
 `resource_inventory` 中 CPU 单位为 milliCPU、内存为 MB；`jvm_xms_bytes`、`jvm_xmx_bytes`、`jvm_xss_bytes`、`jvm_max_metaspace_bytes` 为字节，`update` 说明采集时间。历史样本不是实时状态。`metrics` 传 `query`，`start/end` 同时提供为区间查询，另可传 `step`；服务端强制当前集群标签过滤。
 

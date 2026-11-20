@@ -20,10 +20,11 @@ KubeDoor AI 助手将自然语言问题与已有管理接口、Kubernetes API、
 | 监控与历史数据 | 查询 Prometheus/VictoriaMetrics 指标及 PostgreSQL 入库资源、JVM、事件、告警数据 |
 | 服务源码 | 按 Deployment 或 Pod 查当前镜像和代码链接；管理员允许后，排障时下载源码，按异常搜索、阅读代码定位原因 |
 | 运行配置与数据查询 | 管理员允许后，按 Deployment 或 Pod 获取服务实际运行的配置（密码、密钥换成占位符，模型看不到明文）；排障时用配置里的连接信息只读查询 MySQL、Redis、Elasticsearch |
+| 链路追踪 | 管理员配置 Jaeger（可选 ClickHouse 加速）后，按服务、接口、状态码、耗时、Pod 等搜索链路和统计报错、耗时；按 traceId 分析调用链，找出最先出错或最耗时的服务，再结合 Pod 日志、事件、指标定位原因 |
 | 工具与回复展示 | 工具区默认折叠，逐项显示运行状态，手动展开查看参数、差异和结果；回复支持 Markdown、表格和代码块 |
 | 权限与审批 | 先权限后审批：按「系统管理 → 权限与审批」的操作权限表判断账号能不能做、要不要人工批准（默认业务变更和 kubectl / K8S API 修改要批准）；可勾选自动批准执行 |
 | 全局记忆 | 总结本人会话为可编辑草稿，或手动新增；共享查看、搜索、分页、多选，所选记忆仅随下一轮发送 |
-| Skills 与 Agent | DeepAgents 加载 KubeDoor 运维、服务源码分析、运行配置与数据查询三个 Skill，支持子 Agent、上下文压缩及持久 checkpoint |
+| Skills 与 Agent | DeepAgents 加载 KubeDoor 运维、服务源码分析、运行配置与数据查询、链路追踪排查四个 Skill，支持子 Agent、上下文压缩及持久 checkpoint |
 | 接入自己的 MCP | 对话框的“MCP 管理”接入自己的 SSE / Streamable HTTP MCP 服务（URL + 可选请求头），按账号隔离、加密保存；启用后对话中按需调用，按工具是否只读决定要不要批准 |
 | 外部 MCP | 提供 Streamable HTTP 和兼容 SSE 入口，保留原工具并提供统一工具与 Skill 资源 |
 
@@ -451,6 +452,29 @@ VictoriaMetrics 的自由 MetricsQL 查询经 master 网关使用现有 `PROM_UR
 
 典型排障流程：服务报连接超时或数据不对 → `runtime_config` 用 `keys` 取数据源、Redis、ES 配置 → 核对地址、超时、连接池、开关是否和预期一致 → 用占位符查询（例如 MySQL `SHOW PROCESSLIST`、`EXPLAIN` 慢 SQL、查某条数据是否存在，Redis `GET` / `TTL` 某个 key）→ 结合日志给出结论。
 
+### 链路追踪
+
+前提是系统管理员在「系统管理 → 链路追踪」配置并启用了 Jaeger（要 2.23 及以上），配置方法见 [链路追踪配置说明](../help/链路追踪配置说明.md)。Jaeger 使用 ClickHouse 存储时，可以再配置「ClickHouse 加速」。
+
+| 工具 | 作用 |
+| --- | --- |
+| `trace_services` | 列出服务名。配了加速时只列当前集群最近 24 小时有流量的服务和 Span 数，否则是 Jaeger 里所有集群的服务 |
+| `trace_operations` | 列出某个服务的接口（Span 名和类型；配了加速时还有请求路径和 Span 数） |
+| `trace_search` | 按服务、接口、Span 类型、时间段、HTTP 状态码（具体值、`4xx` / `5xx` 或范围）、是否报错、耗时、域名、Pod、命名空间、业务字段搜索链路，可以做「包含」匹配；返回最新的链路和 Jaeger 链接 |
+| `trace_stats` | 统计（只有配了 ClickHouse 加速时可用）：按时间、服务、接口、路径、状态码、Pod 等分组，给出 Span 数、报错数、4xx / 5xx 数和 P50 / P95 / P99 耗时 |
+| `trace_get` | 按 traceId 取整条链路并分析：请求最终是否失败（中间出错后恢复的标为「已恢复」）、出错链路和根因候选、关键路径耗时、N+1 重复调用；大链路自动折叠重复调用 |
+| `trace_spans` | 查看个别 Span 或全部出错 Span 的完整属性和异常堆栈 |
+| `trace_fields` | 查看字段映射、业务字段，以及某个服务的链路里实际有哪些字段 |
+
+- 七个工具都是查询，对当前集群有只读及以上权限的账号可用，不需要批准；不需要在线 Agent（由 master 查 Jaeger 和 ClickHouse）。
+- 搜索只返回当前集群的链路（按配置的集群字段匹配 KubeDoor 集群名和别名）；按 traceId 查看时返回整条链路，包括其他集群的 Span，每个 Span 标注所属集群。
+- 一次搜索的所有条件要落在同一个 Span（含它的资源属性）上，例如「网关返回 504 并且下游报错」要分两次查。
+- 没配 ClickHouse 加速时，Jaeger 的查询有几个限制：状态码只能精确匹配（`5xx` 会展开成具体状态码）；「包含」匹配要拉一批链路逐条检查，有扫描上限；结果按时间分段、从新到旧查询，查不完时结果里写明查到了哪个时间点；不能做统计，统计类问题改用指标查询。
+- 结果里的 `authorization`、`cookie`、`token`、`password` 等字段和 URL 里同名参数的值换成 `***`；管理员可以在配置页添加更多要打码的字段。链路属性和 SQL 语句会作为对话内容发给模型服务商。
+- 不记审计（AI 的工具调用记录里有每次查询）；配置修改记审计「链路追踪配置」`tracing.update`。
+
+典型排障流程：用户问某个接口为什么 502 → `trace_operations` 对上接口 → 配了加速时先用 `trace_stats` 看报错从几点开始、集中在哪个 Pod → `trace_search` 找到最新几条报错链路 → `trace_get` 看根因候选和关键路径 → `trace_spans` 看根因 Span 的异常堆栈 → 用 `logs`、`pods`、`events`、`metrics` 查根因 Pod 当时的状态 → 需要时用源码分析或运行配置继续查。
+
 ### 提问示例
 
 | 问题 | 应使用的能力 |
@@ -465,6 +489,8 @@ VictoriaMetrics 的自由 MetricsQL 查询经 master 网关使用现有 `PROM_UR
 | “这个 Pod 一直报 NullPointerException，看看代码哪里有问题” | 先取日志里的堆栈，再 `code_fetch` → `code_search` → `code_read` 定位到具体代码行（需要管理员允许 AI 下载源码） |
 | “看下 order-api 的数据库和 Redis 配置” | `runtime_config` 带 `keys=datasource\|redis`，密码以占位符显示（需要管理员允许 AI 获取运行配置） |
 | “order-api 报找不到订单 123，去库里查下有没有这条数据” | 先 `runtime_config` 取数据源配置，再用里面的地址和占位符 `mysql` 查询（默认要提问人批准） |
+| “deploy-gateway-api 最近一小时的 504 是哪来的，从几点开始的” | `trace_stats` 按时间和 Pod 统计（需要 ClickHouse 加速）→ `trace_search` 找最新的 504 链路 → `trace_get` 看根因候选和关键路径 → 查根因 Pod 的日志和事件 |
+| “traceId 0043c22a5e5b5ca8e0c3e8885c6f3f29 为什么这么慢” | `trace_get`（用户说了大概时间会更快）看关键路径和 N+1，再用 `trace_spans` 看耗时最多的 Span |
 
 ## 权限与执行边界
 

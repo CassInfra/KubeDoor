@@ -30,7 +30,8 @@ from .user_mcp import turn_catalogue
 SKILLS_ROOT = Path(__file__).resolve().parent.parent / "skills"
 SKILLS = [{"id": "kubedoor-k8s", "name": "KubeDoor K8S 运维", "description": "优先使用 KubeDoor 已有查询、资源管控与立即/定时/周期运维接口；补充 K8S API、kubectl、istioctl 与 Pod exec 排障。"},
           {"id": "kubedoor-code", "name": "服务源码分析", "description": "查服务当前镜像和代码链接；排障时下载源码，按异常堆栈和报错搜索、阅读代码定位原因（下载源码要管理员允许）。"},
-          {"id": "kubedoor-config", "name": "运行配置与数据查询", "description": "获取服务实际运行的配置（密码、密钥换成占位符）；排障时用配置里的连接信息只读查询 MySQL、Redis、Elasticsearch。"}]
+          {"id": "kubedoor-config", "name": "运行配置与数据查询", "description": "获取服务实际运行的配置（密码、密钥换成占位符）；排障时用配置里的连接信息只读查询 MySQL、Redis、Elasticsearch。"},
+          {"id": "kubedoor-trace", "name": "链路追踪排查", "description": "按接口、状态码、耗时查 Jaeger 链路（配了 ClickHouse 加速时还能统计影响范围），按 Trace ID 分析根因、关键路径和 N+1，再结合日志、Pod、事件、指标定位问题。"}]
 # Cache invariant (design.md 3.1): the system prompt and tool definitions are
 # identical for every session, channel and turn. Anything that changes per turn
 # (time, scope, capabilities, channel, Skills) belongs in the turn context block.

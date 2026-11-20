@@ -13,7 +13,7 @@ from datetime import date, datetime
 
 import yaml
 
-from .domain import AIError
+from .domain import AIError, BEIJING_TZ
 
 
 EXTRA_CATALOG = {
@@ -65,6 +65,15 @@ EXTRA_CATALOG = {
     "code_symbols": ("GET", "", "local", True),
     # 获取运行配置（master func_manager/runtime_config.py）：网关取回后打码再交给模型（runtime_config.py），路径留空
     "runtime_config": ("GET", "", "live", True),
+    # 链路追踪（master tracing/）：master 查 Jaeger，配了 ClickHouse 加速时列服务 / 接口、搜索、统计走加速表。
+    # 都是只读查询（集群只读及以上，不进「权限与审批」表），参数原样放进 body
+    "trace_services": ("POST", "/api/ai/internal/tracing/services", "historical", True),
+    "trace_operations": ("POST", "/api/ai/internal/tracing/operations", "historical", True),
+    "trace_search": ("POST", "/api/ai/internal/tracing/search", "historical", True),
+    "trace_stats": ("POST", "/api/ai/internal/tracing/stats", "historical", True),
+    "trace_get": ("POST", "/api/ai/internal/tracing/trace", "historical", True),
+    "trace_spans": ("POST", "/api/ai/internal/tracing/spans", "historical", True),
+    "trace_fields": ("POST", "/api/ai/internal/tracing/fields", "historical", True),
 }
 # 源码分析：在网关本地执行的操作（Gateway.execute_code）
 CODE_LOCAL = frozenset({"code_fetch", "code_search", "code_read", "code_symbols"})
@@ -72,6 +81,9 @@ CODE_LOCAL = frozenset({"code_fetch", "code_search", "code_read", "code_symbols"
 CODE_TARGET = frozenset({"code_info", "code_fetch"})
 # 按 Deployment 或 Pod 指定服务（二选一）的全部操作：没指定时用页面选中的，Pod 优先（Gateway.invoke）
 SERVICE_TARGET = CODE_TARGET | {"runtime_config"}
+# 链路追踪：参数校验（_validate_trace）和请求（body 就是声明过的参数）单独处理。按 K8S 过滤的参数带 k8s_ 前缀，
+# 网关也不给它们填页面选中的命名空间（Gateway.invoke），页面上选了什么都不会变成链路的过滤条件
+TRACE_OPERATIONS = frozenset({"trace_services", "trace_operations", "trace_search", "trace_stats", "trace_get", "trace_spans", "trace_fields"})
 
 _NS = {"namespace": "string；Kubernetes 命名空间"}
 _DEP = {**_NS, "deployment": "string；Deployment 名称"}
@@ -84,6 +96,50 @@ _ALERT = {
 }
 _CODE_TARGET = {**_NS, "deployment": "string；Deployment 名称，和 pod 二选一", "pod": "string；Pod 名称，和 deployment 二选一"}
 _CODE_ID = {"code_id": "string；code_fetch 返回的 code_id"}
+# 链路追踪的参数（名称、取值和 master 的约定一致）。search、stats 共用的过滤条件都是 ClickHouse 加速表能表达的
+_TRACE_TIME = {
+    "start": "string；开始时间，北京时间 YYYY-MM-DD HH:mm[:ss]（带时区的 ISO 也认）",
+    "end": "string；结束时间，格式同 start，默认现在",
+    "lookback": "string；没给 start 时往前查多久，例如 15m、1h、6h、1d，默认 1h；时间窗口最长 7 天",
+}
+_TRACE_MATCH = {
+    "service": "string；服务名（service.name），一般就是 Deployment 名，不确定先用 trace_services 查；不填 = 所有服务",
+    "operation": "string；Span 名精确匹配，例如 POST /order/create",
+    "span_kind": "server/client/producer/consumer/internal；查接口收到的请求用 server",
+    "error": "boolean；true = Span 状态是 error",
+    "status_codes": "array，最多 20 项：100..599 的整数，或字符串 \"4xx\"、\"5xx\"；HTTP 状态码等于其中任一个，例如 [504]、[\"5xx\"]",
+    "status_min": "integer 100..599；HTTP 状态码范围的下限（含）",
+    "status_max": "integer 100..599；HTTP 状态码范围的上限（含）",
+    "min_duration": "string；这个 Span 的耗时下限，Go 时长，例如 500ms、3s",
+    "max_duration": "string；这个 Span 的耗时上限，格式同 min_duration",
+    "method": "string；请求方法，例如 POST",
+    "path": "string；请求路径（url.path）精确匹配，例如 /order/create",
+    "host": "string；域名或被调方地址（server.address 等）",
+    "k8s_pod": "string；Pod 名",
+    "k8s_namespace": "string；命名空间",
+}
+_TRACE_SEARCH = {
+    **_TRACE_MATCH,
+    "route": "string；路由模板（http.route），例如 /order/{id}",
+    "url": "string；完整 URL（url.full）",
+    "client_ip": "string；客户端 IP",
+    "exception_type": "string；异常类型（exception 事件的 exception.type）",
+    "k8s_deployment": "string；Deployment 名",
+    "attributes": "object {属性名: 字符串值}，最多 10 项；其他属性精确匹配，数字也写成字符串；业务字段的属性名先用 trace_fields 查",
+    "contains": "object {键: 子串}，最多 3 项；不区分大小写的包含匹配，键是 operation、path、query（查询参数）、url、host、k8s_pod 或属性名",
+    **_TRACE_TIME,
+    "limit": "integer 1..50；最多返回多少条链路，默认 20",
+}
+_TRACE_STATS = {
+    **dict.fromkeys(_TRACE_MATCH, "同 trace_search"),
+    "contains": "object {键: 子串}，最多 3 项；不区分大小写的包含匹配，键只能是 operation、path、query（查询参数）、host、k8s_pod",
+    **dict.fromkeys(_TRACE_TIME, "同 trace_search"),
+    "group_by": "array，最多 2 项：time/service/operation/path/status_code/k8s_pod/k8s_namespace/host/kind/method/status；不填 = 不分组，只看 totals",
+    "interval": "1m/5m/10m/1h；group_by 含 time 时每个时间桶多长，不填按窗口自动选",
+    "top": "integer 1..100；最多返回多少行，默认 30",
+}
+_TRACE_ID = {"trace_id": "string；Trace ID，32 位以内的十六进制"}
+_TRACE_AROUND = {"around": "string；链路大概发生的时间，北京时间 YYYY-MM-DD HH:mm[:ss]"}
 EXTRA_SCHEMAS = {
     "pod_list": ([], {**_NS, "namespaces": "string[]；多个命名空间；空数组表示全部，优先于 namespace", "node_name": "string；筛选节点"}, "集群 Pod 列表与容器状态、CPU/内存，支持多个命名空间和指定节点；无需自己拼 K8S API"),
     "delete_pods": (["pods"], {"pods": "非空 object[]；每项 {namespace:string,pod:string}，批量删除目标 Pod"}, "批量删除指定 Pod；控制器可能创建替代 Pod"),
@@ -129,6 +185,13 @@ EXTRA_SCHEMAS = {
     "code_read": (["code_id", "path"], {**_CODE_ID, "path": "string；相对源码根目录的文件路径（code_search 返回的 path）", "start_line": "integer >=1；默认 1", "lines": "integer 1..500；默认 200"}, "按行读取已下载源码里的文本文件，每行前面带行号；在 kubedoor-ai 本地执行，不需要在线 Agent"),
     "code_symbols": (["code_id"], {**_CODE_ID, "name": "string；类、方法、函数等的名字，精确匹配，可写成 Class.method 限定所属类型", "path": "string；相对源码根目录的文件路径；只传 path 返回这个文件的大纲", "kind": "string；按种类过滤，例如 class、interface、method、function、field", "max_results": "integer 1..200；默认 100"}, "用 ctags 找已下载源码里的定义：按名字找类、方法、函数定义在哪个文件哪一行（不含调用处），或者列出一个文件里全部定义的行号；name 和 path 至少传一个；在 kubedoor-ai 本地执行"),
     "runtime_config": (["namespace"], {**_CODE_TARGET, "container": "string；容器名，多容器时指定，默认第一个容器", "keys": "string；按配置名过滤的正则，不区分大小写，最多 500 字符，例如 datasource|redis|elasticsearch；Node.js 的嵌套配置按 a.b.c 完整路径匹配，配置文件不过滤", "detail": "boolean；附带配置来源（优先级从高到低）、打码值从哪里补回、说明", "refresh": "boolean；不用缓存，重新采集"}, "获取服务实际运行的配置（配置中心、环境变量、配置文件合并后的生效值），用于核对连接地址、开关、超时、线程池和配置是否生效，以及查数据库前找连接信息；按 Pod 查用这个 Pod，排障时用出问题的 Pod。先用 keys 缩小范围，不加 keys 返回全部应用配置，太长会截断。密码、密钥是 <secret:…> 占位符，可以原样填进 mysql / redis / elasticsearch 的 password、api_key、sentinel_password（host / url 要用这份配置里写的地址）。管理员没有开启「允许 AI 获取运行配置」时返回 ai_config_disabled"),
+    "trace_services": ([], {"pattern": "string；服务名包含的关键字，不区分大小写，最多 100 个字符", "limit": "integer 1..500；默认 200"}, "列出有链路的服务（service.name，一般是 Deployment 名），pattern 按关键字过滤。配了 ClickHouse 加速时只列当前集群最近 24 小时有流量的服务（source=clickhouse），否则是 Jaeger 里所有集群的服务。链路工具都是只读查询，时间按北京时间，排查方法见 Skill kubedoor-trace"),
+    "trace_operations": (["service"], {"service": "string；服务名", "span_kind": _TRACE_MATCH["span_kind"], "pattern": "string；Span 名或路径包含的关键字，不区分大小写，最多 100 个字符", "limit": "integer 1..500；默认 200", "lookback": "string；只对 ClickHouse 加速表：统计最近多久，例如 6h、2d，默认 24h，最长 7d"}, "列出服务的接口：Span 名 name、种类 kind，加速表另有路径 path 和 Span 数。服务端 Span 名通常是「方法 + 路由」，路由参数是占位符；网关的服务端 Span 名可能是路由 ID，这时用 trace_search 的 path 或 contains 查"),
+    "trace_search": ([], _TRACE_SEARCH, "按条件找链路，从新到旧返回（含 Jaeger 链接 url）。所有条件要落在同一个 Span（含它的资源属性）上；状态码用 status_codes 或 status_min/status_max，报错用 error=true（服务端返回 4xx 一般不算 error）。source=jaeger 时按时间片查、contains 要逐条扫描，看 coverage / scan 是否查完；没查到不等于没发生"),
+    "trace_stats": ([], _TRACE_STATS, "用 ClickHouse 加速表统计命中条件的 Span 数、出错数、4xx / 5xx 数和 p50 / p95 / p99 / 最大耗时，可按 group_by 分组；看接口请求量加 span_kind=server。没配加速时返回 not_supported，改用 metrics"),
+    "trace_get": (["trace_id"], {**_TRACE_ID, **_TRACE_AROUND, "max_nodes": "integer 50..400；调用树最多显示多少个节点，默认 200", "focus_span": "string；Span ID：只看从根到这个 Span 的路径和它下面三层"}, "按 Trace ID 取整条链路并分析：outcome（failed / client_error / recovered / succeeded / unknown）、折叠的调用树 tree、根因候选 root_cause、关键路径、N+1 和 Jaeger 链接 url。尽量传 around（大概时间）：不给时从近到远逐级放大范围，可能很慢；可能含其他集群的 Span"),
+    "trace_spans": (["trace_id"], {**_TRACE_ID, "span_ids": "array，最多 20 项；Span ID（trace_get 返回的 id），十六进制", "errors": "boolean；true = 链路里全部出错的 Span（最多 20 个），和 span_ids 二选一", **_TRACE_AROUND}, "看指定 Span（span_ids，或 errors=true 取全部出错 Span，一次最多 20 个）的属性、资源属性、事件（含异常堆栈）和状态；敏感值已打码，过长的值已截断"),
+    "trace_fields": ([], {"service": "string；给了就取这个服务最近的链路，列出实际出现的属性名和示例"}, "查集群字段和取值、各语义字段对应的属性名、业务字段 custom_fields、是否配置了 ClickHouse 加速；给 service 时列出它最近链路里实际出现的属性名和示例。按业务字段（订单号等）查链路前先用它找属性名"),
 }
 
 _CONTENT_TYPES = {"service", "deployment", "node", "pod", "configmap", "secret", "ingress", "persistentvolumeclaim", "daemonset", "statefulset", "job", "cronjob"}
@@ -155,6 +218,30 @@ _POSITIVE_RESOURCES = {"update_deployment_resources", "resource_control_add"}
 _DNS_LABEL = re.compile(r"[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?\Z")
 _DNS_NAME = re.compile(r"[a-z0-9]([-a-z0-9.]{0,251}[a-z0-9])?\Z")
 
+# ---- 链路追踪的参数校验（取值范围和 master 的约定一致；master 还会再校验一次）----
+_TRACE_TIME_FORMAT = "北京时间 YYYY-MM-DD HH:mm[:ss]（带时区的 ISO 也认）"
+_TRACE_MAX_WINDOW = 7 * 86400   # 时间窗口最长 7 天（秒）
+_TRACE_TEXT_LIMIT = 2048
+_TRACE_CONTAINS_LIMIT = 1024
+_TRACE_TEXT_FIELDS = {"service", "operation", "method", "route", "path", "url", "host", "client_ip", "exception_type",
+                      "k8s_pod", "k8s_namespace", "k8s_deployment"}
+_TRACE_KINDS = ("server", "client", "producer", "consumer", "internal")
+_TRACE_GROUP_BY = ("time", "service", "operation", "path", "status_code", "k8s_pod", "k8s_namespace", "host", "kind", "method", "status")
+_TRACE_INTERVALS = ("1m", "5m", "10m", "1h")
+_TRACE_RANGES = {"status_min": (100, 599), "status_max": (100, 599), "top": (1, 100), "max_nodes": (50, 400)}
+# ClickHouse 加速表没有的条件：trace_search 用了它们改查 Jaeger，trace_stats 不支持
+_TRACE_JAEGER_ONLY = ("route", "url", "client_ip", "exception_type", "k8s_deployment", "attributes")
+_TRACE_STATS_CONTAINS = ("operation", "path", "query", "host", "k8s_pod")
+# 写进 contains 会被当成属性名、什么都匹配不到的键：服务、命名空间、Deployment、Pod 用精确匹配的参数
+_TRACE_CONTAINS_MISUSE = ("service", "namespace", "k8s_namespace", "deployment", "k8s_deployment", "pod")
+_LOOKBACK = re.compile(r"([0-9]{1,7})([smhd])")
+_LOOKBACK_SECONDS = {"s": 1, "m": 60, "h": 3600, "d": 86400}
+_GO_DURATION = re.compile(r"(?:(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:ns|us|µs|μs|ms|s|m|h))+")
+_GO_DURATION_PART = re.compile(r"([0-9]+(?:\.[0-9]*)?|\.[0-9]+)(ns|us|µs|μs|ms|s|m|h)")
+_GO_UNITS = {"ns": 1e-9, "us": 1e-6, "µs": 1e-6, "μs": 1e-6, "ms": 1e-3, "s": 1, "m": 60, "h": 3600}
+_TRACE_ID_RE = re.compile(r"[0-9a-fA-F]{1,32}")
+_SPAN_ID_RE = re.compile(r"[0-9a-fA-F]{1,16}")
+
 
 def _string(value, field, *, allow_empty=False):
     if not isinstance(value, str) or (not allow_empty and not value.strip()):
@@ -170,6 +257,152 @@ def _resource_type(operation, value):
     return value
 
 
+def _control_free(value: str) -> bool:
+    return not any(ord(c) < 32 or ord(c) == 127 for c in value)
+
+
+def _trace_text(value, field, limit=_TRACE_TEXT_LIMIT):
+    if not isinstance(value, str) or not value.strip() or len(value) > limit or not _control_free(value):
+        raise AIError(f"{field} 必须为非空字符串（最多 {limit} 个字符，不能有换行等控制字符）；不需要这个条件就不要传")
+
+
+def _trace_time(value, field) -> datetime:
+    """北京时间（不带时区）或带时区的 ISO；返回带时区的时间，用来比较先后"""
+    try:
+        if not isinstance(value, str) or len(value) > 64:
+            raise ValueError
+        parsed = datetime.fromisoformat(value)
+    except ValueError:
+        raise AIError(f"{field} 必须为{_TRACE_TIME_FORMAT}") from None
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=BEIJING_TZ)
+
+
+def _trace_lookback(value, field):
+    match = _LOOKBACK.fullmatch(value) if isinstance(value, str) else None
+    if not match or int(match[1]) == 0:
+        raise AIError(f"{field} 必须为正整数加单位 s/m/h/d，例如 15m、1h、2d")
+    if int(match[1]) * _LOOKBACK_SECONDS[match[2]] > _TRACE_MAX_WINDOW:
+        raise AIError(f"{field} 最长 7 天（7d）")
+
+
+def _go_duration(value, field) -> float:
+    """Go 时长（500ms、3s、1m30s）换成秒"""
+    if not isinstance(value, str) or len(value) > 32 or not _GO_DURATION.fullmatch(value):
+        raise AIError(f"{field} 必须为 Go 时长，例如 500ms、3s、1m")
+    seconds = sum(float(number) * _GO_UNITS[unit] for number, unit in _GO_DURATION_PART.findall(value))
+    if seconds <= 0:
+        raise AIError(f"{field} 必须大于 0")
+    if seconds > 86400:   # 和 master 一致：最长 24h
+        raise AIError(f"{field} 最长 24h")
+    return seconds
+
+
+def _trace_mapping(value, field, max_items, value_limit):
+    """attributes / contains：{属性名: 字符串}"""
+    if not isinstance(value, dict) or not 1 <= len(value) <= max_items:
+        raise AIError(f"{field} 必须为 1~{max_items} 项的对象，例如 {{\"属性名\": \"值\"}}")
+    for key, item in value.items():
+        if not isinstance(key, str) or not 1 <= len(key) <= 200 or any(c.isspace() for c in key) or not _control_free(key):
+            raise AIError(f"{field} 的键必须为 1~200 个字符的属性名，不能有空白")
+        if not isinstance(item, str):
+            raise AIError(f"{field}.{key} 的值必须为字符串，数字也写成字符串")
+        _trace_text(item, f"{field}.{key}", value_limit)
+
+
+def _validate_trace(operation: str, args: dict) -> None:
+    """链路追踪的参数。只校验声明过的参数（build_request 也只转发这些），另外拦下几种会被静默丢掉、让结果口径变了的写法"""
+    misnamed = [field for field in ("namespace", "deployment", "pod") if field in args]
+    if misnamed:
+        raise AIError(f"链路追踪工具没有 {'、'.join(misnamed)} 参数：按 K8S 过滤用 trace_search / trace_stats 的 k8s_namespace、k8s_pod、k8s_deployment")
+    if operation == "trace_stats":
+        unsupported = [field for field in _TRACE_JAEGER_ONLY if field in args]
+        if unsupported:
+            raise AIError(f"trace_stats 不支持 {'、'.join(unsupported)}（ClickHouse 加速表没有这些字段）；要按它们找链路用 trace_search")
+    if operation == "trace_search":
+        misplaced = [field for field in ("group_by", "interval", "top") if field in args]
+        if misplaced:
+            raise AIError(f"{'、'.join(misplaced)} 是 trace_stats 的参数；分组统计用 trace_stats")
+    for field in EXTRA_SCHEMAS[operation][1]:
+        if field not in args:
+            continue
+        value = args[field]
+        if field in _TRACE_TEXT_FIELDS:   # service、operation、path 等精确匹配的条件
+            _trace_text(value, field)
+        elif field == "pattern":
+            _trace_text(value, field, 100)
+        elif field == "span_kind":
+            if value not in _TRACE_KINDS:
+                raise AIError("span_kind 必须为 " + "/".join(_TRACE_KINDS))
+        elif field in ("error", "errors"):
+            if type(value) is not bool:
+                raise AIError(f"{field} 必须为 boolean")
+        elif field == "limit":
+            maximum = 50 if operation == "trace_search" else 500
+            if type(value) is not int or not 1 <= value <= maximum:
+                raise AIError(f"limit 必须为 1..{maximum} 的整数")
+        elif field in _TRACE_RANGES:
+            low, high = _TRACE_RANGES[field]
+            if type(value) is not int or not low <= value <= high:
+                raise AIError(f"{field} 必须为 {low}..{high} 的整数")
+        elif field == "status_codes":
+            if not isinstance(value, list) or not 1 <= len(value) <= 20:
+                raise AIError("status_codes 必须为 1~20 项的数组，例如 [504] 或 [\"5xx\"]")
+            for item in value:
+                if not (isinstance(item, str) and item in ("4xx", "5xx")) and not (type(item) is int and 100 <= item <= 599):
+                    raise AIError("status_codes 每项是 100..599 的整数（不加引号），或字符串 \"4xx\"、\"5xx\"")
+        elif field in ("min_duration", "max_duration"):
+            _go_duration(value, field)
+        elif field in ("start", "end", "around"):
+            _trace_time(value, field)
+        elif field == "lookback":
+            _trace_lookback(value, field)
+        elif field == "attributes":
+            _trace_mapping(value, field, 10, _TRACE_TEXT_LIMIT)
+        elif field == "contains":
+            _trace_mapping(value, field, 3, _TRACE_CONTAINS_LIMIT)
+            misuse = [key for key in value if key in _TRACE_CONTAINS_MISUSE]
+            if misuse:
+                raise AIError(f"contains 的键不能是 {'、'.join(misuse)}：服务、命名空间、Deployment、Pod 用 service、k8s_namespace、"
+                              "k8s_deployment、k8s_pod 精确匹配，服务名不确定先用 trace_services 的 pattern 查")
+            if operation == "trace_stats" and any(key not in _TRACE_STATS_CONTAINS for key in value):
+                raise AIError("trace_stats 的 contains 只能用 " + "、".join(_TRACE_STATS_CONTAINS) + "（加速表的列）；按其他属性包含匹配用 trace_search")
+        elif field == "group_by":
+            if (not isinstance(value, list) or len(value) > 2
+                    or any(not isinstance(item, str) or item not in _TRACE_GROUP_BY for item in value)
+                    or len(set(value)) != len(value)):
+                raise AIError("group_by 最多 2 项、不能重复，取值 " + "/".join(_TRACE_GROUP_BY))
+        elif field == "interval":
+            if value not in _TRACE_INTERVALS:
+                raise AIError("interval 必须为 " + "/".join(_TRACE_INTERVALS))
+        elif field == "trace_id":
+            if not isinstance(value, str) or not _TRACE_ID_RE.fullmatch(value):
+                raise AIError("trace_id 必须为 1~32 位十六进制")
+        elif field == "focus_span":
+            if not isinstance(value, str) or not _SPAN_ID_RE.fullmatch(value):
+                raise AIError("focus_span 必须为 Span ID（16 位以内的十六进制）")
+        elif field == "span_ids":
+            if (not isinstance(value, list) or not 1 <= len(value) <= 20
+                    or any(not isinstance(item, str) or not _SPAN_ID_RE.fullmatch(item) for item in value)):
+                raise AIError("span_ids 必须为 1~20 个 Span ID（16 位以内的十六进制）")
+        else:   # 新增参数要在上面登记校验方式（测试会覆盖每个声明的参数）
+            raise AIError(f"{operation} 的参数 {field} 没有校验规则", 500, "internal_error")
+    if operation in ("trace_search", "trace_stats"):
+        if "status_min" in args and "status_max" in args and args["status_min"] > args["status_max"]:
+            raise AIError("status_min 不能大于 status_max")
+        if "min_duration" in args and "max_duration" in args and _go_duration(args["min_duration"], "min_duration") > _go_duration(args["max_duration"], "max_duration"):
+            raise AIError("min_duration 不能大于 max_duration")
+        if "start" in args and "end" in args:
+            start, end = _trace_time(args["start"], "start"), _trace_time(args["end"], "end")
+            if start >= end:
+                raise AIError("start 必须早于 end")
+            if (end - start).total_seconds() > _TRACE_MAX_WINDOW:
+                raise AIError("时间窗口最长 7 天")
+    if operation == "trace_stats" and "interval" in args and "time" not in args.get("group_by", []):
+        raise AIError("interval 只用于按时间分组，group_by 要包含 time")
+    if operation == "trace_spans" and ("span_ids" in args) == (args.get("errors") is True):
+        raise AIError("trace_spans 需要 span_ids 或 errors=true（二选一）")
+
+
 def validate_arguments(operation: str, args: dict) -> None:
     """Reject malformed business calls before arguments enter the approval ledger."""
     if operation not in EXTRA_CATALOG:
@@ -180,6 +413,9 @@ def validate_arguments(operation: str, args: dict) -> None:
     for field in required:
         if field not in args or args[field] is None:
             raise AIError(f"{operation} 需要 {field}")
+    if operation in TRACE_OPERATIONS:
+        _validate_trace(operation, args)
+        return
     for field in hints:
         if field not in args:
             continue
@@ -345,6 +581,9 @@ def build_request(operation: str, args: dict, env: str) -> tuple[dict, dict | No
         for snake, camel in (("reporting_component", "reportingComponent"), ("reporting_instance", "reportingInstance")):
             if snake in body:
                 body[camel] = body.pop(snake)
+    elif operation in TRACE_OPERATIONS:
+        # 链路追踪：参数名就是 master 的约定，原样放进 body；集群只在 query 的 env 里
+        body = values
     else:
         query.update(values)
         if operation in ("resource_content", "resource_delete"):

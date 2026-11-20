@@ -27,6 +27,7 @@ from func_manager import data_retention
 from func_manager import ai_api
 from func_manager import code_info
 from func_manager import runtime_config
+from tracing import api as tracing_api
 from func_manager.workload_relay import WorkloadRelay
 from func_manager.pod_exec_relay import PodExecRelay
 from func_manager.pod_log_relay import PodLogRelay
@@ -1090,6 +1091,9 @@ code_info.register_routes(app, call_agent_api)
 
 # ==================== 获取运行配置(Deployment / Pod 页;配置在 /api/admin/runtime-config,见 func_manager/runtime_config.py) ====================
 runtime_config.register_routes(app)
+
+# ==================== 链路追踪(AI 助手查链路;配置在 /api/admin/tracing,AI 走 /api/ai/internal/tracing/*,见 tracing/) ====================
+tracing_api.register_routes(app)
 # 网页安装 / 修复 Agent(/api/admin/agent-installations/*,修复弹框的检查 /api/admin/agent-health)
 agent_install_api.register_routes(app, clients, call_agent_api)
 

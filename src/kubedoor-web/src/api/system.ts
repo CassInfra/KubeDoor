@@ -341,3 +341,220 @@ export const testRuntimeConfigSettings = (data: {
     // 一次获取最长 120 秒(含 202 重试),再留些网络余量
     { timeout: 130000 }
   );
+
+/** 链路追踪的语义字段,顺序即页面上的显示顺序(和 master tracing/fields.py 一致) */
+export type TracingFieldKey =
+  | "status_code"
+  | "method"
+  | "route"
+  | "path"
+  | "url"
+  | "query"
+  | "host"
+  | "client_ip"
+  | "exception_type"
+  | "pod"
+  | "namespace"
+  | "deployment";
+
+/** 语义字段 → 候选属性名(顺序即优先级,每项 0~5 个) */
+export type TracingFieldMap = Record<TracingFieldKey, string[]>;
+
+/** 业务字段:链路里记录的业务标识,告诉 AI 按哪个属性查 */
+export interface TracingCustomField {
+  key: string;
+  label: string;
+}
+
+/** ClickHouse 加速(可选);GET 返回的没有 password,换成 has_password */
+export interface TracingClickHouse {
+  enabled: boolean;
+  url: string;
+  database: string;
+  table: string;
+  /** 汇总表,可空 = 没有汇总表 */
+  dim_table: string;
+  username: string;
+  /** 只写:不传表示沿用已保存的密码 */
+  password?: string;
+  /** 只写:true 表示清空已保存的密码(同时忽略 password),换成没有密码的账号时用 */
+  clear_password?: boolean;
+  /** GET 返回:已保存过密码 */
+  has_password?: boolean;
+  /** 单条 SQL 的超时(秒),5~120 */
+  timeout: number;
+  tls_verify: boolean;
+}
+
+/** 链路追踪配置(系统管理 → 链路追踪) */
+export interface TracingConfig {
+  enabled: boolean;
+  /** Jaeger 查询地址(Jaeger UI 的地址,含 base path) */
+  url: string;
+  /** 给人点的 Jaeger UI 地址;空 = url */
+  ui_url: string;
+  /** 请求头:同获取代码接口,值只写不读 */
+  headers: CodeInfoHeader[];
+  /** 单次请求超时(秒),5~120 */
+  timeout: number;
+  tls_verify: boolean;
+  /** 链路里区分集群的资源属性名,例如 k8sname;空 = 不按集群过滤 */
+  cluster_key: string;
+  fields: TracingFieldMap;
+  custom_fields: TracingCustomField[];
+  /** 额外打码的属性名 */
+  mask_keys: string[];
+  clickhouse: TracingClickHouse;
+}
+
+/** KubeDoor 的集群和别名(Agent 管理页维护) */
+export interface TracingCluster {
+  env: string;
+  aliases: string[];
+}
+
+/** GET / PUT 的返回 */
+export interface TracingSettings extends TracingConfig {
+  /** 字段映射的默认候选 */
+  field_defaults: TracingFieldMap;
+  /** 字段映射的中文名称 */
+  field_labels: Record<TracingFieldKey, string>;
+  /** 字段映射的层级:空 = 不限(Span + 资源属性),event = 异常事件 */
+  field_levels?: Partial<Record<TracingFieldKey, string>>;
+  /** 内置打码的属性名 */
+  mask_builtin?: string[];
+  clusters: TracingCluster[];
+  updated_by?: string | null;
+  updated_at?: string | null;
+}
+
+/** 提交的配置:没传的字段沿用已保存的(右上角开关只传 enabled) */
+export type TracingConfigInput = Partial<Omit<TracingConfig, "clickhouse">> & {
+  clickhouse?: Partial<TracingClickHouse>;
+};
+
+export type TracingTestTarget = "jaeger" | "clickhouse";
+
+/** Jaeger /api/v3/capabilities 的返回;false 的字段省略 */
+export interface TracingCapabilities {
+  search?: {
+    withoutServiceName?: boolean;
+    sameSpanConjunction?: boolean;
+    filter?: { levels?: string[]; operators?: string[] };
+  };
+}
+
+export interface TracingJaegerTest {
+  ok: boolean;
+  elapsed_ms: number;
+  services_count?: number;
+  /** 服务列表(前 1000 个) */
+  services?: string[];
+  /** 2.23 之前没有这个接口:null */
+  capabilities?: TracingCapabilities | null;
+  /** Jaeger ≥ 2.23 且支持结构化过滤,能搜索 */
+  search_ok?: boolean;
+  messages?: string[];
+  error?: string;
+}
+
+/** 链路里的集群取值和它对上的 KubeDoor 集群(对不上或有歧义为 null) */
+export interface TracingClusterValue {
+  value: string;
+  env: string | null;
+  /** 同时是几个集群的名称或别名 */
+  ambiguous?: boolean;
+  /** ClickHouse 测试:最近 10 分钟的 Span 数 */
+  spans?: number;
+}
+
+export interface TracingClickHouseTest {
+  ok: boolean;
+  elapsed_ms: number;
+  version?: string;
+  /** 表名 → 缺少的列 */
+  missing_columns?: Record<string, string[]>;
+  cluster_values?: TracingClusterValue[];
+  messages?: string[];
+  error?: string;
+}
+
+export interface TracingTestResults {
+  jaeger: TracingJaegerTest;
+  clickhouse: TracingClickHouseTest;
+}
+
+export type TracingKeyLevel = "span" | "resource" | "event" | "scope";
+
+/** 识别字段:链路里出现过的一个属性 */
+export interface TracingObservedKey {
+  key: string;
+  level: TracingKeyLevel;
+  types: string[];
+  count: number;
+  /** 最多 3 个示例值(每个 ≤80 字,敏感值已打码) */
+  examples: string[];
+}
+
+/** 识别字段:取值能对上 KubeDoor 集群名或别名的资源属性 */
+export interface TracingClusterCandidate {
+  key: string;
+  values: TracingClusterValue[];
+  matched_envs: string[];
+}
+
+export interface TracingAnalyzeResult {
+  traces: number;
+  spans: number;
+  keys: TracingObservedKey[];
+  cluster_candidates: TracingClusterCandidate[];
+  suggestions: {
+    cluster_key?: string;
+    fields?: Partial<TracingFieldMap>;
+  };
+  /** 说明,例如取样时没找到链路 */
+  notes?: string[];
+}
+
+/** 识别字段:从 Jaeger 按服务取样,或者解析粘贴的 Trace JSON(≤5MB) */
+export type TracingAnalyzeRequest = { config?: TracingConfigInput } & (
+  | { mode: "sample"; service: string; lookback?: string }
+  | { mode: "json"; trace_json: string }
+);
+
+export const getTracingConfig = () =>
+  http.request<Result<TracingSettings>>("get", "/api/admin/tracing");
+
+/** 保存配置;没传的字段沿用原值(右上角开关只传 enabled) */
+export const saveTracingConfig = (data: TracingConfigInput) =>
+  http.request<Result<TracingSettings>>("put", "/api/admin/tracing", {
+    data
+  });
+
+/**
+ * 用页面上的配置(不用先保存,请求头的值和密码留空用已保存的)测试 Jaeger 或 ClickHouse;
+ * timeout 是浏览器等待的毫秒数,按配置的超时和要发的请求数算
+ */
+export const testTracingConfig = <T extends TracingTestTarget>(
+  target: T,
+  config: TracingConfigInput,
+  timeout = 130000
+) =>
+  http.request<Result<TracingTestResults[T]>>(
+    "post",
+    "/api/admin/tracing/test",
+    { data: { target, config } },
+    { timeout }
+  );
+
+/** 识别字段:样例只用于识别,不保存 */
+export const analyzeTracingFields = (
+  data: TracingAnalyzeRequest,
+  timeout = 130000
+) =>
+  http.request<Result<TracingAnalyzeResult>>(
+    "post",
+    "/api/admin/tracing/analyze",
+    { data },
+    { timeout }
+  );

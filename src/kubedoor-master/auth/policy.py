@@ -348,6 +348,9 @@ RULES = (
     _rule('POST', '/api/auth/logout', 'public'),  # 会话失效时也要能清 Cookie
     _rule('GET|POST', '/api/auth/(me|password)', 'session'),
     # ---- 系统管理:用户、集群授权、LDAP、审计、权限与审批、获取代码接口、获取运行配置接口、消息通知 ----
+    # 链路追踪「识别字段」只读分析粘贴的 Trace JSON(最大 5MB):不当写操作,中间件就不会为了取审计的集群先读请求体
+    # (全局 client_max_size 是 2MB,预读超过 2MB 的请求体会失败并读掉一部分,handler 再按流读就不完整了)
+    _rule('POST', '/api/admin/tracing/analyze', 'admin', write=False),
     _rule('', '/api/admin/.+', 'admin'),
     # ---- AI 服务内部桥(获取代码、获取运行配置等由 handler 再按集群和操作权限校验)----
     _rule('', '/api/ai/internal/.+', 'internal'),

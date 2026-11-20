@@ -183,7 +183,7 @@ Deployment 重启和扩缩容均支持三种执行方式：
 
 目录也接入节点调度、批量 Pod 操作、Service/Ingress 详情、资源 YAML 读写、
 StatefulSet/DaemonSet 立即重启、镜像标签、CCI、负载均衡、历史事件与告警等
-已有页面接口。工具分类见 [Skill 工具参考](skills/kubedoor-k8s/references/tools.md)，
+已有页面接口，以及链路追踪查询（见下文）。工具分类见 [Skill 工具参考](skills/kubedoor-k8s/references/tools.md)，
 完整参数以 `/api/ai/tools` 返回为准；接口不支持的类型（如 CRD）使用通用 K8S 工具。
 
 通用能力包括 Kubernetes API 和 CRD、`kubectl`、`istioctl`、Pod exec，以及
@@ -232,6 +232,24 @@ Xms、Xmx、Xss、MaxMetaspace 等已入库 JVM 参数；它表示采集或管�
 - **连接地址核对**（只在用了占位符时）：配置里的密码只能连这个服务自己配置的地址，防止模型或提示注入把密码发到别处。连接的主机（`runtime_config.connection_host`：mysql / redis 的 `host`，elasticsearch 的 `url` 主机名；小写，IPv6 去掉方括号）要作为完整的主机名出现在每个相关服务的配置原文里（`host_in_config`：config / other_config / env 的值和配置文件内容；不区分大小写、不比较端口；`example.com` 不算 `a.example.com`，`10.0.0.1` 不算 `10.0.0.12`，IP 和域名不能互换），否则不执行，返回 `secret_host_mismatch`。agent、direct 两种来源都在网关执行前核对。Redis 集群的 MOVED / ASK 由 kubedoor-tools 自动跳转；哨兵模式下 `host` / `port` 是配置里的哨兵地址、`sentinel_master` 是主节点名，工具向哨兵查到主节点再连。
 - **结果打码**：换出来的原文至少 6 个字符（`MIN_RESULT_SECRET_LENGTH`）的追加进 `ctx.secrets`，结果里出现的由 `dispatch` 打码；更短的不追加（全文替换会把结果里同样的短字符串都打掉，例如密码是 root 时所有的 root），结果里名字像密码的列和字段照样由 kubedoor-tools 打码。
 - **来源**：`auto` 时本轮来源能力里 Agent 在线且 `data_tools=true`（master bootstrap 返回、新版 Agent 声明）用 `agent`，否则 `direct`；指定 `agent` 而它不支持时建动作前就拒绝。`direct` 连不上或超时时结果带 `hint`，提示业务库通常只在业务集群里连得通、请升级 Agent。
+
+### 链路追踪（`kubedoor-trace` Skill）
+
+基于「系统管理 → 链路追踪」（master `tracing/`）：master 直连 Jaeger（api_v3，搜索要 2.23 及以上），配了 ClickHouse 加速时列服务 / 接口、搜索、统计查加速表，按 Trace ID 取链路一律走 Jaeger。七个目录操作都是查询（集群只读及以上，不进「权限与审批」表，没有 `TOOL_OPS`），网关 POST 到 master 的 `/api/ai/internal/tracing/{op}`，query 只有 `env`，body 是声明过的参数（`build_request` 原样转发）：
+
+| operation | master `tracing/…` | 作用 |
+| --- | --- | --- |
+| `trace_services` | `services` | 有链路数据的服务；配了加速表时只列当前集群最近 24 小时有流量的 |
+| `trace_operations` | `operations` | 服务的 Span 名和种类，加速表另给路径和 Span 数 |
+| `trace_search` | `search` | 按服务、Span 名、状态码、耗时、K8S 和属性条件找链路；条件都能用加速表表达时查加速表，否则 Jaeger 按时间片从新到旧查（`coverage`），`contains` 逐条扫描链路（`scan`） |
+| `trace_stats` | `stats` | 用加速表分组统计 Span 数、出错数、4xx / 5xx、耗时分位；没配加速表返回 `not_supported` |
+| `trace_get` | `trace` | 按 Trace ID 取整条链路（含其他集群的 Span）并分析：outcome、折叠后的调用树、根因候选、关键路径、N+1 |
+| `trace_spans` | `spans` | 指定 Span（或全部出错 Span，最多 20 个）的完整属性、事件和异常堆栈，敏感值由 master 打码 |
+| `trace_fields` | `fields` | 按哪个字段、哪些值识别当前集群，字段映射、业务字段；给 service 时附最近链路里实际出现的属性 |
+
+- 参数名、取值范围和错误码以 master 的约定为准，网关按同样的规则先校验（`catalogue._validate_trace`），不合格的直接报错、不调 master。另外拦下几种会被静默丢掉、让结果口径变了的写法：传 `namespace` / `deployment` / `pod`（要用 `k8s_` 前缀的参数）、`trace_stats` 用了加速表没有的条件（route、url、client_ip、exception_type、k8s_deployment、attributes）、`contains` 的键写成 service、namespace 这类名字。
+- 按 K8S 过滤的参数带 `k8s_` 前缀：`Gateway.invoke` 会给 kubedoor 来源的操作填上页面选中的命名空间，链路追踪操作跳过这一步（选中的命名空间不是链路的条件），动作记录里也就不会有它。
+- 工具描述是静态文本（缓存不变量 I2）：是否启用、有没有 ClickHouse 加速都不进系统提示，由结果的 `source` 和错误码体现（`not_configured`、`version_unsupported`、`not_supported`、`jaeger_unavailable` / `clickhouse_unavailable` 等）。结果原样返回，照常经过 `domain.redact`。
 
 ### 花折资源管控（准入控制）
 
@@ -375,7 +393,7 @@ DeepAgents 加载仓库内 `skills/kubedoor-k8s`，Skills 文件只读；会话�
 
 外部 MCP 使用 `/mcp`（Streamable HTTP），并保留 `/sse`、`/messages` 兼容入口。
 原有 **16 个工具的名称和参数保留**，另提供统一 `kubedoor_tool` 和
-`skills://kubedoor-k8s`、`skills://kubedoor-code`、`skills://kubedoor-config` 资源。外部调用与 Web 共用权限、审批和审计，规则和网页 AI 完全一样；需要批准的调用
+`skills://kubedoor-k8s`、`skills://kubedoor-code`、`skills://kubedoor-config`、`skills://kubedoor-trace` 资源。外部调用与 Web 共用权限、审批和审计，规则和网页 AI 完全一样；需要批准的调用
 返回 `pending` 及浏览器会话链接，在批准前不会执行，不需要批准的直接执行并返回结果。
 
 ## 配置、启动与部署
