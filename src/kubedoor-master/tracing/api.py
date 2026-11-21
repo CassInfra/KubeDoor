@@ -49,8 +49,10 @@ def _fail(exc):
 
 
 async def read_body(request):
-    """请求体 JSON 对象；没有请求体当 {}"""
-    if not request.can_read_body:
+    """请求体 JSON 对象；没有请求体当 {}。
+    用 body_exists 判断有没有请求体，不能用 can_read_body：它看的是请求体的流读完没有，写操作（测试连接、保存配置）的
+    鉴权中间件为了取审计的集群会先 request.json() 读一遍，之后它就是 False（读到的内容 aiohttp 有缓存，再读照样拿得到）"""
+    if not request.body_exists:
         return {}
     try:
         body = await request.json()

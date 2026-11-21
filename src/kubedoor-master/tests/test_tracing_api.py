@@ -576,3 +576,36 @@ async def test_routes_behind_auth_middleware(monkeypatch, audits):
     assert browser.status == 401
     # AI 查链路不记审计（AI 动作表已有记录）；被拒的管理接口由中间件按 api.denied 记
     assert [record['action'] for record in audits] == ['api.denied']
+
+
+@pytest.mark.asyncio
+async def test_admin_writes_behind_auth_middleware(monkeypatch, audits):
+    """测试连接、保存配置是写操作：鉴权中间件为了取审计的集群会先 request.json() 读一遍请求体，handler 还要拿得到
+    （read_body 以前看 can_read_body，读过就是 False：测试连接报「target 只能是 jaeger 或 clickhouse」，保存什么都没改）"""
+    from auth import middleware as auth_middleware
+
+    monkeypatch.setenv('AI_INTERNAL_TOKEN', 'secret-test-token')
+
+    async def principal_by_name(username, via):
+        return Principal('root', 'admin', user_id=1, via='internal')
+
+    monkeypatch.setattr(auth_middleware.store, 'principal_by_name', principal_by_name)
+    store = FakeStore()
+    monkeypatch.setattr(tracing_api, 'store', store)
+    monkeypatch.setattr(tracing_config, 'store', store)
+    headers = {'X-Kubedoor-Token': 'secret-test-token', 'X-User-Name': 'root'}
+    async with serve(FakeJaeger()) as url:
+        app = web.Application(middlewares=[auth_middleware.create_middleware()])
+        tracing_api.register_routes(app)
+        async with TestClient(TestServer(app)) as client:
+            tested = await client.post('/api/admin/tracing/test', json={'target': 'jaeger', 'config': {'url': url}},
+                                       headers=headers)
+            tested_data = await tested.json()
+            saved = await client.put('/api/admin/tracing', json={'enabled': True, 'url': url, 'cluster_key': 'k8sname'},
+                                     headers=headers)
+            saved_data = await saved.json()
+    assert tested.status == 200, tested_data
+    assert tested_data['data']['ok'] is True and tested_data['data']['services_count'] == 3
+    assert saved.status == 200 and saved_data['data']['enabled'] is True and saved_data['data']['url'] == url
+    assert store.row['value']['url'] == url
+    assert [record['action'] for record in audits] == ['api.write', 'tracing.update', 'api.write']
