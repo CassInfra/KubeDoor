@@ -16,6 +16,26 @@ export interface AIProvider {
   reasoning_effort?: AIReasoningEffort | null;
 }
 
+/** 网页 AI 助手用哪个模型：wecom 企微专用模型（管理员配置，所有账号共用），custom 自己填写的 */
+export type AIProviderMode = "wecom" | "custom";
+
+/** 请求里的模型参数：自定义模型的完整配置，或者用企微专用模型（API Key 只在服务端） */
+export type AIProviderRequest = AIProvider | { source: "wecom" };
+
+/** 企微专用模型（bootstrap 返回，只读展示；不含 API Key） */
+export interface AISharedModel {
+  /** Base URL 和模型名都配好了，网页可以直接用 */
+  available: boolean;
+  base_url: string;
+  model: string;
+  max_input_tokens: number | null;
+  max_output_tokens: number | null;
+  compression_ratio: number | null;
+  reasoning_effort: AIReasoningEffort | null;
+  /** API Key 是否已配置（只有是否，不返回 Key 本身） */
+  api_key_set: boolean;
+}
+
 export interface AIResource {
   namespace?: string;
   name: string;
@@ -49,8 +69,12 @@ export interface AIBootstrap {
   username: string;
   /** 全局角色:admin / cluster_admin / rw / read / none */
   permission: string;
+  /** 是否系统管理员 */
+  is_admin?: boolean;
   clusters: AICluster[];
   skills: AISkill[];
+  /** 企微专用模型；旧版 AI 服务没有这个字段 */
+  shared_model?: AISharedModel | null;
 }
 
 export interface AITool {
@@ -82,6 +106,8 @@ export interface AIMessage {
   tools?: AITool[];
   created_at?: string;
   memories?: AIMemoryAttachment[];
+  /** 分享页：查看人对这条消息的集群没有只读权限，工具调用的参数和结果没有返回 */
+  tools_hidden?: boolean;
 }
 
 export interface AIMemoryAttachment {
@@ -134,6 +160,29 @@ export interface AISession {
   draft?: boolean;
   /** 搜索结果里命中的那段消息 */
   snippet?: string;
+  /** 会话列表：是否正在分享 */
+  shared?: boolean;
+  /** 会话详情：分享码（分享链接里的随机码），null 表示没有分享 */
+  share_code?: string | null;
+  shared_at?: string | null;
+}
+
+/** 开关分享的结果 */
+export interface AIShareState {
+  id: string;
+  shared: boolean;
+  share_code: string | null;
+  shared_at: string | null;
+}
+
+/** 分享页看到的会话：匿名，不含会话 id 和账号 */
+export interface AIShareView {
+  title: string;
+  shared_at: string;
+  updated_at: string;
+  /** 进行中的一轮；回答要等这一轮结束才写进消息 */
+  active_run: { status: string } | null;
+  messages: AIMessage[];
 }
 
 export interface AIRun {
@@ -403,12 +452,26 @@ export const aiApi = {
   renameSession: (id: string, title: string) =>
     request<AISession>(`/sessions/${itemPath(id)}`, "PATCH", { title }),
   deleteSession: (id: string) => request(`/sessions/${itemPath(id)}`, "DELETE"),
+  /** 开启 / 关闭会话分享（只有会话本人）；已分享时再开启返回原来的分享码 */
+  setShare: (id: string, enabled: boolean) =>
+    request<AIShareState>(`/sessions/${itemPath(id)}/share`, "PUT", {
+      enabled
+    }),
+  /** 分享页：任何登录用户凭分享码查看（只读、匿名） */
+  sharedSession: (code: string, signal?: AbortSignal) =>
+    request<AIShareView>(
+      `/shares/${itemPath(code)}`,
+      "GET",
+      undefined,
+      undefined,
+      signal
+    ),
   run: (
     id: string,
     body: {
       message: string;
       scope: AIScope;
-      provider: AIProvider;
+      provider: AIProviderRequest;
       skill_ids?: string[];
       memory_ids?: string[];
       /** 重新生成 / 编辑后重发：替换最后一轮 */
@@ -455,7 +518,11 @@ export const aiApi = {
       `/memories/${itemPath(id)}?version=${encodeURIComponent(version)}`,
       "DELETE"
     ),
-  summarizeMemory: (id: string, provider: AIProvider, signal?: AbortSignal) =>
+  summarizeMemory: (
+    id: string,
+    provider: AIProviderRequest,
+    signal?: AbortSignal
+  ) =>
     request<AIMemoryDraft>(
       `/sessions/${itemPath(id)}/memory-summary`,
       "POST",
@@ -464,7 +531,11 @@ export const aiApi = {
       signal,
       120000
     ),
-  generateSessionTitle: (id: string, message: string, provider: AIProvider) =>
+  generateSessionTitle: (
+    id: string,
+    message: string,
+    provider: AIProviderRequest
+  ) =>
     request<{ id: string; title: string; generated: boolean }>(
       `/sessions/${itemPath(id)}/title`,
       "POST",
@@ -477,7 +548,7 @@ export const aiApi = {
     id: string,
     actionId: string,
     decision: "approve" | "reject",
-    provider: AIProvider
+    provider: AIProviderRequest
   ) =>
     request<{ status?: string }>(`/runs/${itemPath(id)}/decisions`, "POST", {
       action_id: actionId,
@@ -486,7 +557,7 @@ export const aiApi = {
     }),
   cancel: (id: string) =>
     request<{ status?: string }>(`/runs/${itemPath(id)}/cancel`, "POST", {}),
-  testProvider: (provider: AIProvider) =>
+  testProvider: (provider: AIProviderRequest) =>
     request<Record<string, any>>("/provider/test", "POST", { provider }),
   /** 以下是当前账号自己接入的外部 MCP；保存、测试、刷新时服务端会连一次 MCP 拿工具列表 */
   mcpServers: () => request<{ servers: AIMcpServer[] }>("/mcp-servers"),

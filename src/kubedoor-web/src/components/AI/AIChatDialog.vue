@@ -3,7 +3,14 @@ import { computed, nextTick, ref, watch } from "vue";
 import { useMediaQuery } from "@vueuse/core";
 import { ElMessage, ElMessageBox } from "element-plus";
 import { useAIStoreHook } from "@/store/modules/ai";
-import { CONTEXT_HINT_RATIO, contextShare, formatAIStatus } from "@/utils/ai";
+import {
+  CONTEXT_HINT_RATIO,
+  aiRoleLabel,
+  contextShare,
+  formatAIStatus,
+  shareLink
+} from "@/utils/ai";
+import { copyText } from "@/utils/clipboard";
 import {
   aiApi,
   type AIMessage,
@@ -39,6 +46,7 @@ const selectedSession = computed(() =>
 const skillLabel = (name: string) =>
   ai.bootstrap?.skills.find(skill => (skill.id || skill.name) === name)?.name ||
   name;
+const role = (message: AIMessage) => aiRoleLabel(message.role);
 // 上下文占用 = 最近一次请求的输入 ÷ 模型窗口；较大时提示新建会话
 const contextPercent = computed(() => {
   const share = contextShare(ai.contextUsage);
@@ -354,6 +362,65 @@ async function copy(message: AIMessage) {
     ElMessage.warning("浏览器不允许复制，请手动选择文本。");
   }
 }
+
+// 会话分享：勾选框就是「正在分享」的开关；会话详情还没读到时按列表上的标记显示
+const shareChecked = computed(() =>
+  ai.shareCode !== undefined ? !!ai.shareCode : !!selectedSession.value?.shared
+);
+const canShare = computed(
+  () =>
+    !!selectedSession.value &&
+    !selectedSession.value.draft &&
+    ai.sessionReady &&
+    !ai.sharing &&
+    !operating.value
+);
+async function copyShareLink(code = ai.shareCode) {
+  if (!code) return;
+  const link = shareLink(
+    window.location.origin,
+    window.location.pathname,
+    code
+  );
+  if (await copyText(link)) {
+    ElMessage.success("分享链接已复制，对方登录 KubeDoor 后即可查看。");
+    return;
+  }
+  await ElMessageBox.alert(link, "分享链接（请手动复制）", {
+    confirmButtonText: "知道了"
+  }).catch(() => undefined);
+}
+async function toggleShare(value: string | number | boolean) {
+  const id = ai.sessionId;
+  await action(async () => {
+    if (value) {
+      await ElMessageBox.confirm(
+        "开启后生成分享链接：拿到链接的登录用户都能看到这个会话的问答正文，工具调用的参数和结果只有对相应集群至少有只读权限的人能看到。之后的新消息也会同步给看链接的人；取消勾选后链接立即失效，再次开启会生成新链接。",
+        "分享会话",
+        {
+          type: "warning",
+          confirmButtonText: "开启分享",
+          cancelButtonText: "取消"
+        }
+      );
+    } else {
+      await ElMessageBox.confirm(
+        "关闭后分享链接立即失效，看链接的人不能再打开；再次开启会生成新链接。",
+        "关闭分享",
+        {
+          type: "warning",
+          confirmButtonText: "关闭分享",
+          cancelButtonText: "取消"
+        }
+      );
+    }
+    const code = await ai.setShare(!!value);
+    const found = searchResults.value?.find(item => item.id === id);
+    if (found) found.shared = !!code;
+    if (code) await copyShareLink(code);
+    else if (!value) ElMessage.success("已关闭分享，原链接已失效。");
+  });
+}
 const timestamp = (value?: string) => {
   if (!value) return "";
   const parsed = new Date(value);
@@ -471,10 +538,15 @@ const timestamp = (value?: string) => {
               :key="session.id"
               :class="['session-item', { active: session.id === ai.sessionId }]"
               :disabled="ai.busy || operating"
-              :title="session.title"
+              :title="
+                session.shared ? `${session.title}（分享中）` : session.title
+              "
               @click="selectSession(session)"
             >
-              <span>{{ session.title || "新会话" }}</span>
+              <span
+                ><span v-if="session.shared" aria-label="分享中">🔗 </span
+                >{{ session.title || "新会话" }}</span
+              >
               <small v-if="session.snippet" class="session-snippet">{{
                 redact(session.snippet)
               }}</small>
@@ -580,6 +652,9 @@ const timestamp = (value?: string) => {
                     : "助手会选择合适的数据来源，需要审批的操作先展示给你批准。"
                 }}
               </p>
+              <p v-if="!ai.configured" class="model-missing">
+                {{ ai.modelHint }}
+              </p>
               <el-button
                 v-if="!ai.configured"
                 type="primary"
@@ -596,13 +671,12 @@ const timestamp = (value?: string) => {
               ]"
             >
               <div class="message-heading">
-                <span>{{
-                  message.role === "user"
-                    ? "你"
-                    : message.role === "system"
-                      ? "系统"
-                      : "AI 助手"
-                }}</span>
+                <span class="message-role"
+                  ><span class="role-icon" aria-hidden="true">{{
+                    role(message).icon
+                  }}</span
+                  >{{ role(message).name }}</span
+                >
                 <el-tag v-if="message.scope?.env" size="small" effect="plain">{{
                   message.scope.env
                 }}</el-tag>
@@ -718,8 +792,8 @@ const timestamp = (value?: string) => {
               @keydown="keydown"
             />
             <div class="composer-actions">
-              <span class="model-status" :title="ai.provider.model">{{
-                ai.configured ? ai.provider.model : "尚未配置模型"
+              <span class="model-status" :title="ai.modelLabel">{{
+                ai.modelLabel
               }}</span>
               <span
                 v-if="ai.selectedCluster && !ai.liveAvailable"
@@ -727,6 +801,22 @@ const timestamp = (value?: string) => {
                 >可查询指标和历史数据，实时操作暂不可用</span
               >
               <div class="memory-actions">
+                <el-checkbox
+                  :model-value="shareChecked"
+                  :disabled="!canShare"
+                  class="share-toggle"
+                  title="开启后生成分享链接，登录用户凭链接查看这个会话"
+                  @change="toggleShare"
+                  >分享</el-checkbox
+                >
+                <el-button
+                  v-if="shareChecked && ai.shareCode"
+                  link
+                  type="primary"
+                  title="复制这个会话的分享链接"
+                  @click="copyShareLink()"
+                  >复制链接</el-button
+                >
                 <el-button
                   :loading="ai.summarizingMemory"
                   :disabled="!canSummarize"
@@ -1075,6 +1165,12 @@ const timestamp = (value?: string) => {
   color: var(--el-text-color-primary);
 }
 
+.role-icon {
+  margin-right: 4px;
+  font-size: 14px;
+  line-height: 1;
+}
+
 .message-time {
   margin-left: auto;
   font-size: 11px;
@@ -1116,6 +1212,15 @@ const timestamp = (value?: string) => {
 
 .memory-actions .el-button + .el-button {
   margin-left: 0;
+}
+
+.share-toggle {
+  height: 32px;
+  margin-right: 0;
+}
+
+.model-missing {
+  color: var(--el-color-warning);
 }
 
 .selected-memories {

@@ -650,7 +650,7 @@
     function aiMeta() {
       var m = el('div', 'msg-meta');
       m.appendChild(el('span', 'ai-mini', 'AI'));
-      m.appendChild(doc.createTextNode('AI 助手 · ' + CLUSTER));
+      m.appendChild(doc.createTextNode('花折 AI · ' + CLUSTER));
       return m;
     }
 

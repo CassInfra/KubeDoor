@@ -16,13 +16,17 @@ const props = withDefaults(
     ready?: boolean;
     deciding?: string;
     secret?: string;
+    /** 只读(分享页):不显示审批按钮,入库快照里待批准的工具也一样 */
+    readonly?: boolean;
   }>(),
-  { ready: true }
+  { ready: true, readonly: false }
 );
 const emit = defineEmits<{
   decide: [actionId: string, decision: "approve" | "reject"];
 }>();
 const expanded = ref(false);
+// 等待当前用户批准:展开详情并显示审批按钮
+const awaiting = computed(() => !props.readonly && !!props.tool.pending);
 const text = (value: unknown) => {
   const result = safeAIText(value);
   return props.secret ? result.split(props.secret).join("[已隐藏]") : result;
@@ -84,11 +88,11 @@ const time = computed(() => {
 </script>
 
 <template>
-  <section :class="['tool-card', { 'needs-approval': tool.pending }]">
+  <section :class="['tool-card', { 'needs-approval': awaiting }]">
     <button
       class="tool-heading"
       type="button"
-      :aria-expanded="expanded || tool.pending"
+      :aria-expanded="expanded || awaiting"
       @click="expanded = !expanded"
     >
       <span class="tool-title">{{ tool.name }}</span>
@@ -96,7 +100,7 @@ const time = computed(() => {
         formatAIStatus(tool.status)
       }}</el-tag>
       <span class="expand-indicator">{{
-        expanded || tool.pending ? "收起" : "详情"
+        expanded || awaiting ? "收起" : "详情"
       }}</span>
     </button>
     <div class="tool-meta">
@@ -123,7 +127,7 @@ const time = computed(() => {
     >
       {{ verification.message }}
     </p>
-    <div v-if="expanded || tool.pending" class="tool-details">
+    <div v-if="expanded || awaiting" class="tool-details">
       <p v-if="mcpInfo" class="mcp-summary">
         你接入的 MCP「{{ text(mcpInfo.server) }}」的工具
         <code>{{ text(mcpInfo.tool) }}</code
@@ -205,7 +209,7 @@ const time = computed(() => {
       </template>
       <p v-if="tool.error" class="tool-error">{{ text(tool.error) }}</p>
     </div>
-    <div v-if="tool.pending" class="approval-actions">
+    <div v-if="awaiting" class="approval-actions">
       <span>{{ approvalHint }}</span>
       <el-button
         size="small"

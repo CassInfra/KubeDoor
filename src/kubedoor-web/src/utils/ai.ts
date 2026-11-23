@@ -1,4 +1,10 @@
-import type { AIScope } from "@/api/ai";
+import type {
+  AIMessage,
+  AIProviderMode,
+  AIScope,
+  AISharedModel,
+  AITool
+} from "@/api/ai";
 
 export interface SseFrame {
   event?: string;
@@ -125,6 +131,61 @@ export function safeAIText(value: unknown): string {
 export const providerStorageKey = (username: string) =>
   `kubedoor-ai:provider:${encodeURIComponent(username)}`;
 
+/** 浏览器里保存的模型选择（只有在模型设置里点「保存」才会写）；没保存过或值不对返回 null */
+export function savedProviderMode(value: unknown): AIProviderMode | null {
+  return value === "wecom" || value === "custom" ? value : null;
+}
+
+const customReady = (custom?: { base_url?: string; model?: string } | null) =>
+  !!custom?.base_url?.trim() && !!custom?.model?.trim();
+
+/**
+ * 网页 AI 助手实际用哪个模型：模型设置里保存过的选择优先；没选过时企微专用模型可用就用它，
+ * 不可用而浏览器里有自定义配置（Base URL 和模型名都填了）就用自定义，都没有时仍是企微专用模型
+ * （发送前提示管理员还没有配置）。
+ */
+export function effectiveProviderMode(
+  saved: unknown,
+  sharedAvailable: boolean,
+  custom?: { base_url?: string; model?: string } | null
+): AIProviderMode {
+  const choice = savedProviderMode(saved);
+  if (choice) return choice;
+  if (sharedAvailable) return "wecom";
+  return customReady(custom) ? "custom" : "wecom";
+}
+
+/** 输入框下方显示的模型名 */
+export function providerLabel(
+  mode: AIProviderMode,
+  shared?: Pick<AISharedModel, "available" | "model"> | null,
+  custom?: { base_url?: string; model?: string } | null
+) {
+  if (mode === "wecom")
+    return shared?.available
+      ? `企微专用模型 · ${shared.model}`
+      : "企微专用模型（管理员尚未配置）";
+  return customReady(custom) ? custom!.model!.trim() : "尚未配置模型";
+}
+
+/** 会话分享链接：控制台是 hash 路由，分享页是 #/ai-share/<分享码> */
+export function shareLink(origin: string, pathname: string, code: string) {
+  return `${origin}${pathname || "/"}#/ai-share/${encodeURIComponent(code)}`;
+}
+
+/** 对话里的角色：分享页上提问的一方叫「提问人」（不显示是谁） */
+export function aiRoleLabel(role: string, shared = false) {
+  if (role === "user") return { icon: "🧑", name: shared ? "提问人" : "你" };
+  if (role === "system") return { icon: "⚙️", name: "系统" };
+  return { icon: "🤖", name: "花折 AI" };
+}
+
+/** 分享页末尾的进行中提示：这一轮的回答要等它结束才写进消息 */
+export function shareRunNotice(status?: string | null) {
+  if (!status) return "";
+  return status === "waiting_approval" ? "等待审批中…" : "回答生成中…";
+}
+
 /** Context share at which the UI suggests a new session (same as the WeCom hint). */
 export const CONTEXT_HINT_RATIO = 0.25;
 
@@ -243,6 +304,35 @@ export function normalizeAITool(value: Record<string, any>, env = "") {
         ? meta.error
         : meta.error?.message || value.error
   };
+}
+
+/**
+ * 服务端保存的历史消息（会话详情、分享页）：正文只当文本显示，工具按入库的动作记录规范化，
+ * 引入的记忆只留展示用的字段
+ */
+export function normalizeAIMessages(
+  messages: AIMessage[] | null | undefined
+): AIMessage[] {
+  return (messages || []).map(message => ({
+    ...message,
+    content:
+      typeof message.content === "string"
+        ? message.content
+        : safeAIText(message.content),
+    tools: (message.tools || []).map(
+      tool =>
+        normalizeAITool(
+          tool as unknown as Record<string, any>,
+          message.scope?.env
+        ) as AITool
+    ),
+    memories: (message.memories || []).map(memory => ({
+      id: memory.id,
+      title: safeAIText(memory.title),
+      content: safeAIText(memory.content),
+      version: memory.version
+    }))
+  }));
 }
 
 export function formatAIStatus(status: string) {

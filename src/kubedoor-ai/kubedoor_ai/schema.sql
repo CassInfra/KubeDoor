@@ -18,6 +18,11 @@ CREATE INDEX IF NOT EXISTS kubedoor_ai_sessions_channel ON kubedoor_ai_sessions(
 CREATE UNIQUE INDEX IF NOT EXISTS kubedoor_ai_sessions_channel_key ON kubedoor_ai_sessions(channel, channel_key) WHERE channel_key IS NOT NULL;
 -- 已删除 LangGraph 检查点的时间(企微里再也不会继续的旧对话,wecom.py 定期清理);会话和消息记录保留,不能再继续
 ALTER TABLE kubedoor_ai_sessions ADD COLUMN IF NOT EXISTS checkpoint_purged_at timestamptz;
+-- 会话分享(网页 AI 助手的「分享」勾选框,service.set_share):share_code 是分享链接里的随机码(128 位),为空 = 没有分享,
+-- 关闭后再开启换新码;shared_at 是这次开启的时间。列名不能带 token(接口出口的 redact 会把 *_token 的值打码)
+ALTER TABLE kubedoor_ai_sessions ADD COLUMN IF NOT EXISTS share_code text;
+ALTER TABLE kubedoor_ai_sessions ADD COLUMN IF NOT EXISTS shared_at timestamptz;
+CREATE UNIQUE INDEX IF NOT EXISTS kubedoor_ai_sessions_share_code ON kubedoor_ai_sessions(share_code) WHERE share_code IS NOT NULL;
 CREATE TABLE IF NOT EXISTS kubedoor_ai_runs (
     id uuid PRIMARY KEY, session_id uuid NOT NULL REFERENCES kubedoor_ai_sessions(id) ON DELETE CASCADE,
     username text NOT NULL, permission text NOT NULL, status text NOT NULL,

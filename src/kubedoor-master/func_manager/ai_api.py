@@ -33,6 +33,8 @@ DATA_OPERATIONS = ("mysql", "redis", "elasticsearch")
 DATA_OP = "data.query"
 GENERIC_OPERATIONS = ("api", "kubectl", "istioctl", "diagnostic", "pod_exec", *DATA_OPERATIONS)
 DATA_TOOLS_UNSUPPORTED = "此 Agent 版本不支持数据库 / Redis / ES 查询，请升级 Agent"
+# AI 服务经 /api/ai/internal/audit 写的操作审计:开启 / 关闭网页 AI 会话分享
+AI_AUDIT_ACTIONS = ("ai.share", "ai.unshare")
 
 
 def authorize(request):
@@ -176,6 +178,24 @@ def register_routes(app, clients, utils):
             "default_permission": principal.default_permission,
         })
 
+    async def audit_event(request):
+        # AI 服务里的操作审计(目前是网页 AI 助手的会话分享开关):用户取自内部令牌 + X-User-Name,动作只认白名单。
+        # nginx 不把浏览器 IP 转给 AI 服务,这里不记 IP(能拿到的只是 AI 服务自己的地址)
+        principal = authorize(request)
+        try:
+            body = await request.json()
+        except Exception:
+            raise web.HTTPBadRequest(text="请求必须为 JSON 对象")
+        if not isinstance(body, dict) or body.get("action") not in AI_AUDIT_ACTIONS:
+            raise web.HTTPBadRequest(text="不支持的审计动作")
+        target, detail = body.get("target", ""), body.get("detail")
+        if not isinstance(target, str) or (detail is not None and not isinstance(detail, dict)):
+            raise web.HTTPBadRequest(text="target 必须是字符串,detail 必须是对象")
+        if detail is not None and len(json.dumps(detail, ensure_ascii=False, default=str)) > 2000:
+            raise web.HTTPBadRequest(text="detail 过大")
+        audit.record_bg(principal.username, body["action"], target=target[:200], detail=detail)
+        return web.json_response({"success": True})
+
     async def execute(request):
         # 请求体里可能有服务端填入的明文密码(数据查询的 arguments):只转给 agent,不写日志,审计只记 call_id 和 ops
         principal = authorize(request)
@@ -318,6 +338,7 @@ def register_routes(app, clients, utils):
 
     app.router.add_get("/api/ai/internal/bootstrap", bootstrap)
     app.router.add_get("/api/ai/internal/identity", identity)
+    app.router.add_post("/api/ai/internal/audit", audit_event)
     app.router.add_get("/api/ai/internal/permission-policy", permission_policy)
     app.router.add_post("/api/ai/internal/agent-execute", execute)
     app.router.add_post("/api/ai/internal/agent-cancel", cancel)

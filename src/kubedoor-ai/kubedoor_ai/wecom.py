@@ -154,6 +154,8 @@ class WeComIntegration:
         self.service = service
         self.client = None
         self.config = None
+        # 网页 AI 助手默认也用企微专用模型（Service.provider 的 {"source": "wecom"}）
+        service.shared_settings = self.shared_settings
         self.status = {"configured": False, "connected": False, "authenticated": False,
                        "reconnecting": False, "error": None}
         self._lock = asyncio.Lock()
@@ -795,6 +797,11 @@ class WeComIntegration:
 
     def _provider_settings(self):
         return {key: self.config.get(key) for key in PROVIDER_KEYS}
+
+    def shared_settings(self):
+        """企微专用模型的配置，网页 AI 助手默认也用它。机器人停用时照样返回（停用只断开企微长连接）；
+        从没保存过或解密失败时返回 None"""
+        return self._provider_settings() if self.config else None
 
     async def _session_purged(self, session_id):
         row = await self.service.store.one(

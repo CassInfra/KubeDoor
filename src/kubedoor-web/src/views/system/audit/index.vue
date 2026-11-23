@@ -133,7 +133,9 @@ const ACTION_LABELS: Record<string, string> = {
   "runtime_config.get": "获取运行配置",
   "api.write": "写操作",
   "api.denied": "越权被拒",
-  "ai.agent_execute": "AI 执行修改"
+  "ai.agent_execute": "AI 执行修改",
+  "ai.share": "开启 AI 会话分享",
+  "ai.unshare": "关闭 AI 会话分享"
 };
 
 const loading = ref(false);

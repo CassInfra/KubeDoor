@@ -112,6 +112,33 @@ async def test_internal_routes_require_service_token_and_user_identity(monkeypat
 
 
 @pytest.mark.asyncio
+async def test_internal_audit_records_ai_share_for_the_acting_user(monkeypatch):
+    """网页 AI 会话分享的开关由 AI 服务经内部接口记审计:用户取自 X-User-Name,动作只认白名单,不记 IP"""
+    monkeypatch.setenv("AI_INTERNAL_TOKEN", "secret-test-token")
+    recorded = []
+    monkeypatch.setattr(ai_api.audit, "record_bg",
+                        lambda username, action, **kwargs: recorded.append((username, action, kwargs)))
+    app = internal_app(monkeypatch, {}, fake_utils())
+    headers = {"X-Kubedoor-Token": "secret-test-token", "X-User-Name": "limited", "X-User-Permission": "admin"}
+    async with TestClient(TestServer(app)) as client:
+        response = await client.post("/api/ai/internal/audit", headers=headers, json={
+            "action": "ai.share", "target": "排查超时" + "长" * 300, "detail": {"session_id": "s-1"}})
+        assert response.status == 200 and await response.json() == {"success": True}
+        assert recorded == [("limited", "ai.share", {"target": "排查超时" + "长" * 196, "detail": {"session_id": "s-1"}})]
+        # 白名单以外的动作、字段类型不对、detail 过大都拒绝,不写审计
+        for body in ({"action": "ai.agent_execute"}, {"action": "ai.unshare", "target": 1},
+                     {"action": "ai.unshare", "detail": "x"}, {"action": "ai.unshare", "detail": {"x": "y" * 3000}},
+                     ["ai.share"]):
+            assert (await client.post("/api/ai/internal/audit", headers=headers, json=body)).status == 400
+        assert (await client.post("/api/ai/internal/audit", headers=headers, data="not json")).status == 400
+        # 只有内部令牌、不带用户(系统调用)不能写;没有内部令牌(浏览器)更不行
+        assert (await client.post("/api/ai/internal/audit", headers={"X-Kubedoor-Token": "secret-test-token"},
+                                  json={"action": "ai.share"})).status == 403
+        assert (await client.post("/api/ai/internal/audit", json={"action": "ai.share"})).status == 401
+    assert len(recorded) == 1
+
+
+@pytest.mark.asyncio
 async def test_bootstrap_hides_clusters_without_permission_and_execute_checks_cluster(monkeypatch):
     monkeypatch.setenv("AI_INTERNAL_TOKEN", "secret-test-token")
     utils = fake_utils(get_k8s_aliases=AsyncMock(return_value={"prod": ["生产"], "staging": [], "secret": ["机密"]}),

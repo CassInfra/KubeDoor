@@ -174,6 +174,105 @@ def test_persisted_multi_turn_sse_cluster_changes_and_secret_redaction(harness):
     runner.run(verify())
 
 
+def test_session_share_is_live_anonymous_and_hides_tools_by_cluster_permission(harness):
+    """会话分享：本人开关，重复开启是同一个码，关闭后旧链接立即失效、再开启换新码；任何登录用户凭码只读查看（匿名），
+    工具调用的参数和结果按查看人对该集群的权限给；分享期间的新消息实时可见；开关记 master 审计；删除会话后失效"""
+    h, runner = harness
+
+    async def verify():
+        sid = await h.session()
+        h.model(tool_message("resource_inventory", {"namespace": "other-ns"}), AIMessage(content="集群 A 正常"),
+                tool_message("resource_inventory", {"namespace": "other-ns"}), AIMessage(content="集群 B 正常"))
+        started = await h.http.post(f"/api/ai/sessions/{sid}/runs", json={"message": "检查集群 A", "scope": {"env": "cluster-a"}, "provider": PROVIDER})
+        assert started.status_code == 200, started.text
+        await h.wait(started.json()["run_id"])
+        outsider = {**h.headers, "X-User-Name": "share-outsider-" + uuid.uuid4().hex}
+        assert (await h.http.put(f"/api/ai/sessions/{sid}/share", json={"enabled": True}, headers=outsider)).status_code == 404
+        assert (await h.http.put(f"/api/ai/sessions/{sid}/share", json={"enabled": "yes"})).status_code == 400
+        opened = await h.http.put(f"/api/ai/sessions/{sid}/share", json={"enabled": True})
+        assert opened.status_code == 200, opened.text
+        code = opened.json()["share_code"]
+        assert opened.json()["shared"] is True and len(code) == 22 and opened.json()["shared_at"]
+        assert (await h.http.put(f"/api/ai/sessions/{sid}/share", json={"enabled": True})).json()["share_code"] == code
+        # 会话列表、搜索结果带 shared；会话详情带分享码（出口的 redact 不能把它打码）
+        assert [s["shared"] for s in (await h.http.get("/api/ai/sessions")).json()["sessions"] if s["id"] == sid] == [True]
+        assert [s["shared"] for s in (await h.http.get("/api/ai/sessions?q=集群")).json()["sessions"] if s["id"] == sid] == [True]
+        assert (await h.http.get(f"/api/ai/sessions/{sid}")).json()["share_code"] == code
+        # 分享期间在集群 B 继续聊：新消息也能看到
+        started = await h.http.post(f"/api/ai/sessions/{sid}/runs", json={"message": "检查集群 B", "scope": {"env": "cluster-b"}, "provider": PROVIDER})
+        await h.wait(started.json()["run_id"])
+
+        viewer = {**h.headers, "X-User-Name": "share-viewer-" + uuid.uuid4().hex, "X-User-Permission": "none",
+                  "X-User-Clusters": json.dumps({"cluster-a": "read"})}
+        shared = await h.http.get(f"/api/ai/shares/{code}", headers=viewer)
+        assert shared.status_code == 200, shared.text
+        data = shared.json()
+        assert set(data) == {"title", "shared_at", "updated_at", "active_run", "messages"} and data["active_run"] is None
+        assert h.username not in shared.text and sid not in shared.text
+        assert [(m["role"], m["content"], m["scope"]["env"]) for m in data["messages"]] == [
+            ("user", "检查集群 A", "cluster-a"), ("assistant", "集群 A 正常", "cluster-a"),
+            ("user", "检查集群 B", "cluster-b"), ("assistant", "集群 B 正常", "cluster-b")]
+        answer_a, answer_b = data["messages"][1], data["messages"][3]
+        assert answer_a["tools"] and "tools_hidden" not in answer_a
+        assert answer_b["tools"] == [] and answer_b["tools_hidden"] is True
+        # 两个集群都有权限的人（这里是本人）都看得到
+        assert all(m["tools"] for m in (await h.http.get(f"/api/ai/shares/{code}")).json()["messages"] if m["role"] == "assistant")
+
+        closed = (await h.http.put(f"/api/ai/sessions/{sid}/share", json={"enabled": False})).json()
+        assert closed == {"id": sid, "shared": False, "share_code": None, "shared_at": None}
+        gone = await h.http.get(f"/api/ai/shares/{code}", headers=viewer)
+        assert gone.status_code == 404 and gone.json()["error"]["code"] == "share_not_found"
+        reopened = (await h.http.put(f"/api/ai/sessions/{sid}/share", json={"enabled": True})).json()["share_code"]
+        assert reopened != code and (await h.http.get(f"/api/ai/shares/{code}", headers=viewer)).status_code == 404
+        assert (await h.http.get("/api/ai/shares/not-a-share-code", headers=viewer)).status_code == 404
+        audits = [(call[0], call[3]["action"], call[3]["target"]) for call in h.upstream if call[1] == "/api/ai/internal/audit"]
+        assert audits == [("POST", "ai.share", "集成测试"), ("POST", "ai.unshare", "集成测试"), ("POST", "ai.share", "集成测试")]
+        assert (await h.http.delete(f"/api/ai/sessions/{sid}")).status_code == 200
+        assert (await h.http.get(f"/api/ai/shares/{reopened}", headers=viewer)).status_code == 404
+
+    runner.run(verify())
+
+
+def test_web_chat_can_use_the_wecom_model_without_the_key_reaching_the_browser(harness):
+    """网页按企微专用模型发送：服务端换成企微配置（浏览器带来的地址和 Key 不用），bootstrap 只给不含 Key 的只读信息"""
+    h, runner = harness
+
+    async def verify():
+        shared_key = "shared-wecom-model-private-key"
+        settings = {"base_url": "https://shared-model.invalid/v1", "api_key": shared_key, "model": "shared-model",
+                    "max_input_tokens": None, "max_output_tokens": None, "compression_ratio": 0.6, "reasoning_effort": "low"}
+        h.service.shared_settings = lambda: None
+        assert (await h.http.get("/api/ai/bootstrap")).json()["shared_model"]["available"] is False
+        sid = await h.session()
+        missing = await h.http.post(f"/api/ai/sessions/{sid}/runs", json={"message": "你好", "scope": {"env": "cluster-a"}, "provider": {"source": "wecom"}})
+        assert missing.status_code == 409 and missing.json()["error"]["code"] == "shared_model_unavailable"
+        h.service.shared_settings = lambda: dict(settings)
+        bootstrap = await h.http.get("/api/ai/bootstrap")
+        assert bootstrap.json()["shared_model"] == {
+            "available": True, "base_url": "https://shared-model.invalid/v1", "model": "shared-model", "max_input_tokens": None,
+            "max_output_tokens": None, "compression_ratio": 0.6, "reasoning_effort": "low", "api_key_set": True}
+        assert shared_key not in bootstrap.text
+        used = []
+        scripted = ScriptedModel(responses=[AIMessage(content="企微模型回答 " + shared_key)])
+
+        def factory(provider):
+            used.append(provider)
+            return scripted
+
+        h.service.runtime.model_factory = factory
+        started = await h.http.post(f"/api/ai/sessions/{sid}/runs", json={
+            "message": "你好", "scope": {"env": "cluster-a"},
+            "provider": {"source": "wecom", "base_url": "https://evil.invalid/v1", "api_key": "browser-key", "model": "evil"}})
+        assert started.status_code == 200, started.text
+        await h.wait(started.json()["run_id"])
+        assert used and {(p.base_url, p.api_key, p.model, p.compression_ratio, p.reasoning_effort) for p in used} == {
+            ("https://shared-model.invalid/v1", shared_key, "shared-model", 0.6, "low")}
+        detail = await h.http.get(f"/api/ai/sessions/{sid}")
+        assert "企微模型回答" in detail.text and shared_key not in detail.text
+
+    runner.run(verify())
+
+
 def test_postgres_interrupt_exact_approval_and_mcp_transports(harness):
     h, runner = harness
 

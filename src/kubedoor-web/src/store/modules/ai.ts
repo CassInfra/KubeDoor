@@ -11,18 +11,24 @@ import {
   type AIMemorySummary,
   type AIMessage,
   type AIProvider,
+  type AIProviderMode,
+  type AIProviderRequest,
   type AIReasoningEffort,
   type AIRun,
   type AIScope,
   type AISession,
+  type AISharedModel,
   type AIUsage
 } from "@/api/ai";
 import {
+  effectiveProviderMode,
   isTerminalRun,
   newAIId,
-  normalizeAITool,
+  normalizeAIMessages,
+  providerLabel,
   providerStorageKey,
-  safeAIText
+  safeAIText,
+  savedProviderMode
 } from "@/utils/ai";
 
 const emptyScope = (): AIScope => ({
@@ -57,6 +63,8 @@ export const useAIStore = defineStore("kubedoor-ai", () => {
   const initialized = ref(false);
   const bootstrap = ref<AIBootstrap | null>(null);
   const provider = ref<AIProvider>(defaultProvider());
+  /** 模型设置里保存过的选择；null 表示没选过，按 effectiveProviderMode 推断 */
+  const providerMode = ref<AIProviderMode | null>(null);
   const sessions = ref<AISession[]>([]);
   const sessionId = ref("");
   const sessionLoading = ref(false);
@@ -77,6 +85,10 @@ export const useAIStore = defineStore("kubedoor-ai", () => {
   const enabledMcpCount = computed(
     () => mcpServers.value.filter(item => item.enabled).length
   );
+  /** 当前会话的分享码：undefined 表示还没读到会话详情，null 表示没有分享 */
+  const shareCode = ref<string | null | undefined>(undefined);
+  /** 正在开启 / 关闭分享 */
+  const sharing = ref(false);
   const submitting = ref(false);
   const deciding = ref("");
   const cancelling = ref(false);
@@ -106,9 +118,39 @@ export const useAIStore = defineStore("kubedoor-ai", () => {
   const globalWritable = computed(() =>
     ["admin", "cluster_admin", "rw"].includes(bootstrap.value?.permission ?? "")
   );
-  const configured = computed(
-    () => !!provider.value.base_url.trim() && !!provider.value.model.trim()
+  /** 企微专用模型（bootstrap 带回，只读；旧版 AI 服务没有） */
+  const sharedModel = computed<AISharedModel | null>(
+    () => bootstrap.value?.shared_model ?? null
   );
+  /** 实际使用的模型：模型设置里选过的优先，没选过默认企微专用模型 */
+  const modelMode = computed<AIProviderMode>(() =>
+    effectiveProviderMode(
+      providerMode.value,
+      !!sharedModel.value?.available,
+      provider.value
+    )
+  );
+  const configured = computed(() =>
+    modelMode.value === "wecom"
+      ? !!sharedModel.value?.available
+      : !!provider.value.base_url.trim() && !!provider.value.model.trim()
+  );
+  /** 输入框下方显示的模型名 */
+  const modelLabel = computed(() =>
+    providerLabel(modelMode.value, sharedModel.value, provider.value)
+  );
+  /** 模型不可用时的提示 */
+  const modelHint = computed(() =>
+    modelMode.value === "wecom"
+      ? "管理员还没有配置企微专用模型，请在「模型设置」里改用自定义模型。"
+      : "请先在「模型设置」里填写模型的 Base URL 和模型名。"
+  );
+  /** 请求里带的模型参数：企微专用模型只传来源，API Key 由服务端取，不经过浏览器 */
+  function requestProvider(): AIProviderRequest {
+    return modelMode.value === "wecom"
+      ? { source: "wecom" }
+      : { ...provider.value };
+  }
   const busy = computed(
     () =>
       submitting.value ||
@@ -135,6 +177,9 @@ export const useAIStore = defineStore("kubedoor-ai", () => {
   let listGeneration = 0;
   let submissionGeneration = 0;
   let summaryGeneration = 0;
+  let shareGeneration = 0;
+  // 每次开关分享成功加一：在这之前发出的会话详情请求带回的分享状态已经过时，不再采用
+  let shareRevision = 0;
   const sessionCache = new Map<string, { data: AISession; weight: number }>();
   const draftScopes = new Map<string, AIScope>();
   const titleGenerations = new Map<string, number>();
@@ -286,29 +331,52 @@ export const useAIStore = defineStore("kubedoor-ai", () => {
     selectedMemories.value = [];
     mcpServers.value = [];
     provider.value = defaultProvider();
+    providerMode.value = null;
+    shareGeneration++;
+    shareRevision++;
+    sharing.value = false;
+    shareCode.value = undefined;
     lastSeq.value = 0;
     assistantId = "";
     initialized.value = false;
   }
 
-  function saveProvider(value: AIProvider) {
+  function persistProvider(settings: AIProvider, mode: AIProviderMode) {
     if (!owner) throw new Error("尚未获取登录身份，请重试连接服务。");
-    const settings = {
-      base_url: value.base_url.trim().replace(/\/+$/, ""),
-      api_key: value.api_key.trim(),
-      model: value.model.trim(),
-      max_input_tokens: savedNumber(value.max_input_tokens),
-      max_output_tokens: savedNumber(value.max_output_tokens),
-      compression_ratio: savedNumber(value.compression_ratio),
-      reasoning_effort: savedEffort(value.reasoning_effort)
-    };
-    localStorage.setItem(providerStorageKey(owner), JSON.stringify(settings));
+    localStorage.setItem(
+      providerStorageKey(owner),
+      JSON.stringify({ ...settings, mode })
+    );
     provider.value = settings;
+    providerMode.value = mode;
   }
 
+  /** 保存自定义模型并改用它 */
+  function saveProvider(value: AIProvider) {
+    persistProvider(
+      {
+        base_url: value.base_url.trim().replace(/\/+$/, ""),
+        api_key: value.api_key.trim(),
+        model: value.model.trim(),
+        max_input_tokens: savedNumber(value.max_input_tokens),
+        max_output_tokens: savedNumber(value.max_output_tokens),
+        compression_ratio: savedNumber(value.compression_ratio),
+        reasoning_effort: savedEffort(value.reasoning_effort)
+      },
+      "custom"
+    );
+  }
+
+  /** 改用企微专用模型：浏览器里的自定义配置保留，切回自定义模型时还在 */
+  function useSharedModel() {
+    persistProvider({ ...provider.value }, "wecom");
+  }
+
+  /** 清除浏览器里的自定义配置和模型选择 */
   function forgetProvider() {
     if (owner) localStorage.removeItem(providerStorageKey(owner));
     provider.value = defaultProvider();
+    providerMode.value = null;
   }
 
   async function refreshBootstrap() {
@@ -322,6 +390,8 @@ export const useAIStore = defineStore("kubedoor-ai", () => {
         const saved = JSON.parse(
           localStorage.getItem(providerStorageKey(owner)) || "null"
         );
+        if (saved && typeof saved === "object")
+          providerMode.value = savedProviderMode(saved.mode);
         if (
           saved &&
           typeof saved.base_url === "string" &&
@@ -452,25 +522,7 @@ export const useAIStore = defineStore("kubedoor-ai", () => {
   }
 
   function normalizedSession(data: AISession): AISession {
-    return {
-      ...data,
-      messages: (data.messages || []).map(message => ({
-        ...message,
-        content:
-          typeof message.content === "string"
-            ? message.content
-            : safeAIText(message.content),
-        tools: (message.tools || []).map(tool =>
-          normalizeAITool(tool, message.scope?.env)
-        ),
-        memories: (message.memories || []).map(memory => ({
-          id: memory.id,
-          title: safeAIText(memory.title),
-          content: safeAIText(memory.content),
-          version: memory.version
-        }))
-      }))
-    };
+    return { ...data, messages: normalizeAIMessages(data.messages) };
   }
 
   function cacheSession(data: AISession) {
@@ -524,6 +576,7 @@ export const useAIStore = defineStore("kubedoor-ai", () => {
     selectedMemories.value = [];
     activeRun.value = null;
     contextUsage.value = null;
+    shareCode.value = undefined;
     assistantId = "";
     lastSeq.value = 0;
     streamState.value = "idle";
@@ -537,6 +590,7 @@ export const useAIStore = defineStore("kubedoor-ai", () => {
     const draft = sessions.value.find(item => item.id === id && item.draft);
     if (draft) {
       messages.value = [];
+      shareCode.value = null;
       if (draftScopes.has(id))
         scope.value = JSON.parse(JSON.stringify(draftScopes.get(id)));
       sessionReady.value = true;
@@ -548,11 +602,13 @@ export const useAIStore = defineStore("kubedoor-ai", () => {
       sessionCache.delete(id);
       sessionCache.set(id, cached);
       showHistory(cached.data);
+      shareCode.value = cached.data.share_code;
     } else messages.value = [];
     sessionReady.value = false;
     sessionLoading.value = true;
     const generation = sessionGeneration;
     const username = owner;
+    const revision = shareRevision;
     const controller = new AbortController();
     sessionController = controller;
     try {
@@ -566,8 +622,12 @@ export const useAIStore = defineStore("kubedoor-ai", () => {
       if (response.id !== id)
         throw new Error("会话返回的标识不匹配，请刷新后重试。");
       const data = normalizedSession(response);
+      // 读取期间开关过分享：以开关的结果为准
+      if (revision !== shareRevision && shareCode.value !== undefined)
+        data.share_code = shareCode.value;
       cacheSession(data);
       showHistory(data);
+      applyShare(id, data.share_code);
       sessionReady.value = true;
       activeRun.value =
         typeof data.active_run === "string"
@@ -613,9 +673,53 @@ export const useAIStore = defineStore("kubedoor-ai", () => {
     beginSelection(created.id);
     draftScopes.set(created.id, JSON.parse(JSON.stringify(scope.value)));
     messages.value = [];
+    shareCode.value = null;
     sessionLoading.value = false;
     sessionReady.value = true;
     return created;
+  }
+
+  /** 记下会话的分享状态（会话详情或开关分享带回的）：列表上的标记、缓存和当前会话的分享码 */
+  function applyShare(
+    id: string,
+    code: string | null | undefined,
+    sharedAt?: string | null
+  ) {
+    // 旧版 AI 服务不返回分享状态
+    if (code === undefined) return;
+    const item = sessions.value.find(session => session.id === id);
+    if (item) item.shared = !!code;
+    const cached = sessionCache.get(id);
+    if (cached) {
+      cached.data.share_code = code;
+      if (sharedAt !== undefined) cached.data.shared_at = sharedAt;
+    }
+    if (id === sessionId.value) shareCode.value = code;
+  }
+
+  /** 开启 / 关闭当前会话的分享，返回分享码（关闭时为 null） */
+  async function setShare(enabled: boolean) {
+    const id = sessionId.value;
+    if (!id || sessions.value.some(item => item.id === id && item.draft))
+      throw new Error("会话还没有发送过消息，不能分享。");
+    if (!sessionReady.value) throw new Error("正在核验会话状态，请稍后再试。");
+    if (sharing.value) throw new Error("上一次分享操作还在处理，请稍候。");
+    const username = owner;
+    const generation = ++shareGeneration;
+    sharing.value = true;
+    try {
+      const result = await aiApi.setShare(id, enabled);
+      if (username !== owner || generation !== shareGeneration) return null;
+      const code =
+        result.shared && result.share_code ? result.share_code : null;
+      // 在这之前发出的会话列表 / 详情请求带回的分享状态已经过时
+      listGeneration++;
+      shareRevision++;
+      applyShare(id, code, code ? result.shared_at : null);
+      return code;
+    } finally {
+      if (generation === shareGeneration) sharing.value = false;
+    }
   }
 
   async function renameSession(id: string, title: string) {
@@ -690,15 +794,14 @@ export const useAIStore = defineStore("kubedoor-ai", () => {
       sessions.value.some(item => item.id === sessionId.value && item.draft)
     )
       throw new Error("当前会话没有可总结的已完成对话。");
-    if (!configured.value)
-      throw new Error("请先配置模型的 Base URL 和模型名。");
+    if (!configured.value) throw new Error(modelHint.value);
     const username = owner;
     const id = sessionId.value;
     const generation = sessionGeneration;
     const summary = ++summaryGeneration;
     summarizingMemory.value = true;
     try {
-      const draft = await aiApi.summarizeMemory(id, { ...provider.value });
+      const draft = await aiApi.summarizeMemory(id, requestProvider());
       if (
         username !== owner ||
         id !== sessionId.value ||
@@ -716,12 +819,14 @@ export const useAIStore = defineStore("kubedoor-ai", () => {
     message: string,
     username: string,
     generation: number,
-    modelProvider: AIProvider
+    modelProvider: AIProviderRequest
   ) {
     try {
-      const result = await aiApi.generateSessionTitle(id, message, {
-        ...modelProvider
-      });
+      const result = await aiApi.generateSessionTitle(
+        id,
+        message,
+        modelProvider
+      );
       if (
         username !== owner ||
         generation !== (titleGenerations.get(id) || 0) ||
@@ -972,6 +1077,7 @@ export const useAIStore = defineStore("kubedoor-ai", () => {
       try {
         const currentSession = sessionId.value;
         const username = owner;
+        const revision = shareRevision;
         const data = await aiApi.session(currentSession);
         if (
           generation !== streamGeneration ||
@@ -979,6 +1085,8 @@ export const useAIStore = defineStore("kubedoor-ai", () => {
           currentSession !== sessionId.value
         )
           return;
+        if (revision === shareRevision)
+          applyShare(currentSession, data.share_code, data.shared_at);
         if (
           data.messages?.length &&
           data.messages[data.messages.length - 1].role === "assistant"
@@ -1011,8 +1119,7 @@ export const useAIStore = defineStore("kubedoor-ai", () => {
     if (busy.value || !message.trim()) return;
     if (!sessionReady.value)
       throw new Error("正在核验会话状态，请稍后发送；可以继续输入或切换会话。");
-    if (!configured.value)
-      throw new Error("请先配置模型的 Base URL 和模型名。");
+    if (!configured.value) throw new Error(modelHint.value);
     const target = options.scope ?? scope.value;
     if (
       !target.env ||
@@ -1053,15 +1160,18 @@ export const useAIStore = defineStore("kubedoor-ai", () => {
         else sessions.value.unshift(created);
         draftScopes.delete(draft.id);
         sessionId.value = created.id;
+        shareCode.value = null;
       }
       const currentSession = sessionId.value;
+      // 本轮从发送到生成标题用同一个模型
+      const modelProvider = requestProvider();
       sessionCache.delete(currentSession);
       const run = await aiApi.run(
         currentSession,
         {
           message: message.trim(),
           scope: snapshot,
-          provider: { ...provider.value },
+          provider: modelProvider,
           skill_ids: [...skillIds.value],
           memory_ids: memoryIds,
           ...(options.replaceLast ? { replace_last: true } : {})
@@ -1109,7 +1219,7 @@ export const useAIStore = defineStore("kubedoor-ai", () => {
           message.trim(),
           username,
           titleGenerations.get(currentSession) || 0,
-          { ...provider.value }
+          modelProvider
         );
       }
     } catch (reason) {
@@ -1164,9 +1274,7 @@ export const useAIStore = defineStore("kubedoor-ai", () => {
     deciding.value = actionId;
     error.value = "";
     try {
-      await aiApi.decision(runId, actionId, decision, {
-        ...provider.value
-      });
+      await aiApi.decision(runId, actionId, decision, requestProvider());
       if (generation !== approvalGeneration || activeRun.value?.id !== runId)
         return;
       settledActions.add(`${runId}:${actionId}`);
@@ -1241,6 +1349,11 @@ export const useAIStore = defineStore("kubedoor-ai", () => {
     initialized,
     bootstrap,
     provider,
+    providerMode,
+    sharedModel,
+    modelMode,
+    modelLabel,
+    modelHint,
     sessions,
     sessionId,
     sessionLoading,
@@ -1278,11 +1391,15 @@ export const useAIStore = defineStore("kubedoor-ai", () => {
     upsertMcpServer,
     dropMcpServer,
     saveProvider,
+    useSharedModel,
     forgetProvider,
     selectSession,
     createSession,
     renameSession,
     deleteSession,
+    shareCode,
+    sharing,
+    setShare,
     changeScope,
     setSelectedMemories,
     removeSelectedMemory,

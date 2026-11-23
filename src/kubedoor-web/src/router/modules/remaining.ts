@@ -34,6 +34,17 @@ export default [
     }
   },
   {
+    // AI 会话分享:分享链接打开的只读页,要登录,不带菜单和顶栏
+    path: "/ai-share/:code",
+    name: "AIShare",
+    component: () => import("@/views/ai-share/index.vue"),
+    meta: {
+      title: "AI 会话分享",
+      showLink: false,
+      rank: 104
+    }
+  },
+  {
     path: "/redirect",
     component: Layout,
     meta: {

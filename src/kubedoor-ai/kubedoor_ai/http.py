@@ -10,7 +10,7 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse, StreamingResponse
 from starlette.routing import Route
 
-from .domain import AIError, Provider, authenticate, normalize_scope, redact
+from .domain import AIError, authenticate, normalize_scope, redact
 from .runtime import SKILLS, SKILLS_ROOT
 from .service import Service
 from .storage import plain
@@ -77,6 +77,8 @@ def create_app(service=None, token=None):
         try:
             if endpoint == "bootstrap":
                 result = await svc.bootstrap(identity)
+                # 网页「模型设置」只读显示的企微专用模型（不含 API Key）；MCP 的集群列表不需要，只在这里加
+                result["shared_model"] = svc.shared_model()
             elif endpoint == "resources":
                 result = await svc.resources(identity, request.query_params)
             elif endpoint in ("connections-summary", "connections"):
@@ -131,7 +133,7 @@ def create_app(service=None, token=None):
                     if text:
                         result = {"sessions": await svc.search_sessions(identity, text)}
                     else:
-                        result = {"sessions": await svc.store.fetch("SELECT id,title,created_at,updated_at FROM kubedoor_ai_sessions WHERE username=$1 AND channel='web' ORDER BY updated_at DESC", identity.username)}
+                        result = {"sessions": await svc.store.fetch("SELECT id,title,created_at,updated_at,share_code IS NOT NULL AS shared FROM kubedoor_ai_sessions WHERE username=$1 AND channel='web' ORDER BY updated_at DESC", identity.username)}
                 else:
                     data = await body(request)
                     result = await svc.new_session(identity, data.get("title", "新会话"), request.headers.get("idempotency-key"))
@@ -154,6 +156,11 @@ def create_app(service=None, token=None):
                 result = await svc.generate_session_title(
                     identity, sid, data.get("message"), data.get("provider")
                 )
+            # 会话分享：开关只有会话本人；分享页任何登录用户凭分享码查看（工具结果按查看人的集群权限）
+            elif endpoint == "session-share":
+                result = await svc.set_share(identity, sid, (await body(request)).get("enabled"))
+            elif endpoint == "share":
+                result = await svc.shared_session(identity, request.path_params["code"])
             elif endpoint == "session":
                 if request.method == "GET":
                     result = await svc.session_detail(identity, sid)
@@ -176,7 +183,7 @@ def create_app(service=None, token=None):
                 message = data.get("message")
                 if not isinstance(message, str) or not message.strip() or len(message) > 100000:
                     raise AIError("消息不能为空，最多 100000 字符")
-                provider = Provider.parse(data.get("provider"))
+                provider = svc.provider(data.get("provider"))
                 key = request.headers.get("idempotency-key")
                 # 重新生成 / 编辑后重发：替换最后一轮。同一个幂等键重试时 run 已经建好，不再重复检查
                 rewind = None
@@ -336,6 +343,8 @@ def create_app(service=None, token=None):
     route("/memories/{mid}", "memory", ["GET", "PATCH", "DELETE"])
     route("/sessions/{sid}/memory-summary", "memory-summary", ["POST"])
     route("/sessions/{sid}/title", "title", ["POST"])
+    route("/sessions/{sid}/share", "session-share", ["PUT"])
+    route("/shares/{code}", "share", ["GET"])
     route("/sessions/{sid}", "session", ["GET", "PATCH", "DELETE"])
     route("/sessions/{sid}/runs", "runs", ["POST"])
     route("/runs/{rid}/events", "events", ["GET"])

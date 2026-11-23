@@ -84,9 +84,11 @@ def _page(value, name, maximum=None) -> int:
 
 
 class MemoryLibrary:
-    def __init__(self, store, model_factory=make_model):
+    def __init__(self, store, model_factory=make_model, provider_parser=Provider.parse):
         self.store = store
         self.model_factory = model_factory
+        # 解析请求里的模型参数：Service 传入 Service.provider（{"source": "wecom"} 表示用企微专用模型）
+        self.provider_parser = provider_parser
 
     async def list(self, query=None):
         query = {} if query is None else query
@@ -178,7 +180,7 @@ class MemoryLibrary:
         )
         if active:
             raise AIError("当前会话仍在执行或等待批准，请结束当前轮次后再总结", 409, "memory_summary_active")
-        provider = Provider.parse(provider_raw)
+        provider = self.provider_parser(provider_raw)
         secrets = (provider.api_key,) if provider.api_key else ()
         rows = await self.store.fetch(
             "SELECT m.id,m.role,m.content,m.scope,m.tools,m.memories,m.created_at "

@@ -6,7 +6,12 @@ import { inferModelLimits, type AIModelLimits } from "@/utils/ai";
  * 模型设置里的上下文窗口、最大输出（K token）和压缩阈值（%）；v-model 的值按 token 和小数保存。
  * 模型名变化时的重新预填由父组件处理（followModelLimits），这里只负责显示和输入。
  */
-const props = defineProps<{ model: string; disabled?: boolean }>();
+/** readonly：只读展示（企微专用模型），输入框不可改，也不显示填写说明 */
+const props = defineProps<{
+  model: string;
+  disabled?: boolean;
+  readonly?: boolean;
+}>();
 const limits = defineModel<AIModelLimits>({ required: true });
 
 function update(patch: Partial<AIModelLimits>) {
@@ -56,7 +61,7 @@ const verify = computed(
           :max="9765"
           :precision="0"
           controls-position="right"
-          :disabled="disabled"
+          :disabled="disabled || readonly"
         />
       </div>
       <div class="limit">
@@ -67,7 +72,7 @@ const verify = computed(
           :max="inputK ?? 9765"
           :precision="0"
           controls-position="right"
-          :disabled="disabled"
+          :disabled="disabled || readonly"
         />
       </div>
       <div class="limit">
@@ -79,16 +84,16 @@ const verify = computed(
           :step="5"
           :precision="0"
           controls-position="right"
-          :disabled="disabled"
+          :disabled="disabled || readonly"
         />
       </div>
     </div>
-    <p class="field-hint">
+    <p v-if="!readonly" class="field-hint">
       按模型名自动填写：deepseek 开头 1024K / 384K，gpt 开头 1024K /
       128K，可以手动修改。上下文达到「窗口 ×
       压缩阈值」时，自动摘要较早的对话后继续。
     </p>
-    <p v-if="verify" class="field-warning">
+    <p v-if="verify && !readonly" class="field-warning">
       该模型不在自动识别范围内，或是 gpt-4o 等旧型号，请按模型实际情况填写。
     </p>
   </el-form-item>

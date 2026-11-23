@@ -6,6 +6,7 @@ import logging
 import re
 import uuid
 from contextlib import AsyncExitStack
+from secrets import token_urlsafe
 from urllib.parse import quote, quote_plus, urlsplit, urlunsplit
 
 import asyncpg
@@ -25,6 +26,13 @@ from .storage import Store, pg_dsn
 
 LOGGER = logging.getLogger(__name__)
 PROBE_TOOL = {"name": "kubedoor_connection_probe", "description": "验证模型的工具调用能力", "parameters": {"type": "object", "properties": {}, "required": []}}
+# 网页「模型设置」选企微专用模型时，请求里的模型参数是 {"source": "wecom"}：服务端换成企微专用模型的配置，API Key 不经过浏览器
+SHARED_MODEL_SOURCE = "wecom"
+SHARED_MODEL_MISSING = "管理员还没有配置企微专用模型，请在「模型设置」里改用自定义模型"
+SHARED_MODEL_LIMITS = ("max_input_tokens", "max_output_tokens", "compression_ratio", "reasoning_effort")
+# 会话分享码：token_urlsafe(16)，128 位随机数编码成 22 个字符
+SHARE_CODE = re.compile(r"[A-Za-z0-9_-]{22}")
+SHARE_NOT_FOUND = "分享链接无效或已关闭"
 
 
 def _status_of(exc):
@@ -146,10 +154,14 @@ def search_snippet(content, text, radius=40):
 
 
 class Service:
+    # 企微专用模型的配置（PROVIDER_KEYS 各项，含 API Key）：WeComIntegration 创建时换成它的 shared_settings；None = 没有企微集成
+    shared_settings = None
+
     def __init__(self, store, gateway, runtime, stack=None):
         self.store, self.gateway, self.runtime, self.stack = store, gateway, runtime, stack
         self.tasks = []   # 后台任务（源码缓存的定时清理），close 时取消
-        self.memory_library = MemoryLibrary(store, model_factory=lambda provider: self.runtime.model_factory(provider))
+        self.memory_library = MemoryLibrary(store, model_factory=lambda provider: self.runtime.model_factory(provider),
+                                            provider_parser=self.provider)
 
     @classmethod
     async def open(cls, master_url, internal_token, encryption_key):
@@ -203,10 +215,32 @@ class Service:
                 "agent": {"available": online and upgraded, "online": online, "ai_tools": upgraded, "data_tools": bool(cluster.get("data_tools"))},
                 "direct": {"configured": bool(cluster.get("configured")), "context": cluster.get("context"), "test_status": cluster.get("test_status")}}
 
+    def provider(self, raw):
+        """解析请求里的模型参数。{"source": "wecom"} 用企微专用模型（机器人停用也能用，没配置好 409），
+        其余按浏览器里的自定义模型解析。发送、审批后继续、会话标题、总结记忆、测试连接都经过这里"""
+        if isinstance(raw, dict) and raw.get("source") == SHARED_MODEL_SOURCE:
+            settings = self.shared_settings() if self.shared_settings else None
+            try:
+                return Provider.parse(settings)
+            except AIError:
+                raise AIError(SHARED_MODEL_MISSING, 409, "shared_model_unavailable") from None
+        return Provider.parse(raw)
+
+    def shared_model(self):
+        """网页「模型设置」只读显示的企微专用模型：不返回 API Key，只说有没有配置（字段名不能叫 has_api_key，会被出口打码）"""
+        settings = (self.shared_settings() if self.shared_settings else None) or {}
+        try:
+            Provider.parse(settings)
+            available = True
+        except AIError:
+            available = False
+        return {"available": available, "base_url": settings.get("base_url") or "", "model": settings.get("model") or "",
+                **{key: settings.get(key) for key in SHARED_MODEL_LIMITS}, "api_key_set": bool(settings.get("api_key"))}
+
     async def test_provider(self, raw):
         provider, stage = None, "validate"
         try:
-            provider = Provider.parse(raw)
+            provider = self.provider(raw)
             stage = "initialize"
             model = make_model(provider)
             prompt = [HumanMessage(content="请调用 kubedoor_connection_probe 工具进行连接验证。")]
@@ -245,7 +279,7 @@ class Service:
         if not isinstance(message, str) or not message.strip() or len(message) > 100000:
             raise AIError("首条消息不能为空", 400, "invalid_title_request")
         session = await self.store.session(session_id, identity)
-        provider = Provider.parse(provider_raw)
+        provider = self.provider(provider_raw)
         prompt = (
             "使用四到五个字直接返回这句话的简要主题，不要解释、不要标点、"
             "不要语气词、不要多余文本，不要加粗，如果没有主题，请直接返回“闲聊”"
@@ -328,7 +362,7 @@ class Service:
         """按标题和消息内容搜索本人的网页会话，附上最近一条命中消息的片段"""
         pattern = "%" + text.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
         rows = await self.store.fetch(
-            "SELECT s.id,s.title,s.created_at,s.updated_at,"
+            "SELECT s.id,s.title,s.created_at,s.updated_at,s.share_code IS NOT NULL AS shared,"
             "(SELECT m.content FROM kubedoor_ai_messages m WHERE m.session_id=s.id AND m.replaced_at IS NULL AND m.content ILIKE $2 "
             "ORDER BY m.created_at DESC LIMIT 1) AS matched "
             "FROM kubedoor_ai_sessions s WHERE s.username=$1 AND s.channel='web' AND (s.title ILIKE $2 OR EXISTS "
@@ -392,6 +426,76 @@ class Service:
         session["usage"] = (latest or {}).get("usage")
         return session
 
+    async def audit(self, identity, action, target, detail=None):
+        """记 master 的操作审计（/api/ai/internal/audit）。尽力而为：master 不可用时只记日志，不影响操作本身"""
+        try:
+            await asyncio.wait_for(self.gateway.master(identity, "POST", "/api/ai/internal/audit",
+                                                       body={"action": action, "target": target, "detail": detail}), 10)
+        except Exception as exc:
+            LOGGER.warning("写操作审计失败 %s: %s", action, type(exc).__name__)
+
+    async def set_share(self, identity, sid, enabled):
+        """开关会话分享，只有会话本人能改。
+
+        开启生成分享码，已经在分享就返回原来的（重复点击、并发请求拿到同一个链接）；关闭清空分享码，旧链接立即失效，
+        再开启是新码。不改 updated_at，不打乱会话列表的顺序；状态真的变了才记审计 ai.share / ai.unshare。
+        """
+        if not isinstance(enabled, bool):
+            raise AIError("enabled 必须是 true 或 false")
+        session = await self.store.session(sid, identity)
+        if enabled:
+            row = await self.store.one(
+                "UPDATE kubedoor_ai_sessions SET share_code=$3,shared_at=now() WHERE id=$1::uuid AND username=$2 AND channel='web' "
+                "AND share_code IS NULL RETURNING id,share_code,shared_at", sid, identity.username, token_urlsafe(16))
+            if row:
+                await self.audit(identity, "ai.share", session["title"], {"session_id": row["id"]})
+            else:
+                row = await self.store.one(
+                    "SELECT id,share_code,shared_at FROM kubedoor_ai_sessions WHERE id=$1::uuid AND username=$2 AND channel='web' "
+                    "AND share_code IS NOT NULL", sid, identity.username)
+                if not row:
+                    raise AIError("分享状态刚被修改，请刷新后重试", 409, "share_conflict")
+        else:
+            if await self.store.one(
+                    "UPDATE kubedoor_ai_sessions SET share_code=NULL,shared_at=NULL WHERE id=$1::uuid AND username=$2 AND channel='web' "
+                    "AND share_code IS NOT NULL RETURNING id", sid, identity.username):
+                await self.audit(identity, "ai.unshare", session["title"], {"session_id": session["id"]})
+            row = {"id": session["id"], "share_code": None, "shared_at": None}
+        return {"id": row["id"], "shared": row["share_code"] is not None, "share_code": row["share_code"], "shared_at": row["shared_at"]}
+
+    async def shared_session(self, identity, code):
+        """分享页：任何登录用户凭分享码只读查看。匿名：不返回会话 id 和账号。
+
+        问答正文都能看；工具调用的参数和结果只给对该消息所在集群至少只读的人，没有权限的清空并标 tools_hidden。
+        MCP 调用建的会话，正文本身就是工具的参数和结果，一起清空。分享期间的新消息也能看到（实时，不是快照）。
+        """
+        if not isinstance(code, str) or not SHARE_CODE.fullmatch(code):
+            raise AIError(SHARE_NOT_FOUND, 404, "share_not_found")
+        session = await self.store.one(
+            "SELECT id,title,shared_at,updated_at FROM kubedoor_ai_sessions WHERE share_code=$1 AND channel='web'", code)
+        if not session:
+            raise AIError(SHARE_NOT_FOUND, 404, "share_not_found")
+        rows = await self.store.fetch(
+            "SELECT m.id,m.role,m.content,m.scope,m.tools,m.memories,m.created_at,r.origin FROM kubedoor_ai_messages m "
+            "LEFT JOIN kubedoor_ai_runs r ON r.id=m.run_id WHERE m.session_id=$1::uuid AND m.replaced_at IS NULL "
+            "ORDER BY m.created_at,m.id", session["id"])
+        active = await self.store.one(
+            "SELECT status FROM kubedoor_ai_runs WHERE session_id=$1::uuid AND status IN ('running','waiting_approval') "
+            "ORDER BY created_at DESC LIMIT 1", session["id"])
+        messages = []
+        for row in rows:
+            origin = row.pop("origin", None)
+            scope = row.get("scope")
+            env = scope.get("env") if isinstance(scope, dict) else None
+            readable = isinstance(env, str) and bool(env) and identity.can_read(env)
+            if not readable and (row.get("tools") or origin == "mcp"):
+                row.update(tools=[], tools_hidden=True)
+                if origin == "mcp":
+                    row["content"] = ""
+            messages.append(row)
+        return {"title": session["title"], "shared_at": session["shared_at"], "updated_at": session["updated_at"],
+                "active_run": {"status": active["status"]} if active else None, "messages": messages}
+
     async def decision(self, identity, rid, body):
         run = await self.store.run(rid, identity)
         decision, action_id = body.get("decision"), body.get("action_id")
@@ -433,7 +537,7 @@ class Service:
             self.runtime.tasks[rid] = task
             task.add_done_callback(lambda _: self.runtime.tasks.pop(rid, None))
         else:
-            provider = Provider.parse(body.get("provider"))
+            provider = self.provider(body.get("provider"))
             if not action.get("interrupt_id"):
                 raise AIError("批准点尚未写入，请稍后重试", 409, "checkpoint_pending")
             if rid in self.runtime.tasks:

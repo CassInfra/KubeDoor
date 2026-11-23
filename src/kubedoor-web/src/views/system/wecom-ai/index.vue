@@ -510,6 +510,10 @@ onBeforeUnmount(() => {
           />
         </el-form-item>
         <el-divider content-position="left">企微专用模型</el-divider>
+        <p class="form-tip shared-model-tip">
+          网页 AI
+          助手默认也用这个模型（用户可以在「模型设置」里改用自定义模型）；不用企微机器人的话，可以只填模型部分、不启用机器人。
+        </p>
         <el-form-item label="Base URL" required>
           <el-input
             v-model="form.base_url"
@@ -525,7 +529,7 @@ onBeforeUnmount(() => {
             :placeholder="
               config.has_api_key
                 ? '已保存，留空保持不变'
-                : '仅用于企业微信机器人'
+                : '企微机器人和网页 AI 助手共用'
             "
           />
         </el-form-item>
@@ -847,6 +851,10 @@ onBeforeUnmount(() => {
 
 .unbound-access .form-tip {
   margin-top: 0;
+}
+
+.shared-model-tip {
+  margin: -8px 0 16px;
 }
 
 .muted {

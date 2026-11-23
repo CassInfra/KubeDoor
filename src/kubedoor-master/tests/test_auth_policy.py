@@ -125,6 +125,7 @@ def test_env_condition_sql():
     ('GET', '/api/ai/internal/code-info', 'internal'),  # AI 查代码 / 取下载地址,handler 再按集群校验
     ('GET', '/api/ai/internal/code-access', 'internal'),
     ('GET', '/api/ai/internal/permission-policy', 'internal'),
+    ('POST', '/api/ai/internal/audit', 'internal'),  # AI 会话分享开关的审计,用户取自 X-User-Name
     ('GET', '/api/runtime-config', 'op'),  # 获取运行配置:要「查看运行配置」
     ('GET', '/api/admin/runtime-config', 'admin'),
     ('PUT', '/api/admin/runtime-config', 'admin'),

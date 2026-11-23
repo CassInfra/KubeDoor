@@ -12,17 +12,18 @@ const props = withDefaults(
     deciding?: string;
     secret?: string;
     active?: boolean;
+    /** 只读(分享页):不显示审批,入库快照里待批准的工具也一样 */
+    readonly?: boolean;
   }>(),
-  { active: true, ready: true }
+  { active: true, ready: true, readonly: false }
 );
 const expanded = defineModel<boolean>("expanded", { default: false });
 const emit = defineEmits<{
   decide: [actionId: string, decision: "approve" | "reject"];
 }>();
 const detailsId = `ai-tool-details-${getCurrentInstance()!.uid}`;
-const pendingCount = computed(
-  () => props.tools.filter(tool => tool.pending).length
-);
+const awaiting = (tool: AITool) => !props.readonly && !!tool.pending;
+const pendingCount = computed(() => props.tools.filter(awaiting).length);
 const label = (tool: AITool) =>
   props.secret ? tool.name.split(props.secret).join("[已隐藏]") : tool.name;
 const running = (tool: AITool) =>
@@ -66,7 +67,7 @@ const failed = (tool: AITool) =>
             'tool-progress-item',
             {
               running: running(tool),
-              pending: tool.pending,
+              pending: awaiting(tool),
               failed: failed(tool)
             }
           ]"
@@ -97,6 +98,7 @@ const failed = (tool: AITool) =>
         :ready="ready"
         :deciding="deciding"
         :secret="secret"
+        :readonly="readonly"
         @decide="(id, decision) => emit('decide', id, decision)"
       />
     </div>

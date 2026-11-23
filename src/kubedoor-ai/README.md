@@ -12,8 +12,17 @@ Python 执行库，负责 Kubernetes SDK、CLI 和 Pod exec；它不监听端口
 
 ## 模型与会话
 
-用户在 Web 页面顶部中央的 AI 按钮中配置 `base_url`、API key 和模型名，配置按
-登录用户名保存在当前浏览器。模型需要支持 OpenAI-compatible Chat Completions
+网页 AI 助手的「模型设置」有两种模型，标题右边的开关切换，选择按登录用户名保存在当前浏览器：
+
+- **企微专用模型**（默认）：管理员在「企微 AI 机器人」里配置的模型（`kubedoor_ai_wecom_config`，加密保存）。
+  浏览器在发送、批准后继续、生成标题、总结记忆、测试连接时只传 `provider: {"source": "wecom"}`，
+  `Service.provider()` 换成企微配置（`WeComIntegration.shared_settings`，机器人停用时也给），API Key 不经过浏览器；
+  没配置好时返回 409 `shared_model_unavailable`。`GET /api/ai/bootstrap` 的 `shared_model` 给只读显示用，
+  只有 `api_key_set` 说明有没有 Key（不能叫 `has_api_key`：接口出口的 `redact` 会把 `*_api_key`、`*_token`
+  这类键的值打码）。没有手动选择过的账号默认企微专用模型，管理员还没配置、浏览器里又有自定义配置时先用自定义。
+- **自定义模型**：用户自己配置 `base_url`、API key 和模型名，按登录用户名保存在当前浏览器。
+
+模型需要支持 OpenAI-compatible Chat Completions
 工具调用；服务显式关闭 Responses API。无鉴权的本地模型允许 API key 留空。
 
 `base_url` 填写供应商的 API 基址，例如 `https://api.example.com/v1`，SDK 会自动
@@ -376,8 +385,9 @@ kubedoor-ai 照常先测试连通再保存；`kubedoor_ai_connections.origin` �
 
 | 接口 | 说明 |
 | --- | --- |
-| `GET /api/ai/bootstrap` | 当前用户、集群连接能力与 Skills |
+| `GET /api/ai/bootstrap` | 当前用户、集群连接能力、Skills，以及只读显示用的企微专用模型（`shared_model`，不含 Key） |
 | `/api/ai/sessions`、`/api/ai/sessions/{id}/runs` | 会话管理与创建运行 |
+| `PUT /api/ai/sessions/{id}/share`、`GET /api/ai/shares/{code}` | 会话分享：本人开关（`{enabled}`）；任何登录用户凭分享码只读查看，规则见下文「会话分享」 |
 | `GET/POST /api/ai/memories`、`GET/PATCH/DELETE /api/ai/memories/{id}` | 全局记忆分页查询、按需读取正文及版本检查后的管理 |
 | `POST /api/ai/sessions/{id}/memory-summary` | 生成本人会话的可编辑记忆草稿，保存前不写入全局库 |
 | `GET /api/ai/runs/{id}/events` | 标准 SSE，支持 `after`、`Last-Event-ID` 持久化重放 |
@@ -390,6 +400,21 @@ kubedoor-ai 照常先测试连通再保存；`kubedoor_ai_connections.origin` �
 
 DeepAgents 加载仓库内 `skills/kubedoor-k8s`，Skills 文件只读；会话和运行创建支持
 `Idempotency-Key`，流重连或刷新不会自动重复提交工具。
+
+### 会话分享
+
+网页 AI 助手「总结为记忆」左边的「分享」勾选框（`Service.set_share` / `shared_session`，前端分享页
+`src/kubedoor-web/src/views/ai-share/`，路由 `/#/ai-share/<分享码>`）：
+
+- 分享码存在 `kubedoor_ai_sessions.share_code`（`token_urlsafe(16)`，128 位随机数，唯一索引），`shared_at` 是开启时间。
+  只有会话本人能开关；已经在分享时再开启返回原来的码，关闭清空，再开启是新码；开关不改 `updated_at`。
+  列名和接口字段不能带 `token`（出口的 `redact` 会打码）。
+- 开启、关闭经 master `POST /api/ai/internal/audit` 记审计 `ai.share` / `ai.unshare`（尽力而为，master 不可用只记日志）；
+  查看不记。
+- 分享页任何登录用户可看（nginx 的 `/api/ai/` 已要求登录），匿名：不返回会话 id 和账号。实时读 `kubedoor_ai_messages`
+  （不显示 `replaced_at` 的轮次），进行中的轮次只返回 `active_run.status`。
+- 工具结果按查看人的集群权限：消息 `scope.env` 没有只读权限（或消息没有集群）时 `tools` 清空并标 `tools_hidden`；
+  MCP 调用建的会话（`kubedoor_ai_runs.origin='mcp'`）正文本身就是工具参数和结果，一起清空。问答正文所有登录用户都能看。
 
 外部 MCP 使用 `/mcp`（Streamable HTTP），并保留 `/sse`、`/messages` 兼容入口。
 原有 **16 个工具的名称和参数保留**，另提供统一 `kubedoor_tool` 和
@@ -434,7 +459,7 @@ K8S 上的操作和网页一样按「权限与审批」判定（企微配置页�
 
 企微的模板卡片事件内容在 `event.template_card_event` 里（`event_key`、`task_id`，下拉框选的值在 `selected_items`）。卡片事件只能用来更新被点的那张卡片（`aibot_respond_update_msg`，5 秒内），不能回复消息：按钮处理完就把卡片换成结果（按钮交互卡片，只留一个显示状态的按钮；`text_notice` 卡片必须带跳转链接，不能用）；审批批准或拒绝后的执行结果、选好集群后接着处理的回答用主动推送（`aibot_send_msg`，markdown，执行中再遇到审批也推送审批卡片）。点审批卡片后整个处理限 4 秒：恢复任务前还要问 master 集群状态，master 慢时批准照常生效，卡片先改成「已收到，正在处理」，处理完推送结果；「开始新对话」要停的任务放到后台停。
 
-企微会话单独持久化，不会显示在网页 AI 会话列表中；网页 AI 的模型配置保持原样。Bot Secret 和模型 API Key 留空保存表示保持原密钥不变；修改 Base URL、模型或 Bot ID 后保存会重建长连接。首次接入建议先测试模型工具调用，保存启用配置后确认连接状态为「已连接」，再绑定测试账号和只读集群做单聊验收。
+企微会话单独持久化，不会显示在网页 AI 会话列表中。网页 AI 助手默认也用这里的企微专用模型（用户可以在模型设置里改用自定义模型，见上文「模型与会话」）；不用企微机器人的，可以只填模型部分、不启用机器人。Bot Secret 和模型 API Key 留空保存表示保持原密钥不变；修改 Base URL、模型或 Bot ID 后保存会重建长连接。首次接入建议先测试模型工具调用，保存启用配置后确认连接状态为「已连接」，再绑定测试账号和只读集群做单聊验收。
 
 企微只有一个聊天窗口，会话边界由服务端管理：
 
