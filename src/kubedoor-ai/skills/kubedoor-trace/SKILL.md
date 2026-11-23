@@ -74,6 +74,7 @@ description: 用链路追踪（Jaeger，可选 ClickHouse 加速）排查接口�
 | 线索 | 接着查 |
 | --- | --- |
 | 根因 Span 的 `k8s_pod`、`k8s_namespace` | `logs`（取最新日志，在里面找 traceId 和出错时间附近的行；最多 5000 行，出错较早时可能已经滚走）、`previous_logs`、`pods`（重启、OOMKilled、就绪）、`events`、`deployment_metrics` / `metrics`（CPU、内存、GC、线程） |
+| 要看这次请求在各层的日志（入口、网关、服务），或者实时日志已经滚走 | Skill `kubedoor-logs`：`log_correlate`（key 用 `log_sources` 里标为链路 ID 的关联字段，value 是 traceId，`around` 传链路时间） |
 | 被调方不可达 | 被调方的 `pods`、`service_endpoints`（有没有可用的后端）、`events` / `event_history`；当时有没有发布、扩缩容、重启 |
 | 异常堆栈、代码里的报错 | Skill `kubedoor-code`：`code_fetch` 下载出问题那个 Pod 的源码，再 `code_search` / `code_read` |
 | 连接地址、超时、线程池、连接池等配置 | Skill `kubedoor-config`：`runtime_config` |

@@ -1,0 +1,14 @@
+-- SELECT * FROM __kd_src__ WHERE id IN __kd_src__
+SelectWithUnionQuery (children 1)
+ ExpressionList (children 1)
+  SelectQuery (children 3)
+   ExpressionList (children 1)
+    Asterisk
+   TablesInSelectQuery (children 1)
+    TablesInSelectQueryElement (children 1)
+     TableExpression (children 1)
+      TableIdentifier __kd_src__
+   Function in (children 1)
+    ExpressionList (children 2)
+     Identifier id
+     Identifier __kd_src__

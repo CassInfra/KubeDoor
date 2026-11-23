@@ -1,4 +1,17 @@
 import { createSseParser, type SseFrame } from "@/utils/ai";
+import type {
+  LogBindingCondition,
+  LogColumnNote,
+  LogCorrelationKey,
+  LogDurationUnit,
+  LogLevelKey,
+  LogScanGroup,
+  LogScanResult,
+  LogSemanticField,
+  LogSourceCorrelation,
+  LogSourceKind,
+  LogSuggestedBinding
+} from "./system";
 
 /** DeepSeek 思考强度；null 表示用模型默认（high），请求里不带参数 */
 export type AIReasoningEffort = "off" | "low" | "high" | "max";
@@ -332,6 +345,68 @@ export interface AIMcpTestResult {
   server_info?: AIMcpServerInfo | null;
 }
 
+/** 历史日志「AI 生成说明」的请求：扫描结果（只放勾选的组）、KubeDoor 集群、已有配置的名字、管理员补充说明 */
+export interface LogDescribeRequest {
+  scan: {
+    groups: LogScanGroup[];
+    connection: LogScanResult["connection"];
+    /** 扫描超时只返回了一部分 */
+    partial?: boolean;
+    notes?: string[];
+    /** 扫描按规则给的绑定建议（只有勾选的组） */
+    suggested_bindings?: LogSuggestedBinding[];
+  };
+  clusters: { env: string; aliases: string[] }[];
+  existing: {
+    sources: { id: string; name: string }[];
+    correlation_keys: { key: string; label: string }[];
+    architecture: string;
+  };
+  /** 管理员补充说明（≤ 4000） */
+  hint: string;
+}
+
+/** 草稿里的日志源：group 是扫描结果里组的 ref */
+export interface LogDraftSource {
+  group: string;
+  id: string;
+  name: string;
+  kind: LogSourceKind;
+  description: string;
+  time_field: string;
+  fields: Partial<Record<LogSemanticField, string>>;
+  duration_unit?: LogDurationUnit;
+  level_values?: Partial<Record<LogLevelKey, string[]>>;
+  cluster_field?: string;
+  default_target?: string;
+  columns?: LogColumnNote[];
+  correlations?: LogSourceCorrelation[];
+}
+
+export interface LogDraftBinding {
+  env: string;
+  /** 草稿里的日志源 id，或者已有日志源的 id */
+  source: string;
+  target: string;
+  conditions: LogBindingCondition[];
+  note: string;
+}
+
+export interface LogDraft {
+  sources: LogDraftSource[];
+  correlation_keys: LogCorrelationKey[];
+  bindings: LogDraftBinding[];
+  cluster_notes: { env: string; note: string }[];
+  architecture: string;
+}
+
+export interface LogDescribeResult {
+  draft: LogDraft;
+  /** 被丢掉的项等说明 */
+  notes: string[];
+  model: string;
+}
+
 export class AIRequestError extends Error {
   constructor(
     message: string,
@@ -657,6 +732,20 @@ export const aiApi = {
   deleteConnection: (env: string) =>
     request(`/connections/${itemPath(env)}`, "DELETE")
 };
+
+/**
+ * 历史日志「AI 生成说明」（仅系统管理员）：用企微专用模型按扫描结果生成配置草稿，不保存。
+ * 服务端最长等模型 180 秒，浏览器多等 20 秒；请求体由页面控制在 1.5MB 以内（nginx 限制 2MB）。
+ */
+export const describeLogSources = (body: LogDescribeRequest) =>
+  request<LogDescribeResult>(
+    "/log-sources/describe",
+    "POST",
+    body,
+    undefined,
+    undefined,
+    200000
+  );
 
 export async function streamAIEvents(
   runId: string,

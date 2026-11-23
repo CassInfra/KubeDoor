@@ -1,0 +1,21 @@
+-- SELECT (SELECT max(x) FROM other.t) FROM logs.access
+SelectWithUnionQuery (children 1)
+ ExpressionList (children 1)
+  SelectQuery (children 2)
+   ExpressionList (children 1)
+    Subquery (children 1)
+     SelectWithUnionQuery (children 1)
+      ExpressionList (children 1)
+       SelectQuery (children 2)
+        ExpressionList (children 1)
+         Function max (children 1)
+          ExpressionList (children 1)
+           Identifier x
+        TablesInSelectQuery (children 1)
+         TablesInSelectQueryElement (children 1)
+          TableExpression (children 1)
+           TableIdentifier other.t
+   TablesInSelectQuery (children 1)
+    TablesInSelectQueryElement (children 1)
+     TableExpression (children 1)
+      TableIdentifier logs.access

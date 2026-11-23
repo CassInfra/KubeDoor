@@ -1,0 +1,22 @@
+-- SELECT path, count() AS c FROM __kd_src__ WHERE status >= 500 GROUP BY path ORDER BY c DESC LIMIT 20
+SelectWithUnionQuery (children 1)
+ ExpressionList (children 1)
+  SelectQuery (children 6)
+   ExpressionList (children 2)
+    Identifier path
+    Function count (alias c) (children 1)
+     ExpressionList
+   TablesInSelectQuery (children 1)
+    TablesInSelectQueryElement (children 1)
+     TableExpression (children 1)
+      TableIdentifier __kd_src__
+   Function greaterOrEquals (children 1)
+    ExpressionList (children 2)
+     Identifier status
+     Literal UInt64_500
+   ExpressionList (children 1)
+    Identifier path
+   ExpressionList (children 1)
+    OrderByElement (children 1)
+     Identifier c
+   Literal UInt64_20

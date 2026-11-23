@@ -1,0 +1,21 @@
+-- SELECT arrayFilter(x -> x > 1, [1, 2, 3]) FROM logs.access
+SelectWithUnionQuery (children 1)
+ ExpressionList (children 1)
+  SelectQuery (children 2)
+   ExpressionList (children 1)
+    Function arrayFilter (children 1)
+     ExpressionList (children 2)
+      Function lambda (children 1)
+       ExpressionList (children 2)
+        Function tuple (children 1)
+         ExpressionList (children 1)
+          Identifier x
+        Function greater (children 1)
+         ExpressionList (children 2)
+          Identifier x
+          Literal UInt64_1
+      Literal Array_[UInt64_1, UInt64_2, UInt64_3]
+   TablesInSelectQuery (children 1)
+    TablesInSelectQueryElement (children 1)
+     TableExpression (children 1)
+      TableIdentifier logs.access

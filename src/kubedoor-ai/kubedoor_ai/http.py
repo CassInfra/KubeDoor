@@ -11,6 +11,7 @@ from starlette.responses import JSONResponse, StreamingResponse
 from starlette.routing import Route
 
 from .domain import AIError, authenticate, normalize_scope, redact
+from .log_describe import describe as describe_log_sources
 from .runtime import SKILLS, SKILLS_ROOT
 from .service import Service
 from .storage import plain
@@ -312,6 +313,11 @@ def create_app(service=None, token=None):
             elif endpoint == "tools-execute":
                 data = await body(request)
                 result = await svc.mcp_call(identity, data.get("operation"), data.get("arguments", {}), normalize_scope(data.get("scope")), data.get("source", "auto"))
+            # 历史日志配置页的「AI 生成说明」：只有系统管理员，用企微专用模型（没配好 409），逻辑在 log_describe.py
+            elif endpoint == "log-describe":
+                identity.require_admin()
+                data = await body(request)
+                result = await describe_log_sources(data, svc.provider({"source": "wecom"}), svc.runtime.model_factory)
             else:
                 raise AIError("接口不存在", 404, "not_found")
             return JSONResponse(redact(plain(result)))
@@ -369,6 +375,7 @@ def create_app(service=None, token=None):
     route("/skills/{skill_id}", "skill", ["GET"])
     route("/tools", "tools", ["GET"])
     route("/tools/execute", "tools-execute", ["POST"])
+    route("/log-sources/describe", "log-describe", ["POST"])
     async def setup_health(request):
         try:
             await asyncio.wait_for(request.app.state.service.store.one('SELECT 1 AS ready'), 5)

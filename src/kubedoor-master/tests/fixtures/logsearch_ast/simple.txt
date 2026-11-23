@@ -1,0 +1,27 @@
+-- SELECT status, count() FROM (SELECT * FROM logs.access WHERE ts >= 1) GROUP BY status
+SelectWithUnionQuery (children 1)
+ ExpressionList (children 1)
+  SelectQuery (children 3)
+   ExpressionList (children 2)
+    Identifier status
+    Function count (children 1)
+     ExpressionList
+   TablesInSelectQuery (children 1)
+    TablesInSelectQueryElement (children 1)
+     TableExpression (children 1)
+      Subquery (children 1)
+       SelectWithUnionQuery (children 1)
+        ExpressionList (children 1)
+         SelectQuery (children 3)
+          ExpressionList (children 1)
+           Asterisk
+          TablesInSelectQuery (children 1)
+           TablesInSelectQueryElement (children 1)
+            TableExpression (children 1)
+             TableIdentifier logs.access
+          Function greaterOrEquals (children 1)
+           ExpressionList (children 2)
+            Identifier ts
+            Literal UInt64_1
+   ExpressionList (children 1)
+    Identifier status

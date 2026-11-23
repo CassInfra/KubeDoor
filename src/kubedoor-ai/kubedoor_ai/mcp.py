@@ -118,4 +118,10 @@ def create_mcp(service, token):
         identity()
         return (SKILLS_ROOT / "kubedoor-trace" / "SKILL.md").read_text(encoding="utf-8")
 
+    @server.resource("skills://kubedoor-logs", description="KubeDoor 历史日志查询 Skill")
+    async def kubedoor_logs_skill() -> str:
+        from .runtime import SKILLS_ROOT
+        identity()
+        return (SKILLS_ROOT / "kubedoor-logs" / "SKILL.md").read_text(encoding="utf-8")
+
     return server

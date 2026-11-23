@@ -1,0 +1,12 @@
+-- SELECT getSetting('max_threads') FROM __kd_src__
+SelectWithUnionQuery (children 1)
+ ExpressionList (children 1)
+  SelectQuery (children 2)
+   ExpressionList (children 1)
+    Function getSetting (children 1)
+     ExpressionList (children 1)
+      Literal \'max_threads\'
+   TablesInSelectQuery (children 1)
+    TablesInSelectQueryElement (children 1)
+     TableExpression (children 1)
+      TableIdentifier __kd_src__

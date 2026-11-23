@@ -260,6 +260,24 @@ Xms、Xmx、Xss、MaxMetaspace 等已入库 JVM 参数；它表示采集或管�
 - 按 K8S 过滤的参数带 `k8s_` 前缀：`Gateway.invoke` 会给 kubedoor 来源的操作填上页面选中的命名空间，链路追踪操作跳过这一步（选中的命名空间不是链路的条件），动作记录里也就不会有它。
 - 工具描述是静态文本（缓存不变量 I2）：是否启用、有没有 ClickHouse 加速都不进系统提示，由结果的 `source` 和错误码体现（`not_configured`、`version_unsupported`、`not_supported`、`jaeger_unavailable` / `clickhouse_unavailable` 等）。结果原样返回，照常经过 `domain.redact`。
 
+### 历史日志（`kubedoor-logs` Skill）
+
+基于「系统管理 → 历史日志」（master `logsearch/`）：管理员登记 ClickHouse / Elasticsearch 连接、日志源（时间字段、语义字段、级别取值、关联字段、说明）、各集群的绑定（表 / 索引 + 过滤条件 + 说明）、集群说明和网络架构说明。七个目录操作都是查询（集群只读及以上，不进「权限与审批」表，没有 `TOOL_OPS`），网关 POST 到 master 的 `/api/ai/internal/logs/{op}`，query 只有 `env`，body 是声明过的参数：
+
+| operation | master op | 作用 |
+| --- | --- | --- |
+| `log_sources` | `sources` | 当前集群绑定了的日志源、网络架构、集群说明、关联字段；带 `source` 时给实时字段表和说明 |
+| `log_search` | `search` | 明细；每条带 `@time`，登记了链路 ID 的日志源带 `trace_id` |
+| `log_stats` | `stats` | 计数、时间趋势、分组 Top、耗时分位 |
+| `log_patterns` | `patterns` | 取最新一批正文在 master 归类（ES basic 许可证不能用 categorize_text） |
+| `log_context` | `context` | 锚点前后各 N 条（同一个 Pod） |
+| `log_correlate` | `correlate` | 按关联字段在登记了它的日志源里并行查，合成时间线；链路 ID 给出 traceId 和 Jaeger 链接 |
+| `log_query` | `query` | 原生查询：CH 的 SQL 里 `$src` 由 master 换成带集群和时间条件的子查询，再用 `EXPLAIN AST` 检查只引用了它；ES 的 DSL 外层再套过滤、ES\|QL 用请求体的 `filter` |
+
+- 参数校验在 `catalogue._validate_log`（每个声明的参数都有校验分支），`namespace` / `pod` / `deployment` 这类误用直接报错并提示 `k8s_` 前缀；`Gateway.invoke` 同样不给日志操作填页面选中的命名空间。
+- 工具描述是静态文本：有哪些日志源、字段、集群绑定都不进系统提示，由 `log_sources` 的结果给出。
+- 配置页的「AI 生成说明」走 `POST /api/ai/log-sources/describe`（`kubedoor_ai/log_describe.py`，只有系统管理员）：用企微专用模型（`Service.provider({"source": "wecom"})`）、关闭思考，把扫描结果（样本已由 master 打码）压缩后生成草稿，只保留引用了扫描里存在的组、字段、集群的项；输出全部用列表 + name / description，不用字段名做键（出口 `redact` 会把 token、password 这类键的值打码）。
+
 ### 花折资源管控（准入控制）
 
 集群开启准入控制、命名空间在管控列表里、服务已登记到管控表时，Deployment「受管控」：准入 webhook
@@ -418,7 +436,7 @@ DeepAgents 加载仓库内 `skills/kubedoor-k8s`，Skills 文件只读；会话�
 
 外部 MCP 使用 `/mcp`（Streamable HTTP），并保留 `/sse`、`/messages` 兼容入口。
 原有 **16 个工具的名称和参数保留**，另提供统一 `kubedoor_tool` 和
-`skills://kubedoor-k8s`、`skills://kubedoor-code`、`skills://kubedoor-config`、`skills://kubedoor-trace` 资源。外部调用与 Web 共用权限、审批和审计，规则和网页 AI 完全一样；需要批准的调用
+`skills://kubedoor-k8s`、`skills://kubedoor-code`、`skills://kubedoor-config`、`skills://kubedoor-trace`、`skills://kubedoor-logs` 资源。外部调用与 Web 共用权限、审批和审计，规则和网页 AI 完全一样；需要批准的调用
 返回 `pending` 及浏览器会话链接，在批准前不会执行，不需要批准的直接执行并返回结果。
 
 ## 配置、启动与部署

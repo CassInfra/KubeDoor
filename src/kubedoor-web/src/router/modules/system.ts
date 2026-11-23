@@ -1,4 +1,4 @@
-// 系统管理:用户与权限、权限与审批、LDAP、通用配置、镜像管理、企微 AI 机器人、获取代码接口、获取运行配置接口、链路追踪、消息通知、事件告警规则、AI 用量看板、操作审计,只对管理员开放(后端 /api/admin/* 同样只认管理员)
+// 系统管理:用户与权限、权限与审批、LDAP、通用配置、镜像管理、企微 AI 机器人、获取代码接口、获取运行配置接口、链路追踪、历史日志、消息通知、事件告警规则、AI 用量看板、操作审计,只对管理员开放(后端 /api/admin/* 同样只认管理员)
 export default {
   path: "/system",
   redirect: "/system/users",
@@ -91,6 +91,16 @@ export default {
       component: () => import("@/views/system/tracing/index.vue"),
       meta: {
         title: "链路追踪",
+        roles: ["admin"]
+      }
+    },
+    {
+      // AI 助手查历史日志用的 ClickHouse / Elasticsearch 连接、日志源、各集群的表 / 索引绑定
+      path: "/system/log-sources",
+      name: "SystemLogSources",
+      component: () => import("@/views/system/log-sources/index.vue"),
+      meta: {
+        title: "历史日志",
         roles: ["admin"]
       }
     },

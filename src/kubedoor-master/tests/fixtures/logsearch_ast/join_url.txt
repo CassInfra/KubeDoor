@@ -1,0 +1,20 @@
+-- SELECT * FROM logs.access AS a JOIN url('http://h/x', CSV, 'x String') AS u USING x
+SelectWithUnionQuery (children 1)
+ ExpressionList (children 1)
+  SelectQuery (children 2)
+   ExpressionList (children 1)
+    Asterisk
+   TablesInSelectQuery (children 2)
+    TablesInSelectQueryElement (children 1)
+     TableExpression (children 1)
+      TableIdentifier logs.access (alias a)
+    TablesInSelectQueryElement (children 2)
+     TableExpression (children 1)
+      Function url (alias u) (children 1)
+       ExpressionList (children 3)
+        Literal \'http://h/x\'
+        Identifier CSV
+        Literal \'x String\'
+     TableJoin (children 1)
+      ExpressionList (children 1)
+       Identifier x

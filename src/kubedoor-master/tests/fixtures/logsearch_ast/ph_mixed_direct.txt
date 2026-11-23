@@ -1,0 +1,16 @@
+-- SELECT * FROM __kd_src__ AS a JOIN logs.access AS b USING id
+SelectWithUnionQuery (children 1)
+ ExpressionList (children 1)
+  SelectQuery (children 2)
+   ExpressionList (children 1)
+    Asterisk
+   TablesInSelectQuery (children 2)
+    TablesInSelectQueryElement (children 1)
+     TableExpression (children 1)
+      TableIdentifier __kd_src__ (alias a)
+    TablesInSelectQueryElement (children 2)
+     TableExpression (children 1)
+      TableIdentifier logs.access (alias b)
+     TableJoin (children 1)
+      ExpressionList (children 1)
+       Identifier id

@@ -1,0 +1,14 @@
+-- SELECT * FROM executable('a.sh', 'TSV', 'x String')
+SelectWithUnionQuery (children 1)
+ ExpressionList (children 1)
+  SelectQuery (children 2)
+   ExpressionList (children 1)
+    Asterisk
+   TablesInSelectQuery (children 1)
+    TablesInSelectQueryElement (children 1)
+     TableExpression (children 1)
+      Function executable (children 1)
+       ExpressionList (children 3)
+        Literal \'a.sh\'
+        Literal \'TSV\'
+        Literal \'x String\'

@@ -1,0 +1,26 @@
+-- SELECT quantiles(0.5, 0.95)(duration), toStartOfInterval(ts, INTERVAL 5 MINUTE) AS b FROM logs.access GROUP BY b ORDER BY b
+SelectWithUnionQuery (children 1)
+ ExpressionList (children 1)
+  SelectQuery (children 4)
+   ExpressionList (children 2)
+    Function quantiles (children 2)
+     ExpressionList (children 1)
+      Identifier duration
+     ExpressionList (children 2)
+      Literal Float64_0.5
+      Literal Float64_0.95
+    Function toStartOfInterval (alias b) (children 1)
+     ExpressionList (children 2)
+      Identifier ts
+      Function toIntervalMinute (children 1)
+       ExpressionList (children 1)
+        Literal UInt64_5
+   TablesInSelectQuery (children 1)
+    TablesInSelectQueryElement (children 1)
+     TableExpression (children 1)
+      TableIdentifier logs.access
+   ExpressionList (children 1)
+    Identifier b
+   ExpressionList (children 1)
+    OrderByElement (children 1)
+     Identifier b

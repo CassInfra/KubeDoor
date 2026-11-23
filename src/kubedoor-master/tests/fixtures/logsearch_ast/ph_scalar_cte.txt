@@ -1,0 +1,17 @@
+-- WITH 500 AS lim SELECT count() FROM __kd_src__ WHERE status >= lim
+SelectWithUnionQuery (children 1)
+ ExpressionList (children 1)
+  SelectQuery (children 4)
+   ExpressionList (children 1)
+    Literal UInt64_500 (alias lim)
+   ExpressionList (children 1)
+    Function count (children 1)
+     ExpressionList
+   TablesInSelectQuery (children 1)
+    TablesInSelectQueryElement (children 1)
+     TableExpression (children 1)
+      TableIdentifier __kd_src__
+   Function greaterOrEquals (children 1)
+    ExpressionList (children 2)
+     Identifier status
+     Identifier lim

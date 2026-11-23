@@ -1,0 +1,21 @@
+-- SELECT p, count() FROM logs.access ARRAY JOIN splitByChar('/', path) AS p GROUP BY p
+SelectWithUnionQuery (children 1)
+ ExpressionList (children 1)
+  SelectQuery (children 3)
+   ExpressionList (children 2)
+    Identifier p
+    Function count (children 1)
+     ExpressionList
+   TablesInSelectQuery (children 2)
+    TablesInSelectQueryElement (children 1)
+     TableExpression (children 1)
+      TableIdentifier logs.access
+    TablesInSelectQueryElement (children 1)
+     ArrayJoin (children 1)
+      ExpressionList (children 1)
+       Function splitByChar (alias p) (children 1)
+        ExpressionList (children 2)
+         Literal \'/\'
+         Identifier path
+   ExpressionList (children 1)
+    Identifier p

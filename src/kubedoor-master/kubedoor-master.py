@@ -28,6 +28,7 @@ from func_manager import ai_api
 from func_manager import code_info
 from func_manager import runtime_config
 from tracing import api as tracing_api
+from logsearch import api as logsearch_api
 from func_manager.workload_relay import WorkloadRelay
 from func_manager.pod_exec_relay import PodExecRelay
 from func_manager.pod_log_relay import PodLogRelay
@@ -1094,6 +1095,8 @@ runtime_config.register_routes(app)
 
 # ==================== 链路追踪(AI 助手查链路;配置在 /api/admin/tracing,AI 走 /api/ai/internal/tracing/*,见 tracing/) ====================
 tracing_api.register_routes(app)
+# ==================== 历史日志(AI 助手查 ClickHouse / ES 日志;配置在 /api/admin/log-sources,AI 走 /api/ai/internal/logs/*,见 logsearch/) ====================
+logsearch_api.register_routes(app, clients)
 # 网页安装 / 修复 Agent(/api/admin/agent-installations/*,修复弹框的检查 /api/admin/agent-health)
 agent_install_api.register_routes(app, clients, call_agent_api)
 

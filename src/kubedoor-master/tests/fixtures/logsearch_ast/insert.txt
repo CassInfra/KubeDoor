@@ -1,0 +1,9 @@
+-- INSERT INTO logs.x SELECT 1
+InsertQuery   (children 3)
+ Identifier logs
+ Identifier x
+ SelectWithUnionQuery (children 1)
+  ExpressionList (children 1)
+   SelectQuery (children 1)
+    ExpressionList (children 1)
+     Literal UInt64_1

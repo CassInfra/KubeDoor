@@ -1,0 +1,27 @@
+-- SELECT * FROM (WITH access AS (SELECT 1) SELECT 1) AS s, access
+SelectWithUnionQuery (children 1)
+ ExpressionList (children 1)
+  SelectQuery (children 2)
+   ExpressionList (children 1)
+    Asterisk
+   TablesInSelectQuery (children 2)
+    TablesInSelectQueryElement (children 1)
+     TableExpression (children 1)
+      Subquery (alias s) (children 1)
+       SelectWithUnionQuery (children 1)
+        ExpressionList (children 1)
+         SelectQuery (children 2)
+          ExpressionList (children 1)
+           WithElement (children 1)
+            Subquery (children 1)
+             SelectWithUnionQuery (children 1)
+              ExpressionList (children 1)
+               SelectQuery (children 1)
+                ExpressionList (children 1)
+                 Literal UInt64_1
+          ExpressionList (children 1)
+           Literal UInt64_1
+    TablesInSelectQueryElement (children 2)
+     TableExpression (children 1)
+      TableIdentifier access
+     TableJoin

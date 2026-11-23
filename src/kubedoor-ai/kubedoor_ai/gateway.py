@@ -16,7 +16,8 @@ import httpx
 from langgraph.types import interrupt
 
 from .domain import AIError, CredentialCipher, Identity, beijing_now, redact, utc_now
-from .catalogue import CODE_LOCAL, EXTRA_CATALOG, EXTRA_SCHEMAS, SERVICE_TARGET, TRACE_OPERATIONS, build_request, validate_arguments
+from .catalogue import (CODE_LOCAL, EXTRA_CATALOG, EXTRA_SCHEMAS, LOG_OPERATIONS, SERVICE_TARGET, TRACE_OPERATIONS, build_request,
+                        validate_arguments)
 from .code import CodeCache, CodeError
 from .control import (OUTSIDE_ADMISSION, PLANNED, STEP_NAMES, build_plan, changed_fields, check_target, control_drift,
                       deployment_edits, deployment_path, main_step, rejection, snapshot, verify)
@@ -491,8 +492,8 @@ class Gateway:
         read_only = self.read_only(operation, args)
         scope = ctx.run["scope"]
         ns = scope["namespace"] or (scope.get("deployment") or scope.get("pod") or {}).get("namespace")
-        # 链路追踪按 K8S 过滤用 k8s_namespace 等参数，页面选中的命名空间不是它的条件：不填，动作记录里也就不会出现
-        if source == "kubedoor" and ns and operation not in TRACE_OPERATIONS:
+        # 链路追踪、历史日志按 K8S 过滤用 k8s_namespace 等参数，页面选中的命名空间不是它们的条件：不填，动作记录里也就不会出现
+        if source == "kubedoor" and ns and operation not in TRACE_OPERATIONS and operation not in LOG_OPERATIONS:
             args.setdefault("namespace", ns)
         if source == "kubedoor":
             selected_dep, selected_pod = scope.get("deployment"), scope.get("pod")

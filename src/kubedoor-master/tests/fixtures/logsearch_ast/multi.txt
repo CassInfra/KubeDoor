@@ -1,0 +1,2 @@
+-- SELECT 1; SELECT 2
+HTTP 400: Code: 62. DB::Exception: Syntax error (Multi-statements are not allowed): failed at position 21 (end of query): ; SELECT 2. . (SYNTAX_ERROR) (version 26.7.3.19 (official build))

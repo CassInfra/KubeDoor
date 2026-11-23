@@ -89,6 +89,7 @@
 | 华为 CCI | `cci_schedule_profile`：查询 Deployment 的 ScheduleProfile 和 maxNum |
 | 运行配置 | `runtime_config`：按 Deployment 或 Pod 取实际运行的配置（配置中心、环境变量、配置文件合并后的生效值），密码、密钥是占位符；先用 `keys` 缩小范围，用法见 `/skills/kubedoor-config/SKILL.md` |
 | 链路追踪 | `trace_services`、`trace_operations`：有链路数据的服务和接口；`trace_search`：按服务、接口、状态码、耗时等找链路；`trace_stats`：统计数量、错误和耗时分位（要管理员配置 ClickHouse 加速）；`trace_get`：按 Trace ID 取链路并分析根因、关键路径、N+1；`trace_spans`：看 Span 的完整属性和异常堆栈；`trace_fields`：链路里的字段和集群取值。都是只读查询，按 K8S 过滤的参数是 `k8s_namespace`、`k8s_pod`、`k8s_deployment`，用法见 `/skills/kubedoor-trace/SKILL.md` |
+| 历史日志 | `log_sources`：当前集群能查的日志源（ClickHouse / ES 里的访问日志、应用日志）、网络架构说明和关联字段，查之前先调用；`log_search`：明细；`log_stats`：数量、趋势、分组、耗时分位；`log_patterns`：报错归类；`log_context`：某条日志前后；`log_correlate`：按请求 ID 串起各层日志；`log_query`：原生 SQL / DSL / ES\|QL 兜底。都是只读查询，按 K8S 过滤的参数同样是 `k8s_` 前缀，用法见 `/skills/kubedoor-logs/SKILL.md` |
 
 `resource_inventory` 中 CPU 单位为 milliCPU、内存为 MB；`jvm_xms_bytes`、`jvm_xmx_bytes`、`jvm_xss_bytes`、`jvm_max_metaspace_bytes` 为字节，`update` 说明采集时间。历史样本不是实时状态。`metrics` 传 `query`，`start/end` 同时提供为区间查询，另可传 `step`；服务端强制当前集群标签过滤。
 

@@ -1,0 +1,15 @@
+-- SELECT ts, count() OVER (PARTITION BY status) FROM __kd_src__
+SelectWithUnionQuery (children 1)
+ ExpressionList (children 1)
+  SelectQuery (children 2)
+   ExpressionList (children 2)
+    Identifier ts
+    Function count (children 2)
+     ExpressionList
+     WindowDefinition (children 1)
+      ExpressionList (children 1)
+       Identifier status
+   TablesInSelectQuery (children 1)
+    TablesInSelectQueryElement (children 1)
+     TableExpression (children 1)
+      TableIdentifier __kd_src__

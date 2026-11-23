@@ -31,7 +31,8 @@ SKILLS_ROOT = Path(__file__).resolve().parent.parent / "skills"
 SKILLS = [{"id": "kubedoor-k8s", "name": "KubeDoor K8S 运维", "description": "优先使用 KubeDoor 已有查询、资源管控与立即/定时/周期运维接口；补充 K8S API、kubectl、istioctl 与 Pod exec 排障。"},
           {"id": "kubedoor-code", "name": "服务源码分析", "description": "查服务当前镜像和代码链接；排障时下载源码，按异常堆栈和报错搜索、阅读代码定位原因（下载源码要管理员允许）。"},
           {"id": "kubedoor-config", "name": "运行配置与数据查询", "description": "获取服务实际运行的配置（密码、密钥换成占位符）；排障时用配置里的连接信息只读查询 MySQL、Redis、Elasticsearch。"},
-          {"id": "kubedoor-trace", "name": "链路追踪排查", "description": "按接口、状态码、耗时查 Jaeger 链路（配了 ClickHouse 加速时还能统计影响范围），按 Trace ID 分析根因、关键路径和 N+1，再结合日志、Pod、事件、指标定位问题。"}]
+          {"id": "kubedoor-trace", "name": "链路追踪排查", "description": "按接口、状态码、耗时查 Jaeger 链路（配了 ClickHouse 加速时还能统计影响范围），按 Trace ID 分析根因、关键路径和 N+1，再结合日志、Pod、事件、指标定位问题。"},
+          {"id": "kubedoor-logs", "name": "历史日志查询", "description": "查容器标准输出之外的历史日志：按管理员登记的 ClickHouse / Elasticsearch 日志源（访问日志、网关日志、业务日志）按时间、服务、关键字查明细和统计，归纳报错模式，按请求 ID 跨入口、网关、服务串起一次请求，结合网络架构说明定位问题。"}]
 # Cache invariant (design.md 3.1): the system prompt and tool definitions are
 # identical for every session, channel and turn. Anything that changes per turn
 # (time, scope, capabilities, channel, Skills) belongs in the turn context block.

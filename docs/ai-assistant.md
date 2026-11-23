@@ -22,10 +22,11 @@ KubeDoor AI 助手将自然语言问题与已有管理接口、Kubernetes API、
 | 服务源码 | 按 Deployment 或 Pod 查当前镜像和代码链接；管理员允许后，排障时下载源码，按异常搜索、阅读代码定位原因 |
 | 运行配置与数据查询 | 管理员允许后，按 Deployment 或 Pod 获取服务实际运行的配置（密码、密钥换成占位符，模型看不到明文）；排障时用配置里的连接信息只读查询 MySQL、Redis、Elasticsearch |
 | 链路追踪 | 管理员配置 Jaeger（可选 ClickHouse 加速）后，按服务、接口、状态码、耗时、Pod 等搜索链路和统计报错、耗时；按 traceId 分析调用链，找出最先出错或最耗时的服务，再结合 Pod 日志、事件、指标定位原因 |
+| 历史日志 | 管理员登记 ClickHouse / Elasticsearch 里的访问日志和应用日志并绑定到集群后，按时间、服务、关键字查明细和统计，归纳报错模式，按请求 ID 把入口、网关、服务各层的日志串起来；日志里的链路 ID 可以接着查调用链 |
 | 工具与回复展示 | 工具区默认折叠，逐项显示运行状态，手动展开查看参数、差异和结果；回复支持 Markdown、表格和代码块 |
 | 权限与审批 | 先权限后审批：按「系统管理 → 权限与审批」的操作权限表判断账号能不能做、要不要人工批准（默认业务变更和 kubectl / K8S API 修改要批准）；可勾选自动批准执行 |
 | 全局记忆 | 总结本人会话为可编辑草稿，或手动新增；共享查看、搜索、分页、多选，所选记忆仅随下一轮发送 |
-| Skills 与 Agent | DeepAgents 加载 KubeDoor 运维、服务源码分析、运行配置与数据查询、链路追踪排查四个 Skill，支持子 Agent、上下文压缩及持久 checkpoint |
+| Skills 与 Agent | DeepAgents 加载 KubeDoor 运维、服务源码分析、运行配置与数据查询、链路追踪排查、历史日志查询五个 Skill，支持子 Agent、上下文压缩及持久 checkpoint |
 | 接入自己的 MCP | 对话框的“MCP 管理”接入自己的 SSE / Streamable HTTP MCP 服务（URL + 可选请求头），按账号隔离、加密保存；启用后对话中按需调用，按工具是否只读决定要不要批准 |
 | 外部 MCP | 提供 Streamable HTTP 和兼容 SSE 入口，保留原工具并提供统一工具与 Skill 资源 |
 
@@ -503,6 +504,28 @@ VictoriaMetrics 的自由 MetricsQL 查询经 master 网关使用现有 `PROM_UR
 - 不记审计（AI 的工具调用记录里有每次查询）；配置修改记审计「链路追踪配置」`tracing.update`。
 
 典型排障流程：用户问某个接口为什么 502 → `trace_operations` 对上接口 → 配了加速时先用 `trace_stats` 看报错从几点开始、集中在哪个 Pod → `trace_search` 找到最新几条报错链路 → `trace_get` 看根因候选和关键路径 → `trace_spans` 看根因 Span 的异常堆栈 → 用 `logs`、`pods`、`events`、`metrics` 查根因 Pod 当时的状态 → 需要时用源码分析或运行配置继续查。
+
+### 历史日志
+
+前提是系统管理员在「系统管理 → 历史日志」登记了日志所在的 ClickHouse / Elasticsearch、日志源（每类日志的字段和说明），并给集群绑定了表 / 索引，配置方法见 [历史日志配置说明](../help/历史日志配置说明.md)。配置页可以扫描库表、让 AI 生成说明草稿，管理员改过再保存。
+
+| 工具 | 作用 |
+| --- | --- |
+| `log_sources` | 当前集群能查的日志源、网络架构说明、集群说明和关联字段；带 `source` 时给出字段表、语义字段、级别取值和查询建议 |
+| `log_search` | 按时间、关键字、级别、命名空间 / Deployment / Pod、字段条件查明细；长正文和异常栈已截断 |
+| `log_stats` | 统计条数、趋势、按字段分组的 Top、耗时分位数 |
+| `log_patterns` | 把最新的一批日志正文归并成模式（数字、ID 换成占位符）并计数，可以逐轮排除噪声 |
+| `log_context` | 某条日志前后各 N 条（同一个 Pod） |
+| `log_correlate` | 按请求 ID（链路 ID、网关请求 ID 等）在所有登记了它的日志源里一起查，按时间排出请求经过的各层；链路 ID 可以接着用 `trace_get` |
+| `log_query` | 原生查询兜底：ClickHouse 写 SQL（用 `$src` 代表日志源），Elasticsearch 写 DSL 或 ES\|QL（8.14+）；管理员可以按连接关闭 |
+
+- 七个工具都是查询，对当前集群有只读及以上权限的账号可用，不需要批准；由 master 查 ClickHouse / ES，不需要在线 Agent。
+- 只能查当前集群绑定了的日志源；每次查询都会带上绑定的表 / 索引和过滤条件，原生 SQL 只能通过 `$src` 引用日志源（不能引用其他表、表函数、改设置），DSL 不能用 script。
+- ClickHouse 查询带只读设置、超时和读取行数上限（连接配置），超过时返回 `too_expensive`，AI 缩短时间或加条件再查。
+- 结果里的密码、令牌、Cookie、签名参数等值换成 `***`；管理员可以按日志源添加要打码的字段和正则。日志内容会作为对话内容发给模型服务商。
+- 不记审计（AI 的工具调用记录里有每次查询）；配置修改记审计「历史日志配置」`log_sources.update`。
+
+典型排障流程：用户问昨天下午某个接口为什么一直 502 → `log_sources` 读网络架构，确定先看入口网关的访问日志 → `log_stats` 按时间和上游分组，看从几点开始、集中在哪个服务 → `log_search` 取几条带请求 ID 的样本 → `log_correlate` 串起这个请求在网关、服务各层的日志 → `log_patterns` / `log_context` 看出错服务当时的异常 → 有链路 ID 时 `trace_get` 看调用链 → 用 `pods`、`events`、`metrics` 查那段时间的 Pod 状态。
 
 ### 提问示例
 

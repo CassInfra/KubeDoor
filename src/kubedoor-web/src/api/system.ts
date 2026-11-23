@@ -558,3 +558,364 @@ export const analyzeTracingFields = (
     { data },
     { timeout }
   );
+
+// ---------------------------------------------------------------------------
+// 历史日志(系统管理 → 历史日志,AI 助手的 kubedoor-logs Skill 查 ClickHouse / Elasticsearch 用)
+// ---------------------------------------------------------------------------
+export type LogConnectionType = "clickhouse" | "elasticsearch";
+/** clickhouse 固定 basic;elasticsearch: none / basic / api_key */
+export type LogAuthType = "none" | "basic" | "api_key";
+/** access 请求 / 访问日志;app 应用日志;other 其他 */
+export type LogSourceKind = "access" | "app" | "other";
+export type LogDurationUnit = "ms" | "s" | "us" | "ns";
+/** 语义字段,顺序即页面上的显示顺序(以 GET 返回的 semantic_fields 为准) */
+export type LogSemanticField =
+  | "message"
+  | "level"
+  | "namespace"
+  | "pod"
+  | "service"
+  | "status"
+  | "duration"
+  | "method"
+  | "path"
+  | "host"
+  | "client_ip";
+export type LogLevelKey = "error" | "warn" | "info" | "debug";
+/** 集群绑定的过滤条件:eq / ne / prefix 恰好 1 个值,in / not_in 1~50 个 */
+export type LogConditionOp = "eq" | "ne" | "in" | "not_in" | "prefix";
+
+/** 一个 ClickHouse(HTTP 接口)或 Elasticsearch 的访问方式;GET 返回的没有 password / api_key */
+export interface LogConnection {
+  /** ^[a-z][a-z0-9_-]{0,31}$;已保存的连接不能改(密码按 id 沿用) */
+  id: string;
+  name: string;
+  type: LogConnectionType;
+  url: string;
+  auth_type: LogAuthType;
+  username: string;
+  /** 只写:不传表示沿用已保存的密码 */
+  password?: string;
+  /** 只写:ES 的 API Key(base64 编码的 id:key 原样填),不传表示沿用 */
+  api_key?: string;
+  /** 只写:true 表示清除已保存的密码 / API Key */
+  clear_password?: boolean;
+  clear_api_key?: boolean;
+  /** GET 返回:已保存过密码 / API Key */
+  has_password?: boolean;
+  has_api_key?: boolean;
+  /** 请求头:同获取代码接口,值只写不读 */
+  headers: CodeInfoHeader[];
+  /** 单次查询超时(秒),5~120 */
+  timeout: number;
+  tls_verify: boolean;
+  /** 同一连接同时进行的查询数,1~20 */
+  max_concurrency: number;
+  /** ClickHouse:单次查询每个分片最多读取行数,0 = 不限;ES 忽略 */
+  max_rows_to_read: number;
+  /** 允许 AI 用 log_query 写原生查询 */
+  allow_raw: boolean;
+}
+
+/** 关联字段:不同日志源之间串起同一个请求的 ID */
+export interface LogCorrelationKey {
+  key: string;
+  label: string;
+  description: string;
+  /** 取值的正则(可空,不含 ^ $) */
+  pattern: string;
+  /** 链路 ID(最多一个),可以接着用链路追踪的 trace_get */
+  trace: boolean;
+}
+
+/** 日志源里登记的关联字段:field(列)和 text(正文写法,恰好一个 {value})二选一 */
+export interface LogSourceCorrelation {
+  key: string;
+  field?: string;
+  text?: string;
+}
+
+/** 字段说明 */
+export interface LogColumnNote {
+  name: string;
+  description: string;
+}
+
+/** 日志源:一类日志(结构和含义相同) */
+export interface LogSource {
+  id: string;
+  name: string;
+  enabled: boolean;
+  connection: string;
+  kind: LogSourceKind;
+  /** Markdown,≤ 8000 */
+  description: string;
+  time_field: string;
+  /** 语义字段 → 实际字段名,只有非空项 */
+  fields: Partial<Record<LogSemanticField, string>>;
+  duration_unit: LogDurationUnit;
+  /** 只有非空项 */
+  level_values: Partial<Record<LogLevelKey, string[]>>;
+  correlations: LogSourceCorrelation[];
+  columns: LogColumnNote[];
+  default_fields: string[];
+  mask_fields: string[];
+  mask_patterns: string[];
+  /** 页面便利:新建绑定时默认的表 / 索引 */
+  default_target: string;
+  /** 页面便利:区分集群的字段,新建绑定时默认按它出条件 */
+  cluster_field: string;
+}
+
+export interface LogBindingCondition {
+  field: string;
+  op: LogConditionOp;
+  values: (string | number)[];
+}
+
+/** 集群绑定:这类日志在这个集群里的表 / 索引和过滤条件 */
+export interface LogBinding {
+  source: string;
+  /** 空 = 用日志源的连接 */
+  connection: string;
+  /** CH:库.表;ES:逗号分隔的索引 / 别名 / data stream */
+  target: string;
+  /** 全部 AND;空 = 整张表 / 整个索引都属于这个集群 */
+  conditions: LogBindingCondition[];
+  note: string;
+}
+
+export interface LogCluster {
+  env: string;
+  note: string;
+  bindings: LogBinding[];
+}
+
+export interface LogSourcesConfig {
+  enabled: boolean;
+  /** 网络架构说明(Markdown) */
+  architecture: string;
+  connections: LogConnection[];
+  correlation_keys: LogCorrelationKey[];
+  sources: LogSource[];
+  clusters: LogCluster[];
+}
+
+/** KubeDoor 已登记的集群(k8s_agent_status),按 env 排序 */
+export interface LogKnownCluster {
+  env: string;
+  aliases: string[];
+  online: boolean;
+}
+
+export interface LogSemanticFieldMeta {
+  key: LogSemanticField;
+  label: string;
+}
+
+/** GET / PUT 的返回 */
+export interface LogSourcesSettings extends LogSourcesConfig {
+  clusters_known: LogKnownCluster[];
+  semantic_fields: LogSemanticFieldMeta[];
+  /** 内置打码名 */
+  mask_builtin: string[];
+  updated_by?: string | null;
+  updated_at?: string | null;
+}
+
+/** 提交的配置:传了的顶层键整体替换,没传的沿用(右上角开关只传 enabled) */
+export type LogSourcesConfigInput = Partial<LogSourcesConfig>;
+
+/** 测试连接的结果:ClickHouse 和 Elasticsearch 各自的字段 */
+export interface LogConnectionTest {
+  type: LogConnectionType;
+  version?: string;
+  /** ClickHouse */
+  timezone?: string;
+  user?: string;
+  /** ClickHouse 的 readonly 设置:0 = 不是只读账号 */
+  readonly?: number | string | boolean | null;
+  clusters?: string[];
+  /** Elasticsearch */
+  distribution?: string;
+  cluster_name?: string;
+  license?: string;
+  /** 版本 ≥ 8.14 且不是 OpenSearch */
+  esql?: boolean;
+}
+
+export interface LogScanColumn {
+  name: string;
+  type: string;
+  /** Elasticsearch 运行时字段（没有索引，按它过滤、关联很慢） */
+  runtime?: boolean;
+}
+
+/** 扫描识别出的 ID 列 */
+export interface LogScanIdField {
+  field: string;
+  shape: string;
+  /** Elasticsearch 运行时字段 */
+  runtime?: boolean;
+}
+
+/** 扫描到的一个表 / 索引 */
+export interface LogScanTarget {
+  target: string;
+  /** ClickHouse Distributed 表对应的本地表 */
+  local?: string;
+  cluster?: string;
+  rows?: number | null;
+  bytes?: number | null;
+  first?: string | null;
+  last?: string | null;
+  retention_days?: number | null;
+  sorting_key?: string;
+  partition_key?: string;
+  /** 低基数字段的 topK:字段名 → 取值 */
+  values?: Record<string, (string | number)[]>;
+  /** 样本(打码、每个值截断 300),只有组里第一个目标有 */
+  samples?: Record<string, unknown>[];
+}
+
+/** 字段相同的一组表 / 索引 */
+export interface LogScanGroup {
+  ref: string;
+  name_guess: string;
+  kind_guess: LogSourceKind;
+  columns: LogScanColumn[];
+  /** 语义字段的猜测(含 time 和 duration_unit) */
+  fields_guess: Partial<Record<LogSemanticField | "time", string>> & {
+    duration_unit?: LogDurationUnit;
+  };
+  cluster_field_guess?: string;
+  id_fields?: LogScanIdField[];
+  text_ids?: { text: string; shape: string; count: number }[];
+  meta_description?: string;
+  targets: LogScanTarget[];
+}
+
+/** 绑定建议:exact 取值和集群名相同、alias 和别名相同、token 名称相近、table 一表一集群 */
+export interface LogSuggestedBinding {
+  env: string;
+  group: string;
+  target: string;
+  conditions: LogBindingCondition[];
+  match: "exact" | "alias" | "token" | "table";
+}
+
+export interface LogScanResult {
+  connection: {
+    id: string;
+    type: LogConnectionType;
+    version?: string;
+    timezone?: string;
+  };
+  /** 到点(90 秒)返回已扫到的 */
+  partial: boolean;
+  elapsed_ms: number;
+  notes: string[];
+  groups: LogScanGroup[];
+  suggested_bindings: LogSuggestedBinding[];
+  clusters: { env: string; aliases: string[] }[];
+}
+
+/** 预览:按集群绑定查最近 15 分钟最新 5 条 */
+export interface LogPreviewResult {
+  ok: boolean;
+  rows: Record<string, unknown>[];
+  total?: number | null;
+  elapsed_ms?: number;
+  /** 实际执行的 SQL / DSL(参数已代入) */
+  query?: string | Record<string, unknown> | null;
+  /** 配置里引用了但实际不存在的字段 */
+  schema_problems?: unknown[];
+  error?: string | { code?: string; message?: string } | null;
+}
+
+/** 验证关联字段:from 日志源的取值在 to 日志源里查到了几个 */
+export interface LogVerifyPair {
+  from: string;
+  to: string;
+  sampled: number;
+  matched: number;
+  examples: string[];
+  /** 到 to 里查的时候出错(例如字段不存在) */
+  error?: string;
+}
+
+export interface LogVerifyResult {
+  pairs: LogVerifyPair[];
+  notes: string[];
+}
+
+export const getLogSourcesConfig = () =>
+  http.request<Result<LogSourcesSettings>>("get", "/api/admin/log-sources");
+
+/** 保存配置;没传的顶层键沿用原值(右上角开关只传 enabled) */
+export const saveLogSourcesConfig = (data: LogSourcesConfigInput) =>
+  http.request<Result<LogSourcesSettings>>("put", "/api/admin/log-sources", {
+    data
+  });
+
+/** 测试连接:用页面上还没保存的配置(密码留空用已保存的);timeout 是浏览器等待的毫秒数 */
+export const testLogConnection = (
+  config: LogSourcesConfigInput,
+  connection: string,
+  timeout = 130000
+) =>
+  http.request<Result<LogConnectionTest>>(
+    "post",
+    "/api/admin/log-sources/test",
+    { data: { config, connection } },
+    { timeout }
+  );
+
+/** 扫描连接里的表 / 索引,给出日志源和绑定建议;include / exclude 是 glob,空时不传(用后端默认的排除) */
+export const scanLogConnection = (
+  config: LogSourcesConfigInput,
+  connection: string,
+  include: string[] = [],
+  exclude: string[] = []
+) =>
+  http.request<Result<LogScanResult>>(
+    "post",
+    "/api/admin/log-sources/scan",
+    {
+      data: {
+        config,
+        connection,
+        ...(include.length ? { include } : {}),
+        ...(exclude.length ? { exclude } : {})
+      }
+    },
+    // 后端整体限时 90 秒
+    { timeout: 120000 }
+  );
+
+/** 按这个集群的绑定查最近 15 分钟最新 5 条 */
+export const previewLogBinding = (
+  config: LogSourcesConfigInput,
+  env: string,
+  source: string,
+  timeout = 130000
+) =>
+  http.request<Result<LogPreviewResult>>(
+    "post",
+    "/api/admin/log-sources/preview",
+    { data: { config, env, source } },
+    { timeout }
+  );
+
+/** 验证关联字段:各日志源抽取值到其他日志源里查 */
+export const verifyLogCorrelation = (
+  config: LogSourcesConfigInput,
+  env: string,
+  key: string
+) =>
+  http.request<Result<LogVerifyResult>>(
+    "post",
+    "/api/admin/log-sources/verify",
+    { data: { config, env, key } },
+    { timeout: 120000 }
+  );

@@ -1,0 +1,28 @@
+-- WITH t AS (SELECT * FROM logs.access) SELECT * FROM t AS t2 JOIN other.u USING id
+SelectWithUnionQuery (children 1)
+ ExpressionList (children 1)
+  SelectQuery (children 3)
+   ExpressionList (children 1)
+    WithElement (children 1)
+     Subquery (children 1)
+      SelectWithUnionQuery (children 1)
+       ExpressionList (children 1)
+        SelectQuery (children 2)
+         ExpressionList (children 1)
+          Asterisk
+         TablesInSelectQuery (children 1)
+          TablesInSelectQueryElement (children 1)
+           TableExpression (children 1)
+            TableIdentifier logs.access
+   ExpressionList (children 1)
+    Asterisk
+   TablesInSelectQuery (children 2)
+    TablesInSelectQueryElement (children 1)
+     TableExpression (children 1)
+      TableIdentifier t (alias t2)
+    TablesInSelectQueryElement (children 2)
+     TableExpression (children 1)
+      TableIdentifier other.u
+     TableJoin (children 1)
+      ExpressionList (children 1)
+       Identifier id

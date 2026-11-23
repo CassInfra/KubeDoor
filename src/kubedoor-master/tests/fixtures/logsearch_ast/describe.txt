@@ -1,0 +1,4 @@
+-- DESCRIBE TABLE logs.access
+DescribeQuery (children 1)
+ TableExpression (children 1)
+  TableIdentifier logs.access

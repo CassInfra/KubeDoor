@@ -7,6 +7,7 @@ general Kubernetes executor, rather than an arbitrary HTTP forwarding tool.
 from __future__ import annotations
 
 import copy
+import json
 import math
 import re
 from datetime import date, datetime
@@ -74,6 +75,15 @@ EXTRA_CATALOG = {
     "trace_get": ("POST", "/api/ai/internal/tracing/trace", "historical", True),
     "trace_spans": ("POST", "/api/ai/internal/tracing/spans", "historical", True),
     "trace_fields": ("POST", "/api/ai/internal/tracing/fields", "historical", True),
+    # 历史日志（master logsearch/）：按管理员登记的 ClickHouse / Elasticsearch 日志源查询，master 给每条查询套上当前集群
+    # 绑定的表 / 索引和过滤条件。都是只读查询（集群只读及以上，不进「权限与审批」表），参数原样放进 body
+    "log_sources": ("POST", "/api/ai/internal/logs/sources", "historical", True),
+    "log_search": ("POST", "/api/ai/internal/logs/search", "historical", True),
+    "log_stats": ("POST", "/api/ai/internal/logs/stats", "historical", True),
+    "log_patterns": ("POST", "/api/ai/internal/logs/patterns", "historical", True),
+    "log_context": ("POST", "/api/ai/internal/logs/context", "historical", True),
+    "log_correlate": ("POST", "/api/ai/internal/logs/correlate", "historical", True),
+    "log_query": ("POST", "/api/ai/internal/logs/query", "historical", True),
 }
 # 源码分析：在网关本地执行的操作（Gateway.execute_code）
 CODE_LOCAL = frozenset({"code_fetch", "code_search", "code_read", "code_symbols"})
@@ -84,6 +94,9 @@ SERVICE_TARGET = CODE_TARGET | {"runtime_config"}
 # 链路追踪：参数校验（_validate_trace）和请求（body 就是声明过的参数）单独处理。按 K8S 过滤的参数带 k8s_ 前缀，
 # 网关也不给它们填页面选中的命名空间（Gateway.invoke），页面上选了什么都不会变成链路的过滤条件
 TRACE_OPERATIONS = frozenset({"trace_services", "trace_operations", "trace_search", "trace_stats", "trace_get", "trace_spans", "trace_fields"})
+# 历史日志：同链路追踪，参数校验（_validate_log）和请求（body 就是声明过的参数）单独处理，按 K8S 过滤的参数带 k8s_ 前缀，
+# 网关不给它们填页面选中的命名空间
+LOG_OPERATIONS = frozenset({"log_sources", "log_search", "log_stats", "log_patterns", "log_context", "log_correlate", "log_query"})
 
 _NS = {"namespace": "string；Kubernetes 命名空间"}
 _DEP = {**_NS, "deployment": "string；Deployment 名称"}
@@ -140,6 +153,25 @@ _TRACE_STATS = {
 }
 _TRACE_ID = {"trace_id": "string；Trace ID，32 位以内的十六进制"}
 _TRACE_AROUND = {"around": "string；链路大概发生的时间，北京时间 YYYY-MM-DD HH:mm[:ss]"}
+# 历史日志的参数（名称、取值和 master 的约定一致）。说明每轮都进系统提示：只写最容易用错的约束，用法在 Skill kubedoor-logs 里
+_LOG_TIME = {
+    "start": "string；开始时间，北京时间 YYYY-MM-DD HH:mm[:ss]（带时区的 ISO 也认）",
+    "end": "string；结束时间，格式同 start，默认现在",
+    "lookback": "string；往前查多久（和 start 二选一），例如 15m、1h、6h、1d，默认 1h；时间窗口最长 31 天",
+}
+_LOG_SOURCE = {"source": "string；日志源 ID（log_sources 列出）"}
+_LOG_FILTER = {
+    **_LOG_SOURCE, **_LOG_TIME,
+    "keyword": "string；正文包含的文字（短语匹配），例如异常类名、订单号",
+    "level": "string；error/warn/info/debug（按日志源配置的取值匹配），或原样的级别值",
+    "k8s_namespace": "string；命名空间", "k8s_pod": "string；Pod 名",
+    "k8s_deployment": "string；Deployment 名（匹配它的 Pod）",
+    "filters": "array，最多 10 项：{field, op, value}；op 取 eq/ne/in/not_in/contains/not_contains/prefix/gt/gte/lt/lte/exists/not_exists/regex，"
+               "in/not_in 的 value 是数组，exists/not_exists 不带 value；field 用 log_sources 返回的字段名",
+}
+# log_stats、log_patterns 的过滤条件和 log_search 一样：说明只写一遍（同 trace_stats 的写法）
+_LOG_SAME_FILTER = dict.fromkeys(_LOG_FILTER, "同 log_search")
+_LOG_SAME_FILTER["source"] = _LOG_SOURCE["source"]
 EXTRA_SCHEMAS = {
     "pod_list": ([], {**_NS, "namespaces": "string[]；多个命名空间；空数组表示全部，优先于 namespace", "node_name": "string；筛选节点"}, "集群 Pod 列表与容器状态、CPU/内存，支持多个命名空间和指定节点；无需自己拼 K8S API"),
     "delete_pods": (["pods"], {"pods": "非空 object[]；每项 {namespace:string,pod:string}，批量删除目标 Pod"}, "批量删除指定 Pod；控制器可能创建替代 Pod"),
@@ -192,6 +224,38 @@ EXTRA_SCHEMAS = {
     "trace_get": (["trace_id"], {**_TRACE_ID, **_TRACE_AROUND, "max_nodes": "integer 50..400；调用树最多显示多少个节点，默认 200", "focus_span": "string；Span ID：只看从根到这个 Span 的路径和它下面三层"}, "按 Trace ID 取整条链路并分析：outcome（failed / client_error / recovered / succeeded / unknown）、折叠的调用树 tree、根因候选 root_cause、关键路径、N+1 和 Jaeger 链接 url。尽量传 around（大概时间）：不给时从近到远逐级放大范围，可能很慢；可能含其他集群的 Span"),
     "trace_spans": (["trace_id"], {**_TRACE_ID, "span_ids": "array，最多 20 项；Span ID（trace_get 返回的 id），十六进制", "errors": "boolean；true = 链路里全部出错的 Span（最多 20 个），和 span_ids 二选一", **_TRACE_AROUND}, "看指定 Span（span_ids，或 errors=true 取全部出错 Span，一次最多 20 个）的属性、资源属性、事件（含异常堆栈）和状态；敏感值已打码，过长的值已截断"),
     "trace_fields": ([], {"service": "string；给了就取这个服务最近的链路，列出实际出现的属性名和示例"}, "查集群字段和取值、各语义字段对应的属性名、业务字段 custom_fields、是否配置了 ClickHouse 加速；给 service 时列出它最近链路里实际出现的属性名和示例。按业务字段（订单号等）查链路前先用它找属性名"),
+    "log_sources": ([], {"source": "string；给了就返回这个日志源的字段、说明、关联字段和查询建议"},
+                    "列出当前集群能查的历史日志源（库表 / 索引和用途）、网络架构说明、集群说明和关联字段；查历史日志前先调用。"
+                    "日志工具都是只读查询，时间按北京时间，用法见 Skill kubedoor-logs"),
+    "log_search": (["source"], {**_LOG_FILTER, "fields": "array，最多 50 项；只返回这些字段，默认按日志源配置",
+                                "limit": "integer 1..200；默认 50", "order": "desc/asc；默认 desc（从新到旧）"},
+                   "按时间和条件查日志明细；长正文、异常栈已截断，敏感值已打码"),
+    "log_stats": (["source"], {**_LOG_SAME_FILTER, "group_by": "array，最多 3 项：time 或字段名",
+                               "interval": "1m/5m/10m/30m/1h/3h/6h/12h/1d；group_by 含 time 时每桶多长，不填自动选",
+                               "metrics": "array，最多 5 项：{op, field}；op 取 count/avg/min/max/sum/p50/p90/p95/p99/uniq，默认 [{op: count}]",
+                               "top": "integer 1..200；最多返回多少行，默认 20"},
+                  "统计条数、趋势、分组 Top、耗时分位数"),
+    "log_patterns": (["source"], {**_LOG_SAME_FILTER, "exclude": "array，最多 20 项：排除正文包含这些文字的日志",
+                                  "sample": "integer 100..5000；取多少条最新日志归类，默认 2000", "top": "integer 1..50；默认 20"},
+                     "把日志正文归并成模式（数字、ID 换成占位符）并计数，看有哪几类报错；排除已知噪声后再看"),
+    "log_context": (["source", "time"], {**_LOG_SOURCE, "time": "string；锚点日志的时间（北京时间，最好带毫秒）",
+                                         "k8s_pod": "string；锚点日志所在的 Pod（日志源有 Pod 字段时必填）",
+                                         "anchor_id": "string；锚点日志的 _id（log_search 结果里有时传）",
+                                         "filters": "同 log_search；没有 Pod 字段的日志源用它限定同一个来源",
+                                         "before": "integer 0..100；默认 20", "after": "integer 0..100；默认 20"},
+                    "看某条日志前后各 N 条（同一个 Pod）"),
+    "log_correlate": (["key", "value"], {"key": "string；关联字段（log_sources 的 correlation_keys）", "value": "string；它的取值，例如 traceId",
+                                         "around": "string；请求大概发生的时间（北京时间），前后各查 30 分钟；和 start/end/lookback 二选一",
+                                         **_LOG_TIME, "lookback": "string；往前查多久（和 around、start 二选一），默认 24h；时间窗口最长 31 天",
+                                         "sources": "array；只查这些日志源，默认全部登记了这个关联字段的",
+                                         "limit": "integer 1..100；每个日志源最多返回多少条，默认 20"},
+                      "按请求 ID 在所有登记了它的日志源里一起查并按时间排列，看一个请求经过的各层（入口、网关、服务）；key 是链路 ID 时可以接着 trace_get"),
+    "log_query": (["source"], {**_LOG_SOURCE, **dict.fromkeys(_LOG_TIME, "同 log_search"),
+                               "sql": "string；ClickHouse 日志源：一条只读 SELECT，用 $src 代表日志源（已按集群和时间过滤）",
+                               "dsl": "object；Elasticsearch 日志源：{query, aggs, sort, _source, size}，外面会再套上集群和时间过滤",
+                               "esql": "string；Elasticsearch 8.14+：FROM 之后的管道，例如 | STATS c = COUNT(*) BY level",
+                               "limit": "integer 1..500；默认 100"},
+                  "原生查询：语义工具表达不了时再用；sql / dsl / esql 三选一，按日志源类型（log_sources 的 raw_query）"),
 }
 
 _CONTENT_TYPES = {"service", "deployment", "node", "pod", "configmap", "secret", "ingress", "persistentvolumeclaim", "daemonset", "statefulset", "job", "cronjob"}
@@ -277,12 +341,13 @@ def _trace_time(value, field) -> datetime:
     return parsed if parsed.tzinfo else parsed.replace(tzinfo=BEIJING_TZ)
 
 
-def _trace_lookback(value, field):
+def _trace_lookback(value, field, max_seconds=_TRACE_MAX_WINDOW):
     match = _LOOKBACK.fullmatch(value) if isinstance(value, str) else None
     if not match or int(match[1]) == 0:
         raise AIError(f"{field} 必须为正整数加单位 s/m/h/d，例如 15m、1h、2d")
-    if int(match[1]) * _LOOKBACK_SECONDS[match[2]] > _TRACE_MAX_WINDOW:
-        raise AIError(f"{field} 最长 7 天（7d）")
+    if int(match[1]) * _LOOKBACK_SECONDS[match[2]] > max_seconds:
+        days = max_seconds // 86400
+        raise AIError(f"{field} 最长 {days} 天（{days}d）")
 
 
 def _go_duration(value, field) -> float:
@@ -403,6 +468,237 @@ def _validate_trace(operation: str, args: dict) -> None:
         raise AIError("trace_spans 需要 span_ids 或 errors=true（二选一）")
 
 
+# ---- 历史日志的参数校验（取值范围和 master 的约定一致；master 还会再校验一次）----
+_LOG_MAX_WINDOW = 31 * 86400   # 时间窗口最长 31 天（秒）
+_LOG_SOURCE_ID = re.compile(r"[a-z][a-z0-9_-]{0,31}")   # 日志源 ID
+_LOG_KEY = re.compile(r"[a-z][a-z0-9_]{0,31}")   # 关联字段的 key
+_LOG_FIELD = re.compile(r"[A-Za-z_@][A-Za-z0-9_.@-]{0,199}")   # 字段名
+# 可选的文本条件和长度上限（都要非空、不能有换行等控制字符）
+_LOG_TEXT_LIMITS = {"keyword": 500, "level": 50, "k8s_namespace": 253, "k8s_pod": 253, "k8s_deployment": 253, "anchor_id": 512}
+_LOG_RANGES = {("log_search", "limit"): (1, 200), ("log_correlate", "limit"): (1, 100), ("log_query", "limit"): (1, 500),
+               ("log_stats", "top"): (1, 200), ("log_patterns", "top"): (1, 50), ("log_patterns", "sample"): (100, 5000),
+               ("log_context", "before"): (0, 100), ("log_context", "after"): (0, 100)}
+_LOG_FILTER_OPS = ("eq", "ne", "in", "not_in", "contains", "not_contains", "prefix", "gt", "gte", "lt", "lte",
+                   "exists", "not_exists", "regex")
+_LOG_TEXT_OPS = ("contains", "not_contains", "prefix", "regex")   # value 只能是非空字符串
+_LOG_METRIC_OPS = ("count", "avg", "min", "max", "sum", "p50", "p90", "p95", "p99", "uniq")
+_LOG_INTERVALS = ("1m", "5m", "10m", "30m", "1h", "3h", "6h", "12h", "1d")
+_LOG_RAW_LIMIT = 20000   # sql / esql 最多这么多字符
+_LOG_DSL_LIMIT = 50000   # dsl 序列化后最多这么多字符
+_LOG_DSL_KEYS = ("query", "aggs", "aggregations", "sort", "_source", "size", "track_total_hits")
+# 集群由网关按本轮集群检查（同一个集群时忽略，其他集群 403 scope_violation），不算没声明的参数
+_LOG_SCOPE_KEYS = ("env", "k8s")
+
+
+def _log_hint(operation: str, field, hints) -> str | None:
+    """没声明的参数怎么改：常见误用给出对应的参数，其余说明它是哪个日志工具的参数"""
+    if field in ("namespace", "pod", "deployment"):
+        prefixed = f"k8s_{field}"
+        if prefixed in hints:
+            return f"按 K8S 过滤用 {prefixed}"
+        return f"{operation} 不能按 {field} 过滤，要过滤用 log_search / log_stats / log_patterns 的 {prefixed}"
+    if field in ("query", "q", "text"):
+        if operation == "log_query":
+            return "原生查询用 sql / dsl / esql（按日志源类型）"
+        return "正文关键字用 keyword" if "keyword" in hints else "按正文关键字查用 log_search 的 keyword"
+    if field in ("index", "table"):
+        return "用 source 指定日志源（log_sources 列出的 ID），表 / 索引由集群绑定决定"
+    if field in ("size", "limit"):
+        return {"log_stats": "返回多少行用 top", "log_patterns": "取多少条归类用 sample，返回多少个模式用 top",
+                "log_context": "前后各多少条用 before / after"}.get(operation, "条数用 limit" if "limit" in hints else None)
+    if field == "trace_id":
+        how = "key 填链路 ID 的关联字段（log_sources 返回的 correlation_keys），value 填它的值"
+        return f"用 {how}" if operation == "log_correlate" else f"按链路 ID 查各层日志用 log_correlate：{how}"
+    if field in ("start_time", "end_time", "from", "to", "since", "until") or (field == "time" and operation != "log_context"):
+        if operation == "log_correlate":
+            return "请求大概发生的时间用 around，时间范围用 start / end 或 lookback"
+        return "时间用 start / end（北京时间）或 lookback" if "start" in hints else None
+    if field in ("sort", "order_by"):
+        return "排序用 order（desc / asc）" if "order" in hints else None
+    owners = [name for name in sorted(LOG_OPERATIONS) if field in EXTRA_SCHEMAS[name][1]]
+    return f"{field} 是 {' / '.join(owners)} 的参数" if owners else None
+
+
+def _log_source_id(value, label):
+    if not isinstance(value, str) or not _LOG_SOURCE_ID.fullmatch(value):
+        raise AIError(f"{label} 必须为日志源 ID（小写字母开头，小写字母、数字、_ -，最多 32 个字符），用 log_sources 列出的 ID")
+
+
+def _log_field(value, label):
+    if not isinstance(value, str) or not _LOG_FIELD.fullmatch(value):
+        raise AIError(f"{label} 必须为字段名（字母、_ 或 @ 开头，由字母、数字、_ . @ - 组成，最多 200 个字符），用 log_sources 返回的字段名")
+
+
+def _log_scalar(value, label, limit, *, text_only=False, allow_empty=False):
+    """过滤条件的取值：字符串（不能有换行等控制字符），或数字"""
+    kinds = "字符串" if text_only else "字符串或数字"
+    if isinstance(value, str):
+        if (not allow_empty and not value.strip()) or len(value) > limit or not _control_free(value):
+            raise AIError(f"{label}的 value 必须为{kinds}（字符串{'' if allow_empty else '非空、'}最多 {limit} 个字符，不能有换行等控制字符）")
+    elif text_only or not (type(value) is int or (type(value) is float and math.isfinite(value))):   # 大整数不转 float（会溢出）
+        raise AIError(f"{label}的 value 必须为{kinds}；字段为空用 not_exists")
+
+
+def _log_filters(value):
+    if not isinstance(value, list) or not 1 <= len(value) <= 10:
+        raise AIError("filters 必须为 1~10 项的数组，每项 {field, op, value}；不需要就不要传")
+    for index, item in enumerate(value, 1):
+        label = f"filters 第 {index} 项"
+        if not isinstance(item, dict):
+            raise AIError(f"{label}必须为对象 {{field, op, value}}")
+        extra = [key for key in item if key not in ("field", "op", "value")]
+        if extra:
+            raise AIError(f"{label}只能有 field、op、value，不认识 {'、'.join(map(str, extra))}")
+        _log_field(item.get("field"), f"{label}的 field")
+        op = item.get("op")
+        if not isinstance(op, str) or op not in _LOG_FILTER_OPS:
+            raise AIError(f"{label}的 op 必须为 " + "/".join(_LOG_FILTER_OPS))
+        if op in ("exists", "not_exists"):
+            if "value" in item:
+                raise AIError(f"{label}：{op} 不带 value")
+            continue
+        if "value" not in item:
+            raise AIError(f"{label}：{op} 需要 value")
+        if op in ("in", "not_in"):
+            if not isinstance(item["value"], list) or not 1 <= len(item["value"]) <= 100:
+                raise AIError(f"{label}：{op} 的 value 必须为 1~100 项的数组")
+            for element in item["value"]:
+                _log_scalar(element, label, 500, allow_empty=True)
+        else:
+            _log_scalar(item["value"], label, 200 if op == "regex" else 500,
+                        text_only=op in _LOG_TEXT_OPS, allow_empty=op in ("eq", "ne"))
+
+
+def _log_metrics(value):
+    if not isinstance(value, list) or not 1 <= len(value) <= 5:
+        raise AIError('metrics 必须为 1~5 项的数组，每项 {op, field}，例如 [{"op": "count"}, {"op": "p95", "field": "duration"}]')
+    seen = set()
+    for item in value:
+        if not isinstance(item, dict) or any(key not in ("op", "field") for key in item):
+            raise AIError("metrics 每项是 {op, field}")
+        op = item.get("op")
+        if not isinstance(op, str) or op not in _LOG_METRIC_OPS:
+            raise AIError("metrics 的 op 必须为 " + "/".join(_LOG_METRIC_OPS))
+        if op == "count":
+            if "field" in item:
+                raise AIError("metrics 的 count 统计条数，不带 field")
+        else:
+            _log_field(item.get("field"), f"metrics 里 {op} 的 field")
+        if (op, item.get("field")) in seen:
+            raise AIError("metrics 不能重复")
+        seen.add((op, item.get("field")))
+
+
+def _log_raw(field, value):
+    """原生查询：一条 SQL 或一段 ES|QL 管道，可以多行"""
+    if (not isinstance(value, str) or not value.strip() or len(value) > _LOG_RAW_LIMIT
+            or any((ord(c) < 32 and c not in "\t\n\r") or ord(c) == 127 for c in value)):
+        raise AIError(f"{field} 必须为非空字符串（最多 {_LOG_RAW_LIMIT} 个字符）")
+    if field == "sql" and "$src" not in value:
+        raise AIError("sql 要用 $src 代表日志源（已按集群和时间过滤），例如 SELECT status, count() AS c FROM $src GROUP BY status ORDER BY c DESC")
+    if field == "esql" and re.match(r"\s*\|?\s*FROM\b", value, re.IGNORECASE):
+        raise AIError("esql 只写 FROM 之后的管道（FROM 哪个索引由日志源决定），例如 | STATS c = COUNT(*) BY level")
+
+
+def _log_dsl(value):
+    if not isinstance(value, dict):
+        raise AIError('dsl 必须为 JSON 对象，例如 {"query": {...}, "aggs": {...}}')
+    unknown = [key for key in value if key not in _LOG_DSL_KEYS]
+    if unknown:
+        raise AIError(f"dsl 只能有 {'、'.join(_LOG_DSL_KEYS)}，不认识 {'、'.join(map(str, unknown))}（索引、集群和时间过滤由日志源决定）")
+    try:
+        size = len(json.dumps(value, ensure_ascii=False))
+    except (TypeError, ValueError, RecursionError):
+        raise AIError("dsl 必须为 JSON 对象") from None
+    if size > _LOG_DSL_LIMIT:
+        raise AIError(f"dsl 序列化后最多 {_LOG_DSL_LIMIT} 个字符")
+
+
+def _validate_log(operation: str, args: dict) -> None:
+    """历史日志的参数。没声明的参数一律拒绝（静默丢掉会让模型以为条件生效了），常见误用给出改法"""
+    hints = EXTRA_SCHEMAS[operation][1]
+    unknown = [field for field in args if field not in hints and field not in _LOG_SCOPE_KEYS]
+    if unknown:
+        tips = list(dict.fromkeys(tip for tip in (_log_hint(operation, field, hints) for field in unknown) if tip))
+        raise AIError(f"{operation} 没有参数 {'、'.join(map(str, unknown))}" + (f"：{'；'.join(tips)}" if tips else "")
+                      + "。可用参数：" + "、".join(hints))
+    for field, value in args.items():
+        if field in _LOG_SCOPE_KEYS:
+            continue
+        if field == "source":
+            _log_source_id(value, field)
+        elif field == "key":
+            if not isinstance(value, str) or not _LOG_KEY.fullmatch(value):
+                raise AIError("key 必须为关联字段的 key（小写字母开头，小写字母、数字、_，最多 32 个字符），用 log_sources 返回的 correlation_keys")
+        elif field == "value":
+            if not isinstance(value, str) or not value.strip() or len(value) > 200 or not _control_free(value):
+                raise AIError("value 必须为关联字段的取值：非空字符串（数字也写成字符串），最多 200 个字符，不能有换行等控制字符")
+        elif field in _LOG_TEXT_LIMITS:   # keyword、level、k8s_*、anchor_id
+            _trace_text(value, field, _LOG_TEXT_LIMITS[field])
+        elif field in ("start", "end", "around", "time"):
+            _trace_time(value, field)
+        elif field == "lookback":
+            _trace_lookback(value, field, _LOG_MAX_WINDOW)
+        elif field == "filters":
+            _log_filters(value)
+        elif field == "fields":
+            if not isinstance(value, list) or not 1 <= len(value) <= 50:
+                raise AIError("fields 必须为 1~50 个字段名；用日志源默认的字段就不要传")
+            for item in value:
+                _log_field(item, "fields 的每项")
+            if len(set(value)) != len(value):
+                raise AIError("fields 不能重复")
+        elif field == "group_by":
+            if (not isinstance(value, list) or len(value) > 3
+                    or any(not isinstance(item, str) or (item != "time" and not _LOG_FIELD.fullmatch(item)) for item in value)
+                    or len(set(value)) != len(value)):
+                raise AIError("group_by 最多 3 项、不能重复，每项是 time 或字段名（log_sources 返回的字段名）")
+        elif field == "interval":
+            if not isinstance(value, str) or value not in _LOG_INTERVALS:
+                raise AIError("interval 必须为 " + "/".join(_LOG_INTERVALS))
+        elif field == "metrics":
+            _log_metrics(value)
+        elif field == "exclude":
+            if not isinstance(value, list) or not 1 <= len(value) <= 20:
+                raise AIError("exclude 必须为 1~20 项的数组；不需要就不要传")
+            for item in value:
+                _trace_text(item, "exclude 的每项", 200)
+        elif field == "sources":
+            if not isinstance(value, list) or not 1 <= len(value) <= 20:
+                raise AIError("sources 必须为 1~20 个日志源 ID；查全部登记了这个关联字段的日志源就不要传")
+            for item in value:
+                _log_source_id(item, "sources 的每项")
+            if len(set(value)) != len(value):
+                raise AIError("sources 不能重复")
+        elif field == "order":
+            if value not in ("desc", "asc"):
+                raise AIError("order 必须为 desc 或 asc")
+        elif (operation, field) in _LOG_RANGES:   # limit、top、sample、before、after
+            low, high = _LOG_RANGES[(operation, field)]
+            if type(value) is not int or not low <= value <= high:
+                raise AIError(f"{field} 必须为 {low}..{high} 的整数")
+        elif field in ("sql", "esql"):
+            _log_raw(field, value)
+        elif field == "dsl":
+            _log_dsl(value)
+        else:   # 新增参数要在上面登记校验方式（测试会覆盖每个声明的参数）
+            raise AIError(f"{operation} 的参数 {field} 没有校验规则", 500, "internal_error")
+    if "start" in args and "lookback" in args:
+        raise AIError("start 和 lookback 二选一：lookback 是没给 start 时往前查多久；查一段时间用 start + end")
+    if operation == "log_correlate" and "around" in args and any(field in args for field in ("start", "end", "lookback")):
+        raise AIError("around 和 start / end / lookback 二选一：给了 around 就查它前后各 30 分钟")
+    if "start" in args and "end" in args:
+        start, end = _trace_time(args["start"], "start"), _trace_time(args["end"], "end")
+        if start >= end:
+            raise AIError("start 必须早于 end")
+        if (end - start).total_seconds() > _LOG_MAX_WINDOW:
+            raise AIError("时间窗口最长 31 天")
+    if operation == "log_stats" and "interval" in args and "time" not in args.get("group_by", []):
+        raise AIError("interval 只用于按时间分组，group_by 要包含 time")
+    if operation == "log_query" and sum(field in args for field in ("sql", "dsl", "esql")) != 1:
+        raise AIError("log_query 需要 sql、dsl、esql 其中一个：ClickHouse 日志源用 sql，Elasticsearch 日志源用 dsl 或 esql（看 log_sources 返回的 raw_query）")
+
+
 def validate_arguments(operation: str, args: dict) -> None:
     """Reject malformed business calls before arguments enter the approval ledger."""
     if operation not in EXTRA_CATALOG:
@@ -415,6 +711,9 @@ def validate_arguments(operation: str, args: dict) -> None:
             raise AIError(f"{operation} 需要 {field}")
     if operation in TRACE_OPERATIONS:
         _validate_trace(operation, args)
+        return
+    if operation in LOG_OPERATIONS:
+        _validate_log(operation, args)
         return
     for field in hints:
         if field not in args:
@@ -581,8 +880,8 @@ def build_request(operation: str, args: dict, env: str) -> tuple[dict, dict | No
         for snake, camel in (("reporting_component", "reportingComponent"), ("reporting_instance", "reportingInstance")):
             if snake in body:
                 body[camel] = body.pop(snake)
-    elif operation in TRACE_OPERATIONS:
-        # 链路追踪：参数名就是 master 的约定，原样放进 body；集群只在 query 的 env 里
+    elif operation in TRACE_OPERATIONS or operation in LOG_OPERATIONS:
+        # 链路追踪、历史日志：参数名就是 master 的约定，原样放进 body；集群只在 query 的 env 里
         body = values
     else:
         query.update(values)

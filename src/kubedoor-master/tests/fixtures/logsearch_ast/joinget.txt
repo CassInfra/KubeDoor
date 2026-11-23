@@ -1,0 +1,14 @@
+-- SELECT joinGet('other.j', 'v', 1) FROM logs.access
+SelectWithUnionQuery (children 1)
+ ExpressionList (children 1)
+  SelectQuery (children 2)
+   ExpressionList (children 1)
+    Function joinGet (children 1)
+     ExpressionList (children 3)
+      Literal \'other.j\'
+      Literal \'v\'
+      Literal UInt64_1
+   TablesInSelectQuery (children 1)
+    TablesInSelectQueryElement (children 1)
+     TableExpression (children 1)
+      TableIdentifier logs.access

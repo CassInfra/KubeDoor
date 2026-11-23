@@ -1,0 +1,17 @@
+-- SELECT path FROM __kd_src__ UNION ALL SELECT path FROM __kd_src__
+SelectWithUnionQuery (children 1)
+ ExpressionList (children 2)
+  SelectQuery (children 2)
+   ExpressionList (children 1)
+    Identifier path
+   TablesInSelectQuery (children 1)
+    TablesInSelectQueryElement (children 1)
+     TableExpression (children 1)
+      TableIdentifier __kd_src__
+  SelectQuery (children 2)
+   ExpressionList (children 1)
+    Identifier path
+   TablesInSelectQuery (children 1)
+    TablesInSelectQueryElement (children 1)
+     TableExpression (children 1)
+      TableIdentifier __kd_src__
