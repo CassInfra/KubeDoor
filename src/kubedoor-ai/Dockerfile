@@ -34,8 +34,9 @@ RUN set -eu; \
 COPY src/kubedoor-tools/install-ai-tools.sh /tmp/install-ai-tools.sh
 RUN sh /tmp/install-ai-tools.sh && rm /tmp/install-ai-tools.sh
 COPY src/kubedoor-tools /opt/kubedoor-tools
-COPY src/kubedoor-ai/requirements.txt /app/requirements.txt
-RUN pip install --no-cache-dir /opt/kubedoor-tools -r requirements.txt
+# constraints.txt 是 uv 生成的完整依赖锁：间接依赖不再取构建当天的最新版，镜像和本地测试环境装的是同一套版本
+COPY src/kubedoor-ai/requirements.txt src/kubedoor-ai/constraints.txt /app/
+RUN pip install --no-cache-dir -c constraints.txt /opt/kubedoor-tools -r requirements.txt
 COPY src/kubedoor-ai /app
 RUN useradd --create-home --uid 10001 kubedoor && chown -R kubedoor:kubedoor /app
 USER kubedoor

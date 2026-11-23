@@ -13,9 +13,10 @@ from .domain import Provider
 class KubeDoorChatDeepSeek(ChatDeepSeek):
     """Keep DeepSeek reasoning across tools, checkpoints and subsequent turns.
 
-    langchain-deepseek 1.1.1 reads reasoning_content from both normal and SSE
-    responses, but the inherited OpenAI message serializer drops it on input.
-    DeepSeek thinking mode requires it for assistant history in tool requests.
+    langchain-deepseek (checked 1.1.1 through 1.2.1) reads reasoning_content from
+    both normal and SSE responses, but the inherited OpenAI message serializer
+    drops it on input. DeepSeek thinking mode requires it for assistant history
+    in tool requests.
     """
 
     def _get_request_payload(self, input_, *, stop=None, **kwargs):

@@ -1,9 +1,12 @@
+# kubedoor-ai 的顶层依赖。完整锁（含全部间接依赖）在同目录的 constraints.txt，镜像和本地 .venv-ai 都按它安装。
+# 改了这里或 kubedoor-tools 的依赖后，在仓库根目录重新生成锁（加 --upgrade 会把间接依赖一起升到最新）：
+#   uv pip compile --universal --python-version 3.13 src/kubedoor-ai/requirements.txt src/kubedoor-tools/pyproject.toml -o src/kubedoor-ai/constraints.txt
 httpx==0.28.1
 fastmcp==4.0.11
-deepagents==0.7.21
-langchain-openai==1.6.7
-langchain-deepseek==1.1.1
-langgraph-checkpoint-postgres==3.1.2
+deepagents==0.7.41
+langchain-openai==1.8.5
+langchain-deepseek==1.2.1
+langgraph-checkpoint-postgres==3.2.1
 psycopg[binary,pool]==3.3.6
 asyncpg==0.31.0
 cryptography==50.0.2

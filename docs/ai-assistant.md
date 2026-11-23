@@ -97,9 +97,9 @@ kubectl -n kubedoor logs deployment/kubedoor-ai --since=15m
 账号生成的 key。第三方网关的地址、模型 ID 与 key 应按网关文档或模型列表填写；
 网关可能提供不同的模型 ID 映射。保存后使用“测试连接”验证实际工具调用能力。
 
-DeepSeek 当前默认启用思考模式，无需增加思考开关。本服务使用
-`langchain-deepseek==1.1.1` 的 ChatDeepSeek 处理普通与 SSE 响应，并补齐后续请求
-中的 `reasoning_content` 回传；历史消息通过 PostgreSQL checkpoint 恢复。
+DeepSeek 默认启用思考模式（强度 high），模型设置里的「思考强度」可改为 low、max 或
+关闭。本服务使用 `langchain-deepseek==1.2.1` 的 ChatDeepSeek 处理普通与 SSE 响应，
+并补齐后续请求中的 `reasoning_content` 回传；历史消息通过 PostgreSQL checkpoint 恢复。
 工具选择采用模型默认行为，避免强制 `required` 或指定工具导致默认思考模式请求失败。
 当前继续使用 Chat Completions，暂不接入 Responses API。
 
@@ -650,7 +650,7 @@ flowchart LR
     Agent --> K8S
 ```
 
-调研后采用 [DeepAgents](https://github.com/langchain-ai/deepagents) 0.7.21，
+调研后采用 [DeepAgents](https://github.com/langchain-ai/deepagents)（当前 0.7.41），
 复用 Skills 加载、子 Agent、对话压缩和 LangGraph 中断/checkpoint。执行工具
 接入 KubeDoor 网关，默认文件后端仅提供会话内文件和只读 Skill，集群操作
 通过受控工具调用。Python 版本按实际依赖验证选择，后续可独立升级此服务。

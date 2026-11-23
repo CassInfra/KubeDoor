@@ -56,7 +56,7 @@ kubectl -n kubedoor logs deployment/kubedoor-ai --since=15m
 DeepSeek 默认启用思考模式（强度 high）。模型设置里的「思考强度」可改为 low、max 或关闭：关闭时
 请求带 `thinking: {"type": "disabled"}`，其他强度传 `reasoning_effort`，保持「默认」时请求里不带
 这两个参数；其他模型忽略这项设置。服务使用
-`langchain-deepseek==1.1.1`，保留普通及流式响应中的 `reasoning_content`，并补齐
+`langchain-deepseek==1.2.1`，保留普通及流式响应中的 `reasoning_content`，并补齐
 后续工具调用和多轮请求中的回传，避免思考模式的上下文丢失。工具选择采用模型默认
 行为，不强制 `tool_choice=required` 或指定工具。当前沿用 Chat Completions，
 暂不接入 Responses API；前端仅支持文本输入。各项官方文档核对见
