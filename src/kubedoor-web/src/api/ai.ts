@@ -229,8 +229,9 @@ export interface WeComConfig {
   reasoning_effort?: AIReasoningEffort | null;
   /** 对话空闲多少分钟后，新消息自动进入新对话；0 表示关闭 */
   session_idle_minutes?: number;
-  has_bot_secret: boolean;
-  has_api_key: boolean;
+  /** Bot Secret / 模型 API Key 是否保存过（不返回值本身；不叫 has_* 是因为 *_secret、*_api_key 会被服务端打码） */
+  bot_secret_set: boolean;
+  api_key_set: boolean;
   updated_by?: string;
   updated_at?: string;
 }

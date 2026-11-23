@@ -1150,16 +1150,18 @@ class WeComIntegration:
         return f"已记下你的名字「{name}」，管理员在花折里能看到，方便为你绑定账号（只用来辨认，不影响权限）。"
 
     async def admin_config(self):
+        # 「有没有保存过密钥」叫 bot_secret_set / api_key_set：has_bot_secret、has_api_key 这种以 _secret、_api_key
+        # 结尾的键会被接口出口的 redact 换成 "[REDACTED]"（永远为真，页面一直显示「已保存」）
         row = await self.service.store.one("SELECT enabled,encrypted_config,session_idle_minutes,updated_by,updated_at FROM kubedoor_ai_wecom_config WHERE singleton=true")
         if not row:
-            return {**self.status, "has_bot_secret": False, "has_api_key": False, "session_idle_minutes": DEFAULT_IDLE_MINUTES}
+            return {**self.status, "bot_secret_set": False, "api_key_set": False, "session_idle_minutes": DEFAULT_IDLE_MINUTES}
         config = self.service.gateway.cipher.decrypt("wecom", bytes(row["encrypted_config"]))
         return {**self.status, "enabled": row["enabled"], "bot_id": config.get("bot_id", ""),
                 "base_url": config.get("base_url", ""), "model": config.get("model", ""),
                 "max_input_tokens": config.get("max_input_tokens"), "max_output_tokens": config.get("max_output_tokens"),
                 "compression_ratio": config.get("compression_ratio"), "reasoning_effort": config.get("reasoning_effort"),
                 "session_idle_minutes": row.get("session_idle_minutes", DEFAULT_IDLE_MINUTES),
-                "has_bot_secret": bool(config.get("bot_secret")), "has_api_key": bool(config.get("api_key")),
+                "bot_secret_set": bool(config.get("bot_secret")), "api_key_set": bool(config.get("api_key")),
                 "updated_by": row["updated_by"], "updated_at": row["updated_at"]}
 
     async def save_config(self, identity, raw):

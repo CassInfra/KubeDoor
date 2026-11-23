@@ -13,9 +13,10 @@ import httpx
 import pytest
 
 import kubedoor_ai.wecom as wecom_module
-from kubedoor_ai.domain import BEIJING_TZ, AIError, CredentialCipher, Identity
+from kubedoor_ai.domain import BEIJING_TZ, AIError, CredentialCipher, Identity, redact
 from kubedoor_ai.gateway import Gateway, RunContext, request_cluster_switch
 from kubedoor_ai.http import create_app
+from kubedoor_ai.storage import plain
 from kubedoor_ai.wecom import (WeComIntegration, _PushReply, _StreamReply, _approval_summary, _approval_text, _brief,
                                _legacy_retention_days, _limit_stream, _mentioned_cluster, _pick_cluster)
 
@@ -896,20 +897,30 @@ def test_stream_content_limit_preserves_utf8_boundaries():
 @pytest.mark.asyncio
 async def test_admin_config_never_returns_stored_bot_secret_or_model_key():
     class Cipher:
-        def decrypt(self, *_):
-            return {"bot_id": "bot-1", "bot_secret": "bot-secret", "base_url": "https://llm.example/v1",
-                    "api_key": "model-secret", "model": "model-1"}
+        def __init__(self, config):
+            self.config = config
 
-    store = SimpleNamespace(one=AsyncMock(return_value={
-        "enabled": True, "encrypted_config": b"ciphertext", "updated_by": "admin", "updated_at": "now"
-    }))
-    service = SimpleNamespace(store=store, gateway=SimpleNamespace(cipher=Cipher()))
-    integration = WeComIntegration(service)
-    result = await integration.admin_config()
+        def decrypt(self, *_):
+            return dict(self.config)
+
+    async def admin_config(row, config=None):
+        service = SimpleNamespace(store=SimpleNamespace(one=AsyncMock(return_value=row)),
+                                  gateway=SimpleNamespace(cipher=Cipher(config or {})))
+        # 和接口出口一样经过 redact(plain(...))：has_api_key、has_bot_secret 这种键名曾被打码成 "[REDACTED]"（永远为真）
+        return redact(plain(await WeComIntegration(service).admin_config()))
+
+    row = {"enabled": True, "encrypted_config": b"ciphertext", "updated_by": "admin", "updated_at": "now"}
+    result = await admin_config(row, {"bot_id": "bot-1", "bot_secret": "bot-secret", "base_url": "https://llm.example/v1",
+                                      "api_key": "model-secret", "model": "model-1"})
     assert result["bot_id"] == "bot-1"
-    assert result["has_bot_secret"] and result["has_api_key"]
+    assert result["bot_secret_set"] is True and result["api_key_set"] is True
     assert "bot_secret" not in result and "api_key" not in result
     assert "bot-secret" not in repr(result) and "model-secret" not in repr(result)
+    # 保存过但没填密钥（不启用机器人、本地模型不要 Key）、从没保存过：都是 False，页面不能显示「已保存」
+    result = await admin_config(row, {"bot_id": "", "bot_secret": "", "base_url": "https://llm.example/v1", "api_key": "", "model": "m"})
+    assert result["bot_secret_set"] is False and result["api_key_set"] is False
+    result = await admin_config(None)
+    assert result["bot_secret_set"] is False and result["api_key_set"] is False
 
 
 class ConfigStore:

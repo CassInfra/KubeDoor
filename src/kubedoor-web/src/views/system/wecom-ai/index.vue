@@ -45,8 +45,8 @@ const config = ref<WeComConfig>({
   connected: false,
   authenticated: false,
   reconnecting: false,
-  has_bot_secret: false,
-  has_api_key: false
+  bot_secret_set: false,
+  api_key_set: false
 });
 const form = reactive({
   enabled: false,
@@ -291,7 +291,7 @@ async function testModel() {
 async function saveConfig() {
   if (
     form.enabled &&
-    (!form.bot_id.trim() || (!form.bot_secret && !config.value.has_bot_secret))
+    (!form.bot_id.trim() || (!form.bot_secret && !config.value.bot_secret_set))
   ) {
     ElMessage.warning("启用机器人需要 Bot ID 和 Secret。");
     return;
@@ -503,7 +503,7 @@ onBeforeUnmount(() => {
             show-password
             autocomplete="new-password"
             :placeholder="
-              config.has_bot_secret
+              config.bot_secret_set
                 ? '已保存，留空保持不变'
                 : '企业微信 API 模式机器人 Secret'
             "
@@ -527,7 +527,7 @@ onBeforeUnmount(() => {
             show-password
             autocomplete="new-password"
             :placeholder="
-              config.has_api_key
+              config.api_key_set
                 ? '已保存，留空保持不变'
                 : '企微机器人和网页 AI 助手共用'
             "
