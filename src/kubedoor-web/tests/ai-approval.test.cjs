@@ -206,7 +206,7 @@ async function harness(t) {
   };
 }
 
-test("automatic approval starts disabled and is never persisted with model credentials", async t => {
+test("automatic approval starts disabled and is remembered per account, apart from model credentials", async t => {
   const h = await harness(t);
   assert.equal(h.ai.autoApprove, false);
   await h.start();
@@ -220,12 +220,63 @@ test("automatic approval starts disabled and is never persisted with model crede
   assert.equal(h.requests.length, 1);
   assert.equal(h.requests[0].decision, "approve");
   assert.deepEqual(h.requests[0].provider, h.ai.provider);
-  assert.equal([...h.saved].length, 1);
-  assert.ok(![...h.saved.values()][0].includes("autoApprove"));
+  // 单独一个键，不和模型配置（含 API Key）存在一起
+  const key = utils.autoApproveStorageKey("alice");
+  assert.equal(h.saved.get(key), "1");
+  assert.ok(
+    !h.saved.get(utils.providerStorageKey("alice")).includes("autoApprove")
+  );
+  // 刷新页面（新的 store）：确认登录身份前不生效，确认后恢复上次的选择
   const fresh = h.loadStore();
   assert.equal(fresh.autoApprove, false);
+  await fresh.refreshBootstrap();
+  assert.equal(fresh.autoApprove, true);
+  // 取消勾选同样记下来
+  fresh.autoApprove = false;
+  assert.equal(h.saved.has(key), false);
   fresh.$dispose();
 });
+
+for (const [origin, approved] of [
+  ["mcp", false],
+  ["chat", true]
+]) {
+  test(`automatic approval ${approved ? "approves" : "never approves"} a waiting ${origin} action restored when the session opens`, async t => {
+    const h = await harness(t);
+    h.state.detail = {
+      id: "session-1",
+      messages: [
+        { id: "assistant", role: "assistant", content: "", tools: [] }
+      ],
+      active_run: {
+        id: `${origin}-run`,
+        status: "waiting_approval",
+        event_seq: 3,
+        origin,
+        scope: {
+          env: "cluster-a",
+          namespace: null,
+          deployment: null,
+          pod: null
+        },
+        pending_actions: [action(`${origin}-action`)]
+      }
+    };
+    h.ai.autoApprove = true;
+    await h.ai.selectSession("session-1");
+    await flush();
+    // 外部 MCP 客户端发起、从浏览器链接打开的修改：勾着（或记住了）自动批准也要人手动批准
+    assert.deepEqual(
+      h.requests.map(item => [item.actionId, item.decision]),
+      approved ? [[`${origin}-action`, "approve"]] : []
+    );
+    if (!approved) {
+      assert.equal(h.ai.activeRun.status, "waiting_approval");
+      assert.equal(h.ai.pendingTools[0].action_id, "mcp-action");
+      assert.equal(h.ai.autoApprove, true);
+    }
+  });
+}
 
 test("approval display events cannot authorize execution before the server checkpoint is ready", async t => {
   const h = await harness(t);
@@ -434,6 +485,12 @@ test("a change of signed-in account disables automatic approval", async t => {
   assert.equal(h.ai.activeRun, null);
   assert.equal(h.ai.provider.api_key, "");
   assert.equal(h.requests.length, 0);
+  // 换回 alice：恢复 alice 自己记下的选择，换账号时的清零没有冲掉它
+  h.state.username = "alice";
+  await h.ai.refreshBootstrap();
+  await flush();
+  assert.equal(h.ai.autoApprove, true);
+  assert.equal(h.saved.has(utils.autoApproveStorageKey("bob")), false);
 });
 
 test("a restored checkpoint ignores earlier stream statuses before approving the next action", async t => {

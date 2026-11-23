@@ -21,6 +21,7 @@ import {
   type AIUsage
 } from "@/api/ai";
 import {
+  autoApproveStorageKey,
   effectiveProviderMode,
   isTerminalRun,
   newAIId,
@@ -75,6 +76,30 @@ export const useAIStore = defineStore("kubedoor-ai", () => {
   const selectedMemories = ref<AIMemorySummary[]>([]);
   const summarizingMemory = ref(false);
   const autoApprove = ref(false);
+  // 自动批准执行按账号记在浏览器里，刷新页面后保持。autoApproveOwner 是当前值属于哪个账号：
+  // 换账号重置时先清空它，重置就不会冲掉上一个账号的选择；自动批准失败时关掉的也会记下来
+  let autoApproveOwner = "";
+  watch(
+    autoApprove,
+    value => {
+      if (!autoApproveOwner) return;
+      try {
+        const key = autoApproveStorageKey(autoApproveOwner);
+        if (value) localStorage.setItem(key, "1");
+        else localStorage.removeItem(key);
+      } catch {
+        // 浏览器不让存时只在当前页面有效
+      }
+    },
+    { flush: "sync" }
+  );
+  const savedAutoApprove = (username: string) => {
+    try {
+      return localStorage.getItem(autoApproveStorageKey(username)) === "1";
+    } catch {
+      return false;
+    }
+  };
   const activeRun = ref<AIRun | null>(null);
   /** 当前会话最近一轮的用量（会话详情和 done 事件带回），用来显示上下文占用 */
   const contextUsage = ref<AIUsage | null>(null);
@@ -239,7 +264,10 @@ export const useAIStore = defineStore("kubedoor-ai", () => {
       autoApproving.value ||
       deciding.value ||
       cancelling.value ||
-      activeRun.value?.status !== "waiting_approval"
+      activeRun.value?.status !== "waiting_approval" ||
+      // 外部 MCP 客户端发起的修改要人在浏览器链接里看过再批准：自动批准记在浏览器里之后，
+      // 打开链接就会被直接批准，所以这类一律手动
+      activeRun.value.origin === "mcp"
     )
       return;
     const actionId = automaticPending.value[0]?.action_id;
@@ -320,6 +348,8 @@ export const useAIStore = defineStore("kubedoor-ai", () => {
     streamController?.abort();
     streamGeneration++;
     resetApprovalState();
+    // 先解除归属再清零：重置不能冲掉上一个账号记在浏览器里的选择
+    autoApproveOwner = "";
     autoApprove.value = false;
     settledActions.clear();
     sessions.value = [];
@@ -386,6 +416,9 @@ export const useAIStore = defineStore("kubedoor-ai", () => {
     if (owner !== data.username) {
       resetForUser();
       owner = data.username;
+      // 读这个账号上次的「自动批准执行」，读完再认领归属，读取本身不会写回
+      autoApprove.value = savedAutoApprove(owner);
+      autoApproveOwner = owner;
       try {
         const saved = JSON.parse(
           localStorage.getItem(providerStorageKey(owner)) || "null"

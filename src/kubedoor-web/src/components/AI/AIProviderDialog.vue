@@ -189,6 +189,7 @@ function openWecomSettings() {
         <span class="settings-title">模型设置</span>
         <el-switch
           v-model="custom"
+          class="mode-switch"
           inactive-text="企微专用模型"
           active-text="自定义模型"
           :disabled="testing"
@@ -339,6 +340,21 @@ function openWecomSettings() {
   font-size: var(--el-dialog-title-font-size, 18px);
   line-height: var(--el-dialog-font-line-height, 24px);
   color: var(--el-text-color-primary);
+}
+
+// 滑块不用灰色：企微专用模型绿色、自定义模型蓝色，选中一侧的文字和滑块同色
+// （对话框输入框下方的模型名也用这两个颜色）
+.mode-switch {
+  --el-switch-on-color: var(--el-color-primary);
+  --el-switch-off-color: var(--el-color-success);
+
+  :deep(.el-switch__label--left.is-active) {
+    color: var(--el-color-success);
+  }
+
+  :deep(.el-switch__label--right.is-active) {
+    color: var(--el-color-primary);
+  }
 }
 
 .shared-alert {

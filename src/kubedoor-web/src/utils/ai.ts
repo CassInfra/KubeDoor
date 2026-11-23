@@ -131,6 +131,10 @@ export function safeAIText(value: unknown): string {
 export const providerStorageKey = (username: string) =>
   `kubedoor-ai:provider:${encodeURIComponent(username)}`;
 
+/** 「自动批准执行」按账号记在浏览器里；和模型配置（含 API Key）分开存 */
+export const autoApproveStorageKey = (username: string) =>
+  `kubedoor-ai:auto-approve:${encodeURIComponent(username)}`;
+
 /** 浏览器里保存的模型选择（只有在模型设置里点「保存」才会写）；没保存过或值不对返回 null */
 export function savedProviderMode(value: unknown): AIProviderMode | null {
   return value === "wecom" || value === "custom" ? value : null;

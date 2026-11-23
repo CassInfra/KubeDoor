@@ -25,6 +25,7 @@ import AIMarkdown from "./AIMarkdown.vue";
 import AIMemoryDialog from "./AIMemoryDialog.vue";
 import AIMemoryEditor from "./AIMemoryEditor.vue";
 import AIMemoryAttachments from "./AIMemoryAttachments.vue";
+import AIBrandAvatar from "./AIBrandAvatar.vue";
 
 const ai = useAIStoreHook();
 const mobile = useMediaQuery("(max-width: 760px)");
@@ -441,8 +442,8 @@ const timestamp = (value?: string) => {
   >
     <template #header>
       <div class="ai-header">
-        <span class="ai-badge">AI</span>
-        <span class="ai-title">KubeDoor 助手</span>
+        <AIBrandAvatar :size="32" />
+        <span class="ai-title">花折 AI</span>
         <el-tag
           v-if="ai.scope.env && ai.readOnly"
           size="small"
@@ -471,6 +472,13 @@ const timestamp = (value?: string) => {
             size="small"
             @click="showSessions = !showSessions"
             >会话</el-button
+          >
+          <el-checkbox
+            v-model="ai.autoApprove"
+            class="auto-approve"
+            size="small"
+            title="勾选后需要审批的操作（含高危命令）自动批准；按账号记在当前浏览器，外部 MCP 发起的操作仍要手动批准"
+            >自动批准执行</el-checkbox
           >
           <el-button
             size="small"
@@ -591,37 +599,31 @@ const timestamp = (value?: string) => {
               :clusters="ai.bootstrap.clusters"
               :disabled="ai.busy || operating || !ai.sessionReady"
               @update:model-value="ai.changeScope"
-            />
-            <div class="context-extra">
-              <span>资源选择提供对话上下文；每轮仅操作选中的集群。</span>
-              <el-checkbox
-                v-model="ai.autoApprove"
-                class="auto-approve"
-                title="勾选后需要审批的操作自动批准"
-                >自动批准执行</el-checkbox
-              >
-              <el-select
-                v-if="ai.bootstrap.skills.length"
-                v-model="ai.skillIds"
-                class="skill-selector"
-                multiple
-                collapse-tags
-                collapse-tags-tooltip
-                :disabled="ai.busy"
-                placeholder="Skills：自动匹配"
-                aria-label="指定 Skills"
-              >
-                <el-option
-                  v-for="skill in ai.bootstrap.skills"
-                  :key="skill.id || skill.name"
-                  :value="skill.id || skill.name"
-                  :label="skill.name"
-                  :title="skill.description"
+            >
+              <!-- Skills 和资源选择排在同一行 -->
+              <label v-if="ai.bootstrap.skills.length" class="skill-field">
+                <span>Skills</span>
+                <el-select
+                  v-model="ai.skillIds"
+                  multiple
+                  collapse-tags
+                  collapse-tags-tooltip
+                  :disabled="ai.busy"
+                  placeholder="自动匹配"
+                  aria-label="指定 Skills"
                 >
-                  <span>{{ skill.name }}</span>
-                </el-option>
-              </el-select>
-            </div>
+                  <el-option
+                    v-for="skill in ai.bootstrap.skills"
+                    :key="skill.id || skill.name"
+                    :value="skill.id || skill.name"
+                    :label="skill.name"
+                    :title="skill.description"
+                  >
+                    <span>{{ skill.name }}</span>
+                  </el-option>
+                </el-select>
+              </label>
+            </AIScopeSelector>
             <div v-if="ai.skillIds.length" class="skill-descriptions">
               <span v-for="id in ai.skillIds" :key="id"
                 >{{ skillLabel(id) }}：{{
@@ -642,7 +644,7 @@ const timestamp = (value?: string) => {
             @scroll="onScroll"
           >
             <div v-if="!ai.messages.length" class="conversation-empty">
-              <div class="empty-symbol">AI</div>
+              <AIBrandAvatar class="empty-symbol" :size="52" />
               <h3>描述你要处理的 Kubernetes 问题</h3>
               <p>可以查询日志、分析资源、修改配置或排查 Istio 路由。</p>
               <p>
@@ -792,9 +794,15 @@ const timestamp = (value?: string) => {
               @keydown="keydown"
             />
             <div class="composer-actions">
-              <span class="model-status" :title="ai.modelLabel">{{
-                ai.modelLabel
-              }}</span>
+              <!-- 颜色和模型设置里的滑块一致：企微专用模型绿色、自定义模型蓝色，没配置好用警告色 -->
+              <span
+                :class="[
+                  'model-status',
+                  ai.configured ? `model-${ai.modelMode}` : 'model-unset'
+                ]"
+                :title="ai.modelLabel"
+                >{{ ai.modelLabel }}</span
+              >
               <span
                 v-if="ai.selectedCluster && !ai.liveAvailable"
                 class="unavailable"
@@ -911,21 +919,46 @@ const timestamp = (value?: string) => {
   min-height: 34px;
 }
 
-.ai-badge {
-  display: grid;
-  place-items: center;
-  width: 30px;
-  height: 30px;
-  font-size: 13px;
+// 标题用和头像同一套颜色的渐变字，颜色缓慢流动
+.ai-title {
+  font-size: 18px;
   font-weight: 700;
-  color: var(--el-color-primary);
-  background: var(--el-color-primary-light-9);
-  border-radius: 8px;
+  color: transparent;
+  letter-spacing: 1px;
+  background: linear-gradient(
+    90deg,
+    #075bc6,
+    #6341ce 30%,
+    #b92789 55%,
+    #6341ce 80%,
+    #075bc6
+  );
+  background-clip: text;
+  background-size: 300% 100%;
+  animation: ai-title-flow 8s linear infinite;
 }
 
-.ai-title {
-  font-size: 17px;
-  font-weight: 600;
+:global(html.dark) .ai-title {
+  background-image: linear-gradient(
+    90deg,
+    #5aa2ff,
+    #a78bfa 30%,
+    #f472b6 55%,
+    #a78bfa 80%,
+    #5aa2ff
+  );
+}
+
+@keyframes ai-title-flow {
+  to {
+    background-position: 300% 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ai-title {
+    animation: none;
+  }
 }
 
 .ai-owner {
@@ -935,7 +968,9 @@ const timestamp = (value?: string) => {
 
 .header-actions {
   display: flex;
+  flex-wrap: wrap;
   gap: 8px;
+  align-items: center;
   margin-left: auto;
 }
 
@@ -1060,27 +1095,27 @@ const timestamp = (value?: string) => {
   border-bottom: 1px solid var(--el-border-color-lighter);
 }
 
-.context-extra {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 12px;
-  align-items: center;
-  margin-top: 10px;
-  font-size: 11px;
-  color: var(--el-text-color-secondary);
-}
-
 .auto-approve {
-  height: 32px;
-  margin-right: 0;
+  height: 24px;
+  margin-right: 4px;
 }
 
-.context-extra > span {
-  flex: 1;
-}
+// Skills 放在资源选择那一行（AIScopeSelector 的插槽），宽度规则和资源选择一致
+.skill-field {
+  flex: 1 1 170px;
+  min-width: 0;
+  max-width: 260px;
 
-.skill-selector {
-  width: 220px;
+  > span {
+    display: block;
+    margin-bottom: 6px;
+    font-size: 12px;
+    color: var(--el-text-color-regular);
+  }
+
+  .el-select {
+    width: 100%;
+  }
 }
 
 .skill-descriptions {
@@ -1111,16 +1146,7 @@ const timestamp = (value?: string) => {
 }
 
 .empty-symbol {
-  display: grid;
-  place-items: center;
-  width: 48px;
-  height: 48px;
   margin-bottom: 8px;
-  font-size: 20px;
-  font-weight: 700;
-  color: var(--el-color-primary);
-  background: var(--el-color-primary-light-9);
-  border-radius: 14px;
 }
 
 .conversation-empty h3 {
@@ -1245,9 +1271,23 @@ const timestamp = (value?: string) => {
   max-width: 40%;
   overflow: hidden;
   font-size: 12px;
+  font-weight: 600;
   color: var(--el-text-color-secondary);
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+// 和模型设置里滑块的颜色一致
+.model-wecom {
+  color: var(--el-color-success);
+}
+
+.model-custom {
+  color: var(--el-color-primary);
+}
+
+.model-unset {
+  color: var(--el-color-warning);
 }
 
 .unavailable {
@@ -1329,13 +1369,9 @@ const timestamp = (value?: string) => {
     padding-left: 8px;
   }
 
-  .context-extra {
-    flex-direction: column;
-    align-items: stretch;
-  }
-
-  .skill-selector {
-    width: 100%;
+  .skill-field {
+    flex-basis: 100%;
+    max-width: none;
   }
 
   .chat-message {
@@ -1353,6 +1389,11 @@ const timestamp = (value?: string) => {
   .memory-actions {
     justify-content: flex-end;
     width: 100%;
+  }
+
+  // 手机上操作按钮另起一行，模型名不用让出位置
+  .model-status {
+    max-width: 100%;
   }
 
   .selected-memories :deep(.el-tag__content) {

@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import RobotIcon from "@iconify-icons/ri/robot-2-line";
 import { computed, onBeforeUnmount, ref, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import {
@@ -7,7 +8,10 @@ import {
   type AIMessage,
   type AIShareView
 } from "@/api/ai";
+import { IconifyIconOffline } from "@/components/ReIcon";
+import { useAIStoreHook } from "@/store/modules/ai";
 import { aiRoleLabel, normalizeAIMessages, shareRunNotice } from "@/utils/ai";
+import AIBrandAvatar from "@/components/AI/AIBrandAvatar.vue";
 import AIMarkdown from "@/components/AI/AIMarkdown.vue";
 import AIToolGroup from "@/components/AI/AIToolGroup.vue";
 import AIMemoryAttachments from "@/components/AI/AIMemoryAttachments.vue";
@@ -100,6 +104,13 @@ function openConsole() {
   void router.push("/monit/overview");
 }
 
+// 「访问 花折 AI」：回到控制台并直接打开 AI 助手（对话框挂在控制台布局里，先打开再跳过去）
+const ai = useAIStoreHook();
+function visitAI() {
+  void ai.open();
+  openConsole();
+}
+
 watch(
   code,
   () => {
@@ -123,7 +134,7 @@ onBeforeUnmount(() => {
   <div class="ai-share">
     <header class="share-header">
       <div class="share-brand">
-        <span class="share-logo" aria-hidden="true">🤖</span>
+        <AIBrandAvatar :size="40" />
         <div class="share-heading">
           <h1 :title="view?.title">{{ view?.title || "AI 会话分享" }}</h1>
           <p v-if="view">
@@ -140,9 +151,19 @@ onBeforeUnmount(() => {
           @click="load()"
           >刷新</el-button
         >
-        <el-button type="primary" plain @click="openConsole"
-          >打开 KubeDoor</el-button
-        >
+        <button type="button" class="visit-ai" @click="visitAI">
+          <span class="visit-effects" aria-hidden="true">
+            <span class="visit-sheen" />
+          </span>
+          <IconifyIconOffline
+            class="visit-robot"
+            :icon="RobotIcon"
+            width="18"
+            height="18"
+          />
+          <span class="visit-label">访问 花折 AI</span>
+          <span class="visit-arrow" aria-hidden="true">→</span>
+        </button>
       </div>
     </header>
 
@@ -254,7 +275,8 @@ onBeforeUnmount(() => {
   gap: 12px 20px;
   align-items: center;
   justify-content: space-between;
-  padding: 14px max(20px, calc((100% - 980px) / 2));
+  // 左右各留 10%，和下面占 80% 宽的内容对齐
+  padding: 14px 10%;
   background: var(--el-bg-color);
   border-bottom: 1px solid var(--el-border-color-lighter);
 }
@@ -264,17 +286,6 @@ onBeforeUnmount(() => {
   gap: 12px;
   align-items: center;
   min-width: 0;
-}
-
-.share-logo {
-  display: grid;
-  flex-shrink: 0;
-  place-items: center;
-  width: 40px;
-  height: 40px;
-  font-size: 22px;
-  background: var(--el-color-primary-light-9);
-  border-radius: 10px;
 }
 
 .share-heading {
@@ -299,17 +310,170 @@ onBeforeUnmount(() => {
 
 .share-actions {
   display: flex;
-  gap: 8px;
+  gap: 10px;
+  align-items: center;
 
   .el-button + .el-button {
     margin-left: 0;
   }
 }
 
+// 「访问 花折 AI」：和顶栏「AI 助手」按钮同一套渐变，颜色流动、光泽扫过、外圈光晕呼吸，悬停时上浮、箭头前移
+.visit-ai {
+  position: relative;
+  display: inline-flex;
+  gap: 8px;
+  align-items: center;
+  justify-content: center;
+  height: 36px;
+  padding: 0 18px 0 14px;
+  font-size: 14px;
+  font-weight: 600;
+  color: #fff;
+  white-space: nowrap;
+  cursor: pointer;
+  background: linear-gradient(
+    115deg,
+    #075bc6,
+    #6341ce 42%,
+    #b92789 76%,
+    #ba315f
+  );
+  background-size: 240% 240%;
+  isolation: isolate;
+  border: 1px solid rgb(255 255 255 / 35%);
+  border-radius: 999px;
+  box-shadow:
+    0 4px 12px rgb(92 61 201 / 28%),
+    inset 0 1px 0 rgb(255 255 255 / 20%);
+  transition:
+    transform 200ms ease,
+    box-shadow 200ms ease;
+  animation: visit-flow 8s ease-in-out infinite;
+
+  &::before {
+    position: absolute;
+    inset: -3px;
+    z-index: -1;
+    pointer-events: none;
+    content: "";
+    background: linear-gradient(110deg, #22b9e8, #8b5cf6 50%, #ed5cba);
+    filter: blur(8px);
+    border-radius: inherit;
+    opacity: 0.35;
+    animation: visit-halo 4s ease-in-out infinite;
+  }
+
+  &:hover {
+    box-shadow:
+      0 8px 20px rgb(92 61 201 / 40%),
+      inset 0 1px 0 rgb(255 255 255 / 30%);
+    transform: translateY(-1px) scale(1.03);
+
+    .visit-arrow {
+      transform: translateX(3px);
+    }
+  }
+
+  &:active {
+    transform: scale(0.97);
+  }
+
+  &:focus-visible {
+    outline: 2px solid var(--el-color-primary);
+    outline-offset: 4px;
+  }
+}
+
+.visit-effects {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  pointer-events: none;
+  border-radius: inherit;
+}
+
+.visit-sheen {
+  position: absolute;
+  top: -20%;
+  left: -50%;
+  width: 35%;
+  height: 140%;
+  background: linear-gradient(
+    90deg,
+    transparent,
+    rgb(255 255 255 / 32%),
+    transparent
+  );
+  transform: skewX(-22deg);
+  animation: visit-sheen 4.5s ease-in-out infinite;
+}
+
+.visit-robot {
+  position: relative;
+  animation: visit-float 3.6s ease-in-out infinite;
+}
+
+.visit-label {
+  position: relative;
+  text-shadow: 0 1px 2px rgb(24 18 68 / 20%);
+  letter-spacing: 0.5px;
+}
+
+.visit-arrow {
+  position: relative;
+  transition: transform 200ms ease;
+}
+
+@keyframes visit-flow {
+  0%,
+  100% {
+    background-position: 0% 50%;
+  }
+
+  50% {
+    background-position: 100% 50%;
+  }
+}
+
+@keyframes visit-halo {
+  0%,
+  100% {
+    opacity: 0.25;
+  }
+
+  50% {
+    opacity: 0.55;
+  }
+}
+
+@keyframes visit-sheen {
+  0%,
+  60% {
+    transform: translateX(0) skewX(-22deg);
+  }
+
+  100% {
+    transform: translateX(520%) skewX(-22deg);
+  }
+}
+
+@keyframes visit-float {
+  0%,
+  100% {
+    transform: translateY(1px) rotate(-4deg);
+  }
+
+  50% {
+    transform: translateY(-1px) rotate(4deg);
+  }
+}
+
+// 内容占浏览器宽度的 80%（手机上铺满）
 .share-body {
-  max-width: 980px;
+  width: 80%;
   min-height: 240px;
-  padding: 20px;
+  padding: 20px 0;
   margin: 0 auto;
 }
 
@@ -409,7 +573,12 @@ onBeforeUnmount(() => {
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .run-spinner {
+  .run-spinner,
+  .visit-ai,
+  .visit-ai::before,
+  .visit-sheen,
+  .visit-robot {
+    transition: none;
     animation: none;
   }
 }
@@ -422,12 +591,14 @@ onBeforeUnmount(() => {
   .share-actions {
     width: 100%;
 
-    .el-button {
+    .el-button,
+    .visit-ai {
       flex: 1;
     }
   }
 
   .share-body {
+    width: auto;
     padding: 12px 8px;
   }
 

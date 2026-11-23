@@ -126,7 +126,7 @@ onBeforeUnmount(() => {
 <template>
   <div class="scope-panel">
     <div class="scope-controls">
-      <label>
+      <label class="scope-field field-short">
         <span>K8S 集群</span>
         <el-select
           :model-value="modelValue.env"
@@ -152,7 +152,7 @@ onBeforeUnmount(() => {
           </el-option>
         </el-select>
       </label>
-      <label>
+      <label class="scope-field field-short">
         <span>命名空间</span>
         <el-select
           :model-value="namespace"
@@ -171,7 +171,7 @@ onBeforeUnmount(() => {
           />
         </el-select>
       </label>
-      <label>
+      <label class="scope-field field-long">
         <span>Deployment</span>
         <el-select
           :model-value="deployment"
@@ -190,7 +190,7 @@ onBeforeUnmount(() => {
           />
         </el-select>
       </label>
-      <label>
+      <label class="scope-field field-long field-pod">
         <span>Pod</span>
         <el-select
           :model-value="pod"
@@ -214,6 +214,8 @@ onBeforeUnmount(() => {
           />
         </el-select>
       </label>
+      <!-- 调用方追加的选择（AI 对话框放 Skills），和资源选择排在同一行 -->
+      <slot />
     </div>
     <div v-if="error" class="scope-error">
       <span>部分资源列表不可用：{{ error }}</span>
@@ -229,12 +231,19 @@ onBeforeUnmount(() => {
 </template>
 
 <style scoped lang="scss">
+// 一行排下，宽度按需要分：集群、命名空间名字短，Deployment、Pod 名字长；
+// 对话框窄时一起收窄，再窄才换行
 .scope-controls {
-  display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: 12px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px 12px;
+  align-items: flex-end;
+}
 
-  label > span {
+.scope-field {
+  min-width: 0;
+
+  > span {
     display: block;
     margin-bottom: 6px;
     font-size: 12px;
@@ -244,6 +253,21 @@ onBeforeUnmount(() => {
   .el-select {
     width: 100%;
   }
+}
+
+.field-short {
+  flex: 1 1 140px;
+  max-width: 220px;
+}
+
+.field-long {
+  flex: 2 1 190px;
+  max-width: 340px;
+}
+
+.field-pod {
+  flex-basis: 210px;
+  max-width: 380px;
 }
 
 .cluster-state {
@@ -263,8 +287,13 @@ onBeforeUnmount(() => {
 
 @media (width <= 760px) {
   .scope-controls {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
     gap: 8px;
+  }
+
+  // 手机上两列
+  .scope-field {
+    flex: 1 1 calc(50% - 4px);
+    max-width: none;
   }
 }
 </style>

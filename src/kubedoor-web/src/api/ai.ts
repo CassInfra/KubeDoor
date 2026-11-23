@@ -191,6 +191,8 @@ export interface AIRun {
   event_seq?: number;
   scope?: AIScope;
   pending_actions?: Record<string, unknown>[];
+  /** chat 网页对话；mcp 外部 MCP 客户端发起（在浏览器链接里等待批准） */
+  origin?: string;
 }
 
 export interface AIEvent {

@@ -562,7 +562,7 @@
   })();
 
   /* ------------------------------------------------------------------
-     hero console: scripted KubeDoor 助手 conversation
+     hero console: scripted 花折 AI conversation
      ------------------------------------------------------------------ */
   (function consoleDemo() {
     var box = $('[data-demo]');
