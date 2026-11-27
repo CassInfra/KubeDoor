@@ -897,7 +897,7 @@ class IMBotEngine:
             if kind == "session" and len(parts) >= 2 and parts[1] in ("new", "resume"):
                 choice = "session_new" if parts[1] == "new" else "session_resume"
                 return await self._session_card(event, event.callback_token, choice, event.selected_value)
-            if action_id in ("env_pick", "cluster:select") or kind == "cluster":
+            if action_id in ("env_pick", "cluster:select", "cluster_select") or kind == "cluster":
                 return await self._pick_card(event, event.callback_token, event.selected_value)
         except Exception as exc:
             LOGGER.warning("IM 卡片事件处理失败 [%s]: %s", self.bot.platform, type(exc).__name__)
@@ -982,6 +982,7 @@ class IMBotEngine:
     async def _approval_card(self, event: CardActionEvent, card_ref: str, choice: str) -> dict[str, Any]:
         userid = event.external_user_id
         store = self.service.store
+        callback_sync = event.callback_sync
         approval = None
         if isinstance(card_ref, str) and card_ref:
             approval = await store.one(
@@ -990,27 +991,56 @@ class IMBotEngine:
                 card_ref,
             )
         if not approval or approval["external_user_id"] != userid:
-            return self._card_outcome(
+            outcome = self._card_outcome(
                 card_ref,
                 "审批卡片已失效",
                 detail="该审批已处理、已过期或不属于当前账号。",
                 status="已失效",
                 toast_type="warning",
             )
+            if callback_sync is not None and not callback_sync.claim_sync():
+                await self._safe_update_card(card_ref, "failed", outcome["detail"] or outcome["title"], event.raw_context)
+            return outcome
         problem = self._approval_problem(approval, await self._mapped_user(userid))
         if problem:
-            return self._card_outcome(card_ref, "审批卡片已失效", detail=problem, status="已失效", toast_type="warning")
+            outcome = self._card_outcome(card_ref, "审批卡片已失效", detail=problem, status="已失效", toast_type="warning")
+            if callback_sync is not None and not callback_sync.claim_sync():
+                await self._safe_update_card(approval["card_ref"], "failed", problem, event.raw_context)
+            return outcome
 
-        sla = max(0.5, min(float(self.adapter.capabilities.card_callback_sla_sec or 2.2), 4.0))
-        # Leave margin before platform callback deadline (e.g. 2.2s for 3s SLA, 4.0s for 5s SLA)
-        budget = min(sla, 2.2) if sla <= 3.0 else min(sla, 4.0)
+        sla = max(0.05, min(float(self.adapter.capabilities.card_callback_sla_sec or 2.2), 4.0))
+        # Leave margin before platform callback deadline (e.g. 1.7s for 2.2s Feishu SLA, 3.5s for 4.0s SLA)
+        margin = min(0.5, max(0.05, sla * 0.25)) if sla <= 3.0 else 0.5
+        budget = max(0.05, sla - margin)
         loop = asyncio.get_running_loop()
-        deadline = loop.time() + budget
+        if callback_sync is not None:
+            deadline = loop.time() + max(0.0, callback_sync.deadline - time.monotonic() - margin)
+        else:
+            deadline = loop.time() + budget
+
+        def _handoff_pending() -> dict[str, Any]:
+            self._spawn(
+                self._finish_pending_approval(userid, event.chat_id, approval, choice, event.raw_context),
+                "im-decision",
+            )
+            return self._card_outcome(
+                card_ref,
+                "已收到",
+                None,
+                "正在处理，结果稍后发送。",
+                "处理中",
+                toast_type="info",
+                toast="处理中…",
+            )
+
+        if callback_sync is not None and callback_sync.sync_timed_out:
+            return _handoff_pending()
+
         try:
             async with asyncio.timeout_at(deadline):
                 identity, env, allowed = await self._approver(approval)
             if not allowed:
-                return self._card_outcome(
+                outcome = self._card_outcome(
                     card_ref,
                     "不能批准",
                     f"集群：{env}",
@@ -1018,9 +1048,21 @@ class IMBotEngine:
                     "已失效",
                     toast_type="error",
                 )
+                if callback_sync is not None and not callback_sync.claim_sync():
+                    await self._deliver_missed_failure(
+                        approval["card_ref"],
+                        userid,
+                        event.chat_id,
+                        outcome["detail"] or outcome["title"],
+                        event.raw_context,
+                    )
+                return outcome
             decision_fut = asyncio.ensure_future(self._decide(identity, approval, choice))
+            remaining = deadline - loop.time()
             try:
-                result = await asyncio.wait_for(asyncio.shield(decision_fut), max(0.1, deadline - loop.time()))
+                if remaining <= 0:
+                    raise TimeoutError()
+                result = await asyncio.wait_for(asyncio.shield(decision_fut), remaining)
             except TimeoutError:
                 self._spawn(
                     self._finish_decision(userid, event.chat_id, identity, approval, decision_fut, env, event.raw_context),
@@ -1041,20 +1083,38 @@ class IMBotEngine:
                 approval["card_ref"],
             )
         except (AIError, TimeoutError) as exc:
+            if isinstance(exc, TimeoutError) and callback_sync is not None and callback_sync.sync_timed_out:
+                return _handoff_pending()
             detail = str(exc) if isinstance(exc, AIError) else "校验账号超时，请稍后再点一次。"
-            return self._card_outcome(card_ref, "审批未完成", detail=detail, status="未完成", toast_type="error")
+            outcome = self._card_outcome(card_ref, "审批未完成", detail=detail, status="未完成", toast_type="error")
+            if callback_sync is not None and not callback_sync.claim_sync():
+                await self._deliver_missed_failure(approval["card_ref"], userid, event.chat_id, detail, event.raw_context)
+            return outcome
 
         approved = choice == "approve"
         running = result.get("status") == "running"
         detail = ("正在执行，结果稍后发送。" if approved else "AI 会接着说明情况，稍后发送。") if running else None
+        label = "已批准" if approved else "已拒绝"
+        outcome = self._card_outcome(card_ref, label, f"集群：{env}", detail, label, toast_type="success", toast=label)
+        if callback_sync is not None and not callback_sync.claim_sync():
+            await self._safe_update_card(approval["card_ref"], "done", f"已处理（集群：{env}）", event.raw_context)
+            if running:
+                push = self.adapter.open_push_stream(userid, event.chat_id)
+                self._spawn(
+                    self._watch_run(push, userid, identity, approval["run_id"], approval["resume_after_seq"], env=env),
+                    "im-run-resume",
+                )
+            else:
+                push = self.adapter.open_push_stream(userid, event.chat_id)
+                self._spawn(push.finish(f"{label}（集群：{env}）。"), "im-run-resume")
+            return outcome
         if running:
             push = self.adapter.open_push_stream(userid, event.chat_id)
             self._spawn(
                 self._watch_run(push, userid, identity, approval["run_id"], approval["resume_after_seq"], env=env),
                 "im-run-resume",
             )
-        label = "已批准" if approved else "已拒绝"
-        return self._card_outcome(card_ref, label, f"集群：{env}", detail, label, toast_type="success", toast=label)
+        return outcome
 
     def _approval_problem(self, approval: dict[str, Any], mapped: dict[str, Any]) -> str | None:
         if (mapped.get("username") or self.bot.unbound_username) != approval["username"]:
@@ -1127,6 +1187,45 @@ class IMBotEngine:
         else:
             await reply.finish(f"{'已批准' if approved else '已拒绝'}（集群：{env}）。")
         return True
+
+    async def _deliver_missed_failure(
+        self,
+        card_ref: str,
+        userid: str,
+        chat_id: str,
+        detail: str,
+        raw_context: Any,
+    ) -> None:
+        await self._safe_update_card(card_ref, "failed", detail, raw_context)
+        with suppress(Exception):
+            await self.adapter.open_push_stream(userid, chat_id).finish(detail)
+
+    async def _finish_pending_approval(
+        self,
+        userid: str,
+        chat_id: str,
+        approval: dict[str, Any],
+        choice: str,
+        raw_context: Any = None,
+    ) -> None:
+        try:
+            async with asyncio.timeout(10):
+                identity, env, allowed = await self._approver(approval)
+        except Exception as exc:
+            detail = str(exc) if isinstance(exc, AIError) else "校验账号超时，请稍后再点一次。"
+            await self._deliver_missed_failure(approval["card_ref"], userid, chat_id, detail, raw_context)
+            return
+        if not allowed:
+            await self._deliver_missed_failure(
+                approval["card_ref"],
+                userid,
+                chat_id,
+                "该账号已失去目标集群权限，不能批准此操作。",
+                raw_context,
+            )
+            return
+        decision_fut = asyncio.ensure_future(self._decide(identity, approval, choice))
+        await self._finish_decision(userid, chat_id, identity, approval, decision_fut, env, raw_context)
 
     async def _finish_decision(
         self,

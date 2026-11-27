@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import http
 import inspect
 import json
 import logging
@@ -14,6 +16,11 @@ from typing import Any
 
 import lark_oapi as lark
 import lark_oapi.ws.client as lark_ws_module
+import lark_oapi.ws.const as lark_ws_const
+import lark_oapi.ws.enum as lark_ws_enum
+import lark_oapi.ws.exception as lark_ws_exc
+import lark_oapi.ws.model as lark_ws_model
+import websockets
 from lark_oapi.api.cardkit.v1 import (
     ContentCardElementRequest,
     ContentCardElementRequestBody,
@@ -30,8 +37,10 @@ from lark_oapi.api.im.v1 import (
     ReplyMessageRequest,
     ReplyMessageRequestBody,
 )
-from lark_oapi.core.model import BaseRequest
+from lark_oapi.core.const import UTF_8
 from lark_oapi.core.enum import AccessTokenType, HttpMethod
+from lark_oapi.core.json import JSON as lark_json
+from lark_oapi.core.model import BaseRequest
 from lark_oapi.event.callback.model.p2_card_action_trigger import (
     P2CardActionTrigger,
     P2CardActionTriggerResponse,
@@ -41,7 +50,7 @@ from lark_oapi.api.im.v1.model.p2_im_message_receive_v1 import P2ImMessageReceiv
 from ...domain import AIError, redact
 from ...wecom import _clip, _cluster_menu
 from ..adapter import CardActionHandler, MessageHandler
-from ..models import ApprovalPrompt, CardActionEvent, IMCapabilities, InboundEvent
+from ..models import ApprovalPrompt, CardActionEvent, CardCallbackSync, IMCapabilities, InboundEvent
 from ..ssrf import validate_custom_domain
 
 LOGGER = logging.getLogger(__name__)
@@ -151,6 +160,8 @@ def _build_streaming_card(markdown: str, *, streaming_mode: bool = True, summary
     return {
         "schema": "2.0",
         "config": {
+            "width_mode": "fill",
+            "update_multi": True,
             "streaming_mode": streaming_mode,
             "summary": {"content": summary},
         },
@@ -169,7 +180,7 @@ def _build_streaming_card(markdown: str, *, streaming_mode: bool = True, summary
 def _build_markdown_card(markdown: str, *, title: str | None = None, template: str = "blue") -> dict[str, Any]:
     card: dict[str, Any] = {
         "schema": "2.0",
-        "config": {"wide_screen_mode": True},
+        "config": {"width_mode": "fill", "update_multi": True},
         "body": {
             "elements": [
                 {
@@ -194,7 +205,7 @@ def _build_approval_card(prompt: ApprovalPrompt) -> dict[str, Any]:
     card_ref = prompt.card_ref or prompt.action_id
     return {
         "schema": "2.0",
-        "config": {"wide_screen_mode": True},
+        "config": {"width_mode": "fill", "update_multi": True},
         "header": {
             "title": {"tag": "plain_text", "content": "K8S 操作待审批"},
             "subtitle": {"tag": "plain_text", "content": f"集群：{prompt.env} · {prompt.operation_label}"},
@@ -216,7 +227,12 @@ def _build_approval_card(prompt: ApprovalPrompt) -> dict[str, Any]:
                                     "tag": "button",
                                     "text": {"tag": "plain_text", "content": "批准"},
                                     "type": "primary",
-                                    "value": {"action_id": f"approval:approve:{card_ref}", "card_ref": card_ref},
+                                    "behaviors": [
+                                        {
+                                            "type": "callback",
+                                            "value": {"action_id": f"approval:approve:{card_ref}", "card_ref": card_ref},
+                                        }
+                                    ],
                                 }
                             ],
                         },
@@ -228,7 +244,12 @@ def _build_approval_card(prompt: ApprovalPrompt) -> dict[str, Any]:
                                     "tag": "button",
                                     "text": {"tag": "plain_text", "content": "拒绝"},
                                     "type": "danger",
-                                    "value": {"action_id": f"approval:reject:{card_ref}", "card_ref": card_ref},
+                                    "behaviors": [
+                                        {
+                                            "type": "callback",
+                                            "value": {"action_id": f"approval:reject:{card_ref}", "card_ref": card_ref},
+                                        }
+                                    ],
                                 }
                             ],
                         },
@@ -252,9 +273,15 @@ def _build_cluster_card(
     selected = current_env or suggestion
     select_el: dict[str, Any] = {
         "tag": "select_static",
+        "name": "cluster_select",
         "placeholder": {"tag": "plain_text", "content": "请选择目标 K8S 集群"},
         "options": options,
-        "value": {"action_id": "cluster:select", "card_ref": f"env_{uuid.uuid4().hex[:12]}"},
+        "behaviors": [
+            {
+                "type": "callback",
+                "value": {"action_id": "cluster:select", "card_ref": f"env_{uuid.uuid4().hex[:12]}"},
+            }
+        ],
     }
     if selected and any(item["env"] == selected for item in clusters[:50]):
         select_el["initial_option"] = selected
@@ -268,7 +295,7 @@ def _build_cluster_card(
 
     return {
         "schema": "2.0",
-        "config": {"wide_screen_mode": True},
+        "config": {"width_mode": "fill", "update_multi": True},
         "header": {
             "title": {"tag": "plain_text", "content": "选择 K8S 集群"},
             "subtitle": {"tag": "plain_text", "content": f"当前集群：{current_env or '未选择'}"},
@@ -417,7 +444,7 @@ class FeishuCardStreamHandle:
             self._streaming_open = True
             self._last_sent_text = initial_md
             self._last_sent_at = time.monotonic()
-            self._message_id = await self._send_raw_message("card", {"type": "card", "data": {"card_id": card_id}})
+            self._message_id = await self._send_raw_message("interactive", {"type": "card", "data": {"card_id": card_id}})
         except Exception as exc:
             LOGGER.warning("飞书 CardKit 流式卡片创建失败，降级为普通消息: %s", _safe_lark_error(exc))
             if self._card_id and self._streaming_open:
@@ -600,7 +627,7 @@ class FeishuCardStreamHandle:
         prompt_text: str | None = None,
     ) -> None:
         card_prompt = prompt_text
-        if self._card_id is not None:
+        if self._card_id is not None or self._message_id is not None:
             await self.finish(prompt_text or "请选择目标 K8S 集群：")
             card_prompt = None
         else:
@@ -612,6 +639,60 @@ class FeishuCardStreamHandle:
             LOGGER.warning("飞书集群选择卡片发送失败，降级文本: %s", _safe_lark_error(exc))
             with suppress(Exception):
                 await self._send_raw_message("text", {"text": _clip_utf8(fallback_text, self._max_bytes)})
+
+
+def _classify_ws_invalid_status(exc: websockets.exceptions.InvalidStatus) -> Exception:
+    """Translate websockets>=14 InvalidStatus into lark_oapi ClientException / ServerException."""
+    resp = getattr(exc, "response", None)
+    headers = getattr(resp, "headers", None)
+    status_code = getattr(resp, "status_code", None)
+    if headers is not None:
+        code = headers.get(lark_ws_const.HEADER_HANDSHAKE_STATUS)
+        msg = headers.get(lark_ws_const.HEADER_HANDSHAKE_MSG)
+        if code is not None and msg is not None:
+            try:
+                code_int = int(code)
+            except (TypeError, ValueError):
+                code_int = None
+            if code_int is not None:
+                if code_int == lark_ws_const.AUTH_FAILED:
+                    auth_code = headers.get(lark_ws_const.HEADER_HANDSHAKE_AUTH_ERRCODE)
+                    try:
+                        auth_int = int(auth_code) if auth_code is not None else None
+                    except (TypeError, ValueError):
+                        auth_int = None
+                    if auth_int == lark_ws_const.EXCEED_CONN_LIMIT:
+                        return lark_ws_exc.ClientException(code_int, str(msg))
+                    return lark_ws_exc.ServerException(code_int, str(msg))
+                if code_int == lark_ws_const.FORBIDDEN:
+                    return lark_ws_exc.ClientException(code_int, str(msg))
+                return lark_ws_exc.ServerException(code_int, str(msg))
+    code_num = int(status_code) if status_code is not None else 500
+    msg_text = str(exc)
+    if 400 <= code_num < 500 and code_num != 429:
+        return lark_ws_exc.ClientException(code_num, msg_text)
+    return lark_ws_exc.ServerException(code_num, msg_text)
+
+
+def _extract_action_value(raw_value: Any) -> dict[str, Any]:
+    """Normalize Feishu Card JSON 2.0 callback action.value from dict/list/string forms."""
+    if isinstance(raw_value, str):
+        text = raw_value.strip()
+        if text.startswith("{") or text.startswith("["):
+            with suppress(ValueError):
+                raw_value = json.loads(text)
+    if isinstance(raw_value, list):
+        for item in raw_value:
+            extracted = _extract_action_value(item)
+            if extracted:
+                return extracted
+        return {}
+    if isinstance(raw_value, dict):
+        inner = raw_value.get("value")
+        if "action_id" not in raw_value and isinstance(inner, dict):
+            return inner
+        return raw_value
+    return {}
 
 
 class FeishuAdapter:
@@ -628,6 +709,7 @@ class FeishuAdapter:
         self._ws_thread: threading.Thread | None = None
         self._ws_connect_task: asyncio.Future[Any] | None = None
         self._ws_ping_task: asyncio.Future[Any] | None = None
+        self._ws_shutdown_fn: Any = None
         self._on_message: MessageHandler | None = None
         self._on_card_action: CardActionHandler | None = None
         self._app_secret: str = ""
@@ -722,6 +804,215 @@ class FeishuAdapter:
         except Exception:
             return
 
+    def _schedule_bot_info_refresh(self) -> None:
+        if (
+            self._bot_open_id is None
+            and self._bot_name is None
+            and self.client is not None
+            and hasattr(self.client, "request")
+            and self._main_loop is not None
+            and self._main_loop.is_running()
+        ):
+            asyncio.run_coroutine_threadsafe(self._fetch_bot_info(), self._main_loop)
+
+    def _instrument_ws_client(self, ws_client: Any, ws_loop: asyncio.AbstractEventLoop) -> tuple[Any, dict[str, bool], set[asyncio.Task[Any]], Any]:
+        """Patch lark-oapi==1.5.5 ws.Client instance for MessageType.CARD, InvalidStatus, reconnect, and clean stop."""
+        stopped_flag = {"stopped": False}
+        ws_tasks: set[asyncio.Task[Any]] = set()
+        orig_handle_data_frame = ws_client._handle_data_frame
+        orig_connect = ws_client._connect
+        orig_disconnect = ws_client._disconnect
+        orig_reconnect = ws_client._reconnect
+
+        async def _safe_ping_loop() -> None:
+            while not stopped_flag["stopped"]:
+                try:
+                    if ws_client._conn is not None and ws_client._service_id:
+                        frame = lark_ws_module._new_ping_frame(int(ws_client._service_id))
+                        await ws_client._write_message(frame.SerializeToString())
+                except asyncio.CancelledError:
+                    return
+                except Exception as exc:
+                    LOGGER.debug("飞书长连接心跳发送失败: %s", _safe_lark_error(exc, (self._app_secret,)))
+                await asyncio.sleep(ws_client._ping_interval)
+
+        def _ensure_ping_task() -> None:
+            if stopped_flag["stopped"]:
+                return
+            ping_task = self._ws_ping_task
+            if ping_task is None or ping_task.done():
+                t = ws_loop.create_task(_safe_ping_loop())
+                ws_tasks.add(t)
+                t.add_done_callback(ws_tasks.discard)
+                self._ws_ping_task = t
+
+        async def _patched_handle_data_frame(frame: Any) -> None:
+            hs = frame.headers
+            msg_id = lark_ws_module._get_by_key(hs, lark_ws_const.HEADER_MESSAGE_ID)
+            sum_ = lark_ws_module._get_by_key(hs, lark_ws_const.HEADER_SUM)
+            seq = lark_ws_module._get_by_key(hs, lark_ws_const.HEADER_SEQ)
+            type_ = lark_ws_module._get_by_key(hs, lark_ws_const.HEADER_TYPE)
+            if type_ not in (lark_ws_enum.MessageType.EVENT.value, lark_ws_enum.MessageType.CARD.value):
+                await orig_handle_data_frame(frame)
+                return
+
+            pl = frame.payload
+            if int(sum_) > 1:
+                pl = ws_client._combine(msg_id, int(sum_), int(seq), pl)
+                if pl is None:
+                    return
+
+            resp = lark_ws_model.Response(code=http.HTTPStatus.OK)
+            try:
+                start = int(round(time.time() * 1000))
+                if ws_client._event_handler is None:
+                    raise RuntimeError("event_handler is not configured")
+                result = await asyncio.to_thread(ws_client._event_handler.do_without_validation, pl)
+                end = int(round(time.time() * 1000))
+                header = hs.add()
+                header.key = lark_ws_const.HEADER_BIZ_RT
+                header.value = str(end - start)
+                if result is not None:
+                    resp.data = base64.b64encode(lark_json.marshal(result).encode(UTF_8))
+            except Exception as exc:
+                LOGGER.warning(
+                    "飞书长连接消息处理失败 [%s/%s]: %s",
+                    type_,
+                    msg_id,
+                    _safe_lark_error(exc, (self._app_secret,)),
+                )
+                resp = lark_ws_model.Response(code=http.HTTPStatus.INTERNAL_SERVER_ERROR)
+
+            frame.payload = lark_json.marshal(resp).encode(UTF_8)
+            try:
+                await ws_client._write_message(frame.SerializeToString())
+            except (lark_ws_exc.ConnectionClosedException, websockets.exceptions.ConnectionClosed):
+                if not stopped_flag["stopped"]:
+                    raise
+
+        async def _patched_connect() -> None:
+            lark_ws_module.loop = asyncio.get_running_loop()
+            try:
+                await orig_connect()
+            except websockets.exceptions.InvalidStatus as exc:
+                raise _classify_ws_invalid_status(exc) from None
+            if stopped_flag["stopped"]:
+                with suppress(Exception):
+                    await ws_client._disconnect()
+                return
+            _ensure_ping_task()
+            if self.ws_client is ws_client:
+                self._state.update(connected=True, authenticated=True, reconnecting=False, error=None)
+            self._schedule_bot_info_refresh()
+
+        async def _patched_disconnect() -> None:
+            await orig_disconnect()
+            if self.ws_client is ws_client and not stopped_flag["stopped"]:
+                self._state.update(connected=False, authenticated=False)
+
+        async def _patched_receive_message_loop() -> None:
+            task = asyncio.current_task()
+            if task is not None:
+                ws_tasks.add(task)
+                task.add_done_callback(ws_tasks.discard)
+            try:
+                while not stopped_flag["stopped"]:
+                    conn = ws_client._conn
+                    if conn is None:
+                        if stopped_flag["stopped"]:
+                            return
+                        raise lark_ws_exc.ConnectionClosedException("connection is closed")
+                    msg = await conn.recv()
+                    msg_task = ws_loop.create_task(ws_client._handle_message(msg))
+                    ws_tasks.add(msg_task)
+                    msg_task.add_done_callback(ws_tasks.discard)
+            except asyncio.CancelledError:
+                return
+            except Exception as exc:
+                if stopped_flag["stopped"]:
+                    return
+                safe_err = _safe_lark_error(exc, (self._app_secret,))
+                LOGGER.warning("飞书长连接断开: %s", safe_err)
+                with suppress(Exception):
+                    await ws_client._disconnect()
+                if ws_client._auto_reconnect and not stopped_flag["stopped"]:
+                    if self.ws_client is ws_client:
+                        self._state.update(
+                            connected=False,
+                            authenticated=False,
+                            reconnecting=True,
+                            error=f"飞书长连接断开（{safe_err}）",
+                        )
+                    await ws_client._reconnect()
+                elif self.ws_client is ws_client:
+                    self._state.update(
+                        connected=False,
+                        authenticated=False,
+                        reconnecting=False,
+                        error=f"飞书长连接断开（{safe_err}）",
+                    )
+
+        async def _patched_reconnect() -> None:
+            task = asyncio.current_task()
+            if task is not None:
+                ws_tasks.add(task)
+                task.add_done_callback(ws_tasks.discard)
+            if self.ws_client is ws_client and not stopped_flag["stopped"]:
+                self._state.update(connected=False, authenticated=False, reconnecting=True)
+            try:
+                await orig_reconnect()
+            except asyncio.CancelledError:
+                return
+            except lark_ws_exc.ClientException as exc:
+                safe_err = _safe_lark_error(exc, (self._app_secret,))
+                LOGGER.warning("飞书长连接被拒绝，停止重连: %s", safe_err)
+                if self.ws_client is ws_client:
+                    self._state.update(
+                        connected=False,
+                        authenticated=False,
+                        reconnecting=False,
+                        error=f"飞书长连接失败（{safe_err}）",
+                    )
+            except Exception as exc:
+                if stopped_flag["stopped"]:
+                    return
+                safe_err = _safe_lark_error(exc, (self._app_secret,))
+                LOGGER.warning("飞书长连接重连退出: %s", safe_err)
+                if self.ws_client is ws_client:
+                    self._state.update(
+                        connected=False,
+                        authenticated=False,
+                        reconnecting=False,
+                        error=f"飞书长连接失败（{safe_err}）",
+                    )
+
+        async def _shutdown_ws() -> None:
+            stopped_flag["stopped"] = True
+            ws_client._auto_reconnect = False
+            ping_task = self._ws_ping_task
+            self._ws_ping_task = None
+            tasks_to_cancel = list(ws_tasks)
+            if ping_task is not None and ping_task not in tasks_to_cancel:
+                tasks_to_cancel.append(ping_task)
+            for t in tasks_to_cancel:
+                t.cancel()
+            with suppress(Exception):
+                await ws_client._disconnect()
+            for t in list(ws_tasks):
+                if t not in tasks_to_cancel:
+                    t.cancel()
+                    tasks_to_cancel.append(t)
+            if tasks_to_cancel:
+                await asyncio.gather(*tasks_to_cancel, return_exceptions=True)
+
+        ws_client._handle_data_frame = _patched_handle_data_frame
+        ws_client._connect = _patched_connect
+        ws_client._disconnect = _patched_disconnect
+        ws_client._receive_message_loop = _patched_receive_message_loop
+        ws_client._reconnect = _patched_reconnect
+        ws_client._ping_loop = _safe_ping_loop
+        return _shutdown_ws, stopped_flag, ws_tasks, _ensure_ping_task
+
     async def _launch_ws_client(self, ws_client: Any) -> None:
         # Real lark.ws.Client uses module-level `lark_oapi.ws.client.loop`, so we host
         # it on a dedicated daemon loop thread to keep SDK heartbeats non-blocking.
@@ -740,10 +1031,25 @@ class FeishuAdapter:
             return
 
         ws_loop = _ensure_ws_loop()
+        shutdown_ws, stopped_flag, ws_tasks, ensure_ping_task = self._instrument_ws_client(ws_client, ws_loop)
+        self._ws_shutdown_fn = shutdown_ws
 
         async def _boot() -> None:
-            await ws_client._connect()
-            self._ws_ping_task = asyncio.create_task(ws_client._ping_loop())
+            try:
+                await ws_client._connect()
+                ensure_ping_task()
+            except lark_ws_exc.ClientException:
+                raise
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                with suppress(Exception):
+                    await ws_client._disconnect()
+                if getattr(ws_client, "_auto_reconnect", False) and not stopped_flag["stopped"]:
+                    reconnect_task = ws_loop.create_task(ws_client._reconnect())
+                    ws_tasks.add(reconnect_task)
+                    reconnect_task.add_done_callback(ws_tasks.discard)
+                raise
 
         fut = asyncio.run_coroutine_threadsafe(_boot(), ws_loop)
         self._ws_connect_task = fut
@@ -751,9 +1057,15 @@ class FeishuAdapter:
             await asyncio.wait_for(asyncio.wrap_future(fut), timeout=10)
             self._state.update(connected=True, authenticated=True, reconnecting=False, error=None)
         except Exception as exc:
+            will_reconnect = (
+                not isinstance(exc, lark_ws_exc.ClientException)
+                and bool(getattr(ws_client, "_auto_reconnect", False))
+                and not stopped_flag["stopped"]
+            )
             self._state.update(
                 connected=False,
                 authenticated=False,
+                reconnecting=will_reconnect,
                 error=f"飞书长连接失败（{_safe_lark_error(exc, (self._app_secret,))}）",
             )
             LOGGER.warning("飞书长连接启动失败: %s", _safe_lark_error(exc, (self._app_secret,)))
@@ -765,19 +1077,29 @@ class FeishuAdapter:
     async def _stop_unlocked(self) -> None:
         ws_client, self.ws_client = self.ws_client, None
         ping_task, self._ws_ping_task = self._ws_ping_task, None
+        connect_task, self._ws_connect_task = self._ws_connect_task, None
+        shutdown_fn, self._ws_shutdown_fn = self._ws_shutdown_fn, None
+        if connect_task is not None and not connect_task.done():
+            with suppress(Exception):
+                connect_task.cancel()
         if ws_client is not None:
             with suppress(Exception):
                 ws_client._auto_reconnect = False
-            if ping_task is not None:
+            if shutdown_fn is not None and _WS_LOOP is not None:
                 with suppress(Exception):
-                    ping_task.cancel()
-            if _WS_LOOP is not None and hasattr(ws_client, "_disconnect"):
-                with suppress(Exception):
-                    fut = asyncio.run_coroutine_threadsafe(ws_client._disconnect(), _WS_LOOP)
+                    fut = asyncio.run_coroutine_threadsafe(shutdown_fn(), _WS_LOOP)
                     await asyncio.wait_for(asyncio.wrap_future(fut), timeout=3)
-            elif hasattr(ws_client, "stop"):
-                with suppress(Exception):
-                    ws_client.stop()
+            else:
+                if ping_task is not None:
+                    with suppress(Exception):
+                        ping_task.cancel()
+                if _WS_LOOP is not None and hasattr(ws_client, "_disconnect"):
+                    with suppress(Exception):
+                        fut = asyncio.run_coroutine_threadsafe(ws_client._disconnect(), _WS_LOOP)
+                        await asyncio.wait_for(asyncio.wrap_future(fut), timeout=3)
+                elif hasattr(ws_client, "stop"):
+                    with suppress(Exception):
+                        ws_client.stop()
         self.client = None
         self._ws_thread = None
         self._state.update(connected=False, authenticated=False, reconnecting=False)
@@ -850,10 +1172,7 @@ class FeishuAdapter:
                 if getattr(item, "name", None) == self._bot_name and getattr(item, "key", None):
                     bot_keys.add(item.key)
             return bool(bot_keys), bot_keys
-        for item in mentions:
-            if getattr(item, "key", None) and item.key != "@_all":
-                bot_keys.add(item.key)
-        return bool(bot_keys), bot_keys
+        return False, set()
 
     def _on_im_message_sync(self, data: P2ImMessageReceiveV1) -> None:
         if self._on_message is None or self._main_loop is None:
@@ -872,6 +1191,21 @@ class FeishuAdapter:
         raw_chat_type = getattr(msg, "chat_type", "p2p") or "p2p"
         chat_type = "single" if raw_chat_type == "p2p" else "group"
         mentions = getattr(msg, "mentions", None) or []
+        if (
+            self._bot_open_id is None
+            and self._bot_name is None
+            and self.client is not None
+            and hasattr(self.client, "request")
+            and self._main_loop.is_running()
+        ):
+            try:
+                running_loop = asyncio.get_running_loop()
+            except RuntimeError:
+                running_loop = None
+            refresh_fut = asyncio.run_coroutine_threadsafe(self._fetch_bot_info(), self._main_loop)
+            if running_loop is not self._main_loop and chat_type == "group" and mentions:
+                with suppress(Exception):
+                    refresh_fut.result(timeout=1.5)
         mentioned_bot, bot_keys = self._is_bot_mentioned(mentions)
         text = _extract_feishu_text(msg)
         for key in bot_keys:
@@ -899,12 +1233,16 @@ class FeishuAdapter:
         operator = getattr(ev, "operator", None)
         open_id = getattr(operator, "open_id", None) or getattr(operator, "user_id", None) or ""
         action = getattr(ev, "action", None)
-        value = getattr(action, "value", None)
-        value_dict = value if isinstance(value, dict) else {}
+        raw_value = getattr(action, "value", None)
+        if raw_value is None:
+            raw_value = getattr(action, "behaviors", None)
+        value_dict = _extract_action_value(raw_value)
         option = getattr(action, "option", None) or ""
         options = getattr(action, "options", None) or []
         selected_value = option or (options[0] if options else "") or value_dict.get("env", "")
         action_id = value_dict.get("action_id") or getattr(action, "name", None) or ""
+        if action_id == "cluster_select":
+            action_id = "cluster:select"
         card_ref = value_dict.get("card_ref") or ""
         ctx = getattr(ev, "context", None)
         open_message_id = getattr(ctx, "open_message_id", None) or ""
@@ -913,6 +1251,8 @@ class FeishuAdapter:
         header = getattr(data, "header", None)
         msgid = getattr(header, "event_id", None) or token
 
+        sla_sec = max(0.05, float(self.capabilities.card_callback_sla_sec or 2.2))
+        sync_coord = CardCallbackSync(time.monotonic() + sla_sec)
         event = CardActionEvent(
             bot_id=self.bot_id,
             platform="feishu",
@@ -923,12 +1263,19 @@ class FeishuAdapter:
             msgid=str(msgid or ""),
             chat_id=str(open_chat_id),
             raw_context={"open_message_id": open_message_id, "open_chat_id": open_chat_id, "token": token},
+            callback_sync=sync_coord,
         )
         fut = asyncio.run_coroutine_threadsafe(self._on_card_action(event), self._main_loop)
+        outcome: dict[str, Any] | None
         try:
-            outcome = fut.result(timeout=self.capabilities.card_callback_sla_sec)
+            outcome = fut.result(timeout=sla_sec)
         except TimeoutError:
-            return P2CardActionTriggerResponse({"toast": {"type": "info", "content": "处理中…"}})
+            if sync_coord.mark_sync_timeout():
+                return P2CardActionTriggerResponse({"toast": {"type": "info", "content": "处理中…"}})
+            try:
+                outcome = fut.result(timeout=0.2)
+            except Exception:
+                return P2CardActionTriggerResponse({"toast": {"type": "info", "content": "处理中…"}})
         except Exception as exc:
             LOGGER.warning("飞书卡片回调执行异常: %s", _safe_lark_error(exc, (self._app_secret,)))
             return P2CardActionTriggerResponse({"toast": {"type": "error", "content": "处理失败，请重试"}})

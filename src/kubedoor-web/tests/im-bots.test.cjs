@@ -776,10 +776,37 @@ test("views/system/wecom-ai/index.vue 完整驱动公共模型、多机器人管
   await vm.saveBotUnboundOnly();
   assert.deepEqual(calls.saveUnbound[0], ["bot-wecom-1", "guest", "prod"]);
 
-  // 成员绑定管理
-  vm.inspectBotUsers(vm.bots[0]);
+  // 成员绑定管理：切换机器人后 inspectBotUsers 立即刷新成员列表而非保留旧数据
+  state.users.push({
+    bot_id: "bot-feishu-2",
+    bot_name: "飞书私有机器人",
+    platform: "feishu",
+    external_user_id: "ou_fs_99",
+    username: "alice",
+    default_env: "prod",
+    current_env: "prod",
+    remark: "飞书值班",
+    self_name: null,
+    bound_by: "alice",
+    bound_at: "2026-11-27T09:00:00Z",
+    first_seen_at: "2026-11-27T09:00:00Z",
+    last_seen_at: "2026-11-27T09:10:00Z",
+    pending_approvals: 0
+  });
+  await vm.inspectBotUsers(vm.bots[1]);
+  assert.equal(vm.activeTab, "users");
+  assert.equal(vm.selectedBotFilter, "bot-feishu-2");
+  assert.deepEqual(
+    vm.users.map(u => u.external_user_id),
+    ["ou_fs_99"]
+  );
+  await vm.inspectBotUsers(vm.bots[0]);
   assert.equal(vm.activeTab, "users");
   assert.equal(vm.selectedBotFilter, "bot-wecom-1");
+  assert.deepEqual(
+    vm.users.map(u => u.external_user_id),
+    ["wc_u1"]
+  );
   await vm.editRemark(vm.users[0]);
   assert.deepEqual(calls.remark[0], ["bot-wecom-1", "wc_u1", "张三（SRE）"]);
   vm.editMapping(vm.users[0]);

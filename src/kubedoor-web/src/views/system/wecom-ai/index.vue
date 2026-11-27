@@ -506,10 +506,17 @@ async function removeBot(bot: IMBot) {
   }
 }
 
-function inspectBotUsers(bot: IMBot) {
+async function inspectBotUsers(bot: IMBot) {
   selectedBotFilter.value = bot.id;
   mapping.bot_id = bot.id;
   activeTab.value = "users";
+  try {
+    await loadUsers();
+  } catch (error) {
+    ElMessage.error(
+      error instanceof Error ? error.message : "读取 IM 成员列表失败"
+    );
+  }
 }
 
 function editMapping(row: IMUser) {

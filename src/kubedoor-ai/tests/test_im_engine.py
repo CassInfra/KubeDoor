@@ -875,3 +875,47 @@ async def test_legacy_wecom_migration_is_idempotent():
     count_before = len(store.bots)
     await mgr.migrate_legacy_wecom()
     assert len(store.bots) == count_before
+
+
+@pytest.mark.asyncio
+async def test_legacy_wecom_bridge_prefers_legacy_id_and_validates_before_mutating_shared_model():
+    from kubedoor_ai.im.manager import LegacyWeComBridge
+
+    engine, store, _, _, svc, _ = _make_engine_env()
+    mgr = IMBotManager(svc, shared_model=engine.shared_model)
+    mgr.bots["11111111-1111-4000-8000-111111111111"] = BotConfig(
+        id="11111111-1111-4000-8000-111111111111",
+        platform="wecom",
+        name="extra-wecom",
+        enabled=False,
+        credentials={"bot_id": "extra_bot", "bot_secret": "extra_sec"},
+    )
+    mgr.bots[LEGACY_WECOM_BOT_ID] = BotConfig(
+        id=LEGACY_WECOM_BOT_ID,
+        platform="wecom",
+        name="默认企业微信机器人",
+        enabled=True,
+        credentials={"bot_id": "legacy_bot", "bot_secret": "legacy_sec"},
+    )
+    bridge = LegacyWeComBridge(mgr, engine.shared_model)
+    assert bridge.config["bot_id"] == "legacy_bot"
+    assert bridge.config["enabled"] is True
+
+    # save_config must validate bot fields BEFORE mutating shared_model!
+    mgr2 = IMBotManager(svc, shared_model=SharedModelManager(svc))
+    mgr2.shared_model.config = {"base_url": "https://orig.example.com/v1", "api_key": "sk-orig", "model": "orig-model"}
+    bridge2 = LegacyWeComBridge(mgr2, mgr2.shared_model)
+    with pytest.raises(AIError):
+        await bridge2.save_config(
+            Identity("alice", "admin"),
+            {
+                "enabled": True,
+                "bot_id": "",
+                "bot_secret": "",
+                "base_url": "https://mutated.example.com/v1",
+                "api_key": "sk-mutated",
+                "model": "mutated-model",
+            },
+        )
+    assert mgr2.shared_model.config["base_url"] == "https://orig.example.com/v1"
+    assert mgr2.shared_model.config["model"] == "orig-model"

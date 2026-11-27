@@ -803,7 +803,9 @@ class LegacyWeComBridge:
     @property
     def config(self) -> dict[str, Any] | None:
         shared = self.shared_model.config or {}
-        bot = next((b for b in self.manager.bots.values() if b.platform == "wecom"), None)
+        bot = self.manager.bots.get(LEGACY_WECOM_BOT_ID)
+        if bot is None or bot.platform != "wecom":
+            bot = next((b for b in self.manager.bots.values() if b.platform == "wecom"), None)
         if not shared and not bot:
             return None
         return {**(bot.credentials if bot else {}), **shared, "enabled": bot.enabled if bot else False}
@@ -863,11 +865,6 @@ class LegacyWeComBridge:
     async def save_config(self, identity: Identity, raw: dict[str, Any]) -> dict[str, Any]:
         if not isinstance(raw, dict):
             raise AIError("配置格式无效")
-        if any(raw.get(k) for k in ("base_url", "model", "api_key")):
-            await self.shared_model.save_config(
-                identity,
-                {k: raw[k] for k in PROVIDER_KEYS if k in raw},
-            )
         bot = await self._default_wecom_bot()
         bot_payload: dict[str, Any] = {
             "platform": "wecom",
@@ -879,6 +876,23 @@ class LegacyWeComBridge:
             },
             "session_idle_minutes": raw.get("session_idle_minutes", (bot or {}).get("session_idle_minutes", DEFAULT_IDLE_MINUTES)),
         }
+        current_bot: BotConfig | None = None
+        if bot:
+            current_bot = self.manager.bots.get(bot["id"])
+            if current_bot is None:
+                row = await self.manager.service.store.one(
+                    "SELECT * FROM kubedoor_ai_im_bots WHERE id=$1::uuid",
+                    bot["id"],
+                )
+                if row:
+                    current_bot = self.manager._decode_row(row)
+        self.manager._validate_bot_fields("wecom", bot_payload, current=current_bot)
+
+        if any(raw.get(k) for k in ("base_url", "model", "api_key")):
+            await self.shared_model.save_config(
+                identity,
+                {k: raw[k] for k in PROVIDER_KEYS if k in raw},
+            )
         if bot:
             await self.manager.update_bot(identity, bot["id"], bot_payload)
         else:

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import threading
 from typing import Any, Literal
 
 SUPPORTED_PLATFORMS: tuple[str, ...] = ("wecom", "feishu")
@@ -48,6 +49,32 @@ class InboundEvent:
     raw_context: Any = None
 
 
+class CardCallbackSync:
+    """Thread-safe handoff coordinator between sync adapter SLA wait and async engine."""
+
+    def __init__(self, deadline: float) -> None:
+        self.deadline = deadline
+        self._lock = threading.Lock()
+        self.sync_timed_out = False
+        self.sync_claimed = False
+
+    def mark_sync_timeout(self) -> bool:
+        """Mark synchronous waiter as timed out unless engine already claimed inline return."""
+        with self._lock:
+            if self.sync_claimed:
+                return False
+            self.sync_timed_out = True
+            return True
+
+    def claim_sync(self) -> bool:
+        """Claim inline synchronous response unless adapter already timed out."""
+        with self._lock:
+            if self.sync_timed_out:
+                return False
+            self.sync_claimed = True
+            return True
+
+
 @dataclass(frozen=True)
 class CardActionEvent:
     """Normalized interactive card button / selection callback event."""
@@ -61,6 +88,7 @@ class CardActionEvent:
     msgid: str = ""
     chat_id: str = ""
     raw_context: Any = None
+    callback_sync: CardCallbackSync | None = None
 
 
 @dataclass(frozen=True)
