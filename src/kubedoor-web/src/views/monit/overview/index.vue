@@ -214,6 +214,7 @@ import {
   type PromOverviewMetrics
 } from "@/api/overview";
 import { getPromEnv } from "@/api/monit";
+import { escapeHtml } from "@/utils/safeHtml";
 
 echarts.use([
   PieChart,
@@ -508,14 +509,14 @@ const renderEventPie = () => {
         const d = params.data || {};
         return `
           <div style="line-height:1.6">
-            <div><strong>${params.name}</strong></div>
-            <div>集群：${d.env || "--"}</div>
-            <div>命名空间：${d.namespace || "--"}</div>
-            <div>类型：${d.kind || "--"}</div>
-            <div>对象：${d.resourceName || "--"}</div>
+            <div><strong>${escapeHtml(params.name)}</strong></div>
+            <div>集群：${escapeHtml(d.env || "--")}</div>
+            <div>命名空间：${escapeHtml(d.namespace || "--")}</div>
+            <div>类型：${escapeHtml(d.kind || "--")}</div>
+            <div>对象：${escapeHtml(d.resourceName || "--")}</div>
             <div>次数：${formatNumber(params.value)}</div>
-            <div>占比：${d.ratio || params.percent}%</div>
-            <div style="max-width:240px;white-space:normal;">信息：${d.message || "--"}</div>
+            <div>占比：${escapeHtml(d.ratio || params.percent)}%</div>
+            <div style="max-width:240px;white-space:normal;">信息：${escapeHtml(d.message || "--")}</div>
           </div>
         `;
       }
@@ -564,7 +565,7 @@ const renderAlertDailyBar = () => {
         const p = params?.[0];
         const idx = p?.dataIndex ?? 0;
         const day = days[idx] || p?.name || "";
-        return `${day}<br/>累计告警：${formatNumber(p?.value ?? 0)}`;
+        return `${escapeHtml(day)}<br/>累计告警：${formatNumber(p?.value ?? 0)}`;
       }
     },
     xAxis: {

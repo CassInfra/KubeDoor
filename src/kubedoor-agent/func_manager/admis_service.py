@@ -1,6 +1,7 @@
 import asyncio
 import base64
 import json
+import os
 import re
 from datetime import datetime, timedelta
 
@@ -10,6 +11,7 @@ from kubernetes_asyncio.client.rest import ApiException
 from loguru import logger
 
 import utils
+from func_manager import tls_certs
 from func_manager.jvm_config import replace_jvm_flags
 
 
@@ -316,7 +318,7 @@ class AdmisService:
 
     async def _create_mutating_webhook(self):
         webhook_name = "kubedoor-admis-configuration"
-        namespace = "kubedoor"
+        namespace = os.environ.get("POD_NAMESPACE") or "kubedoor"
         webhook_config = client.V1MutatingWebhookConfiguration(
             metadata=client.V1ObjectMeta(name=webhook_name),
             webhooks=[
@@ -326,7 +328,7 @@ class AdmisService:
                         service=client.AdmissionregistrationV1ServiceReference(
                             namespace=namespace, name="kubedoor-agent", path="/api/admis", port=443
                         ),
-                        ca_bundle=utils.BASE64CA,
+                        ca_bundle=tls_certs.load_ca_bundle_b64(namespace=namespace),
                     ),
                     rules=[
                         client.V1RuleWithOperations(
@@ -356,7 +358,7 @@ class AdmisService:
             response = await self.admission_api.create_mutating_webhook_configuration(body=webhook_config)
             logger.info(f"MutatingWebhookConfiguration created: {response.metadata.name}")
             await self._update_namespace_label("kube-system", "add")
-            await self._update_namespace_label("kubedoor", "add")
+            await self._update_namespace_label(namespace, "add")
         except ApiException as exc:
             error_message = json.loads(exc.body).get("message") if hasattr(exc, 'body') and exc.body else "执行失败"
             logger.error(f"Exception when creating MutatingWebhookConfiguration: {exc}")
@@ -364,11 +366,12 @@ class AdmisService:
 
     async def _delete_mutating_webhook(self):
         webhook_name = "kubedoor-admis-configuration"
+        namespace = os.environ.get("POD_NAMESPACE") or "kubedoor"
         try:
             await self.admission_api.delete_mutating_webhook_configuration(name=webhook_name)
             logger.info(f"MutatingWebhookConfiguration '{webhook_name}' deleted successfully.")
             await self._update_namespace_label("kube-system", "delete")
-            await self._update_namespace_label("kubedoor", "delete")
+            await self._update_namespace_label(namespace, "delete")
         except ApiException as exc:
             error_message = json.loads(exc.body).get("message") if hasattr(exc, 'body') and exc.body else "执行失败"
             logger.error(f"Exception when deleting MutatingWebhookConfiguration: {exc}")

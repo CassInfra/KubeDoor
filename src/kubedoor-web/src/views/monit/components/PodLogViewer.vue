@@ -173,6 +173,7 @@ import { computed, nextTick, onBeforeUnmount, ref, watch } from "vue";
 import { ElMessage } from "element-plus";
 import { useThrottleFn, useDebounceFn } from "@vueuse/core";
 import { AnsiUp } from "ansi_up";
+import { highlightAnsiHtml } from "@/utils/safeHtml";
 import {
   createPodLogStreamUrl,
   downloadPodLogs,
@@ -618,18 +619,11 @@ const highlightSearchKeyword = (message: string, index: number) => {
     return processedMessage;
   }
 
-  const regex = new RegExp(
-    `(${keyword.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")})`,
-    "gi"
-  );
   const highlightClass = isCurrentMatch
     ? "search-highlight-current"
     : "search-highlight";
 
-  return processedMessage.replace(
-    regex,
-    `<span class="${highlightClass}">$1</span>`
-  );
+  return highlightAnsiHtml(processedMessage, keyword, highlightClass);
 };
 
 // ---- 搜索 ----

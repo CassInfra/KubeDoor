@@ -31,6 +31,7 @@ COPY src/kubedoor-tools /opt/kubedoor-tools
 RUN pip install --no-cache-dir /opt/kubedoor-tools
 
 COPY src/kubedoor-agent /app/
+RUN sed -i 's/\r$//' /app/entrypoint.sh && chmod +x /app/entrypoint.sh
 
 # 创建服务目录
 RUN mkdir -p /etc/service/kubedoor-agent /etc/service/pod-mgr
@@ -44,5 +45,6 @@ RUN echo -e '#!/bin/sh\nexec python3 /app/kubedoor-agent.py' > /etc/service/kube
 RUN echo -e '#!/bin/sh\nexec python3 /app/pod-mgr.py' > /etc/service/pod-mgr/run && \
     chmod +x /etc/service/pod-mgr/run
 
+ENTRYPOINT ["/app/entrypoint.sh"]
 # 启动 runit
 CMD ["runsvdir", "/etc/service"]

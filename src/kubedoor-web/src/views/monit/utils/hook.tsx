@@ -22,32 +22,27 @@ export function useResource() {
       let currentEnv = "";
       const rowArr = [row];
       const params = [];
-      const content = rowArr
-        .map(row => {
-          let podCount = row.podCount;
-          const item = {
-            namespace: row.namespace,
-            deployment_name: row.deployment,
-            num: Number(podCount)
-          };
-          params.push(item);
-          currentEnv = row.env;
-          return (
-            `<div>` +
-            `<strong style='margin-right: 5px;'>Env: </strong><i><span style='color: red;'>${row.env}</span></i>&nbsp;&nbsp;` +
-            `<strong style='margin-right: 5px;'>Namespace: </strong><i><span style='color: red;'>${row.namespace}</span></i>&nbsp;&nbsp;` +
-            `<strong style='margin-right: 5px;'>Deployment: </strong><i><span style='color: red;'>${row.deployment}</span></i>&nbsp;&nbsp;` +
-            // `<strong style='margin-right: 5px;'>Pod数量: </strong><i><span style='color: red;'>${podCount}</span></i>` +
-            `</div>`
-          );
-        })
-        .join("<br>");
+      const items = rowArr.map(row => {
+        let podCount = row.podCount;
+        const item = {
+          namespace: row.namespace,
+          deployment_name: row.deployment,
+          num: Number(podCount)
+        };
+        params.push(item);
+        currentEnv = row.env;
+        return {
+          env: row.env,
+          namespace: row.namespace,
+          deployment: row.deployment
+        };
+      });
 
       const showAddLabelRes = await showAddLabel(row.env, row.namespace);
 
       const scaleProps = {
         isScale: true,
-        content,
+        items,
         showInterval: params.length > 1, // 是否显示间隔
         showAddLabel: showAddLabelRes.data.length > 0,
         params: {
@@ -155,26 +150,22 @@ export function useResource() {
       let currentEnv = "";
       const rowArr = [row];
       let params = [];
-      const content = rowArr
-        .map(row => {
-          params.push({
-            namespace: row.namespace,
-            deployment_name: row.deployment
-          });
-          currentEnv = row.env;
-          return (
-            `<div>` +
-            `<strong style='margin-right: 5px;'>Env: </strong><i><span style='color: red;'>${row.env}</span></i>&nbsp;&nbsp;` +
-            `<strong style='margin-right: 5px;'>Namespace: </strong><i><span style='color: red;'>${row.namespace}</span></i>&nbsp;&nbsp;` +
-            `<strong style='margin-right: 5px;'>Deployment: </strong><i><span style='color: red;'>${row.deployment}</span></i>&nbsp;&nbsp;` +
-            `</div>`
-          );
-        })
-        .join("<br>");
+      const items = rowArr.map(row => {
+        params.push({
+          namespace: row.namespace,
+          deployment_name: row.deployment
+        });
+        currentEnv = row.env;
+        return {
+          env: row.env,
+          namespace: row.namespace,
+          deployment: row.deployment
+        };
+      });
 
       const rebootScaleProps = {
         isScale: false,
-        content,
+        items,
         showInterval: params.length > 1,
         showAddLabel: false,
         params: {
@@ -242,14 +233,20 @@ export function useResource() {
               (res as any).error_list &&
               (res as any).error_list.length > 0
             ) {
-              let errorMsg = "";
-              (res as any).error_list.forEach(err => {
-                errorMsg += `Namespace: ${err.namespace}, Deployment: ${err.deployment_name}, Reason: ${err.reason}<br/>`;
-              });
-              message(errorMsg, {
-                type: "error",
-                dangerouslyUseHTMLString: true
-              });
+              message(
+                h(
+                  "div",
+                  (res as any).error_list.map((err: any) =>
+                    h(
+                      "div",
+                      `Namespace: ${err.namespace}, Deployment: ${err.deployment_name}, Reason: ${err.reason}`
+                    )
+                  )
+                ),
+                {
+                  type: "error"
+                }
+              );
             } else if ((res as any).message == "ok" || res == "ok") {
               message(transformI18n("resource.message.editSuccess"), {
                 type: "success"

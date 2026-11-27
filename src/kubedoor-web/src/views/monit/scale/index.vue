@@ -5,12 +5,21 @@ import ReCol from "@/components/ReCol";
 import { getNodeResourceRank, getCciScheduleProfile } from "@/api/monit";
 import { ElMessage } from "element-plus";
 // import { message } from "@/utils/message";
+import { buildNodeOptionLabel } from "@/utils/safeHtml";
 
 import Warning from "@iconify-icons/ep/warning-filled";
 
+type ScaleContentItem = {
+  env?: string;
+  namespace?: string;
+  deployment?: string;
+  podCount?: number | string;
+};
+
 type Props = {
   isScale: boolean;
-  content: string;
+  content?: string;
+  items?: ScaleContentItem[];
   showInterval: boolean;
   showAddLabel: boolean;
   params?: Record<string, any>;
@@ -19,6 +28,7 @@ type Props = {
 const props = withDefaults(defineProps<Props>(), {
   isScale: true,
   content: "",
+  items: () => [],
   showInterval: false,
   showAddLabel: false,
   params: () => ({})
@@ -106,7 +116,7 @@ const renderNodeList = () => {
   if (!nodeListContainer) return;
 
   // 清空现有内容
-  nodeListContainer.innerHTML = "";
+  nodeListContainer.replaceChildren();
 
   // 创建节点列表
   nodeListRef.value.forEach((node: any) => {
@@ -131,14 +141,15 @@ const renderNodeList = () => {
       }
     });
 
-    const label = document.createElement("span");
     // 当资源类型是Pod数时不显示百分号
     const percentText =
       resourceTypeRef.value === "pod" ? node.percent : `${node.percent}%`;
-    // 设置颜色样式：percentText为蓝色，node.cpod_num不等于0时为红色
-    const cpodNumColor =
-      node.cpod_num !== 0 ? "color: red;" : "color: inherit;";
-    label.innerHTML = `${node.name} (<span style="color: blue;">${percentText}</span>，<span style="${cpodNumColor}">${node.cpod_num}Pod</span>)`;
+    const label = buildNodeOptionLabel(
+      node.name,
+      percentText,
+      node.cpod_num,
+      "inherit"
+    );
 
     nodeItem.appendChild(checkbox);
     nodeItem.appendChild(label);
@@ -254,7 +265,35 @@ defineExpose({ getData });
           </div>
         </re-col>
         <re-col :offset="2" :value="20" :xs="24" :sm="24">
-          <div style="margin-bottom: 15px" v-html="props.content" />
+          <div style="margin-bottom: 15px">
+            <template v-if="props.items?.length">
+              <div
+                v-for="(item, index) in props.items"
+                :key="`${item.env ?? ''}-${item.namespace ?? ''}-${item.deployment ?? ''}-${index}`"
+                style="margin-bottom: 6px"
+              >
+                <strong style="margin-right: 5px">Env: </strong>
+                <i style="margin-right: 8px">
+                  <span style="color: red">{{ item.env }}</span>
+                </i>
+                <strong style="margin-right: 5px">Namespace: </strong>
+                <i style="margin-right: 8px">
+                  <span style="color: red">{{ item.namespace }}</span>
+                </i>
+                <strong style="margin-right: 5px">Deployment: </strong>
+                <i style="margin-right: 8px">
+                  <span style="color: red">{{ item.deployment }}</span>
+                </i>
+                <template v-if="item.podCount !== undefined">
+                  <strong style="margin-right: 5px">Pod数量: </strong>
+                  <i>
+                    <span style="color: red">{{ item.podCount }}</span>
+                  </i>
+                </template>
+              </div>
+            </template>
+            <span v-else>{{ props.content }}</span>
+          </div>
         </re-col>
         <template v-if="props.isScale && props.params">
           <re-col :offset="2" :value="20" :xs="24" :sm="24">

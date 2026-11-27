@@ -41,7 +41,7 @@ import shlex
 import utils
 import uuid
 from func_manager.k8s_node_scheduler import K8sNodeScheduler
-from func_manager import oss_url
+from func_manager import internal_auth, oss_url
 from k8s_client_manager import K8sClientManager, load_incluster_config
 
 logger.remove()
@@ -53,6 +53,13 @@ logger.add(
 TASK_RESULTS = {}
 POD_CONTAINER_CACHE = {}
 app = FastAPI()
+
+
+@app.middleware("http")
+async def verify_internal_auth(request: Request, call_next):
+    if not internal_auth.verify_internal_token(request.headers.get(internal_auth.HEADER, "")):
+        return JSONResponse(status_code=403, content={"success": False, "error": "forbidden"})
+    return await call_next(request)
 
 
 async def get_k8s_client():
@@ -225,7 +232,7 @@ async def scale_deployment_via_api(
         # 添加query参数
         scale_url = f"https://localhost:443/api/scale?add_label={'true' if add_label else 'false'}&temp=true&isolate=true"
 
-        headers = {"Content-Type": "application/json"}
+        headers = {"Content-Type": "application/json", **internal_auth.auth_headers()}
 
         # 使用requests发送POST请求
         # 由于是HTTPS且可能使用自签名证书，禁用SSL验证
@@ -956,4 +963,4 @@ async def get_pod_previous_logs(env: str, ns: str, pod: str, lines: int = 100):
 
 
 if __name__ == "__main__":
-    uvicorn.run("pod-mgr:app", host="0.0.0.0", workers=1, port=81)
+    uvicorn.run("pod-mgr:app", host="127.0.0.1", workers=1, port=81)

@@ -34,18 +34,137 @@ metadata:
 type: kubernetes.io/service-account-token
 
 ---
-# agent 要代理执行扩缩容、改镜像、重启、驱逐、改 configmap/ingress/istio 等各类操作,
-# 覆盖面基本等于集群管理员。收紧权限会直接导致对应功能报错,请按实际需要裁剪。
+# 最小权限原则：覆盖 Agent 的运维扩缩容、节点调度、负载均衡、资源管理、Istio/CCI、事件/日志/终端和准入开关，
+# 禁止写入 Secret、RBAC (Role/ClusterRole/Binding) 及修改非本工作台管理的 Webhook。
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
   name: kubedoor-agent-cr
 rules:
-  - apiGroups: ['*']
-    resources: ['*']
-    verbs: ['*']
-  - nonResourceURLs: ['*']
-    verbs: ['*']
+  - apiGroups: [""]
+    resources:
+      - pods
+      - services
+      - configmaps
+      - persistentvolumeclaims
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: [""]
+    resources:
+      - nodes
+      - namespaces
+    verbs: ["get", "list", "watch", "patch", "update"]
+  - apiGroups: [""]
+    resources:
+      - nodes/proxy
+      - nodes/metrics
+      - pods/log
+      - pods/status
+    verbs: ["get"]
+  - apiGroups: [""]
+    resources:
+      - pods/exec
+    verbs: ["create", "get"]
+  - apiGroups: [""]
+    resources:
+      - pods/eviction
+    verbs: ["create"]
+  - apiGroups: [""]
+    resources:
+      - endpoints
+      - events
+      - persistentvolumes
+      - replicationcontrollers
+      - resourcequotas
+      - limitranges
+      - secrets
+      - serviceaccounts
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["apps"]
+    resources:
+      - deployments
+      - deployments/scale
+      - statefulsets
+      - statefulsets/scale
+      - daemonsets
+      - replicasets
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["batch"]
+    resources:
+      - jobs
+      - cronjobs
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["autoscaling"]
+    resources:
+      - horizontalpodautoscalers
+    verbs: ["get", "list", "watch", "delete"]
+  - apiGroups: ["networking.k8s.io"]
+    resources:
+      - ingresses
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["networking.k8s.io"]
+    resources:
+      - ingressclasses
+      - networkpolicies
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["discovery.k8s.io"]
+    resources:
+      - endpointslices
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["policy"]
+    resources:
+      - poddisruptionbudgets
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["storage.k8s.io"]
+    resources:
+      - storageclasses
+      - volumeattachments
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["admissionregistration.k8s.io"]
+    resources:
+      - mutatingwebhookconfigurations
+    verbs: ["create", "list"]
+  - apiGroups: ["admissionregistration.k8s.io"]
+    resources:
+      - mutatingwebhookconfigurations
+    resourceNames:
+      - kubedoor-admis-configuration
+    verbs: ["get", "update", "patch", "delete"]
+  - apiGroups: ["admissionregistration.k8s.io"]
+    resources:
+      - validatingwebhookconfigurations
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["metrics.k8s.io"]
+    resources:
+      - nodes
+      - pods
+    verbs: ["get", "list"]
+  - apiGroups: ["networking.istio.io"]
+    resources:
+      - virtualservices
+      - destinationrules
+      - gateways
+      - serviceentries
+      - sidecars
+      - workloadentries
+      - workloadgroups
+      - envoyfilters
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["scheduling.cci.io"]
+    resources:
+      - scheduleprofiles
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["rbac.authorization.k8s.io"]
+    resources:
+      - roles
+      - rolebindings
+      - clusterroles
+      - clusterrolebindings
+    verbs: ["get", "list", "watch"]
+  - nonResourceURLs:
+      - /version
+      - /healthz
+      - /readyz
+    verbs: ["get"]
 
 ---
 apiVersion: rbac.authorization.k8s.io/v1
@@ -60,6 +179,169 @@ roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
   name: kubedoor-agent-cr
+
+---
+# AI 只读服务账号：专用于 AI Kubeconfig，禁止读取 Secret、执行 pods/exec 或任何写操作
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: kubedoor-ai-readonly
+  namespace: __NAMESPACE__
+
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: kubedoor-ai-readonly
+  namespace: __NAMESPACE__
+  annotations:
+    kubernetes.io/service-account.name: "kubedoor-ai-readonly"
+type: kubernetes.io/service-account-token
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: kubedoor-ai-readonly-cr
+rules:
+  - apiGroups: [""]
+    resources:
+      - pods
+      - pods/log
+      - pods/status
+      - services
+      - endpoints
+      - events
+      - configmaps
+      - nodes
+      - namespaces
+      - persistentvolumes
+      - persistentvolumeclaims
+      - replicationcontrollers
+      - resourcequotas
+      - limitranges
+      - serviceaccounts
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["apps"]
+    resources:
+      - deployments
+      - deployments/scale
+      - statefulsets
+      - statefulsets/scale
+      - daemonsets
+      - replicasets
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["batch"]
+    resources:
+      - jobs
+      - cronjobs
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["autoscaling"]
+    resources:
+      - horizontalpodautoscalers
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["networking.k8s.io"]
+    resources:
+      - ingresses
+      - ingressclasses
+      - networkpolicies
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["discovery.k8s.io"]
+    resources:
+      - endpointslices
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["policy"]
+    resources:
+      - poddisruptionbudgets
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["storage.k8s.io"]
+    resources:
+      - storageclasses
+      - volumeattachments
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["rbac.authorization.k8s.io"]
+    resources:
+      - roles
+      - rolebindings
+      - clusterroles
+      - clusterrolebindings
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["admissionregistration.k8s.io"]
+    resources:
+      - mutatingwebhookconfigurations
+      - validatingwebhookconfigurations
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["metrics.k8s.io"]
+    resources:
+      - nodes
+      - pods
+    verbs: ["get", "list"]
+  - apiGroups: ["networking.istio.io", "security.istio.io", "telemetry.istio.io"]
+    resources:
+      - virtualservices
+      - destinationrules
+      - gateways
+      - serviceentries
+      - sidecars
+      - workloadentries
+      - workloadgroups
+      - authorizationpolicies
+      - peerauthentications
+      - requestauthentications
+      - telemetries
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["scheduling.cci.io"]
+    resources:
+      - scheduleprofiles
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["authentication.k8s.io"]
+    resources:
+      - selfsubjectreviews
+    verbs: ["create"]
+  - apiGroups: ["authorization.k8s.io"]
+    resources:
+      - selfsubjectaccessreviews
+    verbs: ["create"]
+  - nonResourceURLs:
+      - /version
+      - /api
+      - /apis
+    verbs: ["get"]
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: kubedoor-ai-readonly-crb
+subjects:
+  - kind: ServiceAccount
+    name: kubedoor-ai-readonly
+    namespace: __NAMESPACE__
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: kubedoor-ai-readonly-cr
+
+---
+# 默认仅放行 TCP 443 端口（webhook 与健康检查），隐式阻断 pod-mgr :81 等非预期端口；
+# 生产环境建议按集群控制面 / kube-apiserver 网段进一步收紧 ingress[].from.ipBlock。
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: kubedoor-agent-netpol
+  namespace: __NAMESPACE__
+  labels:
+    app: kubedoor-agent
+spec:
+  podSelector:
+    matchLabels:
+      app: kubedoor-agent
+  policyTypes:
+    - Ingress
+  ingress:
+    - ports:
+        - protocol: TCP
+          port: 443
 
 ---
 apiVersion: apps/v1
@@ -96,9 +378,17 @@ spec:
           env:
             - name: TZ
               value: Asia/Shanghai
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
           ports:
             - name: https
               containerPort: 443
+          volumeMounts:
+            - name: webhook-tls
+              mountPath: /etc/kubedoor/certs
+              readOnly: true
           resources:
             limits:
               cpu: "2"
@@ -124,6 +414,11 @@ spec:
             timeoutSeconds: 3
             periodSeconds: 10
             failureThreshold: 3
+      volumes:
+        - name: webhook-tls
+          secret:
+            secretName: kubedoor-agent-webhook-tls
+            optional: true
       restartPolicy: Always
 
 ---

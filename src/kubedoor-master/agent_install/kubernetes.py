@@ -28,6 +28,7 @@ RESOURCES = {
     ('v1', 'Service'): ('services', True),
     ('apps/v1', 'Deployment'): ('deployments', True),
     ('apps/v1', 'DaemonSet'): ('daemonsets', True),
+    ('networking.k8s.io/v1', 'NetworkPolicy'): ('networkpolicies', True),
     ('rbac.authorization.k8s.io/v1', 'ClusterRole'): ('clusterroles', False),
     ('rbac.authorization.k8s.io/v1', 'ClusterRoleBinding'): ('clusterrolebindings', False),
 }

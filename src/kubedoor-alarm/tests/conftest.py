@@ -8,6 +8,7 @@ import contextlib
 import importlib.util
 import json
 import pathlib
+import re
 import sys
 import types
 
@@ -176,25 +177,66 @@ class FakeResult:
         return self._rows[0] if self._rows else None
 
 
+_WRITE_DML_RE = re.compile(r'^\s*(?:INSERT|UPDATE|DELETE)\b', re.IGNORECASE)
+_SELECT_RE = re.compile(r'^\s*SELECT\b', re.IGNORECASE)
+
+
 class FakeConnection:
     def __init__(self, pool):
         self._pool = pool
+        self._pending = []
+        self._tx_depth = 0
 
     def execute(self, sql, params=None):
+        if self._pool.on_execute is not None:
+            self._pool.on_execute(sql, params)
+        if _WRITE_DML_RE.match(sql):
+            self._pending.append((sql, params))
+            return FakeResult([])
         self._pool.executed.append((sql, params))
-        if sql.lstrip().upper().startswith('SELECT') and 'FROM alert_silences' in sql:
-            return FakeResult(self._pool.silence_rows)
-        if sql.lstrip().upper().startswith('SELECT') and 'FROM k8s_pod_alert_days' in sql:
-            return FakeResult(self._pool.alert_rows)
+        if _SELECT_RE.match(sql):
+            if 'FROM alert_silences' in sql:
+                return FakeResult(self._pool.silence_rows)
+            if 'FROM k8s_pod_alert_days' in sql:
+                return FakeResult(self._pool.alert_rows)
         return FakeResult([])
+
+    def commit(self):
+        if self._pending:
+            self._pool.executed.extend(self._pending)
+            self._pending.clear()
+        self._pool.commits += 1
+
+    def rollback(self):
+        self._pending.clear()
+        self._pool.rollbacks += 1
+
+    @contextlib.contextmanager
+    def transaction(self):
+        savepoint = len(self._pending)
+        self._tx_depth += 1
+        try:
+            yield self
+        except BaseException:
+            del self._pending[savepoint:]
+            if self._tx_depth == 1:
+                self._pool.rollbacks += 1
+            raise
+        else:
+            if self._tx_depth == 1:
+                self.commit()
+        finally:
+            self._tx_depth -= 1
 
 
 class FakePool:
-    """代替 psycopg_pool.ConnectionPool。
+    """代替 psycopg_pool.ConnectionPool,模拟 psycopg 3 默认 autocommit=False 事务语义。
 
     silence_rows: alert_silences 的查询结果 (id, matchers, starts_at, ends_at);
     alert_rows: k8s_pod_alert_days「当天是否已有这条告警」的查询结果;
-    fail: 为 True 时取连接直接报错(模拟数据库不可用)。
+    fail: 为 True 时取连接直接报错(模拟数据库不可用);
+    on_execute: 可选回调 (sql, params) -> None,用于在测试中注入 SQL 执行异常;
+    commits / rollbacks: 分别记录提交次数与隐式/显式回滚次数。
     """
 
     def __init__(self, *args, **kwargs):
@@ -202,15 +244,23 @@ class FakePool:
         self.alert_rows = []
         self.executed = []
         self.fail = False
+        self.on_execute = None
+        self.commits = 0
+        self.rollbacks = 0
 
     @contextlib.contextmanager
     def connection(self, timeout=None):
         if self.fail:
             raise RuntimeError('database unavailable')
-        yield FakeConnection(self)
+        conn = FakeConnection(self)
+        try:
+            yield conn
+        finally:
+            if conn._pending:
+                conn.rollback()
 
     def writes(self):
-        """执行过的 INSERT / UPDATE k8s_pod_alert_days:[(语句, 参数), ...]。"""
+        """已提交的 INSERT / UPDATE k8s_pod_alert_days:[(语句, 参数), ...]。"""
         return [(sql, params) for sql, params in self.executed
                 if sql.startswith(('INSERT INTO k8s_pod_alert_days', 'UPDATE k8s_pod_alert_days'))]
 

@@ -105,10 +105,11 @@ def agent_functions(oss_module, http_session, spawned):
         elif isinstance(node, ast.Assign) and any(getattr(t, "id", None) in wanted for t in node.targets):
             nodes.append(node)
     assert len(nodes) == len(wanted), "kubedoor-agent.py 的结构变了,请同步这个测试"
+    internal_auth_module = load_module("agent_test_internal_auth", AGENT_ROOT / "func_manager" / "internal_auth.py")
     namespace = {
         "asyncio": asyncio, "base64": base64, "json": json, "re": re, "aiohttp": aiohttp, "urlencode": urlencode,
         "logger": logger, "WSMsgType": WSMsgType, "MasterConnection": object, "WS_MAX_MSG_SIZE": 16 * 1024 * 1024,
-        "oss_url": oss_module, "http_session": http_session,
+        "oss_url": oss_module, "internal_auth": internal_auth_module, "http_session": http_session,
         "_spawn": lambda coroutine: spawned.append(asyncio.ensure_future(coroutine)),
     }
     exec(compile(ast.Module(body=nodes, type_ignores=[]), "kubedoor-agent.py", "exec"), namespace)
@@ -196,15 +197,19 @@ class FakeK8s:
 @pytest.fixture
 def pod_mgr(monkeypatch, oss_module):
     """按路径加载 pod-mgr.py:utils、K8S 客户端换成假的,对象存储的逻辑用真的 func_manager/oss_url.py"""
+    monkeypatch.setenv("KUBEDOOR_INTERNAL_TOKEN", "test-internal-token")
     fake_utils = ModuleType("utils")
     fake_utils.OSS_URL = None
     fake_utils.send_msg = Mock()
     monkeypatch.setitem(sys.modules, "utils", fake_utils)
+    internal_auth_module = load_module("agent_test_internal_auth", AGENT_ROOT / "func_manager" / "internal_auth.py")
     package = ModuleType("func_manager")
     package.__path__ = [str(AGENT_ROOT / "func_manager")]
     package.oss_url = oss_module
+    package.internal_auth = internal_auth_module
     monkeypatch.setitem(sys.modules, "func_manager", package)
     monkeypatch.setitem(sys.modules, "func_manager.oss_url", oss_module)
+    monkeypatch.setitem(sys.modules, "func_manager.internal_auth", internal_auth_module)
     scheduler = ModuleType("func_manager.k8s_node_scheduler")
     scheduler.K8sNodeScheduler = object
     monkeypatch.setitem(sys.modules, "func_manager.k8s_node_scheduler", scheduler)
@@ -239,8 +244,9 @@ def pod_mgr(monkeypatch, oss_module):
 def call(pod_mgr, path, headers=None):
     from fastapi.testclient import TestClient
 
+    merged = {"X-Kubedoor-Internal-Token": "test-internal-token", **(headers or {})}
     with TestClient(pod_mgr.app) as client:
-        response = client.get(path, params={"env": "prod", "ns": "default", "pod_name": "app-1"}, headers=headers or {})
+        response = client.get(path, params={"env": "prod", "ns": "default", "pod_name": "app-1"}, headers=merged)
     return response.status_code, response.json()
 
 

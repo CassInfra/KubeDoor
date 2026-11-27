@@ -48,7 +48,10 @@ def test_credentials_are_secret_and_urls_are_encoded(monkeypatch):
     cfg = docs["ConfigMap", "kubedoor-agent-config"]["data"]
     assert cfg == {"PROM_K8S_TAG_VALUE": "demo"}
     data = docs["Secret", "kubedoor-agent-credentials"]["data"]
-    assert set(data) == {"KUBEDOOR_MASTER", "OSS_URL"}
+    assert set(data) == {"KUBEDOOR_MASTER", "OSS_URL", "KUBEDOOR_INTERNAL_TOKEN"}
+    internal_token = base64.b64decode(data["KUBEDOOR_INTERNAL_TOKEN"]).decode()
+    assert len(internal_token) == 64 and all(c in "0123456789abcdef" for c in internal_token)
+    assert docs == objects()  # 渲染确定性：包含 KUBEDOOR_INTERNAL_TOKEN 在内完全一致
     assert base64.b64decode(data["KUBEDOOR_MASTER"]).decode() == "wss://agent-demo:p%40ss%3A%27%22%24%26%2Fword@kubedoor.example.com:8443"
     assert "notify-secret" not in json.dumps(list(docs.values()))
     assert "MSG_TYPE" not in json.dumps(list(docs.values())) and "MSG_TOKEN" not in json.dumps(list(docs.values()))
@@ -225,3 +228,79 @@ def test_packaged_templates_at_shallow_container_path(monkeypatch):
     monkeypatch.setattr(bundle, 'Path', ImagePath)
     monkeypatch.setattr(bundle, '__file__', '/agent_install/bundle.py')
     assert str(bundle._template_dir()) == '/agent_install/manifests'
+
+
+def test_agent_manifest_security_hardening():
+    docs = objects({"namespace": "custom-ns"})
+    agent_cr = docs["ClusterRole", "kubedoor-agent-cr"]
+    for rule in agent_cr["rules"]:
+        assert "*" not in rule.get("apiGroups", [])
+        assert "*" not in rule.get("resources", [])
+        assert "*" not in rule.get("verbs", [])
+        assert "*" not in rule.get("nonResourceURLs", [])
+        if "secrets" in rule.get("resources", []):
+            assert set(rule["verbs"]) <= {"get", "list", "watch"}
+        if any(r in rule.get("resources", []) for r in ("roles", "rolebindings", "clusterroles", "clusterrolebindings")):
+            assert set(rule["verbs"]) <= {"get", "list", "watch"}
+
+    netpol = docs["NetworkPolicy", "kubedoor-agent-netpol"]
+    assert netpol["metadata"]["namespace"] == "custom-ns"
+    assert netpol["spec"]["policyTypes"] == ["Ingress"]
+    assert netpol["spec"]["ingress"] == [{"ports": [{"protocol": "TCP", "port": 443}]}]
+
+    agent_pod = docs["Deployment", "kubedoor-agent"]["spec"]["template"]["spec"]
+    container = agent_pod["containers"][0]
+    assert {"name": "POD_NAMESPACE", "valueFrom": {"fieldRef": {"fieldPath": "metadata.namespace"}}} in container["env"]
+    assert {"name": "webhook-tls", "mountPath": "/etc/kubedoor/certs", "readOnly": True} in container["volumeMounts"]
+    assert {"name": "webhook-tls", "secret": {"secretName": "kubedoor-agent-webhook-tls", "optional": True}} in agent_pod["volumes"]
+
+    assert ("ServiceAccount", "kubedoor-ai-readonly") in docs
+    assert ("Secret", "kubedoor-ai-readonly") in docs
+    assert ("ClusterRoleBinding", "kubedoor-ai-readonly-crb") in docs
+    ai_cr = docs["ClusterRole", "kubedoor-ai-readonly-cr"]
+    for rule in ai_cr["rules"]:
+        resources = rule.get("resources", [])
+        verbs = set(rule.get("verbs", []))
+        assert "secrets" not in resources
+        assert "pods/exec" not in resources
+        if "selfsubjectreviews" not in resources and "selfsubjectaccessreviews" not in resources and "selfsubjectrulesreviews" not in resources:
+            assert verbs <= {"get", "list", "watch"}
+
+    ne_pod = docs["DaemonSet", "node-exporter"]["spec"]["template"]["spec"]
+    assert not ne_pod.get("hostIPC")
+    assert "securityContext" not in ne_pod
+    ne_c = ne_pod["containers"][0]
+    assert ne_c["securityContext"] == {
+        "runAsNonRoot": True,
+        "runAsUser": 65534,
+        "runAsGroup": 65534,
+        "allowPrivilegeEscalation": False,
+        "readOnlyRootFilesystem": True,
+        "capabilities": {"drop": ["ALL"]},
+    }
+    mounts = {m["mountPath"]: m["readOnly"] for m in ne_c["volumeMounts"]}
+    assert mounts["/host/proc"] is True and mounts["/host/sys"] is True and mounts["/host/root"] is True
+
+
+def test_bundle_cli_filters_10_agent_including_netpol_and_ai_readonly(monkeypatch, capsys):
+    import io
+    import sys as _sys
+
+    payload = (
+        "NAMESPACE\0custom-ns\0"
+        "K8S_NAME\0demo\0"
+        "MASTER_WS\0wss://agent-demo:secret@kd.example.com\0"
+        "ENABLE_VMAGENT\0false\0"
+        "ENABLE_KUBE_STATE_METRICS\0false\0"
+        "ENABLE_NODE_EXPORTER\0false\0"
+    ).encode("utf-8")
+    monkeypatch.setattr(_sys, "argv", ["bundle.py", "agent", "--file", "10-agent.yaml"])
+    monkeypatch.setattr(_sys, "stdin", type("FakeStdin", (), {"buffer": io.BytesIO(payload)})())
+    bundle.main()
+    rendered = [doc for doc in yaml.safe_load_all(capsys.readouterr().out) if doc]
+    names = {(doc["kind"], doc["metadata"]["name"]) for doc in rendered}
+    assert ("NetworkPolicy", "kubedoor-agent-netpol") in names
+    assert ("ServiceAccount", "kubedoor-ai-readonly") in names
+    assert ("Secret", "kubedoor-ai-readonly") in names
+    assert ("ClusterRole", "kubedoor-ai-readonly-cr") in names
+    assert ("ClusterRoleBinding", "kubedoor-ai-readonly-crb") in names

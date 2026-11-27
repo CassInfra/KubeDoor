@@ -491,13 +491,13 @@
     >
       <pre
         class="result-content"
-        :style="
+        :style="[
           currentOperation === 'jstack' || currentOperation === 'dump'
             ? { 'max-height': '82vh', 'overflow-y': 'auto' }
-            : { 'max-height': '600px', 'overflow-y': 'auto' }
-        "
-        v-html="resultMessage"
-      />
+            : { 'max-height': '600px', 'overflow-y': 'auto' },
+          { 'white-space': 'pre-wrap', 'word-break': 'break-all' }
+        ]"
+      >{{ resultMessage }}</pre>
       <template #footer>
         <el-button type="primary" @click="handleCopyAndClose">关闭</el-button>
       </template>
@@ -1150,7 +1150,7 @@ const resultMessage = ref("");
 const currentOperation = ref(""); // 当前操作类型
 
 const showResultDialog = (message: string, operation: string = "") => {
-  resultMessage.value = `<div style="white-space: pre-wrap; word-break: break-all;">${message}</div>`;
+  resultMessage.value = message ?? "";
   currentOperation.value = operation;
   resultDialogVisible.value = true;
 };

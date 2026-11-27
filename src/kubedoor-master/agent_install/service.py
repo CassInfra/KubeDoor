@@ -41,10 +41,10 @@ METRICS_JOBS = ('vmagent', 'kube-state-metrics', 'k8s-node-exporter', 'k8s-cadvi
 CLOCK_SKEW_LIMIT = 30
 # 安装向导在本集群安装 Agent 时生成的 kubeconfig 的 context 名（kubedoor_setup.agent.CONTEXT）
 SETUP_CONTEXT = 'in-cluster'
-# Agent 清单里 Agent 服务账号的长期令牌（manifests/10-agent.yaml 的 Secret，权限与 Agent 相同）
-AGENT_TOKEN_SECRET = 'kubedoor-agent'
+# Agent 清单里专用只读 AI 服务账号的长期令牌（manifests/10-agent.yaml 的 Secret，仅限只读检查）
+AGENT_TOKEN_SECRET = 'kubedoor-ai-readonly'
 # 自动配置的 AI Kubeconfig 里的 context / user 名，「AI Kubeconfig」列显示它
-AI_CONTEXT = 'kubedoor-agent'
+AI_CONTEXT = 'kubedoor-ai-readonly'
 AI_URL = 'http://kubedoor-ai:8000'
 AI_MANUAL_HINT = 'AI 仍可经 Agent 执行，需要时可在 Agent 管理的「AI Kubeconfig」列手动上传'
 NOTIFY_MANUAL_HINT = '可以在系统管理 → 消息通知手动配置'

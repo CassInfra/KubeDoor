@@ -9,6 +9,7 @@ import argparse
 import base64
 import copy
 import hashlib
+import hmac
 import json
 import os
 from pathlib import Path
@@ -266,7 +267,16 @@ def render_agent(options: dict, *, username: str, password: str) -> list[dict]:
     resources = [obj for filename in selected for obj in _load_file(filename, variables, options["ksm"] != "reuse")]
     # 通知不再由 agent 直接发送（经 master 统一发送），agent 里不保存机器人 token。
     # 对象存储地址：网页安装为空串（master 每次转发 /api/pod/* 时带上通用配置里的地址），旧脚本照旧写入 OSS_URL
-    secret_data = {"KUBEDOOR_MASTER": ws, "OSS_URL": options.get("oss_url", "")}
+    internal_token = hmac.new(
+        f"{username}:{password}".encode("utf-8"),
+        f"kubedoor-internal-token:{options['namespace']}:{options['env']}".encode("utf-8"),
+        "sha256",
+    ).hexdigest()
+    secret_data = {
+        "KUBEDOOR_MASTER": ws,
+        "OSS_URL": options.get("oss_url", ""),
+        "KUBEDOOR_INTERNAL_TOKEN": internal_token,
+    }
     secret = {"apiVersion": "v1", "kind": "Secret", "metadata": {"name": "kubedoor-agent-credentials", "namespace": options["namespace"]}, "type": "Opaque", "data": {k: base64.b64encode(v.encode()).decode() for k, v in secret_data.items()}}
     resources.insert(1, secret)
     if vmagent and (rw_user or rw_pass or rp.query):
@@ -342,7 +352,23 @@ def main():
     if args.file:
         # CLI 仍按原模板文件名输出，便于已有 render 调用按文件 review。
         name = Path(args.file).name
-        names = {"00-namespace.yaml": {"Namespace"}, "10-agent.yaml": {"kubedoor-agent", "kubedoor-agent-config", "kubedoor-agent-cr", "kubedoor-agent-crb", "kubedoor-agent-credentials"}, "20-vmagent.yaml": {"vmagent", "vmagent-config", "kubedoor-vmagent", "kubedoor-metrics-credentials"}, "21-kube-state-metrics.yaml": {"kube-state-metrics", "kubedoor-state-metrics"}, "22-node-exporter.yaml": {"node-exporter"}}
+        names = {
+            "00-namespace.yaml": {"Namespace"},
+            "10-agent.yaml": {
+                "kubedoor-agent",
+                "kubedoor-agent-config",
+                "kubedoor-agent-cr",
+                "kubedoor-agent-crb",
+                "kubedoor-agent-credentials",
+                "kubedoor-agent-netpol",
+                "kubedoor-ai-readonly",
+                "kubedoor-ai-readonly-cr",
+                "kubedoor-ai-readonly-crb",
+            },
+            "20-vmagent.yaml": {"vmagent", "vmagent-config", "kubedoor-vmagent", "kubedoor-metrics-credentials"},
+            "21-kube-state-metrics.yaml": {"kube-state-metrics", "kubedoor-state-metrics"},
+            "22-node-exporter.yaml": {"node-exporter"},
+        }
         resources = [obj for obj in resources if obj["kind"] in names.get(name, set()) or obj["metadata"]["name"] in names.get(name, set())]
     print(yaml.safe_dump_all(resources, allow_unicode=True, sort_keys=False))
 

@@ -672,32 +672,28 @@ export function useResource(tableRef: Ref, searchStore: any) {
         ? [row]
         : tableRef.value.getTableRef().getSelectionRows();
       const params = [];
-      const content = rowArr
-        .map(row => {
-          let podCount = row.pod_count_manual;
+      const items = rowArr.map(row => {
+        let podCount = row.pod_count_manual;
+        if (podCount === -1) {
+          podCount = row.pod_count_ai;
           if (podCount === -1) {
-            podCount = row.pod_count_ai;
-            if (podCount === -1) {
-              podCount = row.pod_count;
-            }
+            podCount = row.pod_count;
           }
-          const item = {
-            namespace: row.namespace,
-            deployment_name: row.deployment,
-            num: Number(podCount)
-          };
-          params.push(item);
-          currentEnv = row.env;
-          return (
-            `<div>` +
-            `<strong style='margin-right: 5px;'>Env: </strong><i><span style='color: red;'>${row.env}</span></i>&nbsp;&nbsp;` +
-            `<strong style='margin-right: 5px;'>Namespace: </strong><i><span style='color: red;'>${row.namespace}</span></i>&nbsp;&nbsp;` +
-            `<strong style='margin-right: 5px;'>Deployment: </strong><i><span style='color: red;'>${row.deployment}</span></i>&nbsp;&nbsp;` +
-            `<strong style='margin-right: 5px;'>Pod数量: </strong><i><span style='color: red;'>${podCount}</span></i>` +
-            `</div>`
-          );
-        })
-        .join("<br>");
+        }
+        const item = {
+          namespace: row.namespace,
+          deployment_name: row.deployment,
+          num: Number(podCount)
+        };
+        params.push(item);
+        currentEnv = row.env;
+        return {
+          env: row.env,
+          namespace: row.namespace,
+          deployment: row.deployment,
+          podCount
+        };
+      });
 
       let showAddLabelRes = -1;
 
@@ -708,7 +704,7 @@ export function useResource(tableRef: Ref, searchStore: any) {
 
       const scaleProps = {
         isScale: true,
-        content,
+        items,
         showInterval: params.length > 1, // 是否显示间隔.
         showAddLabel: showAddLabelRes
       };
@@ -782,26 +778,22 @@ export function useResource(tableRef: Ref, searchStore: any) {
         ? [row]
         : tableRef.value.getTableRef().getSelectionRows();
       let params = [];
-      const content = rowArr
-        .map(row => {
-          params.push({
-            namespace: row.namespace,
-            deployment_name: row.deployment
-          });
-          currentEnv = row.env;
-          return (
-            `<div>` +
-            `<strong style='margin-right: 5px;'>Env: </strong><i><span style='color: red;'>${row.env}</span></i>&nbsp;&nbsp;` +
-            `<strong style='margin-right: 5px;'>Namespace: </strong><i><span style='color: red;'>${row.namespace}</span></i>&nbsp;&nbsp;` +
-            `<strong style='margin-right: 5px;'>Deployment: </strong><i><span style='color: red;'>${row.deployment}</span></i>&nbsp;&nbsp;` +
-            `</div>`
-          );
-        })
-        .join("<br>");
+      const items = rowArr.map(row => {
+        params.push({
+          namespace: row.namespace,
+          deployment_name: row.deployment
+        });
+        currentEnv = row.env;
+        return {
+          env: row.env,
+          namespace: row.namespace,
+          deployment: row.deployment
+        };
+      });
 
       const rebootProps = {
         isScale: false,
-        content,
+        items,
         showInterval: params.length > 1,
         showAddLabel: -1
       };

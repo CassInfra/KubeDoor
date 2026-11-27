@@ -6,9 +6,17 @@ import ReCol from "@/components/ReCol";
 
 import Warning from "@iconify-icons/ep/warning-filled";
 
+type ScaleContentItem = {
+  env?: string;
+  namespace?: string;
+  deployment?: string;
+  podCount?: number | string;
+};
+
 type Props = {
   isScale: boolean;
-  content: string;
+  content?: string;
+  items?: ScaleContentItem[];
   showInterval: boolean;
   showAddLabel: number; //-1: 多条数据显示默认为false, 0: 不显示, 1: 显示默认为true
 };
@@ -16,6 +24,7 @@ type Props = {
 const props = withDefaults(defineProps<Props>(), {
   isScale: true,
   content: "",
+  items: () => [],
   showInterval: false,
   showAddLabel: -1
 });
@@ -108,7 +117,35 @@ defineExpose({ getData });
           </div>
         </re-col>
         <re-col :offset="2" :value="20" :xs="24" :sm="24">
-          <div style="margin-bottom: 15px" v-html="props.content" />
+          <div style="margin-bottom: 15px">
+            <template v-if="props.items?.length">
+              <div
+                v-for="(item, index) in props.items"
+                :key="`${item.env ?? ''}-${item.namespace ?? ''}-${item.deployment ?? ''}-${index}`"
+                style="margin-bottom: 6px"
+              >
+                <strong style="margin-right: 5px">Env: </strong>
+                <i style="margin-right: 8px">
+                  <span style="color: red">{{ item.env }}</span>
+                </i>
+                <strong style="margin-right: 5px">Namespace: </strong>
+                <i style="margin-right: 8px">
+                  <span style="color: red">{{ item.namespace }}</span>
+                </i>
+                <strong style="margin-right: 5px">Deployment: </strong>
+                <i style="margin-right: 8px">
+                  <span style="color: red">{{ item.deployment }}</span>
+                </i>
+                <template v-if="item.podCount !== undefined">
+                  <strong style="margin-right: 5px">Pod数量: </strong>
+                  <i>
+                    <span style="color: red">{{ item.podCount }}</span>
+                  </i>
+                </template>
+              </div>
+            </template>
+            <span v-else>{{ props.content }}</span>
+          </div>
         </re-col>
         <template v-if="props.isScale">
           <re-col

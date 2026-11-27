@@ -140,8 +140,8 @@ class FakeCluster:
             return {'metadata': {'uid': self.uid}}
         if path.endswith('/configmaps/kubedoor-agent-config'):
             return copy.deepcopy(self.resources.get(('ConfigMap', 'kubedoor-agent-config')))
-        if path == '/api/v1/namespaces/kubedoor/secrets/kubedoor-agent':
-            secret = copy.deepcopy(self.resources.get(('Secret', 'kubedoor-agent')))
+        if path == '/api/v1/namespaces/kubedoor/secrets/kubedoor-ai-readonly':
+            secret = copy.deepcopy(self.resources.get(('Secret', 'kubedoor-ai-readonly')))
             if secret and self.agent_token:
                 secret['data'] = {'token': base64.b64encode(self.agent_token.encode()).decode(), 'ca.crt': 'Q0E='}
             return secret
@@ -327,7 +327,7 @@ class FakeAI:
 
     async def handle(self, request):
         self.requests.append({'path': request.path, 'headers': dict(request.headers), 'body': await request.json()})
-        reply = self.reply if self.reply is not None else {'env': 'production', 'context': 'kubedoor-agent', 'origin': 'agent-install'}
+        reply = self.reply if self.reply is not None else {'env': 'production', 'context': 'kubedoor-ai-readonly', 'origin': 'agent-install'}
         return web.json_response(reply, status=self.status)
 
     def app(self):
@@ -359,12 +359,12 @@ async def test_agent_online_configures_ai_kubeconfig_with_the_agent_token(enviro
     headers = request['headers']
     assert (headers['X-Kubedoor-Token'], headers['X-User-Name'], headers['X-User-Permission']) == ('internal-secret', 'admin', 'admin')
     body = request['body']
-    assert (body['context'], body['origin']) == ('kubedoor-agent', 'agent-install')
+    assert (body['context'], body['origin']) == ('kubedoor-ai-readonly', 'agent-install')
     config = json.loads(body['content'])
-    # 集群地址沿用安装用的 kubeconfig；凭据是 Agent 服务账号的长期令牌，不是上传的个人令牌
+    # 集群地址沿用安装用的 kubeconfig；凭据是专用只读 AI 服务账号的长期令牌，不是上传的个人令牌
     assert config['clusters'][0]['cluster'] == {'server': 'https://k8s.example.test'}
-    assert config['users'] == [{'name': 'kubedoor-agent', 'user': {'token': 'agent-sa-token'}}]
-    assert config['current-context'] == 'kubedoor-agent' and config['contexts'][0]['context']['user'] == 'kubedoor-agent'
+    assert config['users'] == [{'name': 'kubedoor-ai-readonly', 'user': {'token': 'agent-sa-token'}}]
+    assert config['current-context'] == 'kubedoor-ai-readonly' and config['contexts'][0]['context']['user'] == 'kubedoor-ai-readonly'
     assert 'private-kube-token' not in body['content']
     # 安装记录里没有任何令牌，上传的 kubeconfig 照样销毁
     assert done['encrypted'] == ''
@@ -391,7 +391,7 @@ async def test_ai_kubeconfig_result_never_fails_the_install(environment, monkeyp
 @pytest.mark.asyncio
 async def test_ai_kubeconfig_explains_why_it_was_not_configured(environment, monkeypatch):
     service, cluster, _ = environment
-    cluster.resources['Secret', 'kubedoor-agent'] = {'kind': 'Secret', 'metadata': {'name': 'kubedoor-agent', 'namespace': 'kubedoor'}}
+    cluster.resources['Secret', 'kubedoor-ai-readonly'] = {'kind': 'Secret', 'metadata': {'name': 'kubedoor-ai-readonly', 'namespace': 'kubedoor'}}
     task, options, parsed = {'env': 'production', 'payload': {'created_by': 'admin'}}, {'namespace': 'kubedoor'}, module.parse(CONFIG)
     monkeypatch.delenv('AI_INTERNAL_TOKEN', raising=False)
     result = await service.configure_ai_connection(task, options, parsed, cluster)
@@ -405,7 +405,7 @@ async def test_ai_kubeconfig_explains_why_it_was_not_configured(environment, mon
     # 令牌控制器还没填令牌：稍等几次仍然没有就放弃
     cluster.agent_token = ''
     result = await service.configure_ai_connection(task, options, parsed, cluster)
-    assert result['status'] == 'failed' and 'Secret kubedoor-agent' in result['message']
+    assert result['status'] == 'failed' and 'Secret kubedoor-ai-readonly' in result['message']
     cluster.unauthorized = True
     result = await service.configure_ai_connection(task, options, parsed, cluster)
     assert result['status'] == 'failed' and '认证失败（HTTP 401）' in result['message']
@@ -420,7 +420,7 @@ def test_ai_kubeconfig_keeps_the_cluster_section_and_swaps_the_credential():
                                                'tls-server-name': 'api.internal'}
     # 自动配置的 kubeconfig 要能通过 AI 那边同一个解析器（只接受内嵌凭据）
     reparsed = module.parse_kubeconfig(built)
-    assert reparsed['context'] == 'kubedoor-agent' and reparsed['config']['users'][0]['user'] == {'token': 'agent-sa-token'}
+    assert reparsed['context'] == 'kubedoor-ai-readonly' and reparsed['config']['users'][0]['user'] == {'token': 'agent-sa-token'}
 
 
 @pytest.mark.asyncio
@@ -816,7 +816,10 @@ async def test_oss_url_is_not_written_into_the_agent_secret(environment, setting
     done = await repo.get(task['id'])
     assert done['status'] == 'succeeded', done['payload']
     secret = cluster.resources['Secret', 'kubedoor-agent-credentials']['data']
-    assert set(secret) == {'KUBEDOOR_MASTER', 'OSS_URL'} and base64.b64decode(secret['OSS_URL']).decode() == ''
+    assert set(secret) == {'KUBEDOOR_MASTER', 'OSS_URL', 'KUBEDOOR_INTERNAL_TOKEN'}
+    assert base64.b64decode(secret['OSS_URL']).decode() == ''
+    token = base64.b64decode(secret['KUBEDOOR_INTERNAL_TOKEN']).decode()
+    assert len(token) == 64 and all(ch in '0123456789abcdef' for ch in token)
     applied = json.dumps(cluster.applied)
     assert 'objects.example.test' not in applied and 'page.example.test' not in applied
 

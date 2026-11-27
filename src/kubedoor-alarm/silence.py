@@ -222,7 +222,7 @@ class SilenceEngine:
         if not pending:
             return
         try:
-            with self._pool.connection() as conn:
+            with self._pool.connection() as conn, conn.transaction():
                 for silence_id, (delta, last_ts) in pending.items():
                     conn.execute(
                         "UPDATE alert_silences SET match_count = match_count + %s, "

@@ -153,3 +153,160 @@ def test_setup_health(alarm_app, monkeypatch):
     alarm_app.pool.fail = True
     resp = client.get('/internal/setup-health', headers={'X-Kubedoor-Token': 'internal-secret'})
     assert resp.status_code == 503 and resp.get_json()['ok'] is False
+
+
+def test_fake_pool_discards_uncommitted_dml_and_counts_rollback():
+    from conftest import FakePool
+
+    pool = FakePool()
+    pool.silence_rows = [SILENCE_RESTART]
+    pool.alert_rows = [(1,)]
+
+    # 未调 commit() 也未用 conn.transaction() 的写入,退出 connection() 时模拟 putconn() 隐式回滚
+    with pool.connection() as conn:
+        conn.execute('INSERT INTO k8s_pod_alert_days (fingerprint) VALUES (%s)', ('fp-1',))
+        conn.execute('UPDATE k8s_pod_alert_days SET count_firing = 2 WHERE fingerprint = %s', ('fp-1',))
+        conn.execute('DELETE FROM k8s_pod_alert_days WHERE fingerprint = %s', ('fp-1',))
+
+    assert pool.writes() == []
+    assert pool.executed == []
+    assert pool.commits == 0
+    assert pool.rollbacks == 1
+
+    # 只读 SELECT 不触发回滚,并正常返回配置好的结果集和锁查询空结果
+    with pool.connection() as conn:
+        assert conn.execute('SELECT pg_advisory_xact_lock(hashtext(%s))', ('2026-11-07:fp-1',)).fetchall() == []
+        assert conn.execute('SELECT id FROM alert_silences').fetchall() == [SILENCE_RESTART]
+        assert conn.execute('SELECT 1 FROM k8s_pod_alert_days').fetchone() == (1,)
+
+    assert pool.rollbacks == 1
+
+    # 显式 commit() 与 conn.transaction() 正常退出均会提交
+    with pool.connection() as conn:
+        conn.execute('INSERT INTO k8s_pod_alert_days (fingerprint) VALUES (%s)', ('fp-commit',))
+        conn.commit()
+    with pool.connection() as conn, conn.transaction():
+        conn.execute('UPDATE k8s_pod_alert_days SET count_firing = 3 WHERE fingerprint = %s', ('fp-tx',))
+
+    assert len(pool.writes()) == 2
+    assert pool.commits == 2
+    assert pool.rollbacks == 1
+
+    # conn.transaction() 发生异常时丢弃待提交写入并传播异常
+    with pytest.raises(RuntimeError, match='boom'):
+        with pool.connection() as conn, conn.transaction():
+            conn.execute('INSERT INTO k8s_pod_alert_days (fingerprint) VALUES (%s)', ('fp-abort',))
+            raise RuntimeError('boom')
+
+    assert len(pool.writes()) == 2
+    assert pool.commits == 2
+    assert pool.rollbacks == 2
+
+
+def _alert_data(fp=None, status='firing'):
+    return {
+        'fingerprint': fp or fingerprint(),
+        'start_time': '2026-11-07 12:00:00',
+        'end_time': '2026-11-07 12:30:00',
+        'severity': 'Warning',
+        'alert_group': 'pod',
+        'alert_name': 'K8S_Pod_Restart',
+        'env': 'prod-k8s',
+        'namespace': 'default',
+        'container': 'web',
+        'pod': 'web-6d4cf56db6-abcde',
+        'description': '重启了 3 次',
+        'alert_status': status,
+    }
+
+
+def test_firing_insert_and_update_acquire_advisory_lock_and_commit(alarm_app):
+    fp = fingerprint()
+    assert alarm_app.handle_firing_alert(_alert_data(fp), True, None) == (True, '')
+    assert alarm_app.pool.rollbacks == 0
+    assert alarm_app.pool.commits == 1
+    assert [sql.split()[0:2] for sql, _ in alarm_app.pool.executed] == [
+        ['SELECT', 'pg_advisory_xact_lock(hashtext(%s))'],
+        ['SELECT', '1'],
+        ['INSERT', 'INTO'],
+    ]
+    assert alarm_app.pool.executed[0] == (
+        'SELECT pg_advisory_xact_lock(hashtext(%s))',
+        (f'2026-11-07:{fp}',),
+    )
+
+    alarm_app.pool.executed.clear()
+    alarm_app.pool.alert_rows = [(1,)]
+    assert alarm_app.handle_firing_alert(_alert_data(fp), True, 7) == (True, '')
+    assert alarm_app.pool.rollbacks == 0
+    assert alarm_app.pool.commits == 2
+    assert [sql.split()[0:2] for sql, _ in alarm_app.pool.executed] == [
+        ['SELECT', 'pg_advisory_xact_lock(hashtext(%s))'],
+        ['SELECT', '1'],
+        ['UPDATE', 'k8s_pod_alert_days'],
+    ]
+    assert alarm_app.pool.executed[0] == (
+        'SELECT pg_advisory_xact_lock(hashtext(%s))',
+        (f'2026-11-07:{fp}',),
+    )
+
+
+def test_resolved_alert_commits_with_zero_rollbacks(alarm_app):
+    assert alarm_app.handle_resolved_alert(_alert_data(), True, None)[0] is False
+    assert alarm_app.pool.writes() == []
+    assert alarm_app.pool.rollbacks == 0
+    assert alarm_app.pool.commits == 1
+
+    alarm_app.pool.alert_rows = [(1,)]
+    assert alarm_app.handle_resolved_alert(_alert_data(), True, None) == (True, '')
+    assert len(alarm_app.pool.writes()) == 1
+    assert alarm_app.pool.writes()[0][0].startswith('UPDATE k8s_pod_alert_days SET')
+    assert alarm_app.pool.rollbacks == 0
+    assert alarm_app.pool.commits == 2
+
+
+def test_firing_and_resolved_rollback_on_mid_transaction_exception(alarm_app, monkeypatch):
+    def fail_info(*args, **kwargs):
+        raise RuntimeError('mid-transaction failure')
+
+    monkeypatch.setattr(alarm_app.logging, 'info', fail_info)
+
+    # firing INSERT 在提交前异常:已执行的 INSERT 必须回滚
+    with pytest.raises(RuntimeError, match='mid-transaction failure'):
+        alarm_app.handle_firing_alert(_alert_data(), True, None)
+    assert alarm_app.pool.writes() == []
+    assert alarm_app.pool.commits == 0
+    assert alarm_app.pool.rollbacks == 1
+
+    # firing UPDATE 在提交前异常:已执行的 UPDATE 必须回滚
+    alarm_app.pool.alert_rows = [(1,)]
+    with pytest.raises(RuntimeError, match='mid-transaction failure'):
+        alarm_app.handle_firing_alert(_alert_data(), True, None)
+    assert alarm_app.pool.writes() == []
+    assert alarm_app.pool.commits == 0
+    assert alarm_app.pool.rollbacks == 2
+
+    # resolved UPDATE 在提交前异常:已执行的 UPDATE 必须回滚
+    with pytest.raises(RuntimeError, match='mid-transaction failure'):
+        alarm_app.handle_resolved_alert(_alert_data(), True, None)
+    assert alarm_app.pool.writes() == []
+    assert alarm_app.pool.commits == 0
+    assert alarm_app.pool.rollbacks == 3
+
+
+def test_store_isolates_failed_alert_transaction_from_subsequent_alert(alarm_app):
+    calls = {'inserts': 0}
+
+    def fail_first_insert(sql, params):
+        if sql.startswith('INSERT INTO k8s_pod_alert_days'):
+            calls['inserts'] += 1
+            if calls['inserts'] == 1:
+                raise RuntimeError('unique violation or timeout')
+
+    alarm_app.pool.on_execute = fail_first_insert
+    resp = store(alarm_app, store_alert(pod='pod-fail'), store_alert(pod='pod-ok'))
+    assert resp.status_code == 200
+    assert alarm_app.pool.rollbacks == 1
+    assert alarm_app.pool.commits == 1
+    assert len(alarm_app.pool.writes()) == 1
+    assert alarm_app.pool.writes()[0][1][10] == 'pod-ok'

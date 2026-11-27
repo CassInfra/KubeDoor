@@ -712,13 +712,13 @@
     >
       <pre
         class="result-content"
-        :style="
+        :style="[
           currentOperation === 'jstack' || currentOperation === 'dump'
             ? { 'max-height': '82vh', 'overflow-y': 'auto' }
-            : { 'max-height': '600px', 'overflow-y': 'auto' }
-        "
-        v-html="resultMessage"
-      />
+            : { 'max-height': '600px', 'overflow-y': 'auto' },
+          { 'white-space': 'pre-wrap', 'word-break': 'break-all' }
+        ]"
+      >{{ resultMessage }}</pre>
       <template #footer>
         <el-button type="primary" @click="handleCopyAndClose">关闭</el-button>
       </template>
@@ -767,6 +767,7 @@ import { updateServiceContent, getServiceContent } from "@/api/service";
 import { useSearchStoreHook } from "@/store/modules/search";
 import { usePermission } from "@/utils/usePermission";
 import { openPodShell } from "@/utils/podShell";
+import { buildNodeOptionLabel } from "@/utils/safeHtml";
 import { podQuestion } from "@/utils/ai";
 import { useAskAI } from "@/utils/useAskAI";
 import PodLogViewer from "@/views/monit/components/PodLogViewer.vue";
@@ -1187,7 +1188,7 @@ const refreshPods = async (targetNamespace?: string) => {
 };
 
 const showResultDialog = (message: string, operation: string = "") => {
-  resultMessage.value = `<div style="white-space: pre-wrap; word-break: break-all;">${message}</div>`;
+  resultMessage.value = message ?? "";
   currentOperation.value = operation;
   resultDialogVisible.value = true;
 };
@@ -1266,7 +1267,7 @@ const handleModifyPod = async (
       const nodeListContainer = document.getElementById("nodeListContainer");
       if (!nodeListContainer) return;
 
-      nodeListContainer.innerHTML = "";
+      nodeListContainer.replaceChildren();
 
       nodeListRef.value.forEach((node: any) => {
         const nodeItem = document.createElement("div");
@@ -1290,11 +1291,13 @@ const handleModifyPod = async (
           }
         });
 
-        const label = document.createElement("span");
         const percentText =
           resourceTypeRef.value === "pod" ? node.percent : `${node.percent}%`;
-        const cpodNumColor = node.cpod_num !== 0 ? "color: red;" : "";
-        label.innerHTML = `${node.name} (<span style="color: blue;">${percentText}</span>，<span style="${cpodNumColor}">${node.cpod_num}Pod</span>)`;
+        const label = buildNodeOptionLabel(
+          node.name,
+          percentText,
+          node.cpod_num
+        );
 
         nodeItem.appendChild(checkbox);
         nodeItem.appendChild(label);

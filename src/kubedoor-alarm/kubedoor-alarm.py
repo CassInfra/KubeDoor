@@ -146,7 +146,12 @@ def handle_firing_alert(alert_data, send_resolved, silence_id=None):
     """
     day = alert_data['start_time'].split()[0]
     silenced = silence_id is not None
-    with pool.connection() as conn:
+    with pool.connection() as conn, conn.transaction():
+        # 事务级咨询锁串行化同 (day, fingerprint) 的并发入库,防止竞态重复插入
+        conn.execute(
+            "SELECT pg_advisory_xact_lock(hashtext(%s))",
+            (f"{day}:{alert_data['fingerprint']}",),
+        )
         existing = conn.execute(
             "SELECT 1 FROM k8s_pod_alert_days "
             "WHERE start_time::date = %s AND fingerprint = %s LIMIT 1",
@@ -196,7 +201,7 @@ def handle_resolved_alert(alert_data, send_resolved, silence_id=None):
 
     day = alert_data['start_time'].split()[0]
     silenced = silence_id is not None
-    with pool.connection() as conn:
+    with pool.connection() as conn, conn.transaction():
         existing = conn.execute(
             "SELECT 1 FROM k8s_pod_alert_days "
             "WHERE start_time::date = %s AND fingerprint = %s LIMIT 1",

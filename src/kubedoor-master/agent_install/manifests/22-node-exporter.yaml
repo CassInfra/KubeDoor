@@ -18,7 +18,6 @@ spec:
         app: node-exporter
     spec:
       hostPID: true
-      hostIPC: true
       hostNetwork: true
       containers:
       - name: node-exporter
@@ -34,7 +33,14 @@ spec:
             cpu: 500m
             memory: 400Mi
         securityContext:
-          privileged: true
+          runAsNonRoot: true
+          runAsUser: 65534
+          runAsGroup: 65534
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop:
+              - ALL
         args:
         - --path.procfs=/host/proc
         - --path.sysfs=/host/sys
@@ -47,17 +53,15 @@ spec:
         volumeMounts:
         - mountPath: /host/proc
           name: proc
-          readOnly: false
+          readOnly: true
         - mountPath: /host/sys
           name: sys
-          readOnly: false
+          readOnly: true
         - mountPath: /host/root
           mountPropagation: HostToContainer
           name: root
           readOnly: true
 
-      securityContext:
-        runAsUser: 0
       tolerations:
       - operator: Exists
       volumes:

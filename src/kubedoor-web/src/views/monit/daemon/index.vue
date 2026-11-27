@@ -700,6 +700,7 @@ import * as monaco from "monaco-editor";
 import * as yaml from "js-yaml";
 import { YAMLException } from "js-yaml";
 import { AnsiUp } from "ansi_up";
+import { highlightAnsiHtml } from "@/utils/safeHtml";
 
 defineOptions({
   name: "DaemonSetManager"
@@ -1339,17 +1340,10 @@ const highlightSearchKeyword = (message: string, index: number) => {
   if (!message.toLowerCase().includes(keyword.toLowerCase())) {
     return processedMessage;
   }
-  const regex = new RegExp(
-    `(${keyword.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")})`,
-    "gi"
-  );
   const highlightClass = isCurrentMatch
     ? "search-highlight-current"
     : "search-highlight";
-  return processedMessage.replace(
-    regex,
-    `<span class="${highlightClass}">$1</span>`
-  );
+  return highlightAnsiHtml(processedMessage, keyword, highlightClass);
 };
 
 const performSearch = (forceFirstMatch = false) => {
