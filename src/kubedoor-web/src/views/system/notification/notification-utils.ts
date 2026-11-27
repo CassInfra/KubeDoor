@@ -725,10 +725,9 @@ export const FALLBACK_PROVIDERS: ProviderSchema[] = [
       {
         key: "to_addrs",
         label: "收件人地址",
-        kind: "textarea",
+        kind: "text",
         required: true,
-        placeholder:
-          "多个邮箱用逗号或换行分隔，如 sre@example.com, ops@example.com"
+        placeholder: "多个邮箱用逗号分隔，如 sre@example.com, ops@example.com"
       },
       {
         key: "subject_prefix",
@@ -746,6 +745,7 @@ export const CATEGORY_OPTIONS: Array<{ value: string; label: string }> = [
   { value: "ops", label: "运维操作通知" },
   { value: "metric_alert", label: "指标告警" },
   { value: "control_table", label: "管控表通知" },
+  { value: "test", label: "测试消息" },
   { value: "generic", label: "通用通知" }
 ];
 
@@ -793,7 +793,7 @@ export interface RouteFormV2 {
   continue: boolean;
 }
 
-const CHANNEL_ID_RE = /^[A-Za-z0-9_.:-]{1,64}$/;
+const CHANNEL_ID_RE = /^[A-Za-z0-9_.-]{1,64}$/;
 const IM_WEBHOOK_PROVIDERS = new Set(["wecom", "feishu", "dingding", "slack"]);
 
 const V2_WEBHOOK_HOSTS: Array<[RegExp, string]> = [
@@ -1153,7 +1153,7 @@ export function buildChannelPayloadV2(
   const id = (form.id || "").trim();
   if (!CHANNEL_ID_RE.test(id)) {
     throw new Error(
-      `通道 ID「${id || "(空)"}」不合规：只能包含字母、数字、下划线、点、冒号或连字符，最长 64 个字符`
+      `通道 ID「${id || "(空)"}」不合规：只能包含字母、数字、下划线、点或连字符，最长 64 个字符`
     );
   }
   const name = (form.name || "").trim();

@@ -247,3 +247,29 @@ def test_send_pinned_https_passes_sni_host_while_connecting_to_pinned_ip(monkeyp
         ("create_connection", ("93.184.216.34", 443)),
         ("wrap_socket", "api.example.com"),
     ]
+
+
+def test_default_dns_lookup_times_out_cleanly_without_hanging(monkeypatch):
+    import time
+
+    gate = threading.Event()
+
+    def hanging_getaddrinfo(host, port, *args, **kwargs):
+        gate.wait(5.0)
+        return [(socket.AF_INET, socket.SOCK_STREAM, 0, "", ("93.184.216.34", port))]
+
+    monkeypatch.setattr(socket, "getaddrinfo", hanging_getaddrinfo)
+    monkeypatch.setenv("NOTIFY_DNS_TIMEOUT", "0.05")
+
+    started = time.monotonic()
+    try:
+        with pytest.raises(SSRFError, match="TimeoutError"):
+            validate_target_url("https://slow-dns.example.com/hook")
+        elapsed = time.monotonic() - started
+        assert elapsed < 1.0
+    finally:
+        gate.set()
+
+    # Custom resolver= signature continues working unaffected
+    resolver = _fake_resolver({"fast.example.com": ["93.184.216.34"]})
+    assert validate_target_url("https://fast.example.com/hook", resolver=resolver).pinned_ip == "93.184.216.34"

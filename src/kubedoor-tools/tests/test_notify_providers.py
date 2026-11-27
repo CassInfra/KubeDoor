@@ -296,6 +296,34 @@ def test_feishu_provider_lark_signing_colors_and_at(monkeypatch):
     assert r_rl.ok is False and r_rl.retryable is True
 
 
+def test_feishu_parse_http_response_rejects_mixed_and_missing_status_codes():
+    p = get_provider("feishu")
+
+    # Both zero -> ok
+    assert p.parse_http_response(200, {}, '{"code":0,"StatusCode":0,"StatusMessage":"success"}').ok is True
+    assert p.parse_http_response(200, {}, '{"code":null,"StatusCode":0}').ok is True
+
+    # Non-zero code alongside StatusCode: 0 -> MUST fail and report 19024
+    mixed1 = p.parse_http_response(200, {}, '{"code":19024,"msg":"Key Words Not Found","StatusCode":0}')
+    assert mixed1.ok is False
+    assert mixed1.provider_code == "19024"
+    assert "19024" in mixed1.message and "Key Words Not Found" in mixed1.message
+
+    # Non-zero StatusCode alongside code: 0 -> MUST fail and report 19024
+    mixed2 = p.parse_http_response(200, {}, '{"code":0,"msg":"ok","StatusCode":19024,"StatusMessage":"Key Words Not Found"}')
+    assert mixed2.ok is False
+    assert mixed2.provider_code == "19024"
+    assert "19024" in mixed2.message and "Key Words Not Found" in mixed2.message
+
+    # Retryable error code with StatusCode: 0 -> fail + retryable
+    mixed_rl = p.parse_http_response(200, {}, '{"code":11232,"msg":"rate limit","StatusCode":0}')
+    assert mixed_rl.ok is False and mixed_rl.retryable is True and mixed_rl.provider_code == "11232"
+
+    # Missing or null status fields -> fail
+    assert p.parse_http_response(200, {}, "{}").ok is False
+    assert p.parse_http_response(200, {}, '{"code":null,"msg":"unknown"}').ok is False
+
+
 # ---------------------------------------------------------------------------
 # Provider 3: DingTalk
 # ---------------------------------------------------------------------------

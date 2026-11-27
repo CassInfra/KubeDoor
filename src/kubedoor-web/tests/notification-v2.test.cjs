@@ -217,6 +217,17 @@ test("buildChannelPayloadV2 支持密文留空沿用、切换类型重填校验�
   assert.throws(() => utils.buildChannelPayloadV2(smtpForm), /不能大于 65535/);
   smtpForm.settings.port = 465;
   assert.equal(utils.buildChannelPayloadV2(smtpForm).settings.port, 465);
+
+  // 通道 ID 与路由 ID 禁止冒号 ':'，与后端 _ID_PATTERN 对齐；CATEGORY_OPTIONS 含 test；smtp.to_addrs 为 text
+  const badIdForm = utils.defaultChannelFormV2("wecom", undefined, {
+    id: "ch:bad",
+    name: "非法冒号",
+    secrets: { token: "key-1" }
+  });
+  assert.throws(() => utils.buildChannelPayloadV2(badIdForm), /通道 ID.*不合规/);
+  const smtpSchema = utils.findProviderSchema("smtp");
+  assert.equal(smtpSchema.fields.find(f => f.key === "to_addrs")?.kind, "text");
+  assert.ok(utils.CATEGORY_OPTIONS.some(c => c.value === "test"));
 });
 
 test("buildConfigV2Payload 校验通道去重、路由多路扇出及默认兜底引用", () => {
@@ -263,6 +274,12 @@ test("buildConfigV2Payload 校验通道去重、路由多路扇出及默认兜�
   assert.match(
     utils.routeSummary(rt1, { ch_wecom: "企微群", ch_mail: "值班邮箱" }),
     /集群: prod-k8s.*指标告警.*企微群、值班邮箱（继续后续规则）/
+  );
+
+  // 通道 ID 与路由 ID 禁止冒号 ':'
+  assert.throws(
+    () => utils.buildConfigV2Payload([ch1], [{ ...rt1, id: "rt:bad" }], []),
+    /路由规则 ID.*格式不合规/
   );
 
   // 路由未选目标通道 -> 阻止提交

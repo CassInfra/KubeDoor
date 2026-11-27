@@ -8,6 +8,7 @@ import ipaddress
 import os
 import socket
 import ssl
+import threading
 from dataclasses import dataclass
 from typing import Any, Callable, Iterable
 from urllib.parse import urlsplit
@@ -18,6 +19,7 @@ from .redact import redact_text
 _CGNAT_NET = ipaddress.ip_network("100.64.0.0/10")
 _THIS_NET_V4 = ipaddress.ip_network("0.0.0.0/8")
 _NAT64_WELL_KNOWN = ipaddress.ip_network("64:ff9b::/96")
+DEFAULT_DNS_TIMEOUT = 5.0
 
 
 class SSRFError(ValueError):
@@ -258,10 +260,47 @@ def precheck_target_url(
     return scheme, host, port
 
 
+def _effective_dns_timeout(dns_timeout: float | None = None) -> float:
+    if dns_timeout is not None:
+        return max(float(dns_timeout), 0.01)
+    raw = os.environ.get("NOTIFY_DNS_TIMEOUT", "").strip()
+    if raw:
+        try:
+            val = float(raw)
+            if val > 0:
+                return val
+        except ValueError:
+            pass
+    return DEFAULT_DNS_TIMEOUT
+
+
+def _resolve_default_getaddrinfo(host: str, port: int, timeout: float) -> Any:
+    done = threading.Event()
+    box: list[Any] = [None, None]
+
+    def _worker() -> None:
+        try:
+            box[0] = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
+        except BaseException as exc:  # noqa: BLE001
+            box[1] = exc
+        finally:
+            done.set()
+
+    thread = threading.Thread(target=_worker, name="notify-dns-resolve", daemon=True)
+    thread.start()
+    if not done.wait(timeout):
+        raise TimeoutError(f"DNS lookup timed out after {timeout:.2f}s")
+    if box[1] is not None:
+        raise box[1]
+    return box[0]
+
+
 def _resolve_ips(
     host: str,
     port: int,
     resolver: Callable[..., Any] | None,
+    *,
+    dns_timeout: float | None = None,
 ) -> list[str]:
     literal = _parse_ip_literal(host)
     if literal is not None and resolver is None:
@@ -269,7 +308,7 @@ def _resolve_ips(
 
     try:
         if resolver is None:
-            infos = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
+            infos = _resolve_default_getaddrinfo(host, port, _effective_dns_timeout(dns_timeout))
         else:
             try:
                 sig = inspect.signature(resolver)
@@ -309,6 +348,7 @@ def validate_target_url(
     allow_private_cidrs: Iterable[str] | None = None,
     allow_private_hosts: Iterable[str] | None = None,
     resolver: Callable[..., Any] | None = None,
+    dns_timeout: float | None = None,
 ) -> ResolvedTarget:
     """Validate URL scheme/host and resolve+check EVERY A/AAAA record against SSRF rules."""
     scheme, host, port = precheck_target_url(
@@ -322,7 +362,7 @@ def validate_target_url(
     private_cidrs = _effective_private_cidrs(allow_private_cidrs)
     host_allowed_private = _host_matches(host, private_hosts)
 
-    raw_ips = _resolve_ips(host, port, resolver)
+    raw_ips = _resolve_ips(host, port, resolver, dns_timeout=dns_timeout)
     validated: list[str] = []
     for ip_str in raw_ips:
         validated.append(
@@ -391,6 +431,7 @@ def validate_host_port(
     allow_private_cidrs: Iterable[str] | None = None,
     allow_private_hosts: Iterable[str] | None = None,
     resolver: Callable[..., Any] | None = None,
+    dns_timeout: float | None = None,
 ) -> ResolvedTarget:
     """Validate and resolve a bare host:port target (e.g. SMTP relay) with SSRF rules."""
     clean_host, clean_port = precheck_host_port(
@@ -403,7 +444,7 @@ def validate_host_port(
     private_cidrs = _effective_private_cidrs(allow_private_cidrs)
     host_allowed_private = _host_matches(clean_host, private_hosts)
 
-    raw_ips = _resolve_ips(clean_host, clean_port, resolver)
+    raw_ips = _resolve_ips(clean_host, clean_port, resolver, dns_timeout=dns_timeout)
     validated = [
         _validate_ip_address(
             ip_str,
@@ -458,10 +499,16 @@ def send_pinned_http(
     allow_private_hosts: Iterable[str] | None = None,
     resolver: Callable[..., Any] | None = None,
     ssl_context: ssl.SSLContext | None = None,
+    dns_timeout: float | None = None,
 ) -> tuple[int, str, dict[str, str]]:
     """Execute HttpPreparedRequest pinned to validated IP, preserving Host + SNI, zero redirects."""
     effective_allow_http = bool(allow_http or req.allow_http)
     if ssrf_check:
+        effective_dns_timeout = (
+            min(_effective_dns_timeout(), max(float(req.timeout), 0.1))
+            if dns_timeout is None
+            else dns_timeout
+        )
         target = validate_target_url(
             req.url,
             allowed_hosts=allowed_hosts,
@@ -469,6 +516,7 @@ def send_pinned_http(
             allow_private_cidrs=allow_private_cidrs,
             allow_private_hosts=allow_private_hosts,
             resolver=resolver,
+            dns_timeout=effective_dns_timeout,
         )
     else:
         scheme, host, port = _parse_url_parts(req.url, allowed_hosts=allowed_hosts, allow_http=effective_allow_http)

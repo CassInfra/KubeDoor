@@ -70,7 +70,7 @@ SETTING_KEY = 'notification'
 DEFAULT_SCOPE = '全局配置'
 REFRESH_INTERVAL = 10  # 秒
 SEND_TIMEOUT = 10  # 秒
-SEND_WORKERS = 4
+SEND_WORKERS = 8
 # 默认限速(v1 / 兜底): 每分钟 20 条
 RATE_LIMIT = 20
 RATE_WINDOW = 60  # 秒
@@ -754,7 +754,9 @@ def _send(channel, content_or_msg, scope, *, record: bool = True, trace_id: str 
         if isinstance(channel, ChannelConfig)
         else channel
     )
+    started = time.monotonic()
     ok, message = deliver(legacy_channel, content_or_msg)
+    latency_ms = max(int((time.monotonic() - started) * 1000), 0)
     label = _channel_label(legacy_channel)
     if ok:
         logger.info(f'消息通知已发送({scope},{label})')
@@ -775,7 +777,7 @@ def _send(channel, content_or_msg, scope, *, record: bool = True, trace_id: str 
             http_status=200 if ok else None,
             error_summary='' if ok else message,
             message=message,
-            latency_ms=0,
+            latency_ms=latency_ms,
         )
     return DeliveryResult(ok=ok, message=message, retryable=False)
 
@@ -803,7 +805,7 @@ class _Robot:
 
     def __init__(self, label, rate_limit=RATE_LIMIT, window=RATE_WINDOW, burst_limit=None, burst_window=1.0):
         self.label = label
-        self.items = deque()  # (channel, payload, scope, attempt, max_attempts, trace_id, started_at)
+        self.items = deque()  # (channel, payload, scope, attempt, max_attempts, trace_id, started_at, started_total)
         self.sent = deque()
         self.busy = False
         self.dropped = 0
@@ -939,7 +941,7 @@ class Dispatcher:
             if len(robot.items) >= self.backlog:
                 dropped_scope = robot.items.popleft()[2]
                 warning = self._note_drop(robot, dropped_scope, self.clock())
-            robot.items.append((channel, text, scope, 1, attempts_cap, effective_trace, self.clock()))
+            robot.items.append((channel, text, scope, 1, attempts_cap, effective_trace, self.clock(), time.monotonic()))
             self._start()
             self._cond.notify_all()
         if warning:
@@ -1022,7 +1024,7 @@ class Dispatcher:
         return max(base + float(self._jitter(base)), 0.0)
 
     def _send_one(self, robot, item):
-        channel, payload, scope, attempt, max_attempts, trace_id, started_at = item
+        channel, payload, scope, attempt, max_attempts, trace_id, started_at, started_total = item
         result = None
         threw = False
         try:
@@ -1046,7 +1048,7 @@ class Dispatcher:
                 robot.sent.append(now)
                 if should_retry:
                     delay = self._retry_delay(attempt, result)
-                    robot.items.appendleft((channel, payload, scope, attempt + 1, max_attempts, trace_id, started_at))
+                    robot.items.appendleft((channel, payload, scope, attempt + 1, max_attempts, trace_id, started_at, started_total))
                     robot.next_retry_at = now + delay
                 else:
                     robot.next_retry_at = 0.0
@@ -1063,7 +1065,10 @@ class Dispatcher:
                         logger.info(f'消息通知已发送({scope},{robot.label})')
                     else:
                         logger.warning(f'消息通知发送失败({scope},{robot.label}):{result.message}')
-                    total_latency = result.latency_ms if result.latency_ms is not None else 0
+                    clock_ms = max(int((now - started_at) * 1000), 0)
+                    wall_ms = max(int((time.monotonic() - started_total) * 1000), 0)
+                    attempt_ms = int(result.latency_ms or 0)
+                    total_latency = max(clock_ms, wall_ms, attempt_ms)
                     _record_delivery(
                         trace_id=trace_id,
                         env=payload.env,

@@ -203,20 +203,73 @@ def _upsert_v2_from_v1_entry(v2_channels, cid, name, entry):
     kind = entry['type']
     at = str(entry.get('at') or '')
     prev = v2_channels.get(cid)
-    settings = dict(prev.get('settings') or {}) if isinstance(prev, dict) and prev.get('provider') == kind else _v1_default_settings(kind, at)
+    same_provider = isinstance(prev, dict) and prev.get('provider') == kind
+    settings = (
+        dict(prev.get('settings') or {})
+        if same_provider and isinstance(prev.get('settings'), dict)
+        else _v1_default_settings(kind, at)
+    )
     settings['at'] = at
     if kind == 'feishu' and 'domain_preset' not in settings:
         settings['domain_preset'] = 'feishu'
     if kind in ('wecom', 'dingding') and 'domain_preset' not in settings:
         settings['domain_preset'] = 'public'
+    secrets = (
+        dict(prev.get('secrets') or {})
+        if same_provider and isinstance(prev.get('secrets'), dict)
+        else {}
+    )
+    secrets['token'] = entry['token']
     v2_channels[cid] = {
         'id': cid,
         'name': str(prev.get('name') or name) if isinstance(prev, dict) else name,
         'provider': kind,
         'enabled': True,
         'settings': settings,
-        'secrets': {'token': entry['token']},
+        'secrets': secrets,
     }
+
+
+def _route_match_parts(route):
+    match = route.get('match') if isinstance(route.get('match'), dict) else {}
+    envs = [str(x).strip() for x in (match.get('envs') or []) if str(x).strip()]
+    cats = [str(x).strip() for x in (match.get('categories') or []) if str(x).strip()]
+    sevs = [str(x).strip() for x in (match.get('severities') or []) if str(x).strip()]
+    return envs, cats, sevs
+
+
+def _upsert_cluster_route(routes, env, cid):
+    rid = f'rt_cluster_{env}'
+    existing_route = next((r for r in routes if r.get('id') == rid), None)
+    if existing_route is not None:
+        existing_route['name'] = existing_route.get('name') or f'集群 {env}'
+        existing_route['enabled'] = True
+        existing_route['match'] = {'envs': [env], 'categories': [], 'severities': []}
+        existing_route['channel_ids'] = [cid]
+        existing_route['continue'] = False
+        return
+
+    target_route = {
+        'id': rid,
+        'name': f'集群 {env}',
+        'enabled': True,
+        'match': {'envs': [env], 'categories': [], 'severities': []},
+        'channel_ids': [cid],
+        'continue': False,
+    }
+    last_specific = -1
+    for idx, route in enumerate(routes):
+        envs, cats, sevs = _route_match_parts(route)
+        if env in envs or ((not envs or '*' in envs) and (cats or sevs)):
+            last_specific = idx
+
+    insert_idx = len(routes)
+    for idx in range(last_specific + 1, len(routes)):
+        envs, cats, sevs = _route_match_parts(routes[idx])
+        if (not envs or '*' in envs) and not cats and not sevs:
+            insert_idx = idx
+            break
+    routes.insert(insert_idx, target_route)
 
 
 def _merge_v1_into_v2(existing_v2, v1_cfg):
@@ -243,26 +296,12 @@ def _merge_v1_into_v2(existing_v2, v1_cfg):
     new_clusters = _saved_clusters(v1_cfg)
     for env, entry in new_clusters.items():
         cid = f'ch_cluster_{env}'
-        rid = f'rt_cluster_{env}'
         _upsert_v2_from_v1_entry(channels_map, cid, f'集群 {env}', entry)
-        existing_route = next((r for r in routes if r.get('id') == rid), None)
-        if existing_route is not None:
-            existing_route['enabled'] = True
-            existing_route['match'] = {'envs': [env], 'categories': [], 'severities': []}
-            existing_route['channel_ids'] = [cid]
-            existing_route['continue'] = False
-        else:
-            routes.insert(0, {
-                'id': rid,
-                'name': f'集群 {env}',
-                'enabled': True,
-                'match': {'envs': [env], 'categories': [], 'severities': []},
-                'channel_ids': [cid],
-                'continue': False,
-            })
+        _upsert_cluster_route(routes, env, cid)
 
-    # 删除已从 v1 clusters 移除的自动生成集群路由
+    # 删除已从 v1 clusters 移除的自动生成集群路由(仅在无其它路由或 default_channel_ids 引用时删除通道)
     filtered_routes = []
+    removed_cluster_cids = set()
     for route in routes:
         rid = str(route.get('id') or '')
         if rid.startswith('rt_cluster_'):
@@ -270,9 +309,16 @@ def _merge_v1_into_v2(existing_v2, v1_cfg):
             if env_name not in new_clusters:
                 cid = f'ch_cluster_{env_name}'
                 if route.get('channel_ids') == [cid]:
-                    channels_map.pop(cid, None)
+                    removed_cluster_cids.add(cid)
                     continue
         filtered_routes.append(route)
+
+    for cid in removed_cluster_cids:
+        still_used = cid in default_ids or any(
+            cid in (r.get('channel_ids') or []) for r in filtered_routes
+        )
+        if not still_used:
+            channels_map.pop(cid, None)
 
     return {
         'version': 2,
@@ -290,19 +336,8 @@ def _merge_cluster_into_v2(existing_v2, env, norm_entry):
     default_ids = list(base.get('default_channel_ids') or [])
 
     cid = f'ch_cluster_{env}'
-    rid = f'rt_cluster_{env}'
     _upsert_v2_from_v1_entry(channels_map, cid, f'集群 {env}', norm_entry)
-
-    target_route = {
-        'id': rid,
-        'name': f'集群 {env}',
-        'enabled': True,
-        'match': {'envs': [env], 'categories': [], 'severities': []},
-        'channel_ids': [cid],
-        'continue': False,
-    }
-    routes = [r for r in routes if r.get('id') != rid]
-    routes.insert(0, target_route)
+    _upsert_cluster_route(routes, env, cid)
 
     return {
         'version': 2,

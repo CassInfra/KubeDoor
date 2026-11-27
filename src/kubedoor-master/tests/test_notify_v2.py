@@ -220,7 +220,7 @@ async def test_put_v2_encrypts_applies_reuses_and_guards_key_rotation(monkeypatc
                 'settings': {
                     'host': 'smtp.example.com',
                     'port': 465,
-                    'tls_mode': 'ssl',
+                    'security': 'ssl',
                     'username': 'bot@example.com',
                     'from_addr': 'bot@example.com',
                     'to_addrs': 'oncall@example.com',
@@ -316,7 +316,7 @@ async def test_put_v2_encrypts_applies_reuses_and_guards_key_rotation(monkeypatc
         'settings': {
             'host': '127.0.0.1',
             'port': 25,
-            'tls_mode': 'none',
+            'security': 'none',
             'from_addr': 'a@example.com',
             'to_addrs': 'b@example.com',
         },
@@ -412,9 +412,11 @@ def test_dispatcher_retries_retryable_only_and_honors_retry_after(monkeypatch):
         dispatcher._dispatch([])  # attempt 3 -> 200 OK
 
     assert len(calls) == 3
+    assert service.SEND_WORKERS == 8
     assert service._delivery_ring[-1]['trace_id'] == 'trace-retry'
     assert service._delivery_ring[-1]['attempts'] == 3
     assert service._delivery_ring[-1]['ok'] is True
+    assert service._delivery_ring[-1]['latency_ms'] >= 9000
 
     # 2) HTTP 400 不可重试 -> 只试 1 次且不触发退避等待
     calls.clear()
@@ -741,3 +743,187 @@ async def test_deliveries_pg_query_branch(monkeypatch):
     assert data['data']['items'][0]['message'] == '发送成功'
     assert seen_sql[0][2] == ('prod-k8s', 'wecom', True)
     assert seen_sql[1][2] == ('prod-k8s', 'wecom', True, 20, 5)
+
+
+@pytest.mark.asyncio
+async def test_save_cluster_channel_and_v1_put_preserve_v2_sign_secret(monkeypatch, audits):
+    feishu_token = '3f8c1a2b-1111-2222-3333-444455556666'
+    feishu_sign = 'feishu-sign-secret-keep-me'
+    ding_sign = 'SEC-ding-sign-keep-me'
+    existing_v2 = {
+        'version': 2,
+        'channels': {
+            'ch_default': {
+                'id': 'ch_default',
+                'name': '全局飞书',
+                'provider': 'feishu',
+                'enabled': True,
+                'settings': {'domain_preset': 'lark', 'at': 'ou_1'},
+                'secrets': {
+                    'token': encrypt_secret(feishu_token),
+                    'sign_secret': encrypt_secret(feishu_sign),
+                },
+            },
+            'ch_cluster_prod': {
+                'id': 'ch_cluster_prod',
+                'name': '生产飞书',
+                'provider': 'feishu',
+                'enabled': True,
+                'settings': {'domain_preset': 'feishu', 'at': 'ou_1'},
+                'secrets': {
+                    'token': encrypt_secret(feishu_token),
+                    'sign_secret': encrypt_secret(feishu_sign),
+                },
+            },
+            'ch_cluster_stage': {
+                'id': 'ch_cluster_stage',
+                'name': '预发钉钉',
+                'provider': 'dingding',
+                'enabled': True,
+                'settings': {'domain_preset': 'public', 'at': '13800000000'},
+                'secrets': {
+                    'token': encrypt_secret(DING_TOKEN),
+                    'sign_secret': encrypt_secret(ding_sign),
+                },
+            },
+        },
+        'routes': [
+            {
+                'id': 'rt_cluster_prod',
+                'name': '集群 prod',
+                'enabled': True,
+                'match': {'envs': ['prod'], 'categories': [], 'severities': []},
+                'channel_ids': ['ch_cluster_prod'],
+                'continue': False,
+            },
+            {
+                'id': 'rt_cluster_stage',
+                'name': '集群 stage',
+                'enabled': True,
+                'match': {'envs': ['stage'], 'categories': [], 'severities': []},
+                'channel_ids': ['ch_cluster_stage'],
+                'continue': False,
+            },
+        ],
+        'default_channel_ids': ['ch_default'],
+    }
+    store = FakeStore(existing_v2)
+    app, _ = make_app(monkeypatch, store)
+
+    # 1) save_cluster_channel on same provider (blank token, updated at) preserves sign_secret & domain_preset
+    await notify_api.save_cluster_channel('prod', {'type': 'feishu', 'token': '', 'at': 'ou_2'}, 'installer')
+    prod_ch = store.row['value']['channels']['ch_cluster_prod']
+    assert prod_ch['settings'] == {'domain_preset': 'feishu', 'at': 'ou_2'}
+    assert decrypt_secret(prod_ch['secrets']['token']) == feishu_token
+    assert decrypt_secret(prod_ch['secrets']['sign_secret']) == feishu_sign
+
+    # 2) v1 PUT updating default and stage keeps sign_secret on both
+    async with TestClient(TestServer(app)) as client:
+        resp = await client.put('/api/admin/notification', json={
+            'default': {'type': 'feishu', 'token': '', 'at': 'ou_new'},
+            'clusters': [
+                {'env': 'prod', 'type': 'feishu', 'token': '', 'at': 'ou_2'},
+                {'env': 'stage', 'type': 'dingding', 'token': '', 'at': '13900000000'},
+            ],
+        })
+        assert resp.status == 200
+    saved = store.row['value']
+    assert saved['channels']['ch_default']['settings']['domain_preset'] == 'lark'
+    assert decrypt_secret(saved['channels']['ch_default']['secrets']['sign_secret']) == feishu_sign
+    assert decrypt_secret(saved['channels']['ch_cluster_stage']['secrets']['sign_secret']) == ding_sign
+
+    # 3) Switching provider drops the old provider's sign_secret
+    await notify_api.save_cluster_channel('prod', {'type': 'wecom', 'token': WECOM_TOKEN, 'at': ''}, 'installer')
+    switched_ch = store.row['value']['channels']['ch_cluster_prod']
+    assert switched_ch['provider'] == 'wecom'
+    assert set(switched_ch['secrets']) == {'token'}
+
+
+@pytest.mark.asyncio
+async def test_save_cluster_channel_and_v1_put_do_not_shadow_specific_routes(monkeypatch):
+    existing_v2 = {
+        'version': 2,
+        'channels': {
+            'ch_stage_custom': {
+                'id': 'ch_stage_custom',
+                'name': '预发专项',
+                'provider': 'wecom',
+                'enabled': True,
+                'settings': {'domain_preset': 'public', 'at': ''},
+                'secrets': {'token': encrypt_secret(WECOM_TOKEN)},
+            },
+            'ch_hook': {
+                'id': 'ch_hook',
+                'name': '回调',
+                'provider': 'webhook',
+                'enabled': True,
+                'settings': {'url': 'https://hooks.example.com/a', 'method': 'POST'},
+                'secrets': {},
+            },
+            'ch_global_fallback': {
+                'id': 'ch_global_fallback',
+                'name': '全量兜底',
+                'provider': 'webhook',
+                'enabled': True,
+                'settings': {'url': 'https://hooks.example.com/fallback', 'method': 'POST'},
+                'secrets': {},
+            },
+        },
+        'routes': [
+            {
+                'id': 'rt_stage_metric',
+                'name': '预发严重指标告警',
+                'enabled': True,
+                'match': {'envs': ['stage'], 'categories': ['metric_alert'], 'severities': ['critical']},
+                'channel_ids': ['ch_stage_custom', 'ch_hook'],
+                'continue': True,
+            },
+            {
+                'id': 'rt_global_all',
+                'name': '全局兜底路由',
+                'enabled': True,
+                'match': {'envs': [], 'categories': [], 'severities': []},
+                'channel_ids': ['ch_global_fallback'],
+                'continue': False,
+            },
+        ],
+        'default_channel_ids': [],
+    }
+    store = FakeStore(existing_v2)
+    app, _ = make_app(monkeypatch, store)
+
+    # 1) save_cluster_channel inserts rt_cluster_stage AFTER rt_stage_metric and BEFORE rt_global_all
+    await notify_api.save_cluster_channel('stage', {'type': 'dingding', 'token': DING_TOKEN, 'at': ''}, 'installer')
+    route_ids = [r['id'] for r in store.row['value']['routes']]
+    assert route_ids == ['rt_stage_metric', 'rt_cluster_stage', 'rt_global_all']
+    targets = service.resolve_targets(env='stage', category='metric_alert', severity='critical')
+    assert [t.id for t in targets] == ['ch_stage_custom', 'ch_hook', 'ch_cluster_stage']
+    ops_targets = service.resolve_targets(env='stage', category='ops', severity='info')
+    assert [t.id for t in ops_targets] == ['ch_cluster_stage']
+
+    # 2) Updating existing rt_cluster_stage keeps its position in-place; adding another cluster preserves specific route precedence
+    await notify_api.save_cluster_channel('stage', {'type': 'dingding', 'token': '', 'at': '13800000001'}, 'installer')
+    assert [r['id'] for r in store.row['value']['routes']] == ['rt_stage_metric', 'rt_cluster_stage', 'rt_global_all']
+
+    # 3) Reference ch_cluster_stage in a custom route and default_channel_ids, then remove stage via v1 PUT -> ch_cluster_stage must NOT be deleted
+    store.row['value']['routes'][0]['channel_ids'].append('ch_cluster_stage')
+    store.row['value']['default_channel_ids'] = ['ch_cluster_stage']
+    async with TestClient(TestServer(app)) as client:
+        resp = await client.put('/api/admin/notification', json={
+            'clusters': [{'env': 'prod', 'type': 'wecom', 'token': WECOM_TOKEN, 'at': ''}],
+        })
+        assert resp.status == 200
+    saved = store.row['value']
+    assert 'ch_cluster_stage' in saved['channels']
+    assert 'ch_cluster_stage' in saved['default_channel_ids']
+    assert [r['id'] for r in saved['routes']] == ['rt_stage_metric', 'rt_cluster_prod', 'rt_global_all']
+    # rt_stage_metric (continue=True) still fans out to ch_cluster_stage and continues to rt_global_all
+    assert [t.id for t in service.resolve_targets(env='stage', category='metric_alert', severity='critical')] == [
+        'ch_stage_custom', 'ch_hook', 'ch_cluster_stage', 'ch_global_fallback'
+    ]
+    # Also verify non-referenced removed cluster channel IS cleaned up when unreferenced
+    async with TestClient(TestServer(app)) as client:
+        resp2 = await client.put('/api/admin/notification', json={'clusters': []})
+        assert resp2.status == 200
+    assert 'ch_cluster_prod' not in store.row['value']['channels']
+    assert 'ch_cluster_stage' in store.row['value']['channels']

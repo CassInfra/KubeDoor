@@ -284,11 +284,26 @@ class FeishuProvider(NotificationProvider):
                 retry_after=retry_after,
             )
 
-        if is_zero(data.get("code")) or is_zero(data.get("StatusCode")):
+        status_fields: list[tuple[str, Any]] = []
+        if "code" in data and data["code"] is not None:
+            status_fields.append(("code", data["code"]))
+        if "StatusCode" in data and data["StatusCode"] is not None:
+            status_fields.append(("StatusCode", data["StatusCode"]))
+
+        if status_fields and all(is_zero(val) for _, val in status_fields):
             return make_delivery_result(True, OK_MESSAGE, status_code=status_code, provider_code="0")
 
-        code = data["code"] if "code" in data else data.get("StatusCode")
-        msg = data["msg"] if "msg" in data else data.get("StatusMessage")
+        non_zero = [(key, val) for key, val in status_fields if not is_zero(val)]
+        if non_zero:
+            err_key, code = non_zero[0]
+            if err_key == "code":
+                msg = data.get("msg") if data.get("msg") not in (None, "") else data.get("StatusMessage")
+            else:
+                msg = data.get("StatusMessage") if data.get("StatusMessage") not in (None, "") else data.get("msg")
+        else:
+            code = None
+            msg = data["msg"] if "msg" in data else data.get("StatusMessage")
+
         code_str = "" if code is None else str(code)
         retryable = status_code == 429 or status_code >= 500 or code_str in ("11232", "99991400")
         return make_delivery_result(
