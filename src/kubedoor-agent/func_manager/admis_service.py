@@ -41,6 +41,12 @@ class AdmisService:
             return web.json_response(res)
         if action == "on":
             if res.get("is_on"):
+                try:
+                    await self.ensure_webhook_ca_bundle()
+                except ApiException as exc:
+                    error_message = json.loads(exc.body).get("message") if hasattr(exc, 'body') and exc.body else "执行失败"
+                    logger.error(f"Exception when syncing MutatingWebhookConfiguration caBundle: {exc}")
+                    return web.json_response({"message": error_message}, status=500)
                 return web.json_response({"message": "Webhook is already opened!", "success": True})
             create_res = await self._create_mutating_webhook()
             if create_res:
@@ -315,6 +321,50 @@ class AdmisService:
             error_message = json.loads(exc.body).get("message") if hasattr(exc, 'body') and exc.body else "执行失败"
             logger.error(f"Exception when reading MutatingWebhookConfiguration: {exc}")
             return {"message": error_message}
+
+    async def ensure_webhook_ca_bundle(self):
+        """若集群中已存在 kubedoor-admis-configuration，将其 caBundle 与当前服务端 CA 同步（不存在则跳过）。"""
+        if not self.admission_api:
+            return False
+        webhook_name = "kubedoor-admis-configuration"
+        namespace = os.environ.get("POD_NAMESPACE") or "kubedoor"
+        try:
+            webhook_config = await self.admission_api.read_mutating_webhook_configuration(name=webhook_name)
+        except ApiException as exc:
+            if exc.status == 404:
+                return False
+            raise
+
+        webhooks = getattr(webhook_config, "webhooks", None) or []
+        if not webhooks:
+            return False
+
+        expected_ca = tls_certs.load_ca_bundle_b64(namespace=namespace)
+        drifted = []
+        for wh in webhooks:
+            current_ca = getattr(getattr(wh, "client_config", None), "ca_bundle", None)
+            if isinstance(current_ca, bytes):
+                current_ca = current_ca.decode("ascii", errors="ignore")
+            if (current_ca or "").strip() != expected_ca:
+                drifted.append(wh)
+
+        if not drifted:
+            return False
+
+        patch_webhooks = [
+            {"name": wh.name, "clientConfig": {"caBundle": expected_ca}}
+            for wh in drifted
+            if getattr(wh, "name", None)
+        ]
+        if not patch_webhooks:
+            return False
+
+        await self.admission_api.patch_mutating_webhook_configuration(
+            name=webhook_name,
+            body={"webhooks": patch_webhooks},
+        )
+        logger.info(f"MutatingWebhookConfiguration '{webhook_name}' caBundle synced.")
+        return True
 
     async def _create_mutating_webhook(self):
         webhook_name = "kubedoor-admis-configuration"

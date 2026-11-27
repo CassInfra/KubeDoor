@@ -140,6 +140,8 @@ class FakeCluster:
             return {'metadata': {'uid': self.uid}}
         if path.endswith('/configmaps/kubedoor-agent-config'):
             return copy.deepcopy(self.resources.get(('ConfigMap', 'kubedoor-agent-config')))
+        if path.endswith('/secrets/kubedoor-agent-webhook-tls'):
+            return copy.deepcopy(self.resources.get(('Secret', 'kubedoor-agent-webhook-tls')))
         if path == '/api/v1/namespaces/kubedoor/secrets/kubedoor-ai-readonly':
             secret = copy.deepcopy(self.resources.get(('Secret', 'kubedoor-ai-readonly')))
             if secret and self.agent_token:
@@ -1339,3 +1341,96 @@ def test_plans_without_a_chosen_kube_state_metrics_render_as_before():
     bad = {**base, 'ksm_target': {'namespace': 'monitoring', 'name': 'x|.*', 'count': 2, 'pin_name': True}}
     with pytest.raises(ValueError, match='kube-state-metrics 的命名空间或 Service 名称无效'):
         module.render_agent(bad, username='agent-1', password='secret-1')
+
+
+def test_ensure_webhook_tls_secret_manifest_valid_certs_and_deterministic_render():
+    import ipaddress
+    from cryptography import x509
+    from cryptography.hazmat.primitives.asymmetric import padding
+
+    secret = module.ensure_webhook_tls_secret_manifest('custom-ns')
+    assert secret['kind'] == 'Secret' and secret['type'] == 'kubernetes.io/tls'
+    assert secret['metadata']['name'] == 'kubedoor-agent-webhook-tls'
+    assert secret['metadata']['namespace'] == 'custom-ns'
+    assert set(secret['data']) == {'ca.crt', 'tls.crt', 'tls.key'}
+
+    ca_cert = x509.load_pem_x509_certificate(base64.b64decode(secret['data']['ca.crt']))
+    leaf_cert = x509.load_pem_x509_certificate(base64.b64decode(secret['data']['tls.crt']))
+    assert ca_cert.extensions.get_extension_for_class(x509.BasicConstraints).value.ca is True
+    assert leaf_cert.extensions.get_extension_for_class(x509.BasicConstraints).value.ca is False
+    assert leaf_cert.issuer == ca_cert.subject
+    ca_cert.public_key().verify(
+        leaf_cert.signature,
+        leaf_cert.tbs_certificate_bytes,
+        padding.PKCS1v15(),
+        leaf_cert.signature_hash_algorithm,
+    )
+    san = leaf_cert.extensions.get_extension_for_class(x509.SubjectAlternativeName).value
+    assert {
+        'kubedoor-agent',
+        'kubedoor-agent.custom-ns',
+        'kubedoor-agent.custom-ns.svc',
+        'kubedoor-agent.custom-ns.svc.cluster.local',
+        'localhost',
+    } <= set(san.get_values_for_type(x509.DNSName))
+    assert ipaddress.IPv4Address('127.0.0.1') in san.get_values_for_type(x509.IPAddress)
+
+    with pytest.raises(ValueError):
+        module.ensure_webhook_tls_secret_manifest('Invalid_NS')
+
+    # render_agent 不产生随机密钥，确保预检 fingerprint 与实际安装一致
+    opts = {**module.defaults({module.WRITE_KEY: WRITE_URL}), 'env': 'production',
+            'master_url': 'https://kubedoor.example.test', 'installation_id': 'task-1'}
+    first = module.fingerprint(module.render_agent(opts, username='preflight', password='preflight'))
+    second = module.fingerprint(module.render_agent(opts, username='preflight', password='preflight'))
+    assert first == second
+
+
+@pytest.mark.asyncio
+async def test_install_creates_webhook_tls_secret_when_missing_and_preserves_when_existing(environment):
+    service, cluster, repo = environment
+    service.clients.clear()
+    task = await plan(service)
+    await service.start(task['id'], task['revision'])
+    await service.tasks[task['id']]
+    done = await repo.get(task['id'])
+    assert done['status'] == 'succeeded', done['payload']
+
+    applied_names = [(r['kind'], r['metadata']['name']) for r in cluster.applied]
+    assert ('Secret', 'kubedoor-agent-webhook-tls') in applied_names
+    assert applied_names.index(('Secret', 'kubedoor-agent-webhook-tls')) < applied_names.index(('Deployment', 'kubedoor-agent'))
+    created_secret = copy.deepcopy(cluster.resources['Secret', 'kubedoor-agent-webhook-tls'])
+    assert set(created_secret['data']) == {'ca.crt', 'tls.crt', 'tls.key'}
+
+    # 已有完整 kubedoor-agent-webhook-tls 时不覆盖（保留原证书，保证滚动更新期 CA 一致）
+    service.clients.clear()
+    cluster.applied.clear()
+    sentinel = {
+        'apiVersion': 'v1', 'kind': 'Secret',
+        'metadata': {'name': 'kubedoor-agent-webhook-tls', 'namespace': 'kubedoor'},
+        'data': {'ca.crt': 'KEEP-CA', 'tls.crt': 'KEEP-CRT', 'tls.key': 'KEEP-KEY'},
+    }
+    cluster.resources['Secret', 'kubedoor-agent-webhook-tls'] = copy.deepcopy(sentinel)
+    task2 = await service.inspect(CONFIG, 'admin')
+    task2 = await service.preflight(task2['id'], 'production', {**task2['payload']['options'], **PRESETS['agent']}, force=True)
+    await service.start(task2['id'], task2['revision'])
+    await service.tasks[task2['id']]
+    assert (await repo.get(task2['id']))['status'] == 'succeeded'
+    assert ('Secret', 'kubedoor-agent-webhook-tls') not in [(r['kind'], r['metadata']['name']) for r in cluster.applied]
+    assert cluster.resources['Secret', 'kubedoor-agent-webhook-tls']['data'] == sentinel['data']
+
+    # 缺少 ca.crt 的残缺 Secret 会被补齐
+    service.clients.clear()
+    cluster.applied.clear()
+    cluster.resources['Secret', 'kubedoor-agent-webhook-tls'] = {
+        'apiVersion': 'v1', 'kind': 'Secret',
+        'metadata': {'name': 'kubedoor-agent-webhook-tls', 'namespace': 'kubedoor'},
+        'data': {'tls.crt': 'ONLY-CRT', 'tls.key': 'ONLY-KEY'},
+    }
+    task3 = await service.inspect(CONFIG, 'admin')
+    task3 = await service.preflight(task3['id'], 'production', {**task3['payload']['options'], **PRESETS['agent']}, force=True)
+    await service.start(task3['id'], task3['revision'])
+    await service.tasks[task3['id']]
+    assert (await repo.get(task3['id']))['status'] == 'succeeded'
+    healed = cluster.resources['Secret', 'kubedoor-agent-webhook-tls']['data']
+    assert set(healed) == {'ca.crt', 'tls.crt', 'tls.key'} and healed['tls.crt'] != 'ONLY-CRT'

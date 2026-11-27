@@ -26,12 +26,22 @@ from notify import api as notify_api
 from notify import channels
 
 from . import health
-from .bundle import KSM_PORT, WRITE_KEY, defaults, installs_vmagent, normalize_options, public_options, render_agent
+from .bundle import (
+    KSM_PORT,
+    WRITE_KEY,
+    defaults,
+    ensure_webhook_tls_secret_manifest,
+    installs_vmagent,
+    normalize_options,
+    public_options,
+    render_agent,
+)
 from .kubernetes import InstallError, Kubernetes
 from .repository import Repository
 
 OWNER = 'kubedoor.io/installation'
 MANAGED = 'kubedoor.io/managed-by'
+WEBHOOK_TLS_SECRET = 'kubedoor-agent-webhook-tls'
 MAX_CONFIG = 1024 * 1024
 STEP_NAMES = ['验证安装计划', '创建命名空间和凭据', '应用安装资源', '等待工作负载就绪', '等待 Agent 上线', '验证指标采集']
 METRICS_STEP = len(STEP_NAMES) - 1
@@ -444,6 +454,11 @@ class Service:
         saved = await self.saved_kubeconfig(env, username)
         if 'error' in saved:
             return {'task': None, 'message': saved['error']}
+        if saved.get('origin') == 'agent-install' and saved.get('context') == AI_CONTEXT:
+            return {
+                'task': None,
+                'message': '当前集群自动配置的 AI Kubeconfig 仅具备只读权限（kubedoor-ai-readonly），请上传有集群管理权限的 Kubeconfig 执行修复',
+            }
         try:
             task = await self.inspect(saved['content'], username, context=saved['context'],
                                       repair={'env': env, 'source': 'ai-connection', 'origin': saved['origin']})
@@ -809,6 +824,22 @@ class Service:
                     await self.step(task, index, 'running')
                     task['payload']['started_at'] = time.time()
                     await self.repo.save(task)
+                    ns = options['namespace']
+                    existing_tls = await kube.request(
+                        'GET',
+                        f'/api/v1/namespaces/{quote(ns, safe="")}/secrets/{WEBHOOK_TLS_SECRET}',
+                        missing_ok=True,
+                    )
+                    tls_data = (existing_tls or {}).get('data') or {}
+                    if not all(tls_data.get(key) for key in ('tls.crt', 'tls.key', 'ca.crt')):
+                        webhook_tls_secret = ensure_webhook_tls_secret_manifest(ns)
+                        webhook_tls_secret['metadata'].setdefault('labels', {}).update({
+                            OWNER: task['id'],
+                            MANAGED: 'web-installer',
+                        })
+                        await kube.apply(webhook_tls_secret, force=force or bool(existing_tls))
+                        task['payload'].setdefault('applied', []).append(summary(webhook_tls_secret))
+                        await self.repo.save(task)
                     for resource in resources:
                         if resource['kind'] == 'Namespace':
                             continue

@@ -162,6 +162,17 @@ async def test_repair_explains_when_kubedoor_ai_is_unreachable_or_not_configured
 
 
 @pytest.mark.asyncio
+async def test_repair_guides_upload_when_saved_kubeconfig_is_readonly(repairing, monkeypatch):
+    service, _, repo = repairing
+    ai = FakeAI(200, {'env': ENV, 'context': 'kubedoor-ai-readonly', 'origin': 'agent-install', 'content': CONFIG})
+    result = await repair_with(service, monkeypatch, ai)
+    assert result['task'] is None
+    assert '只读权限（kubedoor-ai-readonly）' in result['message']
+    assert '上传有集群管理权限的 Kubeconfig' in result['message']
+    assert await repo.list() == []
+
+
+@pytest.mark.asyncio
 async def test_repair_only_for_connected_clusters_and_returns_a_running_one(repairing, monkeypatch):
     service, _, repo = repairing
     with pytest.raises(InstallError) as caught:
@@ -288,6 +299,19 @@ async def test_repair_installs_and_brings_the_agent_back_online(repairing):
     assert done['status'] == 'succeeded', done['payload'].get('error')
     assert all(item['namespace'] in ('ops-agent', '') for item in done['payload']['applied'])
     assert service.clients[ENV]['online'] is True
+    assert ('Secret', 'kubedoor-agent-webhook-tls') in cluster.resources
+
+    # 再次修复时已有完整 kubedoor-agent-webhook-tls 会原样保留
+    cluster.applied.clear()
+    preserved_data = {'ca.crt': 'KEEP-CA', 'tls.crt': 'KEEP-CRT', 'tls.key': 'KEEP-KEY'}
+    cluster.resources['Secret', 'kubedoor-agent-webhook-tls']['data'] = dict(preserved_data)
+    task2 = await preflight(service, await service.inspect(CONFIG, 'admin', repair={'env': ENV, 'source': 'upload'}),
+                            **PRESETS['agent'])
+    await service.start(task2['id'], task2['revision'])
+    await service.tasks[task2['id']]
+    assert (await repo.get(task2['id']))['status'] == 'succeeded'
+    assert ('Secret', 'kubedoor-agent-webhook-tls') not in [(r['kind'], r['metadata']['name']) for r in cluster.applied]
+    assert cluster.resources['Secret', 'kubedoor-agent-webhook-tls']['data'] == preserved_data
 
 
 @pytest.mark.asyncio

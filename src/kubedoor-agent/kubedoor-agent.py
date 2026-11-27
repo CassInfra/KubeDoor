@@ -315,16 +315,17 @@ async def connect_to_server():
         try:
             clean_uri, ws_headers = ws_tls.prepare_master_ws_connection(uri)
             ssl_context = ws_tls.build_master_ssl_context(clean_uri)
+            ws_kwargs = {
+                "headers": ws_headers or None,
+                "max_msg_size": WS_MAX_MSG_SIZE,
+                "heartbeat": WS_PING_INTERVAL,
+            }
+            if ssl_context is not None:
+                ws_kwargs["ssl"] = ssl_context
             async with ClientSession() as session:
                 # heartbeat:协议层 ping/pong。链路断了或 master 不再响应时 aiohttp 会主动断开,
                 # 以前没开,连接"假死"时 agent 一直以为连着,只能重启
-                async with session.ws_connect(
-                    clean_uri,
-                    headers=ws_headers or None,
-                    ssl=ssl_context,
-                    max_msg_size=WS_MAX_MSG_SIZE,
-                    heartbeat=WS_PING_INTERVAL,
-                ) as raw_ws:
+                async with session.ws_connect(clean_uri, **ws_kwargs) as raw_ws:
                     logger.info("成功连接到服务端")
                     # 各模块都通过 MasterConnection 发送:每次发送带超时,master 不再回应心跳时判定连接失效
                     ws = MasterConnection(raw_ws, WS_SEND_TIMEOUT, HEARTBEAT_ACK_TIMEOUT)
@@ -547,6 +548,7 @@ async def cron(request):
                                                 secret_key_ref=client.V1SecretKeySelector(
                                                     name="kubedoor-agent-credentials",
                                                     key="KUBEDOOR_INTERNAL_TOKEN",
+                                                    optional=True,
                                                 )
                                             ),
                                         ),
@@ -559,6 +561,12 @@ async def cron(request):
             ),
         ),
     )
+
+    if not (os.environ.get("KUBEDOOR_INTERNAL_TOKEN") or "").strip():
+        logger.warning(
+            f"创建 CronJob '{name_pre}' 时缺少 KUBEDOOR_INTERNAL_TOKEN（可能仅更新了镜像而未重新应用安装清单）；"
+            "CronJob 回调将缺少内部认证令牌，请通过「修复 Agent」或重新应用安装清单补齐凭据"
+        )
 
     try:
         await batch_v1.create_namespaced_cron_job(namespace=namespace, body=cronjob)
@@ -711,6 +719,11 @@ async def start_https_server():
     site = web.TCPSite(runner, '0.0.0.0', 443, ssl_context=ssl_context)
     await site.start()
     logger.info("HTTPS 服务器已启动，监听端口 443")
+    if admis_service:
+        try:
+            await admis_service.ensure_webhook_ca_bundle()
+        except Exception as exc:
+            logger.warning(f"启动同步 MutatingWebhookConfiguration caBundle 失败: {exc}")
     while True:
         await asyncio.sleep(3600)
 

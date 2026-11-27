@@ -288,6 +288,35 @@ async def test_cron_injects_internal_token_secret_and_pod_namespace(isolated_age
     secret_ref = env_map["KUBEDOOR_INTERNAL_TOKEN"].value_from.secret_key_ref
     assert secret_ref.name == "kubedoor-agent-credentials"
     assert secret_ref.key == "KUBEDOOR_INTERNAL_TOKEN"
+    assert secret_ref.optional is True
+
+
+@pytest.mark.asyncio
+async def test_cron_warns_when_internal_token_missing_on_image_only_upgrade(isolated_agent, monkeypatch):
+    monkeypatch.setenv("POD_NAMESPACE", "kubedoor")
+    monkeypatch.delenv("KUBEDOOR_INTERNAL_TOKEN", raising=False)
+    warnings = []
+    sink_id = isolated_agent.logger.add(
+        lambda msg: warnings.append(str(msg)),
+        level="WARNING",
+    )
+    try:
+        isolated_agent.batch_v1 = SimpleNamespace(create_namespaced_cron_job=AsyncMock())
+        monkeypatch.setattr(isolated_agent.utils, "send_msg", Mock())
+        payload = {
+            "cron": "0 8 * * *",
+            "type": "scale",
+            "service": {"deployment_list": [{"namespace": "app-ns", "deployment_name": "api", "num": 2}]},
+        }
+        req = SimpleNamespace(json=AsyncMock(return_value=payload), query={})
+        resp = await isolated_agent.cron(req)
+        assert resp.status == 200
+        created_body = isolated_agent.batch_v1.create_namespaced_cron_job.await_args.kwargs["body"]
+        env_map = {item.name: item for item in created_body.spec.job_template.spec.template.spec.containers[0].env}
+        assert env_map["KUBEDOOR_INTERNAL_TOKEN"].value_from.secret_key_ref.optional is True
+        assert any("KUBEDOOR_INTERNAL_TOKEN" in line and "修复 Agent" in line for line in warnings)
+    finally:
+        isolated_agent.logger.remove(sink_id)
 
 
 # ---------------------------------------------------------------------- tls_certs & admis_service
@@ -410,6 +439,152 @@ async def test_admis_service_uses_dynamic_namespace_and_ca_bundle(admission_modu
     assert [ns for ns, _ in patched_namespaces] == ["kube-system", "team-ops"]
 
 
+@pytest.mark.asyncio
+async def test_admis_ensure_webhook_ca_bundle_syncs_drift_and_noops(admission_module, tmp_path, monkeypatch):
+    from kubernetes_asyncio.client.rest import ApiException
+
+    monkeypatch.setenv("POD_NAMESPACE", "team-ops")
+    monkeypatch.setenv("WEBHOOK_CERT_DIR", str(tmp_path / "absent"))
+    monkeypatch.setenv("WEBHOOK_RUNTIME_CERT_DIR", str(tmp_path / "runtime"))
+    expected_ca = admission_module.tls_certs.load_ca_bundle_b64(namespace="team-ops")
+
+    # admission_api is None -> no-op
+    svc_no_api = admission_module.AdmisService(None, None, None, {})
+    assert await svc_no_api.ensure_webhook_ca_bundle() is False
+
+    # 404 -> no-op without creating
+    create_mock = AsyncMock()
+    patch_mock = AsyncMock()
+    api_404 = SimpleNamespace(
+        read_mutating_webhook_configuration=AsyncMock(side_effect=ApiException(status=404)),
+        create_mutating_webhook_configuration=create_mock,
+        patch_mutating_webhook_configuration=patch_mock,
+    )
+    assert await admission_module.AdmisService(None, None, api_404, {}).ensure_webhook_ca_bundle() is False
+    create_mock.assert_not_awaited()
+    patch_mock.assert_not_awaited()
+
+    # Matching caBundle -> no-op
+    matching_cfg = SimpleNamespace(
+        webhooks=[
+            SimpleNamespace(
+                name="kubedoor-admis.mutating.webhook",
+                client_config=SimpleNamespace(ca_bundle=expected_ca),
+            )
+        ]
+    )
+    api_match = SimpleNamespace(
+        read_mutating_webhook_configuration=AsyncMock(return_value=matching_cfg),
+        patch_mutating_webhook_configuration=AsyncMock(),
+    )
+    assert await admission_module.AdmisService(None, None, api_match, {}).ensure_webhook_ca_bundle() is False
+    api_match.patch_mutating_webhook_configuration.assert_not_awaited()
+
+    # Drifted caBundle -> PATCH with expected caBundle
+    drifted_cfg = SimpleNamespace(
+        webhooks=[
+            SimpleNamespace(
+                name="kubedoor-admis.mutating.webhook",
+                client_config=SimpleNamespace(ca_bundle="c3RhbGUtY2E="),
+            )
+        ]
+    )
+    api_drift = SimpleNamespace(
+        read_mutating_webhook_configuration=AsyncMock(return_value=drifted_cfg),
+        patch_mutating_webhook_configuration=AsyncMock(),
+    )
+    svc_drift = admission_module.AdmisService(None, None, api_drift, {})
+    assert await svc_drift.ensure_webhook_ca_bundle() is True
+    api_drift.patch_mutating_webhook_configuration.assert_awaited_once_with(
+        name="kubedoor-admis-configuration",
+        body={
+            "webhooks": [
+                {
+                    "name": "kubedoor-admis.mutating.webhook",
+                    "clientConfig": {"caBundle": expected_ca},
+                }
+            ]
+        },
+    )
+
+
+@pytest.mark.asyncio
+async def test_admis_switch_on_syncs_ca_bundle_when_already_opened(admission_module, tmp_path, monkeypatch):
+    monkeypatch.setenv("POD_NAMESPACE", "kubedoor")
+    monkeypatch.setenv("WEBHOOK_CERT_DIR", str(tmp_path / "absent"))
+    monkeypatch.setenv("WEBHOOK_RUNTIME_CERT_DIR", str(tmp_path / "runtime"))
+    expected_ca = admission_module.tls_certs.load_ca_bundle_b64(namespace="kubedoor")
+
+    drifted_cfg = SimpleNamespace(
+        webhooks=[
+            SimpleNamespace(
+                name="kubedoor-admis.mutating.webhook",
+                client_config=SimpleNamespace(ca_bundle="b2xkLWNh"),
+            )
+        ]
+    )
+    admission_api = SimpleNamespace(
+        read_mutating_webhook_configuration=AsyncMock(return_value=drifted_cfg),
+        patch_mutating_webhook_configuration=AsyncMock(),
+    )
+    svc = admission_module.AdmisService(None, None, admission_api, {})
+    resp = await svc.admis_switch(SimpleNamespace(query={"action": "on"}))
+    assert resp.status == 200
+    assert json.loads(resp.text) == {"message": "Webhook is already opened!", "success": True}
+    admission_api.patch_mutating_webhook_configuration.assert_awaited_once_with(
+        name="kubedoor-admis-configuration",
+        body={
+            "webhooks": [
+                {
+                    "name": "kubedoor-admis.mutating.webhook",
+                    "clientConfig": {"caBundle": expected_ca},
+                }
+            ]
+        },
+    )
+
+
+@pytest.mark.asyncio
+async def test_start_https_server_syncs_ca_bundle_and_survives_errors(isolated_agent, tmp_path, monkeypatch):
+    import asyncio as _asyncio
+
+    monkeypatch.setenv("WEBHOOK_CERT_DIR", str(tmp_path / "absent"))
+    monkeypatch.setenv("WEBHOOK_RUNTIME_CERT_DIR", str(tmp_path / "runtime"))
+
+    isolated_agent.update_image_handler = AsyncMock()
+    isolated_agent.reboot_service = SimpleNamespace(reboot=AsyncMock())
+    ensure_mock = AsyncMock(side_effect=RuntimeError("apiserver transient 503"))
+    isolated_agent.admis_service = SimpleNamespace(
+        admis_switch=AsyncMock(),
+        admis_mutate=AsyncMock(),
+        ensure_webhook_ca_bundle=ensure_mock,
+    )
+    isolated_agent.mcp_service = SimpleNamespace(
+        get_deployment_pods=AsyncMock(),
+        get_namespace_events=AsyncMock(),
+        get_nodes_info=AsyncMock(),
+    )
+    isolated_agent.balance_node_service = SimpleNamespace(balance_node=AsyncMock())
+
+    fake_runner = SimpleNamespace(setup=AsyncMock())
+    fake_site = SimpleNamespace(start=AsyncMock())
+    monkeypatch.setattr(isolated_agent.web, "AppRunner", lambda _app: fake_runner)
+    monkeypatch.setattr(isolated_agent.web, "TCPSite", lambda *_args, **_kwargs: fake_site)
+    monkeypatch.setattr(isolated_agent.asyncio, "sleep", AsyncMock(side_effect=_asyncio.CancelledError))
+
+    warnings = []
+    sink_id = isolated_agent.logger.add(lambda m: warnings.append(str(m)), level="WARNING")
+    try:
+        with pytest.raises(_asyncio.CancelledError):
+            await isolated_agent.start_https_server()
+    finally:
+        isolated_agent.logger.remove(sink_id)
+
+    fake_site.start.assert_awaited_once()
+    ensure_mock.assert_awaited_once()
+    assert any("caBundle" in w and "apiserver transient 503" in w for w in warnings)
+
+
 # ---------------------------------------------------------------------- ws_tls
 
 
@@ -516,5 +691,52 @@ async def test_ws_tls_verifies_real_wss_handshake(ws_tls_mod, tls_certs_mod, tmp
                 msg = await ws.receive_json()
                 expected = "Basic " + base64.b64encode(b"agent-u:secret-p").decode("ascii")
                 assert msg == {"auth": expected}
+    finally:
+        await runner.cleanup()
+
+
+@pytest.mark.asyncio
+async def test_connect_to_server_plain_ws_emits_no_ssl_none_deprecation_warning(isolated_agent, monkeypatch):
+    import asyncio as _asyncio
+    import warnings
+
+    async def ws_handler(request):
+        ws = web.WebSocketResponse()
+        await ws.prepare(request)
+        await ws.close()
+        return ws
+
+    app = web.Application()
+    app.router.add_get("/ws", ws_handler)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "127.0.0.1", 0)
+    await site.start()
+    try:
+        port = site._server.sockets[0].getsockname()[1]
+        monkeypatch.setattr(isolated_agent.utils, "KUBEDOOR_MASTER", f"ws://127.0.0.1:{port}")
+        monkeypatch.setattr(isolated_agent.utils, "PROM_K8S_TAG_VALUE", "demo")
+        monkeypatch.setattr(isolated_agent, "event_monitor", SimpleNamespace(set_websocket_connection=Mock(), stop_monitoring=AsyncMock()))
+        monkeypatch.setattr(isolated_agent, "workload_streamer", SimpleNamespace(attach=Mock(), detach=Mock()))
+        monkeypatch.setattr(isolated_agent, "notifier", SimpleNamespace(attach=Mock(), detach=Mock()))
+        monkeypatch.setattr(isolated_agent, "pod_exec_manager", SimpleNamespace(close_all=Mock()))
+        monkeypatch.setattr(isolated_agent, "pod_log_streamer", SimpleNamespace(close_all=Mock()))
+        monkeypatch.setattr(
+            isolated_agent,
+            "run_connection_tasks",
+            AsyncMock(side_effect=_asyncio.CancelledError),
+        )
+
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            with pytest.raises(_asyncio.CancelledError):
+                await isolated_agent.connect_to_server()
+
+        ssl_deprecations = [
+            str(w.message)
+            for w in caught
+            if issubclass(w.category, DeprecationWarning) and "ssl=None" in str(w.message)
+        ]
+        assert ssl_deprecations == []
     finally:
         await runner.cleanup()

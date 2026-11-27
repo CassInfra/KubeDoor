@@ -252,17 +252,36 @@ def test_firing_insert_and_update_acquire_advisory_lock_and_commit(alarm_app):
 
 
 def test_resolved_alert_commits_with_zero_rollbacks(alarm_app):
-    assert alarm_app.handle_resolved_alert(_alert_data(), True, None)[0] is False
+    fp = fingerprint()
+    assert alarm_app.handle_resolved_alert(_alert_data(fp), True, None)[0] is False
     assert alarm_app.pool.writes() == []
     assert alarm_app.pool.rollbacks == 0
     assert alarm_app.pool.commits == 1
+    assert [sql.split()[0:2] for sql, _ in alarm_app.pool.executed] == [
+        ['SELECT', 'pg_advisory_xact_lock(hashtext(%s))'],
+        ['SELECT', '1'],
+    ]
+    assert alarm_app.pool.executed[0] == (
+        'SELECT pg_advisory_xact_lock(hashtext(%s))',
+        (f'2026-11-07:{fp}',),
+    )
 
+    alarm_app.pool.executed.clear()
     alarm_app.pool.alert_rows = [(1,)]
-    assert alarm_app.handle_resolved_alert(_alert_data(), True, None) == (True, '')
+    assert alarm_app.handle_resolved_alert(_alert_data(fp), True, None) == (True, '')
     assert len(alarm_app.pool.writes()) == 1
     assert alarm_app.pool.writes()[0][0].startswith('UPDATE k8s_pod_alert_days SET')
     assert alarm_app.pool.rollbacks == 0
     assert alarm_app.pool.commits == 2
+    assert [sql.split()[0:2] for sql, _ in alarm_app.pool.executed] == [
+        ['SELECT', 'pg_advisory_xact_lock(hashtext(%s))'],
+        ['SELECT', '1'],
+        ['UPDATE', 'k8s_pod_alert_days'],
+    ]
+    assert alarm_app.pool.executed[0] == (
+        'SELECT pg_advisory_xact_lock(hashtext(%s))',
+        (f'2026-11-07:{fp}',),
+    )
 
 
 def test_firing_and_resolved_rollback_on_mid_transaction_exception(alarm_app, monkeypatch):
