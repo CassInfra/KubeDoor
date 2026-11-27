@@ -11,6 +11,7 @@ from starlette.responses import JSONResponse, StreamingResponse
 from starlette.routing import Route
 
 from .domain import AIError, authenticate, normalize_scope, redact
+from .im import IMBotManager, LegacyWeComBridge, SharedModelManager
 from .log_describe import describe as describe_log_sources
 from .runtime import SKILLS, SKILLS_ROOT
 from .service import Service
@@ -44,7 +45,32 @@ async def body(request):
     return value
 
 
+def _safe_json_response(value):
+    """Apply redact(plain(value)) while preserving IMBot non-secret `credentials` dict key."""
+    data = plain(value)
+    if isinstance(data, dict) and isinstance(data.get("bots"), list):
+        bots = []
+        for bot in data["bots"]:
+            if isinstance(bot, dict) and isinstance(bot.get("credentials"), dict):
+                creds = redact(bot["credentials"])
+                cleaned = redact({k: v for k, v in bot.items() if k != "credentials"})
+                cleaned["credentials"] = creds
+                bots.append(cleaned)
+            else:
+                bots.append(redact(bot))
+        rest = redact({k: v for k, v in data.items() if k != "bots"})
+        rest["bots"] = bots
+        return JSONResponse(rest)
+    if isinstance(data, dict) and isinstance(data.get("credentials"), dict) and "platform" in data:
+        creds = redact(data["credentials"])
+        cleaned = redact({k: v for k, v in data.items() if k != "credentials"})
+        cleaned["credentials"] = creds
+        return JSONResponse(cleaned)
+    return JSONResponse(redact(data))
+
+
 def create_app(service=None, token=None):
+    import uuid
     from .mcp import create_mcp
     token = token if token is not None else os.getenv("AI_INTERNAL_TOKEN", "")
     mcp = create_mcp(lambda: app.state.service, token)
@@ -55,19 +81,21 @@ def create_app(service=None, token=None):
     async def lifespan(app):
         owned = service is None
         app.state.service = service or await Service.open(os.getenv("MASTER_URL", "http://kubedoor-master"), token, os.getenv("AI_ENCRYPTION_KEY", ""))
-        app.state.wecom = None
+        if owned:
+            app.state.shared_model = SharedModelManager(app.state.service, wire_service=True)
+            await app.state.shared_model.load()
+            app.state.im_manager = IMBotManager(app.state.service, shared_model=app.state.shared_model)
+            await app.state.im_manager.start()
+            app.state.wecom_bridge = LegacyWeComBridge(app.state.im_manager, app.state.shared_model)
+            app.state.wecom = app.state.wecom_bridge
         try:
-            if owned:
-                from .wecom import WeComIntegration
-                app.state.wecom = WeComIntegration(app.state.service)
-                await app.state.wecom.start()
             async with AsyncExitStack() as stack:
                 await stack.enter_async_context(streamable.router.lifespan_context(streamable))
                 await stack.enter_async_context(legacy.router.lifespan_context(legacy))
                 yield
         finally:
             if owned:
-                await app.state.wecom.close()
+                await app.state.im_manager.close()
                 await app.state.service.close()
 
     async def handle(request: Request):
@@ -261,45 +289,111 @@ def create_app(service=None, token=None):
                     result = await svc.gateway.mcp.delete(identity, server_id)
             elif endpoint == "mcp-server-refresh":
                 result = await svc.gateway.mcp.refresh(identity, request.path_params["mcp_id"])
-            elif endpoint == "wecom-config":
+            elif endpoint == "shared-model":
                 identity.require_admin()
                 if request.method == "GET":
-                    result = await request.app.state.wecom.admin_config()
+                    result = await request.app.state.shared_model.get_config()
                 else:
-                    result = await request.app.state.wecom.save_config(identity, await body(request))
+                    result = await request.app.state.shared_model.save_config(identity, await body(request))
+            elif endpoint == "shared-model-test":
+                identity.require_admin()
+                result = await request.app.state.shared_model.test_config(await body(request))
+            elif endpoint == "im-bots":
+                identity.require_admin()
+                if request.method == "GET":
+                    result = {"bots": await request.app.state.im_manager.list_bots()}
+                else:
+                    result = await request.app.state.im_manager.create_bot(identity, await body(request))
+            elif endpoint == "im-bot":
+                identity.require_admin()
+                bot_id = str(uuid.UUID(request.path_params["bot_id"]))
+                if request.method == "GET":
+                    result = await request.app.state.im_manager.get_bot(bot_id)
+                elif request.method == "PUT":
+                    result = await request.app.state.im_manager.update_bot(identity, bot_id, await body(request))
+                else:
+                    result = await request.app.state.im_manager.delete_bot(bot_id)
+            elif endpoint == "im-bot-unbound":
+                identity.require_admin()
+                bot_id = str(uuid.UUID(request.path_params["bot_id"]))
+                result = await request.app.state.im_manager.save_unbound(identity, bot_id, await body(request))
+            elif endpoint == "im-users":
+                identity.require_admin()
+                if request.method == "GET":
+                    bot_filter = request.query_params.get("bot_id") or None
+                    if bot_filter:
+                        bot_filter = str(uuid.UUID(bot_filter))
+                    result = {"users": await request.app.state.im_manager.list_users(bot_filter)}
+                else:
+                    result = await request.app.state.im_manager.save_user(identity, await body(request))
+            elif endpoint == "im-user":
+                identity.require_admin()
+                bot_id = str(uuid.UUID(request.path_params["bot_id"]))
+                result = await request.app.state.im_manager.delete_user(bot_id, request.path_params["userid"])
+            elif endpoint == "im-user-purge":
+                identity.require_admin()
+                bot_id = str(uuid.UUID(request.path_params["bot_id"]))
+                result = await request.app.state.im_manager.purge_member(bot_id, request.path_params["userid"])
+            elif endpoint == "im-user-remark":
+                identity.require_admin()
+                bot_id = str(uuid.UUID(request.path_params["bot_id"]))
+                result = await request.app.state.im_manager.save_remark(bot_id, request.path_params["userid"], await body(request))
+            elif endpoint == "im-binding":
+                result = await request.app.state.im_manager.binding(identity)
+            elif endpoint == "im-binding-code":
+                result = await request.app.state.im_manager.create_bind_code(identity)
+            elif endpoint == "im-binding-member":
+                bot_id = str(uuid.UUID(request.path_params["bot_id"]))
+                result = await request.app.state.im_manager.unbind_self(identity, bot_id, request.path_params["userid"])
+            elif endpoint == "wecom-config":
+                identity.require_admin()
+                wecom_target = request.app.state.wecom or request.app.state.wecom_bridge
+                if request.method == "GET":
+                    result = await wecom_target.admin_config()
+                else:
+                    result = await wecom_target.save_config(identity, await body(request))
             elif endpoint == "wecom-test":
                 identity.require_admin()
+                wecom_target = request.app.state.wecom or request.app.state.wecom_bridge
                 provider = (await body(request)).get("provider")
-                if isinstance(provider, dict) and not provider.get("api_key") and request.app.state.wecom.config:
-                    provider = {**provider, "api_key": request.app.state.wecom.config.get("api_key", "")}
+                if isinstance(provider, dict) and not provider.get("api_key") and wecom_target.config:
+                    provider = {**provider, "api_key": wecom_target.config.get("api_key", "")}
                 result = await svc.test_provider(provider)
             elif endpoint == "wecom-users":
                 identity.require_admin()
+                wecom_target = request.app.state.wecom or request.app.state.wecom_bridge
                 if request.method == "GET":
-                    result = {"users": await request.app.state.wecom.users(),
-                              **await request.app.state.wecom.unbound_setting()}
+                    result = {"users": await wecom_target.users(),
+                              **await wecom_target.unbound_setting()}
                 else:
-                    result = await request.app.state.wecom.save_user(identity, await body(request))
+                    result = await wecom_target.save_user(identity, await body(request))
             elif endpoint == "wecom-unbound":
                 identity.require_admin()
-                result = await request.app.state.wecom.save_unbound(identity, await body(request))
+                wecom_target = request.app.state.wecom or request.app.state.wecom_bridge
+                result = await wecom_target.save_unbound(identity, await body(request))
             elif endpoint == "wecom-user":
                 identity.require_admin()
-                await request.app.state.wecom.delete_user(request.path_params["userid"])
+                wecom_target = request.app.state.wecom or request.app.state.wecom_bridge
+                await wecom_target.delete_user(request.path_params["userid"])
                 result = {"success": True}
             elif endpoint == "wecom-user-purge":
                 identity.require_admin()
-                result = await request.app.state.wecom.purge_member(request.path_params["userid"])
+                wecom_target = request.app.state.wecom or request.app.state.wecom_bridge
+                result = await wecom_target.purge_member(request.path_params["userid"])
             elif endpoint == "wecom-user-remark":
                 identity.require_admin()
-                result = await request.app.state.wecom.save_remark(request.path_params["userid"], await body(request))
+                wecom_target = request.app.state.wecom or request.app.state.wecom_bridge
+                result = await wecom_target.save_remark(request.path_params["userid"], await body(request))
             # 自助绑定:任何登录用户管理自己账号绑定的企微成员
             elif endpoint == "wecom-binding":
-                result = await request.app.state.wecom.binding(identity)
+                wecom_target = request.app.state.wecom or request.app.state.wecom_bridge
+                result = await wecom_target.binding(identity)
             elif endpoint == "wecom-binding-code":
-                result = await request.app.state.wecom.create_bind_code(identity)
+                wecom_target = request.app.state.wecom or request.app.state.wecom_bridge
+                result = await wecom_target.create_bind_code(identity)
             elif endpoint == "wecom-binding-member":
-                result = await request.app.state.wecom.unbind_self(identity, request.path_params["userid"])
+                wecom_target = request.app.state.wecom or request.app.state.wecom_bridge
+                result = await wecom_target.unbind_self(identity, request.path_params["userid"])
             elif endpoint == "skills":
                 result = {"skills": SKILLS}
             elif endpoint == "skill":
@@ -313,14 +407,14 @@ def create_app(service=None, token=None):
             elif endpoint == "tools-execute":
                 data = await body(request)
                 result = await svc.mcp_call(identity, data.get("operation"), data.get("arguments", {}), normalize_scope(data.get("scope")), data.get("source", "auto"))
-            # 历史日志配置页的「AI 生成说明」：只有系统管理员，用企微专用模型（没配好 409），逻辑在 log_describe.py
+            # 历史日志配置页的「AI 生成说明」：只有系统管理员，用公共默认模型（没配好 409），逻辑在 log_describe.py
             elif endpoint == "log-describe":
                 identity.require_admin()
                 data = await body(request)
-                result = await describe_log_sources(data, svc.provider({"source": "wecom"}), svc.runtime.model_factory)
+                result = await describe_log_sources(data, svc.provider({"source": "shared"}), svc.runtime.model_factory)
             else:
                 raise AIError("接口不存在", 404, "not_found")
-            return JSONResponse(redact(plain(result)))
+            return _safe_json_response(result)
         except AIError as exc:
             error = {"code": exc.code, "message": str(exc)}
             if exc.details:
@@ -361,6 +455,18 @@ def create_app(service=None, token=None):
     route("/mcp-servers/test", "mcp-server-test", ["POST"])
     route("/mcp-servers/{mcp_id}", "mcp-server", ["PUT", "PATCH", "DELETE"])
     route("/mcp-servers/{mcp_id}/refresh", "mcp-server-refresh", ["POST"])
+    route("/shared-model", "shared-model", ["GET", "PUT"])
+    route("/shared-model/test", "shared-model-test", ["POST"])
+    route("/im/bots", "im-bots", ["GET", "POST"])
+    route("/im/bots/{bot_id}", "im-bot", ["GET", "PUT", "DELETE"])
+    route("/im/bots/{bot_id}/unbound", "im-bot-unbound", ["PUT"])
+    route("/im/users", "im-users", ["GET", "POST"])
+    route("/im/users/{bot_id}/{userid}", "im-user", ["DELETE"])
+    route("/im/users/{bot_id}/{userid}/purge", "im-user-purge", ["POST"])
+    route("/im/users/{bot_id}/{userid}/remark", "im-user-remark", ["PUT"])
+    route("/im/binding", "im-binding", ["GET"])
+    route("/im/binding/code", "im-binding-code", ["POST"])
+    route("/im/binding/{bot_id}/{userid}", "im-binding-member", ["DELETE"])
     route("/wecom", "wecom-config", ["GET", "PUT"])
     route("/wecom/test", "wecom-test", ["POST"])
     route("/wecom/users", "wecom-users", ["GET", "POST"])
@@ -393,5 +499,8 @@ def create_app(service=None, token=None):
     if service is not None:
         app.state.service = service
         app.state.wecom = None
+        app.state.shared_model = SharedModelManager(service, wire_service=False)
+        app.state.im_manager = IMBotManager(service, shared_model=app.state.shared_model)
+        app.state.wecom_bridge = LegacyWeComBridge(app.state.im_manager, app.state.shared_model)
     app.state.mcp = mcp
     return app

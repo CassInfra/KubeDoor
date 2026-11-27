@@ -26,9 +26,10 @@ from .storage import Store, pg_dsn
 
 LOGGER = logging.getLogger(__name__)
 PROBE_TOOL = {"name": "kubedoor_connection_probe", "description": "验证模型的工具调用能力", "parameters": {"type": "object", "properties": {}, "required": []}}
-# 网页「模型设置」选企微专用模型时，请求里的模型参数是 {"source": "wecom"}：服务端换成企微专用模型的配置，API Key 不经过浏览器
+# 网页「模型设置」选公共默认模型（含企微兼容别名）时，请求里的模型参数是 {"source": "shared"} 或 {"source": "wecom"}：服务端换成公共默认模型配置，API Key 不经过浏览器
 SHARED_MODEL_SOURCE = "wecom"
-SHARED_MODEL_MISSING = "管理员还没有配置企微专用模型，请在「模型设置」里改用自定义模型"
+SHARED_MODEL_SOURCES = frozenset({"wecom", "shared"})
+SHARED_MODEL_MISSING = "管理员还没有配置公共默认模型（或企微专用模型），请在「模型设置」里改用自定义模型"
 SHARED_MODEL_LIMITS = ("max_input_tokens", "max_output_tokens", "compression_ratio", "reasoning_effort")
 # 会话分享码：token_urlsafe(16)，128 位随机数编码成 22 个字符
 SHARE_CODE = re.compile(r"[A-Za-z0-9_-]{22}")
@@ -216,9 +217,9 @@ class Service:
                 "direct": {"configured": bool(cluster.get("configured")), "context": cluster.get("context"), "test_status": cluster.get("test_status")}}
 
     def provider(self, raw):
-        """解析请求里的模型参数。{"source": "wecom"} 用企微专用模型（机器人停用也能用，没配置好 409），
+        """解析请求里的模型参数。{"source": "shared"} 或 {"source": "wecom"} 用公共默认模型（机器人停用也能用，没配置好 409），
         其余按浏览器里的自定义模型解析。发送、审批后继续、会话标题、总结记忆、测试连接都经过这里"""
-        if isinstance(raw, dict) and raw.get("source") == SHARED_MODEL_SOURCE:
+        if isinstance(raw, dict) and raw.get("source") in SHARED_MODEL_SOURCES:
             settings = self.shared_settings() if self.shared_settings else None
             try:
                 return Provider.parse(settings)

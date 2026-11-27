@@ -125,6 +125,7 @@ httpx==0.28.1
     #   google-genai
     #   langchain-core
     #   langgraph-sdk
+    #   lark-oapi
 httpx2==2.16.0
     # via
     #   anthropic
@@ -223,6 +224,8 @@ langsmith==0.16.0
     # via
     #   deepagents
     #   langchain-core
+lark-oapi==1.5.5
+    # via -r src/kubedoor-ai/requirements.txt
 markdown-it-py==4.2.0
     # via rich
 mcp==2.3.0
@@ -291,6 +294,8 @@ pyasn1-modules==0.4.2
     # via google-auth
 pycparser==3.12 ; implementation_name != 'PyPy' and platform_python_implementation != 'PyPy'
     # via cffi
+pycryptodome==4.6.0
+    # via lark-oapi
 pydantic==2.14.2
     # via
     #   anthropic
@@ -360,13 +365,16 @@ requests==2.34.2
     #   google-genai
     #   kubernetes
     #   langsmith
+    #   lark-oapi
     #   requests-oauthlib
     #   requests-toolbelt
     #   tiktoken
 requests-oauthlib==2.0.0
     # via kubernetes
 requests-toolbelt==1.0.0
-    # via langsmith
+    # via
+    #   langsmith
+    #   lark-oapi
 rich==15.0.0
     # via
     #   cyclopts
@@ -460,6 +468,7 @@ websockets==17.4
     #   google-genai
     #   langgraph-sdk
     #   langsmith
+    #   lark-oapi
     #   wecom-aibot-python-sdk
 wecom-aibot-python-sdk==1.0.2
     # via -r src/kubedoor-ai/requirements.txt

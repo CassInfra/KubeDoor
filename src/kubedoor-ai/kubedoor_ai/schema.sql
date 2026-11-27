@@ -180,3 +180,86 @@ CREATE TABLE IF NOT EXISTS kubedoor_ai_mcp_servers (
     CHECK (char_length(name) BETWEEN 1 AND 40)
 );
 CREATE UNIQUE INDEX IF NOT EXISTS kubedoor_ai_mcp_servers_name ON kubedoor_ai_mcp_servers(username, lower(name));
+
+-- 公共默认模型配置（独立于具体 IM 机器人：供网页 AI 助手、历史日志生成说明与未覆盖模型的 IM 机器人共用）
+CREATE TABLE IF NOT EXISTS kubedoor_ai_shared_model (
+    singleton boolean PRIMARY KEY DEFAULT true CHECK (singleton),
+    encrypted_config bytea NOT NULL,
+    updated_by text NOT NULL,
+    updated_at timestamptz NOT NULL DEFAULT now()
+);
+
+-- 通用多平台 / 多实例 IM 机器人配置表
+CREATE TABLE IF NOT EXISTS kubedoor_ai_im_bots (
+    id uuid PRIMARY KEY,
+    platform text NOT NULL CHECK (platform IN ('wecom', 'feishu', 'dingtalk', 'slack')),
+    name text NOT NULL CHECK (char_length(name) BETWEEN 1 AND 80),
+    enabled boolean NOT NULL DEFAULT false,
+    encrypted_config bytea NOT NULL,
+    unbound_username text CHECK (unbound_username IS NULL OR char_length(unbound_username) BETWEEN 1 AND 200),
+    unbound_default_env text CHECK (unbound_default_env IS NULL OR char_length(unbound_default_env) BETWEEN 1 AND 255),
+    session_idle_minutes integer NOT NULL DEFAULT 120 CHECK (session_idle_minutes BETWEEN 0 AND 10080),
+    group_policy text NOT NULL DEFAULT 'disabled' CHECK (group_policy IN ('disabled', 'mention', 'allowlist')),
+    allowed_chat_ids jsonb NOT NULL DEFAULT '[]',
+    updated_by text NOT NULL,
+    updated_at timestamptz NOT NULL DEFAULT now()
+);
+
+-- 通用 IM 成员绑定与对话状态表
+CREATE TABLE IF NOT EXISTS kubedoor_ai_im_users (
+    bot_id uuid NOT NULL REFERENCES kubedoor_ai_im_bots(id) ON DELETE CASCADE,
+    external_user_id text NOT NULL CHECK (char_length(external_user_id) BETWEEN 1 AND 256),
+    platform text NOT NULL,
+    username text CHECK (username IS NULL OR char_length(username) BETWEEN 1 AND 200),
+    default_env text,
+    current_env text,
+    session_id uuid REFERENCES kubedoor_ai_sessions(id) ON DELETE SET NULL,
+    previous_session_id uuid REFERENCES kubedoor_ai_sessions(id) ON DELETE SET NULL,
+    remark text CHECK (remark IS NULL OR char_length(remark) BETWEEN 1 AND 100),
+    self_name text CHECK (self_name IS NULL OR char_length(self_name) BETWEEN 1 AND 16),
+    bound_by text,
+    bound_at timestamptz,
+    pending_text text,
+    pending_at timestamptz,
+    bind_failures integer NOT NULL DEFAULT 0,
+    bind_failed_at timestamptz,
+    first_seen_at timestamptz NOT NULL DEFAULT now(),
+    last_seen_at timestamptz NOT NULL DEFAULT now(),
+    updated_at timestamptz NOT NULL DEFAULT now(),
+    PRIMARY KEY (bot_id, external_user_id)
+);
+CREATE INDEX IF NOT EXISTS kubedoor_ai_im_users_username ON kubedoor_ai_im_users(username);
+CREATE INDEX IF NOT EXISTS kubedoor_ai_im_users_platform_uid ON kubedoor_ai_im_users(platform, external_user_id);
+
+-- 跨平台通用 6 位自助绑定码
+CREATE TABLE IF NOT EXISTS kubedoor_ai_im_bind_codes (
+    code text PRIMARY KEY,
+    username text NOT NULL UNIQUE,
+    expires_at timestamptz NOT NULL,
+    created_at timestamptz NOT NULL DEFAULT now()
+);
+
+-- 按 (bot_id, msgid) 幂等去重入站事件与卡片回调
+CREATE TABLE IF NOT EXISTS kubedoor_ai_im_inbox (
+    bot_id uuid NOT NULL REFERENCES kubedoor_ai_im_bots(id) ON DELETE CASCADE,
+    msgid text NOT NULL,
+    external_user_id text NOT NULL,
+    kind text NOT NULL,
+    received_at timestamptz NOT NULL DEFAULT now(),
+    PRIMARY KEY (bot_id, msgid)
+);
+
+-- 通用交互卡片审批追踪表
+CREATE TABLE IF NOT EXISTS kubedoor_ai_im_approvals (
+    bot_id uuid NOT NULL REFERENCES kubedoor_ai_im_bots(id) ON DELETE CASCADE,
+    card_ref text NOT NULL,
+    action_id uuid NOT NULL UNIQUE REFERENCES kubedoor_ai_actions(id) ON DELETE CASCADE,
+    run_id uuid NOT NULL REFERENCES kubedoor_ai_runs(id) ON DELETE CASCADE,
+    external_user_id text NOT NULL,
+    username text NOT NULL,
+    session_id uuid NOT NULL REFERENCES kubedoor_ai_sessions(id) ON DELETE CASCADE,
+    resume_after_seq bigint NOT NULL,
+    expires_at timestamptz NOT NULL,
+    created_at timestamptz NOT NULL DEFAULT now(),
+    PRIMARY KEY (bot_id, card_ref)
+);

@@ -29,6 +29,18 @@ export interface AIProvider {
   reasoning_effort?: AIReasoningEffort | null;
 }
 
+export interface AIProviderSummary {
+  base_url: string;
+  model: string;
+  /** 上下文窗口（token）；null 表示由服务端按模型推断 */
+  max_input_tokens?: number | null;
+  /** 最大输出（token）；null 表示由服务端按模型推断 */
+  max_output_tokens?: number | null;
+  /** 压缩阈值（0.2–0.8，上下文达到窗口的这个比例时自动摘要）；null 表示默认 0.5 */
+  compression_ratio?: number | null;
+  reasoning_effort?: AIReasoningEffort | null;
+}
+
 /** 网页 AI 助手用哪个模型：wecom 企微专用模型（管理员配置，所有账号共用），custom 自己填写的 */
 export type AIProviderMode = "wecom" | "custom";
 
@@ -47,6 +59,124 @@ export interface AISharedModel {
   reasoning_effort: AIReasoningEffort | null;
   /** API Key 是否已配置（只有是否，不返回 Key 本身） */
   api_key_set: boolean;
+}
+
+export type IMPlatform = "wecom" | "feishu";
+export type IMGroupPolicy = "disabled" | "mention" | "allowlist";
+export type FeishuDomainPreset = "feishu" | "lark" | "custom";
+
+export interface SharedModelConfig {
+  available: boolean;
+  configured: boolean;
+  base_url: string;
+  model: string;
+  max_input_tokens: number | null;
+  max_output_tokens: number | null;
+  compression_ratio: number | null;
+  reasoning_effort: AIReasoningEffort | null;
+  api_key_set: boolean;
+  updated_by?: string;
+  updated_at?: string;
+}
+
+export interface SharedModelInput {
+  base_url: string;
+  api_key?: string;
+  model: string;
+  max_input_tokens: number | null;
+  max_output_tokens: number | null;
+  compression_ratio: number | null;
+  reasoning_effort: AIReasoningEffort | null;
+}
+
+export interface IMBotCredentials {
+  bot_id?: string;
+  app_id?: string;
+  domain_preset?: FeishuDomainPreset;
+  custom_domain?: string;
+}
+
+export interface IMBotModelOverrideInput extends AIProviderSummary {
+  api_key?: string;
+}
+
+export interface IMBot {
+  id: string;
+  platform: IMPlatform;
+  name: string;
+  enabled: boolean;
+  configured: boolean;
+  connected: boolean;
+  authenticated: boolean;
+  reconnecting: boolean;
+  error?: string | null;
+  credentials: IMBotCredentials;
+  secret_set: boolean;
+  session_idle_minutes: number;
+  group_policy: IMGroupPolicy;
+  allowed_chat_ids: string[];
+  model_override?: (AIProviderSummary & { api_key_set?: boolean }) | null;
+  unbound_username?: string | null;
+  unbound_default_env?: string | null;
+  updated_by?: string;
+  updated_at?: string;
+}
+
+export interface IMBotInput {
+  platform: IMPlatform;
+  name: string;
+  enabled: boolean;
+  credentials: IMBotCredentials & {
+    bot_secret?: string;
+    app_secret?: string;
+  };
+  session_idle_minutes: number;
+  group_policy: IMGroupPolicy;
+  allowed_chat_ids: string[];
+  model_override?: IMBotModelOverrideInput | null;
+  unbound_username?: string | null;
+  unbound_default_env?: string | null;
+}
+
+export interface IMUser {
+  bot_id: string;
+  bot_name?: string;
+  platform: IMPlatform;
+  external_user_id: string;
+  username: string | null;
+  default_env: string | null;
+  current_env: string | null;
+  remark: string | null;
+  self_name: string | null;
+  bound_by: string | null;
+  bound_at: string | null;
+  first_seen_at: string;
+  last_seen_at: string;
+  pending_approvals: number;
+}
+
+export interface IMBindingState {
+  enabled: boolean;
+  connected: boolean;
+  platforms: IMPlatform[];
+  bots: {
+    id: string;
+    name: string;
+    platform: IMPlatform;
+    enabled: boolean;
+    connected: boolean;
+  }[];
+  members: {
+    bot_id: string;
+    bot_name?: string;
+    platform: IMPlatform;
+    external_user_id: string;
+    self_name: string | null;
+    bound_by: string | null;
+    bound_at: string | null;
+    last_seen_at: string;
+  }[];
+  code_minutes: number;
 }
 
 export interface AIResource {
@@ -710,6 +840,72 @@ export const aiApi = {
   unbindWecom: (userid: string) =>
     request<{ success: boolean }>(
       `/wecom/binding/${itemPath(userid)}`,
+      "DELETE"
+    ),
+  /** 公共默认模型（独立于 IM 机器人，供 Web AI 助手、日志说明生成与 IM 机器人默认继承） */
+  sharedModelConfig: () => request<SharedModelConfig>("/shared-model"),
+  saveSharedModel: (data: SharedModelInput) =>
+    request<SharedModelConfig>("/shared-model", "PUT", data),
+  testSharedModel: (
+    provider: AIProvider | (AIProviderSummary & { api_key?: string })
+  ) => request<Record<string, any>>("/shared-model/test", "POST", { provider }),
+  /** 多平台 IM 机器人管理（企业微信 / 飞书等） */
+  imBots: () => request<{ bots: IMBot[] }>("/im/bots"),
+  createIMBot: (data: IMBotInput) => request<IMBot>("/im/bots", "POST", data),
+  updateIMBot: (botId: string, data: IMBotInput) =>
+    request<IMBot>(`/im/bots/${itemPath(botId)}`, "PUT", data),
+  deleteIMBot: (botId: string) =>
+    request<{ success: boolean }>(`/im/bots/${itemPath(botId)}`, "DELETE"),
+  saveIMBotUnbound: (
+    botId: string,
+    username: string | null,
+    defaultEnv: string | null
+  ) =>
+    request<{
+      unbound_username: string | null;
+      unbound_default_env: string | null;
+    }>(`/im/bots/${itemPath(botId)}/unbound`, "PUT", {
+      username,
+      default_env: defaultEnv
+    }),
+  imUsers: (botId?: string) =>
+    request<{ users: IMUser[] }>(
+      botId ? `/im/users?bot_id=${encodeURIComponent(botId)}` : "/im/users"
+    ),
+  saveIMUser: (data: {
+    bot_id: string;
+    external_user_id: string;
+    username: string;
+    default_env?: string | null;
+  }) => request<{ success: boolean }>("/im/users", "POST", data),
+  deleteIMUser: (botId: string, userid: string) =>
+    request<{ success: boolean }>(
+      `/im/users/${itemPath(botId)}/${itemPath(userid)}`,
+      "DELETE"
+    ),
+  purgeIMUser: (botId: string, userid: string) =>
+    request<{ success: boolean; sessions: number; stopped: number }>(
+      `/im/users/${itemPath(botId)}/${itemPath(userid)}/purge`,
+      "POST",
+      {}
+    ),
+  saveIMUserRemark: (botId: string, userid: string, remark: string | null) =>
+    request<{ remark: string | null }>(
+      `/im/users/${itemPath(botId)}/${itemPath(userid)}/remark`,
+      "PUT",
+      { remark }
+    ),
+  /** 自助绑定：任何登录用户管理自己账号绑定的 IM 成员 */
+  imBinding: () => request<IMBindingState>("/im/binding"),
+  createIMBindCode: () =>
+    request<{ code: string; expires_at: string; minutes?: number }>(
+      "/im/binding/code",
+      "POST",
+      {}
+    ),
+  unbindSelfIM: (botId: string, userid: string) =>
+    request<{ success: boolean }>(
+      `/im/binding/${itemPath(botId)}/${itemPath(userid)}`,
       "DELETE"
     ),
   connections: () => request<{ connections: AIConnection[] }>("/connections"),
