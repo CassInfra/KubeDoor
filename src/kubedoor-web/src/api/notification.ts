@@ -59,6 +59,154 @@ export interface NotifyTestResult {
   message: string;
 }
 
+/* ==================== v2 Schema-driven Multi-IM Types ==================== */
+
+export type FieldKind =
+  | "text"
+  | "secret"
+  | "select"
+  | "number"
+  | "boolean"
+  | "textarea"
+  | "headers";
+
+export interface ProviderFieldOption {
+  value: string;
+  label: string;
+}
+
+export interface ProviderFieldSpec {
+  key: string;
+  label: string;
+  kind: FieldKind;
+  required?: boolean;
+  secret?: boolean;
+  default?: string | number | boolean | Record<string, string>;
+  placeholder?: string;
+  help?: string;
+  options?: ProviderFieldOption[];
+  min?: number;
+  max?: number;
+  visible_when?: Record<string, string | boolean | Array<string | boolean>>;
+}
+
+export interface ProviderRateLimit {
+  max_requests?: number;
+  limit?: number;
+  window_seconds?: number;
+  window?: number;
+  burst?: number;
+  burst_limit?: number;
+  label?: string;
+}
+
+export interface ProviderSchema {
+  id: string;
+  type?: string;
+  label: string;
+  description: string;
+  default_rate_limit: ProviderRateLimit | [number, number] | string;
+  supports_at: boolean;
+  supports_markdown: boolean;
+  at_help?: string;
+  fields: ProviderFieldSpec[];
+}
+
+export interface NotifyChannelV2 {
+  id: string;
+  name: string;
+  provider: string;
+  enabled: boolean;
+  settings: Record<string, any>;
+  secret_hints?: Record<string, string>;
+  configured_secrets?: string[];
+  configured?: boolean;
+  updated_at?: string | null;
+}
+
+export interface NotifyChannelV2Input {
+  id: string;
+  name: string;
+  provider: string;
+  enabled: boolean;
+  settings: Record<string, any>;
+  secrets: Record<string, string>;
+}
+
+export interface NotifyRouteMatch {
+  envs?: string[];
+  categories?: string[];
+  severities?: string[];
+}
+
+export interface NotifyRouteV2 {
+  id: string;
+  name: string;
+  enabled: boolean;
+  match: NotifyRouteMatch;
+  channel_ids: string[];
+  continue: boolean;
+}
+
+export interface NotificationConfigV2 {
+  version: 2;
+  channels: NotifyChannelV2[];
+  routes: NotifyRouteV2[];
+  default_channel_ids: string[];
+  envs: string[];
+  updated_by?: string | null;
+  updated_at?: string | null;
+}
+
+export interface NotificationConfigV2Input {
+  version: 2;
+  channels: NotifyChannelV2Input[];
+  routes: NotifyRouteV2[];
+  default_channel_ids: string[];
+}
+
+export interface NotifyTestV2Request {
+  channel_id?: string;
+  provider: string;
+  name?: string;
+  settings: Record<string, any>;
+  secrets: Record<string, string>;
+  env?: string;
+  category?: string;
+  severity?: string;
+}
+
+export interface DeliveryRecord {
+  id: string | number;
+  trace_id?: string;
+  env?: string | null;
+  category?: string;
+  severity?: string;
+  channel_id?: string;
+  channel_name?: string;
+  provider: string;
+  ok: boolean;
+  attempts?: number;
+  http_status?: number | null;
+  error_summary?: string | null;
+  message?: string | null;
+  latency_ms?: number | null;
+  created_at: string;
+}
+
+export interface DeliveryQueryParams {
+  env?: string;
+  provider?: string;
+  ok?: boolean | string;
+  limit?: number;
+  offset?: number;
+}
+
+export interface DeliveryListResponse {
+  items: DeliveryRecord[];
+  total?: number;
+}
+
 type Result<T> = { success: boolean; data: T; message?: string };
 
 /** silent:出错不弹提示,交给调用方处理(安装 Agent 对话框读不到就不显示已有的单独配置) */
@@ -84,4 +232,48 @@ export const testNotification = (data: NotifyTestRequest) =>
     { data },
     // 错误由页面自己提示(429 要换成「操作太频繁」);master 调 IM 接口最多等 10 秒
     { silent: true, timeout: 30000 }
+  );
+
+/** 获取 Schema 驱动的通知通道提供方元数据 */
+export const getNotificationProviders = (silent = false) =>
+  http.request<Result<ProviderSchema[] | { providers: ProviderSchema[] }>>(
+    "get",
+    "/api/admin/notification/providers",
+    undefined,
+    silent ? { silent: true } : undefined
+  );
+
+/** 获取 v2 统一多通道通知配置（通道池 + 路由规则 + 集群列表） */
+export const getNotificationConfigV2 = (silent = false) =>
+  http.request<Result<NotificationConfigV2>>(
+    "get",
+    "/api/admin/notification/v2",
+    undefined,
+    silent ? { silent: true } : undefined
+  );
+
+/** 保存 v2 统一多通道通知配置 */
+export const saveNotificationConfigV2 = (data: NotificationConfigV2Input) =>
+  http.request<Result<NotificationConfigV2>>(
+    "put",
+    "/api/admin/notification/v2",
+    { data }
+  );
+
+/** 发送 v2 测试消息 */
+export const testNotificationV2 = (data: NotifyTestV2Request) =>
+  http.request<Result<NotifyTestResult>>(
+    "post",
+    "/api/admin/notification/test",
+    { data },
+    { silent: true, timeout: 30000 }
+  );
+
+/** 查询通知投递审计日志 */
+export const getNotificationDeliveries = (params?: DeliveryQueryParams) =>
+  http.request<Result<DeliveryRecord[] | DeliveryListResponse>>(
+    "get",
+    "/api/admin/notification/deliveries",
+    { params },
+    { silent: true }
   );

@@ -70,6 +70,14 @@ async def purge_expired() -> None:
         await store.cleanup_sessions()
     except Exception as e:
         logger.error(f"清理过期登录会话失败: {e}")
+    try:
+        from notify import service as notify_service
+
+        deleted = await notify_service.cleanup_deliveries()
+        if deleted:
+            logger.info(f"🧹过期数据清理:notification_deliveries 删除 {deleted} 行(created_at 早于 30 天前)")
+    except Exception as e:
+        logger.error(f"清理过期通知投递审计日志失败: {e}")
 
 
 async def retention_loop() -> None:
