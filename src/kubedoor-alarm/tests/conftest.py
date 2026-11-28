@@ -7,6 +7,7 @@
 import contextlib
 import importlib.util
 import json
+import json as json_module
 import pathlib
 import sys
 import types
@@ -54,16 +55,17 @@ class FakeHTTP:
     """替换 requests.get / requests.post,记录调用。
 
     master: 依次返回的结果(FakeResponse 或异常),每次 GET 取一个;
-    im: 每次 POST 的结果(FakeResponse 或异常),默认企微 / 钉钉风格的成功返回。
-    取配置的异常会被 ChannelResolver 吞掉,所以多出来的 GET 记在 unexpected 里,用例结束时检查。
+    notify: 依次返回给 POST /api/internal/notify 的结果(FakeResponse 或异常),为空时回退到 self.im;
+    im: POST 默认返回(成功匹配 1 个通道并入队)。
     """
 
     def __init__(self):
         self.master = []
+        self.notify = []
         self.gets = []
         self.posts = []
         self.unexpected = []
-        self.im = FakeResponse(200, {'errcode': 0, 'errmsg': 'ok'})
+        self.im = FakeResponse(200, {'success': True, 'data': {'matched': 1, 'queued': 1, 'trace_id': 't-default'}})
 
     def get(self, url, params=None, headers=None, timeout=None, **kwargs):
         self.gets.append({'url': url, 'params': params, 'headers': headers, 'timeout': timeout})
@@ -75,12 +77,24 @@ class FakeHTTP:
             raise outcome
         return outcome
 
-    def post(self, url, headers=None, data=None, timeout=None, **kwargs):
-        body = json.loads(data.decode('utf-8') if isinstance(data, bytes) else data)
-        self.posts.append({'url': url, 'headers': headers, 'json': body, 'timeout': timeout})
-        if isinstance(self.im, Exception):
-            raise self.im
-        return self.im
+    def post(self, url, headers=None, data=None, json=None, timeout=None, allow_redirects=None, **kwargs):
+        if json is not None:
+            body = json
+        elif data is not None:
+            body = json_module.loads(data.decode('utf-8') if isinstance(data, bytes) else data)
+        else:
+            body = None
+        self.posts.append({
+            'url': url,
+            'headers': headers,
+            'json': body,
+            'timeout': timeout,
+            'allow_redirects': allow_redirects,
+        })
+        outcome = self.notify.pop(0) if self.notify else self.im
+        if isinstance(outcome, Exception):
+            raise outcome
+        return outcome
 
 
 @pytest.fixture(autouse=True)
@@ -117,14 +131,6 @@ class Clock:
 @pytest.fixture
 def clock():
     return Clock()
-
-
-@pytest.fixture
-def resolver(monkeypatch, clock):
-    """换掉模块级的通知配置缓存:每个用例从空缓存开始,时间由 clock 控制。"""
-    fresh = notify_client.ChannelResolver(clock=clock)
-    monkeypatch.setattr(notify_client, '_resolver', fresh)
-    return fresh
 
 
 @pytest.fixture
@@ -228,7 +234,7 @@ def _fake_psycopg_modules():
 
 
 @pytest.fixture
-def alarm_app(monkeypatch, resolver, internal_env, alarm_settings):
+def alarm_app(monkeypatch, internal_env, alarm_settings):
     """加载 kubedoor-alarm.py,返回模块;通用配置见 alarm_settings(集群标签名 k8s,配置了 KubeDoor 地址)。"""
     for name, module in _fake_psycopg_modules().items():
         monkeypatch.setitem(sys.modules, name, module)

@@ -6,6 +6,9 @@ import time
 import pytest
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
+_TOOLS_DIR = pathlib.Path(__file__).resolve().parents[2] / 'kubedoor-tools'
+if _TOOLS_DIR.is_dir() and str(_TOOLS_DIR) not in sys.path:
+    sys.path.insert(1, str(_TOOLS_DIR))
 
 
 def _cache_policy(policy, ttl=3600):

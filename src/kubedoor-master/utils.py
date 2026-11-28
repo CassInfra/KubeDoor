@@ -700,7 +700,7 @@ async def update_control_data(rows):
                 f"采集高峰期数据更新到管控表时，检测到新服务【{env}】【{namespace}】【{deployment}】,将新增到管控表。"
             )
             logger.info(content)
-            notify(content, env)
+            notify(content, env, category='control_table')
             try:
                 tmp = parse_insert_data(i)
                 await db.pg_copy_records('k8s_res_control', [tuple(tmp)], _RES_CONTROL_COLUMNS)

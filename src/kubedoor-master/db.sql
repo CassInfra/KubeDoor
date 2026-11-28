@@ -569,3 +569,25 @@ CREATE UNIQUE INDEX IF NOT EXISTS uq_agent_installations_running_env
     ON agent_installations (env) WHERE status='running' AND env<>'';
 CREATE UNIQUE INDEX IF NOT EXISTS uq_agent_installations_running_target
     ON agent_installations (target_uid) WHERE status='running' AND target_uid<>'';
+
+-- =============================================================================
+-- 12. notification_deliveries —— 通知投递审计日志(只追加,按 created_at 保留 30 天)
+-- =============================================================================
+CREATE TABLE IF NOT EXISTS notification_deliveries (
+    id            bigserial   PRIMARY KEY,
+    trace_id      text        NOT NULL,
+    env           text        NOT NULL DEFAULT '',
+    category      text        NOT NULL DEFAULT 'generic',
+    severity      text        NOT NULL DEFAULT 'info',
+    channel_id    text        NOT NULL,
+    channel_name  text        NOT NULL,
+    provider      text        NOT NULL,
+    ok            boolean     NOT NULL,
+    attempts      integer     NOT NULL DEFAULT 1,
+    http_status   integer,
+    error_summary text        NOT NULL DEFAULT '',
+    latency_ms    integer     NOT NULL DEFAULT 0,
+    created_at    timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_notification_deliveries_created
+    ON notification_deliveries (created_at DESC);

@@ -1,4 +1,4 @@
-"""notify_client:按集群取通知配置、缓存与过期、master 失败时沿用,以及各 IM 的消息格式。"""
+"""notify_client: 集群识别、get_internal 兼容以及转发告警到 master /api/internal/notify 的代理逻辑。"""
 import logging
 
 import pytest
@@ -7,132 +7,44 @@ import requests
 import notify_client
 from conftest import FakeResponse, master_ok
 
-WECOM = {'type': 'wecom', 'token': 'wecom-key', 'at': 'zhangsan'}
-DING = {'type': 'dingding', 'token': 'ding-token', 'at': '13800000000'}
+
+# ---------------------------------------------------------------------------
+# 安全边界: 不再本地解析/缓存明文通道或拼装 IM Webhook
+# ---------------------------------------------------------------------------
+def test_plaintext_token_fetching_and_im_builders_removed():
+    for removed in ('fetch_channel', 'ChannelResolver', 'resolve', 'send', 'wecom', 'dingding', 'feishu', 'slack', 'parse_response'):
+        assert not hasattr(notify_client, removed)
 
 
 # ---------------------------------------------------------------------------
-# 取配置
+# get_internal (供 settings_client 共用)
 # ---------------------------------------------------------------------------
-def test_fetch_calls_master_with_internal_token(fake_http, resolver, internal_env):
-    fake_http.master = [master_ok(WECOM)]
-    assert notify_client.resolve('prod-k8s') == WECOM
+def test_get_internal_calls_master_with_internal_token(fake_http, internal_env):
+    fake_http.master = [master_ok({'prom_k8s_tag_key': 'k8s'})]
+    data = notify_client.get_internal('/api/internal/settings', {'env': 'prod-k8s'})
+    assert data == {'prom_k8s_tag_key': 'k8s'}
     assert fake_http.gets == [{
-        'url': 'http://kubedoor-master/api/internal/notification',
+        'url': 'http://kubedoor-master/api/internal/settings',
         'params': {'env': 'prod-k8s'},
         'headers': {'X-Kubedoor-Token': 'internal-secret'},
         'timeout': 5,
     }]
 
 
-def test_master_url_from_env_and_empty_env_means_global(fake_http, resolver, internal_env, monkeypatch):
-    monkeypatch.setenv('MASTER_INTERNAL_URL', 'http://master.test:8080/')
-    fake_http.master = [master_ok(None)]
-    assert notify_client.resolve('') is None
-    assert fake_http.gets[0]['url'] == 'http://master.test:8080/api/internal/notification'
-    assert fake_http.gets[0]['params'] == {'env': ''}
-
-
-def test_channel_fields_are_normalized(fake_http, resolver, internal_env):
-    fake_http.master = [master_ok({'type': 'feishu', 'token': ' hook-id ', 'at': None, 'extra': 1})]
-    assert notify_client.resolve('prod') == {'type': 'feishu', 'token': 'hook-id', 'at': ''}
-
-
-def test_cache_hit_within_ttl_then_refetch_after_expiry(fake_http, resolver, clock, internal_env):
-    changed = {**WECOM, 'token': 'new-key'}
-    fake_http.master = [master_ok(WECOM), master_ok(changed)]
-    assert notify_client.resolve('prod') == WECOM
-    clock.now += 14.9
-    assert notify_client.resolve('prod') == WECOM
-    assert len(fake_http.gets) == 1
-    clock.now += 0.2  # 距第一次取配置 15.1 秒,已过期
-    assert notify_client.resolve('prod') == changed
-    assert len(fake_http.gets) == 2
-
-
-def test_cache_is_per_cluster(fake_http, resolver, internal_env):
-    fake_http.master = [master_ok(WECOM), master_ok(DING)]
-    assert notify_client.resolve('a') == WECOM
-    assert notify_client.resolve('b') == DING
-    assert notify_client.resolve('a') == WECOM
-    assert [get['params'] for get in fake_http.gets] == [{'env': 'a'}, {'env': 'b'}]
-
-
-def test_no_config_returns_none_and_is_cached(fake_http, resolver, clock, internal_env):
-    fake_http.master = [master_ok(None)]
-    assert notify_client.resolve('prod') is None
-    clock.now += 5
-    assert notify_client.resolve('prod') is None
-    assert len(fake_http.gets) == 1
-
-
-@pytest.mark.parametrize('failure', [
-    requests.ConnectionError('connection refused'),
-    requests.Timeout('read timed out'),
-    FakeResponse(500, text='Internal Server Error'),
-    FakeResponse(401, {'success': False, 'error': 'bad_token', 'message': '内部访问令牌无效'}),
-    FakeResponse(200, {'success': False, 'message': 'boom'}),
-    FakeResponse(200, text='<html>not json</html>'),
-    master_ok({'type': 'unknown', 'token': 'x'}),
-    master_ok({'type': 'wecom', 'token': ''}),
-    master_ok('wecom'),
-], ids=['connect', 'timeout', 'http500', 'http401', 'not-success', 'not-json', 'bad-type', 'no-token', 'bad-data'])
-def test_master_failure_keeps_last_good_config(fake_http, resolver, clock, internal_env, failure, caplog):
-    fake_http.master = [master_ok(WECOM), failure, master_ok(None)]
-    assert notify_client.resolve('prod') == WECOM
-    clock.now += 16
-    with caplog.at_level(logging.WARNING):
-        assert notify_client.resolve('prod') == WECOM
-    assert '沿用上次取到的配置' in caplog.text
-    # 失败后同样等一个 TTL 再试,不让每批告警都去等 master 超时
-    clock.now += 10
-    assert notify_client.resolve('prod') == WECOM
-    assert len(fake_http.gets) == 2
-    clock.now += 6
-    assert notify_client.resolve('prod') is None  # master 恢复,说已经没有配置
-    assert len(fake_http.gets) == 3
-
-
-def test_master_down_without_cache_returns_none_and_retries_next_time(fake_http, resolver, internal_env, caplog):
-    fake_http.master = [requests.ConnectionError('connection refused'), master_ok(WECOM)]
-    with caplog.at_level(logging.ERROR):
-        assert notify_client.resolve('prod') is None
-    assert '之前也没有取到过' in caplog.text
-    # 没有可沿用的配置时不缓存失败,下一批告警马上重试
-    assert notify_client.resolve('prod') == WECOM
-    assert len(fake_http.gets) == 2
-
-
-def test_missing_internal_token_does_not_call_master(fake_http, resolver, monkeypatch, caplog):
+def test_get_internal_requires_token_and_raises_fetch_error_on_bad_response(fake_http, monkeypatch):
     monkeypatch.delenv('AI_INTERNAL_TOKEN', raising=False)
-    with caplog.at_level(logging.ERROR):
-        assert notify_client.resolve('prod') is None
+    with pytest.raises(notify_client.FetchError, match='AI_INTERNAL_TOKEN'):
+        notify_client.get_internal('/api/internal/settings')
     assert fake_http.gets == []
-    assert 'AI_INTERNAL_TOKEN' in caplog.text
 
-
-def test_unexpected_fetch_error_is_treated_as_failure(caplog):
-    def broken(env):
-        raise RuntimeError('bug')
-
-    fresh = notify_client.ChannelResolver(fetch=broken)
-    with caplog.at_level(logging.ERROR):
-        assert fresh.resolve('prod') is None
-    assert 'RuntimeError' in caplog.text
-
-
-def test_fetch_logs_never_contain_tokens(fake_http, resolver, clock, internal_env, caplog):
-    fake_http.master = [master_ok(WECOM), FakeResponse(503, {'success': False, 'message': 'unavailable'})]
-    with caplog.at_level(logging.DEBUG):
-        notify_client.resolve('prod')
-        clock.now += 20
-        notify_client.resolve('prod')
-    assert 'unavailable' in caplog.text
-    assert 'wecom-key' not in caplog.text and 'internal-secret' not in caplog.text
+    monkeypatch.setenv('AI_INTERNAL_TOKEN', 'internal-secret')
+    fake_http.master = [FakeResponse(503, {'success': False, 'message': 'unavailable'})]
+    with pytest.raises(notify_client.FetchError, match='HTTP 503'):
+        notify_client.get_internal('/api/internal/settings')
 
 
 # ---------------------------------------------------------------------------
-# 集群名
+# 集群名识别与 scope_label
 # ---------------------------------------------------------------------------
 @pytest.mark.parametrize('payload, expected', [
     ({'commonLabels': {'k8s': 'prod'}, 'groupLabels': {'k8s': 'other'}}, 'prod'),
@@ -153,108 +65,66 @@ def test_cluster_of_without_tag_key_uses_global():
     assert notify_client.cluster_of({'commonLabels': {'k8s': 'prod'}}, '') == ''
 
 
+def test_scope_label():
+    assert notify_client.scope_label('prod') == '集群 prod'
+    assert notify_client.scope_label('') == '全局配置'
+
+
 # ---------------------------------------------------------------------------
-# 发送
+# post_internal_notify / send_alert 统一代理发送
 # ---------------------------------------------------------------------------
-def test_wecom_payload(fake_http):
-    notify_client.send({'type': 'wecom', 'token': 'KEY', 'at': 'ignored'}, '### 故障', 'zhangsan')
-    [post] = fake_http.posts
-    assert post['url'] == 'https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=KEY'
-    assert post['json'] == {'msgtype': 'markdown', 'markdown': {'content': '### 故障<@zhangsan>'}}
-    assert post['headers'] == {'Content-Type': 'application/json'}
-    assert post['timeout'] == 10
+def test_send_alert_posts_structured_payload_to_master(fake_http, internal_env, monkeypatch, caplog):
+    monkeypatch.setenv('MASTER_INTERNAL_URL', 'http://master.test:8080/')
+    fake_http.notify = [FakeResponse(200, {'success': True, 'data': {'matched': 2, 'queued': 2, 'trace_id': 'tr-1'}})]
+    items = [{'status': 'firing', 'summary': 'PodCrash,已持续5分钟', 'description': 'oom', 'severity': 'critical',
+              'silence_url': 'https://kd.example/#/alarm/silence', 'labels': {'alertname': 'PodCrash'}}]
+    links = [{'label': '屏蔽', 'url': 'https://kd.example/#/alarm/silence'}]
 
+    with caplog.at_level(logging.DEBUG):
+        res = notify_client.send_alert('prod-k8s', items, at='zhangsan', severity='critical', links=links)
 
-def test_dingding_payload(fake_http):
-    notify_client.send({'type': 'dingding', 'token': 'TOKEN', 'at': ''}, 'md', '13800000000')
+    assert res == {'matched': 2, 'queued': 2, 'trace_id': 'tr-1'}
+    assert fake_http.gets == []
     [post] = fake_http.posts
-    assert post['url'] == 'https://oapi.dingtalk.com/robot/send?access_token=TOKEN'
+    assert post['url'] == 'http://master.test:8080/api/internal/notify'
+    assert post['headers'] == {'X-Kubedoor-Token': 'internal-secret', 'Content-Type': 'application/json'}
+    assert post['timeout'] == notify_client.SEND_TIMEOUT
+    assert post['allow_redirects'] is False
     assert post['json'] == {
-        'msgtype': 'markdown',
-        'markdown': {'title': '告警', 'text': 'md'},
-        'at': {'atMobiles': ['13800000000']},
+        'env': 'prod-k8s',
+        'category': 'metric_alert',
+        'severity': 'critical',
+        'title': '',
+        'body': '',
+        'at': 'zhangsan',
+        'items': items,
+        'links': links,
     }
+    assert 'internal-secret' not in caplog.text
 
 
-def test_feishu_payload(fake_http):
-    fake_http.im = FakeResponse(200, {'code': 0, 'msg': 'success'})
-    notify_client.send({'type': 'feishu', 'token': 'HOOK', 'at': ''}, 'md', 'ou_123')
-    [post] = fake_http.posts
-    assert post['url'] == 'https://open.feishu.cn/open-apis/bot/v2/hook/HOOK'
-    assert post['json'] == {
-        'msg_type': 'interactive',
-        'card': {
-            'header': {'title': {'tag': 'plain_text', 'content': '告警通知'}, 'template': 'red'},
-            'elements': [{'tag': 'markdown', 'content': 'md\n<at id=ou_123></at>'}],
-        },
-    }
+def test_post_internal_notify_missing_token_raises_send_error(fake_http, monkeypatch):
+    monkeypatch.delenv('AI_INTERNAL_TOKEN', raising=False)
+    with pytest.raises(notify_client.SendError, match='AI_INTERNAL_TOKEN'):
+        notify_client.post_internal_notify({'env': 'prod', 'category': 'metric_alert', 'items': []})
+    assert fake_http.posts == []
 
 
-def test_slack_sends_one_message_per_alert(fake_http):
-    fake_http.im = FakeResponse(200, text='ok')
-    content = [['💥故障: A,小于1分钟', 'desc A', 'https://silence.example'], ['🎉恢复: B,小于1分钟', 'desc B']]
-    notify_client.send({'type': 'slack', 'token': 'T1/B2/xyz', 'at': ''}, content, 'U123')
-    assert [post['url'] for post in fake_http.posts] == ['https://hooks.slack.com/services/T1/B2/xyz'] * 2
-    title = {'type': 'rich_text', 'elements': [{'type': 'rich_text_section', 'elements': [
-        {'type': 'text', 'text': '💥故障: A,小于1分钟', 'style': {'bold': True}}]}]}
-    link = {'type': 'rich_text', 'elements': [{'type': 'rich_text_section', 'elements': [
-        {'type': 'link', 'text': '【屏蔽】', 'url': 'https://silence.example'}]}]}
-    assert fake_http.posts[0]['json'] == {'blocks': [
-        title,
-        {'type': 'section', 'text': {'type': 'mrkdwn', 'text': 'desc A <@U123>'}},
-        link,
-        {'type': 'divider'},
-    ]}
-    resolved = fake_http.posts[1]['json']['blocks']
-    assert resolved[0]['elements'][0]['elements'][0]['text'] == '🎉恢复: B,小于1分钟'
-    assert [block['type'] for block in resolved] == ['rich_text', 'section', 'divider']  # 恢复不带屏蔽链接
-
-
-@pytest.mark.parametrize('kind, check', [
-    ('wecom', lambda body: body['markdown']['content'] == 'md'),
-    ('dingding', lambda body: 'at' not in body),
-    ('feishu', lambda body: body['card']['elements'][0]['content'] == 'md'),
-])
-def test_no_mention_when_at_is_empty(fake_http, kind, check):
-    notify_client.send({'type': kind, 'token': 'T', 'at': ''}, 'md', '')
-    assert check(fake_http.posts[0]['json'])
-
-
-def test_slack_no_mention_when_at_is_empty(fake_http):
-    fake_http.im = FakeResponse(200, text='ok')
-    notify_client.send({'type': 'slack', 'token': 'T/B/x', 'at': ''}, [['t', 'desc']], '')
-    assert fake_http.posts[0]['json']['blocks'][1]['text']['text'] == 'desc'
-
-
-@pytest.mark.parametrize('kind, response, ok', [
-    ('wecom', FakeResponse(200, {'errcode': 0, 'errmsg': 'ok'}), True),
-    ('wecom', FakeResponse(200, {'errcode': 93000, 'errmsg': 'invalid webhook url'}), False),
-    ('wecom', FakeResponse(502, text='Bad Gateway'), False),
-    ('dingding', FakeResponse(200, {'errcode': 0, 'errmsg': 'ok'}), True),
-    ('dingding', FakeResponse(200, {'errcode': 310000, 'errmsg': 'keywords not in content'}), False),
-    ('feishu', FakeResponse(200, {'code': 0, 'msg': 'success'}), True),
-    ('feishu', FakeResponse(200, {'StatusCode': 0, 'StatusMessage': 'success'}), True),
-    ('feishu', FakeResponse(200, {'code': 19001, 'msg': 'param invalid'}), False),
-    ('slack', FakeResponse(200, text='ok'), True),
-    ('slack', FakeResponse(404, text='no_service'), False),
-])
-def test_parse_response(kind, response, ok):
-    assert notify_client.parse_response(kind, response)[0] is ok
-
-
-def test_im_error_is_logged_not_raised(fake_http, caplog):
-    fake_http.im = FakeResponse(200, {'errcode': 93000, 'errmsg': 'invalid webhook url'})
-    with caplog.at_level(logging.WARNING):
-        notify_client.send({'type': 'wecom', 'token': 'SECRET-KEY', 'at': ''}, 'md', '')
-    assert '93000' in caplog.text and 'SECRET-KEY' not in caplog.text
-
-
-def test_network_error_hides_token(fake_http):
-    fake_http.im = requests.ConnectionError(
-        "HTTPSConnectionPool(host='qyapi.weixin.qq.com', port=443): "
-        "Max retries exceeded with url: /cgi-bin/webhook/send?key=SECRET-KEY")
+@pytest.mark.parametrize('failure', [
+    requests.ConnectionError('connection refused: http://kubedoor-master/api/internal/notify'),
+    requests.Timeout('read timed out'),
+    FakeResponse(503, {'success': False, 'message': 'not ready'}),
+    FakeResponse(403, {'success': False, 'message': 'forbidden'}),
+    FakeResponse(500, text='Internal Server Error'),
+    FakeResponse(200, {'success': False, 'message': 'dispatch error'}),
+    FakeResponse(200, text='<html>not json</html>'),
+    FakeResponse(200, {'success': True, 'data': 'bad-shape'}),
+], ids=['connect', 'timeout', 'http503', 'http403', 'http500', 'not-success', 'not-json', 'bad-data'])
+def test_post_internal_notify_failures_raise_send_error(fake_http, internal_env, failure):
+    fake_http.notify = [failure]
     with pytest.raises(notify_client.SendError) as info:
-        notify_client.send({'type': 'wecom', 'token': 'SECRET-KEY', 'at': ''}, 'md', '')
-    assert 'SECRET-KEY' not in str(info.value)
-    assert 'ConnectionError' in str(info.value)
-    assert info.value.__cause__ is None and info.value.__suppress_context__
+        notify_client.post_internal_notify({'env': 'prod', 'category': 'metric_alert', 'items': [{'summary': 'A'}]})
+    assert info.value.__cause__ is None
+    if isinstance(failure, Exception):
+        assert info.value.__suppress_context__ is True
+    assert 'internal-secret' not in str(info.value)
