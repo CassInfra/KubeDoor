@@ -101,6 +101,8 @@ export function pickInstallOptions(
     result.vmagent = result.mode === "full" ? "install" : "reuse";
     if (result.mode === "agent") result.ksm = result.node_exporter = "reuse";
   }
+  // Agent 端组件固定装在 kubedoor，任务里带回的历史命名空间也不能改
+  result.namespace = "kubedoor";
   return result;
 }
 
@@ -151,11 +153,8 @@ export function settingsReminder(label: string): string {
 export function installValidation(options: AgentInstallOptions): string {
   if (!/^[A-Za-z0-9_-]{1,64}$/.test(options.env))
     return "集群标识只能包含字母、数字、下划线和中划线，最长 64 位";
-  if (
-    !/^[a-z0-9]([-a-z0-9]*[a-z0-9])?$/.test(options.namespace) ||
-    options.namespace.length > 63
-  )
-    return "命名空间应为最多 63 位的小写字母、数字和中划线";
+  if (options.namespace !== "kubedoor")
+    return "Agent 只能安装到 kubedoor 命名空间，不能修改";
   if (!options.master_url.trim()) return "请填写目标集群可访问的 KubeDoor 地址";
   try {
     const address = new URL(options.master_url);
@@ -222,7 +221,7 @@ export function repairNotice(
     repair.source === "ai-connection"
       ? `用保存的 AI Kubeconfig（${connection}）连接集群`
       : "用上传的 kubeconfig 连接集群";
-  return `${via}，覆盖安装集群 ${repair.env} 的 Agent；集群唯一标识和命名空间沿用现有的，不能修改。`;
+  return `${via}，覆盖安装集群 ${repair.env} 的 Agent；集群唯一标识沿用现有的，命名空间固定为 kubedoor，不能修改。`;
 }
 
 /**

@@ -1,4 +1,5 @@
 import { http } from "@/utils/http";
+import type { PureHttpRequestConfig } from "@/utils/http/types";
 
 export type ResultTable = {
   success?: boolean;
@@ -54,21 +55,28 @@ export const getConfigMapList = (env: string, namespace?: string) => {
  * @param env K8S环境
  * @param namespace 命名空间
  * @param serviceName Service名称
+ * @param config axios 配置,例如弹窗里自己展示错误时传 silent
  */
 export const getServiceContent = (
   env: string,
   namespace: string,
   serviceName: string,
-  resourceType: string
+  resourceType: string,
+  config?: PureHttpRequestConfig
 ) => {
-  return http.request<ResContentResult>("get", "/api/agent/res/content", {
-    params: {
-      env,
-      namespace,
-      resource_name: serviceName,
-      resource_type: resourceType
-    }
-  });
+  return http.request<ResContentResult>(
+    "get",
+    "/api/agent/res/content",
+    {
+      params: {
+        env,
+        namespace,
+        resource_name: serviceName,
+        resource_type: resourceType
+      }
+    },
+    config
+  );
 };
 
 /**

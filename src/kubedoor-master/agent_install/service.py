@@ -27,6 +27,7 @@ from notify import channels
 
 from . import health
 from .bundle import (
+    AGENT_NAMESPACE,
     KSM_PORT,
     WRITE_KEY,
     defaults,
@@ -68,8 +69,8 @@ AGENT_CONFIG = 'kubedoor-agent-config'
 REPAIR_CHECK = '现有 Agent'
 # 修复任务从哪来：用 AI Kubeconfig 列保存的 / 页面上传的
 REPAIR_SOURCES = ('ai-connection', 'upload')
-# 修复时沿用上次网页安装的这几个参数（Agent 版本用推荐版本，集群标识固定）
-REPAIR_KEEP = ('namespace', 'mode', 'vmagent', 'ksm', 'node_exporter', 'master_url')
+# 修复时沿用上次网页安装的这几个参数（Agent 版本用推荐版本，集群标识固定，命名空间固定 kubedoor）
+REPAIR_KEEP = ('mode', 'vmagent', 'ksm', 'node_exporter', 'master_url')
 # 修复时目标集群里没有找到这个集群的 Agent：放进强制覆盖清单的一项（kind），确认后才继续
 MISSING_AGENT = 'Agent'
 
@@ -422,8 +423,8 @@ class Service:
         return task
 
     async def repair_options(self, env, base):
-        """修复的预填参数：集群标识固定为 env；命名空间、安装方式、采集组件、KubeDoor 地址沿用这个集群上次网页安装的
-        （脚本装的没有记录，用默认值）；Agent 版本用推荐版本。命名空间在预检时再以目标集群里现有 Agent 所在的为准"""
+        """修复的预填参数：集群标识固定为 env；安装方式、采集组件、KubeDoor 地址沿用这个集群上次网页安装的
+        （脚本装的没有记录，用默认值）；Agent 版本用推荐版本。命名空间固定为 kubedoor，不再跟随现有 Agent。"""
         default = {'env': env, 'mode': 'full' if base['metrics_available'] else 'agent'}
         picked = dict(default)
         previous = await self.repo.installed(env)
@@ -508,8 +509,8 @@ class Service:
             if repair and options.get('env') != repair['env']:
                 raise InstallError(f'修复时集群唯一标识不能修改，要和现在的一样：{repair["env"]}', 409)
             if (task['payload'].get('applied') or task['payload'].get('target_reserved')) and (
-                    context != task['payload']['context'] or any(options[k] != previous[k] for k in ('env', 'namespace'))):
-                raise InstallError('任务已开始安装，不能更换目标 context、集群标识或命名空间；请新建安装任务', 409)
+                    context != task['payload']['context'] or options['env'] != previous['env']):
+                raise InstallError('任务已开始安装，不能更换目标 context 或集群标识；请新建安装任务', 409)
             if not options.get('env') or not options.get('master_url'):
                 raise InstallError('请填写集群唯一标识和目标集群可访问的 KubeDoor 地址')
             if installs_vmagent(options) and not options.get(WRITE_KEY):
@@ -580,10 +581,26 @@ class Service:
         repair = task['payload'].get('repair')
         found = await self.repair_identity(task, options, kube, checks) if repair else None
         if options.get('image_pull_secret'):
-            existing_secret = await kube.request('GET', f'/api/v1/namespaces/{options["namespace"]}/secrets/{options["image_pull_secret"]}',
-                                                 missing_ok=True)
+            secret_name = options['image_pull_secret']
+            existing_secret = await kube.request(
+                'GET', f'/api/v1/namespaces/{options["namespace"]}/secrets/{secret_name}', missing_ok=True)
             if not existing_secret:
-                raise InstallError('指定的镜像拉取 Secret 不存在，请先在目标命名空间创建它或使用可公开拉取的镜像')
+                # 安装向导可能把控制端装在别的命名空间：镜像拉取 Secret 在那里，Agent 固定装到 kubedoor，
+                # 这里复制一份过去；kubeconfig 的 context 命名空间就是控制端命名空间。
+                source_namespace = kube.context_namespace
+                if source_namespace != options['namespace']:
+                    source_secret = await kube.request(
+                        'GET', f'/api/v1/namespaces/{source_namespace}/secrets/{secret_name}', missing_ok=True)
+                    if source_secret:
+                        copied = copy.deepcopy(source_secret)
+                        copied['metadata'] = {
+                            'name': secret_name, 'namespace': options['namespace'],
+                            'labels': copy.deepcopy((source_secret.get('metadata') or {}).get('labels') or {}),
+                        }
+                        await kube.request('POST', f'/api/v1/namespaces/{options["namespace"]}/secrets', body=copied)
+                        existing_secret = copied
+            if not existing_secret:
+                raise InstallError('指定的镜像拉取 Secret 不存在，请先在 kubedoor 命名空间创建它或使用可公开拉取的镜像')
         if repair:
             return found
         cfg = await kube.request('GET', f'/api/v1/namespaces/{options["namespace"]}/configmaps/{AGENT_CONFIG}', missing_ok=True)
@@ -615,15 +632,15 @@ class Service:
             raise InstallError(f'目标集群里有 {len(mine)} 套集群名为 {env} 的 Agent（命名空间 {spaces}），请先删掉多余的再修复', 409)
         if mine:
             namespace = mine[0]['metadata'].get('namespace') or options['namespace']
-            if namespace != options['namespace']:
-                if checks is None:
-                    raise InstallError(f'目标集群里集群 {env} 的 Agent 现在在命名空间 {namespace}，和检测时不同，请重新检测', 409)
-                options['namespace'] = namespace
+            if namespace != AGENT_NAMESPACE:
+                raise InstallError(
+                    f'Agent 只能安装在 kubedoor 命名空间；目标集群里集群 {env} 的 Agent 在命名空间 {namespace}，'
+                    '请先把它迁移到 kubedoor 或卸载后重新安装', 409)
             script = mine[0]['metadata'].get('labels', {}).get(MANAGED) != 'web-installer'
             if checks is not None:
                 checks.append({'name': REPAIR_CHECK, 'status': 'success',
-                               'message': f'命名空间 {namespace} 里有集群 {env} 的 Agent（{"脚本" if script else "网页"}安装），修复会覆盖安装它'})
-            return [conflict('ConfigMap', AGENT_CONFIG, namespace, '脚本安装的 Agent')] if script else []
+                               'message': f'命名空间 kubedoor 里有集群 {env} 的 Agent（{"脚本" if script else "网页"}安装），修复会覆盖安装它'})
+            return [conflict('ConfigMap', AGENT_CONFIG, AGENT_NAMESPACE, '脚本安装的 Agent')] if script else []
         other = await kube.request('GET', f'/api/v1/namespaces/{options["namespace"]}/configmaps/{AGENT_CONFIG}', missing_ok=True)
         if other:
             raise InstallError(f'命名空间 {options["namespace"]} 里是集群 {agent_cluster_name(other)[:64] or "（空）"} 的 Agent，'

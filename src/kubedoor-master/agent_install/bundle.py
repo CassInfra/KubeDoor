@@ -24,8 +24,12 @@ import yaml
 # kube-state-metrics、node-exporter 是 auto（自动检测：已有就复用，没有就安装）/ install / reuse（不安装，用集群里已有的）。
 # mode 是页面上的安装方式，只决定三个组件的默认值：full 完整安装（vmagent 安装，其余自动检测），
 # agent 仅安装 kubedoor-agent（三个都不装）。只传 mode 不传 vmagent（安装向导、本次改动前的安装任务）时按 mode 定三个组件
+# Agent 端组件（kubedoor-agent、vmagent、kube-state-metrics、node-exporter）只允许装在这个命名空间。
+# 页面、API、安装向导和旧脚本都统一按这个值渲染，不再接受自定义命名空间。
+AGENT_NAMESPACE = "kubedoor"
+
 BASE = {
-    "namespace": "kubedoor", "master_url": "", "env": "", "aliases": [],
+    "namespace": AGENT_NAMESPACE, "master_url": "", "env": "", "aliases": [],
     "mode": "full", "image_repo": "swr.cn-south-1.myhuaweicloud.com/starsl.cn",
     "agent_tag": "2.6.0", "oss_url": "", "remote_write_url": "",
     "vmagent": "install", "ksm": "auto", "node_exporter": "auto", "image_pull_secret": "",
@@ -109,8 +113,11 @@ def normalize_options(raw: dict, default: dict | None = None) -> dict:
         raise ValueError("通知配置的格式不正确")
     if result["env"] and not re.fullmatch(r"[A-Za-z0-9_-]{1,100}", result["env"]):
         raise ValueError("集群标识需要 1 至 100 个字母、数字、下划线或中划线")
-    if not re.fullmatch(r"[a-z0-9](?:[-a-z0-9]{0,61}[a-z0-9])?", result["namespace"]):
-        raise ValueError("命名空间必须是有效的 Kubernetes 名称")
+    # Agent 端组件固定装在 kubedoor：页面传了别的命名空间直接拒绝；空值沿用默认的 kubedoor。
+    requested_namespace = raw.get("namespace")
+    if requested_namespace and requested_namespace != AGENT_NAMESPACE:
+        raise ValueError("Agent 只能安装到 kubedoor 命名空间，不能修改")
+    result["namespace"] = AGENT_NAMESPACE
     aliases = result.get("aliases", [])
     if not isinstance(aliases, list) or len(aliases) > 20 or any(not isinstance(a, str) or len(a) > 100 for a in aliases):
         raise ValueError("集群别名最多 20 个，每个不超过 100 个字符")
@@ -222,7 +229,7 @@ def pin_ksm_job(scrape: dict, options: dict) -> None:
         relabels.append({"source_labels": ["__meta_kubernetes_service_name"], "regex": name, "action": "keep"})
 
 
-def ensure_webhook_tls_secret_manifest(namespace: str = "kubedoor") -> dict:
+def ensure_webhook_tls_secret_manifest(namespace: str = AGENT_NAMESPACE) -> dict:
     """为 kubedoor-agent Webhook 生成集群持久化的 TLS Secret 清单（包含 ca.crt、tls.crt、tls.key）。"""
     if not isinstance(namespace, str) or not re.fullmatch(r"[a-z0-9](?:[-a-z0-9]{0,61}[a-z0-9])?", namespace):
         raise ValueError("命名空间必须是有效的 Kubernetes 名称")
@@ -443,6 +450,8 @@ def _from_vars(variables: dict) -> tuple[dict, str, str]:
     d["ksm"] = "reuse" if variables.get("ENABLE_KUBE_STATE_METRICS", "true") != "true" else "install"
     d["node_exporter"] = "reuse" if variables.get("ENABLE_NODE_EXPORTER", "true") != "true" else "install"
     d["_legacy_components"] = [name for name, flag in zip(FILES[2:], ("ENABLE_VMAGENT", "ENABLE_KUBE_STATE_METRICS", "ENABLE_NODE_EXPORTER")) if variables.get(flag, "true") == "true"]
+    # 旧脚本的 NAMESPACE 是控制端命名空间；Agent 端组件固定装到 kubedoor，不跟随它。
+    d["namespace"] = AGENT_NAMESPACE
     return d, unquote(p.username or "anonymous-agent"), unquote(p.password or "legacy-anonymous")
 
 

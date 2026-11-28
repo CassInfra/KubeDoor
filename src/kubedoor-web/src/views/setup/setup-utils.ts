@@ -146,7 +146,7 @@ export function agentFormFrom(agent?: SetupAgent): AgentForm {
     install: !!options,
     env: source.env || "",
     aliases: (options?.aliases || []).join(", "),
-    namespace: source.namespace || "kubedoor",
+    namespace: "kubedoor",
     mode: source.mode === "agent" ? "agent" : "full",
     ksm: componentChoice(source.ksm),
     node_exporter: componentChoice(source.node_exporter)
@@ -179,10 +179,8 @@ export function agentPayload(form: AgentForm): SetupAgentOptions {
   if (aliases.some(alias => Array.from(alias).length > 100))
     throw new Error("每个集群别名最长 100 个字符。");
   const namespace = form.namespace.trim();
-  if (!/^[a-z0-9](?:[-a-z0-9]{0,61}[a-z0-9])?$/.test(namespace))
-    throw new Error(
-      "命名空间只能含小写字母、数字和中划线，以字母或数字开头和结尾，最长 63 个字符。"
-    );
+  if (namespace !== "kubedoor")
+    throw new Error("Agent 只能安装到 kubedoor 命名空间，不能修改。");
   if (form.mode !== "full" && form.mode !== "agent")
     throw new Error("请选择安装方式。");
   if (!componentChoices.includes(form.ksm))

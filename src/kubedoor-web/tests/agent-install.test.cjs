@@ -437,7 +437,7 @@ test("向导必须先检测，修改参数后再次禁止安装", async t => {
   assert.equal(calls.start, 0);
   await vm.preflight();
   assert.equal(vm.canInstall, true);
-  vm.options.namespace = "other";
+  vm.options.agent_tag = "other";
   await vm.start(false);
   assert.equal(vm.canInstall, false);
   assert.equal(calls.start, 0);
@@ -875,14 +875,14 @@ test("Agent 管理表格列宽：K8S 列按最长的集群名完整显示，不�
 
 // ---------------------------------------------------------------- 修复 Agent
 const healthUtils = compile("../src/views/workbench/health-utils.ts");
-// 服务端用保存的 AI Kubeconfig 建的修复任务：参数已预填（集群标识固定、命名空间沿用现有 Agent 的、Agent 版本为推荐版本）
+// 服务端用保存的 AI Kubeconfig 建的修复任务：参数已预填（集群标识固定、命名空间固定 kubedoor、Agent 版本为推荐版本）
 const repairTask = (extra = {}) =>
   task({
     id: "repair-1",
     context: "kubedoor-agent",
     contexts: [{ name: "kubedoor-agent", server: "https://k8s.example.com" }],
     repair: { env: "production", source: "ai-connection" },
-    options: served({ namespace: "kubedoor-system", agent_tag: "2.6.0" }),
+    options: served({ namespace: "kubedoor", agent_tag: "2.6.0" }),
     ...extra
   });
 const upload = text => ({
@@ -892,7 +892,7 @@ const upload = text => ({
   }
 });
 
-test("修复：有 AI Kubeconfig 时直接到确认信息，集群标识和命名空间不能改，检测提交的就是这个集群", async t => {
+test("修复：有 AI Kubeconfig 时直接到确认信息，集群标识不能改，检测提交的就是这个集群", async t => {
   const repairs = [];
   const sent = [];
   const { vm, calls, saved, storageReads } = await harness(
@@ -911,12 +911,12 @@ test("修复：有 AI Kubeconfig 时直接到确认信息，集群标识和命�
         return repairTask({
           status: "ready",
           revision: 2,
-          options: { ...selected, namespace: "kubedoor-system" },
+          options: { ...selected, namespace: "kubedoor" },
           checks: [
             {
               name: "现有 Agent",
               status: "success",
-              message: "kubedoor-system/kubedoor-agent"
+              message: "kubedoor/kubedoor-agent"
             }
           ]
         });
@@ -939,12 +939,12 @@ test("修复：有 AI Kubeconfig 时直接到确认信息，集群标识和命�
   assert.equal(vm.usingSavedConnection, true);
   assert.match(
     vm.repairText,
-    /^用保存的 AI Kubeconfig（自动配置）连接集群，覆盖安装集群 production 的 Agent；集群唯一标识和命名空间沿用现有的/
+    /^用保存的 AI Kubeconfig（自动配置）连接集群，覆盖安装集群 production 的 Agent；集群唯一标识沿用现有的，命名空间固定为 kubedoor/
   );
   // 服务端预填的参数原样显示
   assert.deepEqual(
     [vm.options.env, vm.options.namespace, vm.options.agent_tag],
-    ["production", "kubedoor-system", "2.6.0"]
+    ["production", "kubedoor", "2.6.0"]
   );
   await vm.preflight();
   assert.equal(sent.length, 1);

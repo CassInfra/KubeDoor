@@ -1816,9 +1816,10 @@ onBeforeUnmount(() => {
                           id="agent-namespace"
                           v-model="agentForm.namespace"
                           autocomplete="off"
+                          disabled
                         />
                         <p class="field-hint">
-                          Agent 安装到这个命名空间，不存在时自动创建。
+                          Agent 端组件固定安装在 kubedoor 命名空间，不能修改。
                         </p>
                       </div>
                       <div>

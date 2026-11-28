@@ -384,7 +384,7 @@ class SetupAPI:
             if agent.get('status') not in ('choice', 'failed') or self.agent_busy():
                 raise SetupError('Agent 安装已在进行或已经结束，请刷新页面查看状态', 409)
             private = await self.repo.load_private(state)
-            defaults = agent.get('defaults') or agent_defaults(self.repo.namespace, private['config'])
+            defaults = agent.get('defaults') or agent_defaults(private['config'])
             options = normalize_options(body.get('options'), defaults, write_url_of(private['config']))
             # force：用户在确认框里同意接管本集群里已有的 Agent 资源（预检报「已有 Agent 资源」后的强制覆盖安装）
             start_attempt(state, options, secrets.token_hex(16), force=body.get('force') is True)

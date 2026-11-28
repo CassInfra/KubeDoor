@@ -13,6 +13,7 @@
     "preview:build": "pnpm build && vite preview",
     "typecheck": "tsc --noEmit && vue-tsc --noEmit --skipLibCheck",
     "test:agent-install": "node --test tests/agent-install.test.cjs",
+    "test:deployment-env": "node --test tests/deployment-env.test.cjs",
     "test:setup": "node --test tests/setup.test.cjs",
     "test:general-settings": "node --test tests/general-settings.test.cjs",
     "test:event-alert-rules": "node --test tests/event-alert-rules.test.cjs",

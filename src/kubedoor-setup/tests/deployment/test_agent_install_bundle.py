@@ -40,6 +40,14 @@ def test_bundle_image_defaults_match_install_script():
         assert line.split("=", 1)[1].strip('"') == bundle.BASE[key], variable
 
 
+def test_agent_namespace_is_fixed_to_kubedoor():
+    base = bundle.defaults({bundle.WRITE_KEY: WRITE_URL})
+    assert bundle.normalize_options({"env": "demo"}, base)["namespace"] == "kubedoor"
+    assert bundle.normalize_options({"env": "demo", "namespace": ""}, base)["namespace"] == "kubedoor"
+    with pytest.raises(ValueError, match="kubedoor"):
+        bundle.normalize_options({"env": "demo", "namespace": "ops"}, base)
+
+
 def test_credentials_are_secret_and_urls_are_encoded(monkeypatch):
     # 通知改由 master 统一发送：即使 master 环境里还残留旧的 MSG_TOKEN，也不能写进业务集群
     monkeypatch.setenv("MSG_TOKEN", "notify-secret")

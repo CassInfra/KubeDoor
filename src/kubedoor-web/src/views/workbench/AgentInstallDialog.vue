@@ -100,7 +100,7 @@ const isRepair = computed(() => !!props.repairEnv || !!task.value?.repair);
 const repairTarget = computed(
   () => props.repairEnv || task.value?.repair?.env || ""
 );
-/** 集群唯一标识和命名空间不能改：已开始安装，或者是修复（沿用现有 Agent 的） */
+/** 集群唯一标识不能改：已开始安装，或者是修复（沿用现有集群的标识）；命名空间固定 kubedoor */
 const identityLocked = computed(() => targetFixed.value || isRepair.value);
 const dialogTitle = computed(() =>
   isRepair.value ? `修复 Agent：${repairTarget.value}` : "安装 Agent"
@@ -935,10 +935,10 @@ onBeforeUnmount(() => {
           </el-form-item>
           <div class="field-grid">
             <el-form-item label="命名空间">
-              <el-input
-                v-model="options.namespace"
-                :disabled="identityLocked"
-              />
+              <el-input v-model="options.namespace" disabled />
+              <div class="field-hint">
+                Agent 端组件固定安装在 kubedoor 命名空间，不能修改。
+              </div>
             </el-form-item>
             <el-form-item label="Agent 镜像版本">
               <el-input

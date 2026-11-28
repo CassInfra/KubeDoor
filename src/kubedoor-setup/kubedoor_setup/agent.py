@@ -35,7 +35,6 @@ PROBE_TOKEN_SECONDS = 600       # 只用来检测权限的令牌：TokenRequest 
 STALE_SECONDS = 90              # 状态这么久没刷新、本进程又没有对应任务，视为安装服务重启过
 CONCLUDED = ('succeeded', 'partial', 'skipped')
 ENV = re.compile(r'[A-Za-z0-9_-]{1,100}')
-NAMESPACE = re.compile(r'[a-z0-9](?:[-a-z0-9]{0,61}[a-z0-9])?')
 PULL_SECRET = re.compile(r'[a-z0-9](?:[-a-z0-9.]*[a-z0-9])?')
 UNAVAILABLE = '未授予在本集群安装 Agent 的临时集群权限，安装完成后可在控制台上传 kubeconfig 接入本集群'
 FAILED = '在本集群安装 Agent 未成功：可修改选项后重试，或跳过直接完成安装'
@@ -117,13 +116,14 @@ def master_url(namespace):
     return f'http://kubedoor-master.{namespace}'
 
 
-def agent_defaults(namespace, config):
-    return {'namespace': namespace, 'mode': 'full' if write_url_of(config) else 'agent',
+def agent_defaults(config):
+    # Agent 端组件只允许装在 kubedoor，和控制端所在命名空间无关。
+    return {'namespace': 'kubedoor', 'mode': 'full' if write_url_of(config) else 'agent',
             'ksm': 'auto', 'node_exporter': 'auto', 'env': ''}
 
 
-def new_agent_state(namespace, config):
-    return {'status': 'choice', 'deadline': deadline_after(CHOICE_SECONDS), 'defaults': agent_defaults(namespace, config),
+def new_agent_state(config):
+    return {'status': 'choice', 'deadline': deadline_after(CHOICE_SECONDS), 'defaults': agent_defaults(config),
             'steps': [], 'checks': [], 'updated_at': utcnow(),
             'message': '控制端已就绪：可以在本集群安装 Agent，也可以跳过直接完成安装'}
 
@@ -169,9 +169,11 @@ def normalize_options(raw, defaults, write_url):
     env = raw.get('env', '')
     if not isinstance(env, str) or not ENV.fullmatch(env.strip()):
         raise SetupError('请填写集群唯一标识：1 至 100 个字母、数字、下划线或中划线', 422)
-    namespace = raw.get('namespace') or defaults.get('namespace', '')
-    if not isinstance(namespace, str) or not NAMESPACE.fullmatch(namespace.strip()):
-        raise SetupError('命名空间需为有效的 Kubernetes 名称：小写字母、数字或中划线，不超过 63 个字符', 422)
+    # Agent 端组件固定装在 kubedoor：页面传了别的命名空间直接拒绝；空值沿用默认的 kubedoor。
+    requested_namespace = raw.get('namespace')
+    if requested_namespace is not None and str(requested_namespace).strip() not in ('', 'kubedoor'):
+        raise SetupError('Agent 只能安装到 kubedoor 命名空间，不能修改', 422)
+    namespace = 'kubedoor'
     aliases = raw.get('aliases')
     aliases = [] if aliases is None else aliases
     if (not isinstance(aliases, list) or len(aliases) > 20
@@ -201,16 +203,18 @@ def bootstrap_pull_secret():
     return value if isinstance(value, str) and PULL_SECRET.fullmatch(value) else ''
 
 
-def master_options(options, namespace):
+def master_options(options, control_namespace):
     """交给 master 预检的安装选项。
 
     时序库远程写地址、镜像仓库和采集组件镜像由 master 从通用配置读取（安装服务在控制服务就绪时已写入第 3 步的地址），
     Agent 版本等其余参数沿用 master 的默认值；这里只带本集群直连 master 的集群内地址。
+    Agent 固定装到 kubedoor；control_namespace 是控制端所在命名空间，用来拼 master 地址、找镜像拉取 Secret。
     """
-    result = {key: copy.deepcopy(options[key]) for key in ('env', 'aliases', 'namespace', 'mode', 'ksm', 'node_exporter')}
-    result['master_url'] = master_url(namespace)
+    result = {key: copy.deepcopy(options[key]) for key in ('env', 'aliases', 'mode', 'ksm', 'node_exporter')}
+    result['namespace'] = 'kubedoor'
+    result['master_url'] = master_url(control_namespace)
     pull_secret = bootstrap_pull_secret()
-    if pull_secret and options['namespace'] == namespace:
+    if pull_secret:
         result['image_pull_secret'] = pull_secret
     return result
 

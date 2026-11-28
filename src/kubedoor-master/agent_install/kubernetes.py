@@ -74,6 +74,18 @@ class Kubernetes:
         self.directory = None
         self.session = None
 
+    @property
+    def context_namespace(self):
+        """kubeconfig 当前 context 的命名空间；Agent 固定装到 kubedoor，但镜像拉取 Secret 可能还在控制端命名空间。"""
+        contexts = self.config.get('contexts') or []
+        current = self.config.get('current-context')
+        for item in contexts:
+            if item.get('name') == current:
+                return (item.get('context') or {}).get('namespace') or 'default'
+        if contexts:
+            return (contexts[0].get('context') or {}).get('namespace') or 'default'
+        return 'default'
+
     async def __aenter__(self):
         self.directory = tempfile.TemporaryDirectory(prefix='kubedoor-install-')
         try:

@@ -91,7 +91,7 @@ async def repair_with(service, monkeypatch, ai, username='admin'):
         return await service.repair(ENV, username)
 
 
-async def installed_before(repo, namespace='ops-agent', **options):
+async def installed_before(repo, namespace='kubedoor', **options):
     """这个集群以前网页安装成功过的记录（集群 UID 和假集群一样）"""
     record = {'id': '11111111-1111-4111-8111-111111111111', 'status': 'succeeded', 'revision': 3, 'env': ENV,
               'target_uid': 'cluster-uid', 'encrypted': '', 'expires_at': module.utcnow(),
@@ -125,8 +125,8 @@ async def test_repair_uses_the_saved_kubeconfig_and_keeps_the_last_install_setti
     assert result['message'] == '' and task['status'] == 'draft'
     assert task['payload']['repair'] == {'env': ENV, 'source': 'ai-connection', 'origin': 'agent-install'}
     options = task['payload']['options']
-    # 集群标识固定；命名空间、安装方式、采集组件、KubeDoor 地址沿用上次；Agent 版本用推荐版本
-    assert options['env'] == ENV and options['namespace'] == 'ops-agent' and options['mode'] == 'agent'
+    # 集群标识固定；安装方式、采集组件、KubeDoor 地址沿用上次；命名空间固定 kubedoor；Agent 版本用推荐版本
+    assert options['env'] == ENV and options['namespace'] == 'kubedoor' and options['mode'] == 'agent'
     assert (options['vmagent'], options['ksm'], options['node_exporter']) == ('reuse', 'reuse', 'reuse')
     assert options['master_url'] == 'https://intranet.example.test'
     assert options['agent_tag'] == module.defaults()['agent_tag']
@@ -188,17 +188,29 @@ async def test_repair_cannot_change_the_cluster_name(repairing):
 
 
 @pytest.mark.asyncio
-async def test_repair_follows_the_namespace_of_the_existing_agent(repairing):
+async def test_repair_refuses_an_agent_outside_kubedoor(repairing):
     service, cluster, _ = repairing
     cluster.add_agent('ops-agent')
     task = await service.inspect(CONFIG, 'admin', repair={'env': ENV, 'source': 'upload'})
-    assert task['payload']['options']['namespace'] == 'kubedoor'   # 没有安装记录：默认值
+    assert task['payload']['options']['namespace'] == 'kubedoor'   # 没有安装记录：固定值
+    done = await preflight(service, task, **PRESETS['agent'])
+    assert done['status'] == 'draft'
+    error = check(done, '安装预检')
+    assert error['status'] == 'error'
+    assert 'Agent 只能安装在 kubedoor 命名空间' in error['message'] and 'ops-agent' in error['message']
+    assert all(item['namespace'] in ('kubedoor', '') for item in done['payload']['resources'])
+
+
+@pytest.mark.asyncio
+async def test_repair_keeps_kubedoor_for_an_agent_already_there(repairing):
+    service, cluster, _ = repairing
+    cluster.add_agent('kubedoor')
+    task = await service.inspect(CONFIG, 'admin', repair={'env': ENV, 'source': 'upload'})
     done = await preflight(service, task, **PRESETS['agent'])
     assert done['status'] == 'ready', done['payload']['checks']
-    # 页面上的命名空间换成现有 Agent 所在的，并说明
-    assert done['payload']['options']['namespace'] == 'ops-agent'
-    assert '命名空间 ops-agent 里有集群 production 的 Agent（网页安装）' in check(done, module.REPAIR_CHECK)['message']
-    assert all(item['namespace'] in ('ops-agent', '') for item in done['payload']['resources'])
+    assert done['payload']['options']['namespace'] == 'kubedoor'
+    assert '命名空间 kubedoor 里有集群 production 的 Agent（网页安装）' in check(done, module.REPAIR_CHECK)['message']
+    assert all(item['namespace'] in ('kubedoor', '') for item in done['payload']['resources'])
     # 「这个集群标识已有 Agent 登记」不再拦修复
     assert ENV in service.clients
 
@@ -235,10 +247,10 @@ async def test_no_agent_in_the_target_cluster_needs_confirmation_unless_installe
     # 以前在这个集群（同一个集群 UID）网页安装过：Agent 被删了也直接按记录重装
     await installed_before(repo)
     again = await service.inspect(CONFIG, 'admin', repair={'env': ENV, 'source': 'upload'})
-    assert again['payload']['options']['namespace'] == 'ops-agent'
+    assert again['payload']['options']['namespace'] == 'kubedoor'
     ready = await preflight(service, again)
     assert ready['status'] == 'ready', ready['payload']['checks']
-    assert '按上次的安装记录重新安装到命名空间 ops-agent' in check(ready, module.REPAIR_CHECK)['message']
+    assert '按上次的安装记录重新安装到命名空间 kubedoor' in check(ready, module.REPAIR_CHECK)['message']
 
 
 @pytest.mark.asyncio
@@ -279,29 +291,30 @@ async def test_a_normal_install_still_refuses_a_registered_cluster_name(repairin
 @pytest.mark.asyncio
 async def test_repair_installs_and_brings_the_agent_back_online(repairing):
     service, cluster, repo = repairing
-    cluster.add_agent('ops-agent')
+    cluster.add_agent('kubedoor')
     task = await preflight(service, await service.inspect(CONFIG, 'admin', repair={'env': ENV, 'source': 'upload'}),
                            **PRESETS['agent'])
     await service.start(task['id'], task['revision'])
     await service.tasks[task['id']]
     done = await repo.get(task['id'])
     assert done['status'] == 'succeeded', done['payload'].get('error')
-    assert all(item['namespace'] in ('ops-agent', '') for item in done['payload']['applied'])
+    assert all(item['namespace'] in ('kubedoor', '') for item in done['payload']['applied'])
     assert service.clients[ENV]['online'] is True
 
 
 @pytest.mark.asyncio
 async def test_install_stops_when_the_agent_moved_after_the_check(repairing):
     service, cluster, repo = repairing
-    cluster.add_agent('ops-agent')
+    cluster.add_agent('kubedoor')
     task = await preflight(service, await service.inspect(CONFIG, 'admin', repair={'env': ENV, 'source': 'upload'}),
                            **PRESETS['agent'])
-    cluster.configs = {'elsewhere': {**cluster.configs['ops-agent'],
-                                     'metadata': {**cluster.configs['ops-agent']['metadata'], 'namespace': 'elsewhere'}}}
+    cluster.configs = {'elsewhere': {**cluster.configs['kubedoor'],
+                                     'metadata': {**cluster.configs['kubedoor']['metadata'], 'namespace': 'elsewhere'}}}
     await service.start(task['id'], task['revision'])
     await service.tasks[task['id']]
     done = await repo.get(task['id'])
-    assert done['status'] == 'failed' and '现在在命名空间 elsewhere，和检测时不同' in done['payload']['error']
+    assert done['status'] == 'failed'
+    assert 'Agent 只能安装在 kubedoor 命名空间' in done['payload']['error'] and 'elsewhere' in done['payload']['error']
 
 
 # ---- 修复弹框里的检查 ----

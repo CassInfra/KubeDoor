@@ -394,7 +394,7 @@ class InstallRunner:
         state = await self.repo.load()
         if (state.get('agent') or {}).get('status') not in CONCLUDED:
             if await self.agent_installer_available():
-                await self.update(phase='agent', step=6, agent=new_agent_state(self.namespace, self.config),
+                await self.update(phase='agent', step=6, agent=new_agent_state(self.config),
                                   check='cleanup', status='pending', message='等待选择是否在本集群安装 Agent')
                 return
             await self.update(agent=unavailable_agent_state())

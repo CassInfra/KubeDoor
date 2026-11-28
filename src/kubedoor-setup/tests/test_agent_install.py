@@ -192,7 +192,7 @@ async def enter_agent_phase(repo, *, write_url=True, agent=None):
     checks.append({'id': 'cleanup', 'name': 'cleanup', 'status': 'pending', 'message': '等待选择是否在本集群安装 Agent'})
     state.update(phase='agent', step=6, target_locked=True, run_id='run', services=rows, checks=checks,
                  selected_services=[row['id'] for row in rows], metrics_write_required=True,
-                 agent=agent or new_agent_state('kubedoor', private['config']))
+                 agent=agent or new_agent_state(private['config']))
     await repo.write(state, private)
     return private
 
@@ -520,9 +520,11 @@ def test_option_defaults_and_normalization_follow_master_rules():
     defaults = {'namespace': 'kubedoor', 'mode': 'full'}
     result = normalize_options({'env': ' prod_1-a ', 'aliases': None}, defaults, 'https://vm/api/v1/write')
     assert result == {'env': 'prod_1-a', 'aliases': [], 'namespace': 'kubedoor', 'mode': 'full', 'ksm': 'auto', 'node_exporter': 'auto'}
-    assert normalize_options({'env': 'a', 'namespace': 'agent-ns', 'mode': 'agent', 'ksm': 'reuse'}, defaults, '')['namespace'] == 'agent-ns'
+    with pytest.raises(SetupError):
+        normalize_options({'env': 'a', 'namespace': 'agent-ns', 'mode': 'agent', 'ksm': 'reuse'}, defaults, '')
     with pytest.raises(SetupError):
         normalize_options({'env': 'a'}, defaults, '')
+    assert normalize_options({'env': 'a'}, {'namespace': 'kubedoor', 'mode': 'agent'}, '')['namespace'] == 'kubedoor'
 
 
 @pytest.mark.asyncio

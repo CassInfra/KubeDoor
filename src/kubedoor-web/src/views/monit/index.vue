@@ -181,6 +181,9 @@
     <!-- 获取运行配置:master 调「系统管理 → 获取运行配置接口」配置的接口 -->
     <RuntimeConfigDialog ref="runtimeConfigRef" />
 
+    <!-- 获取 ENV:Deployment 主容器的环境变量 -->
+    <EnvDialog ref="envDialogRef" />
+
     <!-- 新建资源全屏YAML编辑弹窗（效果同 Service 编辑弹窗） -->
     <!-- 编辑Deployment -->
     <el-dialog
@@ -872,6 +875,9 @@
                     <el-dropdown-item @click="handleCodeInfo(scope.row)"
                       >获取代码</el-dropdown-item
                     >
+                    <el-dropdown-item @click="handleEnv(scope.row)"
+                      >获取 ENV</el-dropdown-item
+                    >
                     <el-dropdown-item
                       :disabled="!can('config.view', scope.row.env)"
                       @click="
@@ -982,6 +988,7 @@ import { useAskAI } from "@/utils/useAskAI";
 import PodLogViewer from "@/views/monit/components/PodLogViewer.vue";
 import CodeInfoDialog from "@/views/monit/components/CodeInfoDialog.vue";
 import RuntimeConfigDialog from "@/views/monit/components/RuntimeConfigDialog.vue";
+import EnvDialog from "@/views/monit/components/EnvDialog.vue";
 import * as monaco from "monaco-editor";
 import * as yaml from "js-yaml";
 import {
@@ -1846,6 +1853,16 @@ const runtimeConfigRef = ref<InstanceType<typeof RuntimeConfigDialog> | null>(
 );
 const openRuntimeConfig = (target: RuntimeConfigTarget) => {
   runtimeConfigRef.value?.open(target);
+};
+
+// 获取 ENV:展示 Deployment 主容器的环境变量
+const envDialogRef = ref<InstanceType<typeof EnvDialog> | null>(null);
+const handleEnv = (row: {
+  env: string;
+  namespace: string;
+  deployment: string;
+}) => {
+  envDialogRef.value?.open(row);
 };
 
 // Pod 操作（扩缩容/节点均衡等）共享的当前 Pod 信息

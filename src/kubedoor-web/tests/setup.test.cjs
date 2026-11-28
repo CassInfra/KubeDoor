@@ -809,7 +809,7 @@ test("收尾任务退回失败时重新获取安装会话和重试入口", async
 const agentOptions = {
   env: "prod-k8s",
   aliases: ["生产"],
-  namespace: "kubedoor-agent",
+  namespace: "kubedoor",
   mode: "full",
   ksm: "auto",
   node_exporter: "auto"
@@ -827,7 +827,7 @@ const agentState = (agent = {}, extra = {}) =>
       deadline: "2026-11-06T09:00:00Z",
       defaults: {
         env: "",
-        namespace: "kubedoor-agent",
+        namespace: "kubedoor",
         mode: "full",
         ksm: "auto",
         node_exporter: "auto"
@@ -842,7 +842,7 @@ test("Agent 安装选项按安装服务的规则校验，别名去重去空", ()
     install: true,
     env: " prod-k8s ",
     aliases: "生产, prod\n生产，，  \n",
-    namespace: "kubedoor-agent",
+    namespace: "kubedoor",
     mode: "full",
     ksm: "install",
     node_exporter: "reuse"
@@ -850,7 +850,7 @@ test("Agent 安装选项按安装服务的规则校验，别名去重去空", ()
   assert.deepEqual(utils.agentPayload(form), {
     env: "prod-k8s",
     aliases: ["生产", "prod"],
-    namespace: "kubedoor-agent",
+    namespace: "kubedoor",
     mode: "full",
     ksm: "install",
     node_exporter: "reuse"
@@ -877,9 +877,9 @@ test("Agent 安装选项按安装服务的规则校验，别名去重去空", ()
     "a".repeat(64)
   ])
     assert.throws(() => utils.agentPayload({ ...form, namespace }), /命名空间/);
-  assert.equal(
-    utils.agentPayload({ ...form, namespace: "a".repeat(63) }).namespace,
-    "a".repeat(63)
+  assert.throws(
+    () => utils.agentPayload({ ...form, namespace: "a".repeat(63) }),
+    /命名空间/
   );
   const aliases = Array.from({ length: 21 }, (_, index) => `alias-${index}`);
   assert.throws(
@@ -942,7 +942,7 @@ test("Agent 表单优先按上次提交的选项预填，完成页按结果给�
       status: "choice",
       defaults: {
         env: "prod-k8s",
-        namespace: "kubedoor-agent",
+        namespace: "kubedoor",
         mode: "agent",
         ksm: "bad"
       }
@@ -951,7 +951,7 @@ test("Agent 表单优先按上次提交的选项预填，完成页按结果给�
       install: false,
       env: "prod-k8s",
       aliases: "",
-      namespace: "kubedoor-agent",
+      namespace: "kubedoor",
       mode: "agent",
       ksm: "auto",
       node_exporter: "auto"
@@ -972,7 +972,7 @@ test("Agent 表单优先按上次提交的选项预填，完成页按结果给�
       install: true,
       env: "prod-k8s",
       aliases: "生产, prod",
-      namespace: "kubedoor-agent",
+      namespace: "kubedoor",
       mode: "full",
       ksm: "install",
       node_exporter: "reuse"
@@ -1031,7 +1031,7 @@ test("第 6 步勾选安装时校验选项后提交，之后锁定页面、不�
   assert.equal(vm.agentChoosing, true);
   assert.ok(vm.agentDeadline);
   assert.equal(vm.agentForm.install, false);
-  assert.equal(vm.agentForm.namespace, "kubedoor-agent");
+  assert.equal(vm.agentForm.namespace, "kubedoor");
   vm.goStep(4);
   assert.equal(vm.step, 6);
   vm.agentForm.install = true;
@@ -1050,7 +1050,7 @@ test("第 6 步勾选安装时校验选项后提交，之后锁定页面、不�
       options: {
         env: "prod-k8s",
         aliases: ["生产", "prod"],
-        namespace: "kubedoor-agent",
+        namespace: "kubedoor",
         mode: "full",
         ksm: "install",
         node_exporter: "auto"
@@ -1106,18 +1106,20 @@ test("Agent 安装失败后按上次选项预填，可改选项重试，也可�
   );
   assert.equal(vm.agentDone, 1);
   assert.equal(vm.actionText, "重新安装 Agent");
-  vm.agentForm.namespace = "kubedoor-ops";
   vm.agentForm.mode = "agent";
+  vm.agentForm.ksm = "reuse";
+  vm.agentForm.node_exporter = "reuse";
   await vm.advance();
   const submitted = {
     ...agentOptions,
-    namespace: "kubedoor-ops",
-    mode: "agent"
+    mode: "agent",
+    ksm: "reuse",
+    node_exporter: "reuse"
   };
   assert.deepEqual(calls.installAgent, [{ revision: 5, options: submitted }]);
   assert.equal(vm.agentStatus, "running");
   // 安装中退回失败时按实际提交的选项回填（安装中表单已锁定）
-  vm.agentForm.namespace = "stale";
+  vm.agentForm.ksm = "stale";
   setState(
     agentState(
       { status: "failed", options: submitted, error: "镜像拉取失败" },
@@ -1126,7 +1128,7 @@ test("Agent 安装失败后按上次选项预填，可改选项重试，也可�
   );
   await vm.pollState();
   assert.equal(vm.agentStatus, "failed");
-  assert.equal(vm.agentForm.namespace, "kubedoor-ops");
+  assert.equal(vm.agentForm.ksm, "reuse");
   assert.equal(vm.agentForm.mode, "agent");
   await vm.submitAgent(true);
   assert.deepEqual(calls.skipAgent, [7]);
