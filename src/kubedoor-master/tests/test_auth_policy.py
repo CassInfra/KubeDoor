@@ -109,6 +109,7 @@ def test_env_condition_sql():
     ('GET', '/api/agent/coredns', 'env_read'),
     ('GET', '/api/agent/net/resolve', 'env_read'),  # 从 agent 所在 Pod 解析域名
     ('GET', '/api/agent/net/tcp', 'op'),  # 端口测试会从集群内向任意地址发起连接
+    ('GET', '/api/agent/istio-routes', 'env_read'),  # VirtualService 路由摘要,按集群读权限
     ('POST', '/api/agent/coredns/save', 'op'),
     ('GET', '/api/agent/coredns/save', 'op'),  # 只登记了 GET 的只读路径,别的子路径不放宽
     ('POST', '/api/db/silence/add', 'custom'),
@@ -134,6 +135,11 @@ def test_env_condition_sql():
     ('GET', '/api/admin/general-settings', 'admin'),  # 通用配置
     ('PUT', '/api/admin/general-settings', 'admin'),
     ('POST', '/api/admin/general-settings/test-metrics', 'admin'),
+    ('GET', '/api/admin/notification/providers', 'admin'),
+    ('GET', '/api/admin/notification/v2', 'admin'),
+    ('PUT', '/api/admin/notification/v2', 'admin'),
+    ('GET', '/api/admin/notification/deliveries', 'admin'),
+    ('POST', '/api/internal/notify', 'internal'),
     ('GET', '/api/internal/settings', 'internal'),  # kubedoor-alarm、kubedoor-ai 取配置,handler 只认系统身份
     ('POST', '/api/admis', 'env_write'),  # 准入 webhook 由 K8S 直接调 agent,不经过 master
     ('GET', '/api/something/new', 'env_write'),  # 没登记的接口默认按集群写

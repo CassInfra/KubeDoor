@@ -1,7 +1,12 @@
 import asyncio
 import json
+import pathlib
 import sys
 import time
+
+_TOOLS_DIR = pathlib.Path(__file__).resolve().parent.parent / 'kubedoor-tools'
+if _TOOLS_DIR.is_dir() and str(_TOOLS_DIR) not in sys.path:
+    sys.path.insert(0, str(_TOOLS_DIR))
 import base64
 import re
 import uuid

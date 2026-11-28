@@ -12,4 +12,6 @@ asyncpg==0.31.0
 cryptography==50.0.2
 uvicorn==0.54.0
 wecom-aibot-python-sdk==1.0.2
+# 公网分享快照：把 AI 回答的 Markdown 渲染成静态 HTML（constraints.txt 已锁定版本）
+markdown-it-py==4.2.0
 lark-oapi==1.5.5

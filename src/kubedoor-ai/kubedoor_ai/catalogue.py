@@ -25,7 +25,10 @@ EXTRA_CATALOG = {
     "uncordon_nodes": ("POST", "/api/nodes/uncordon", "live", False),
     "service_endpoints": ("GET", "/api/agent/service/endpoints", "live", True),
     "service_first_port": ("GET", "/api/agent/service/first-port", "live", True),
+    "net_resolve": ("GET", "/api/agent/net/resolve", "live", True),
+    "net_tcp": ("GET", "/api/agent/net/tcp", "live", True),
     "ingress_rules": ("GET", "/api/agent/ingress/rules", "live", True),
+    "istio_routes": ("GET", "/api/agent/istio-routes", "live", True),
     "resource_content": ("GET", "/api/agent/res/content", "live", True),
     "resource_apply": ("POST", "/api/agent/res/ops", "live", False),
     "resource_delete": ("DELETE", "/api/agent/res/delete", "live", False),
@@ -181,6 +184,9 @@ EXTRA_SCHEMAS = {
     "service_endpoints": (["namespace", "service_name"], {**_NS, "service_name": "string；Service 名称"}, "查询 Service 后端 Endpoints、地址及端口，用于排查服务无后端"),
     "service_first_port": (["namespace", "service_name"], {**_NS, "service_name": "string；Service 名称"}, "获取 Service 第一个端口"),
     "ingress_rules": (["namespace", "ingress_name"], {**_NS, "ingress_name": "string；Ingress 名称"}, "查询 Ingress 域名、路径及后端 Service/端口规则"),
+    "istio_routes": ([], {"host": "string；按域名过滤 hosts（* 匹配全部，*.example.com 匹配子域）", "namespace": "string；只查这个命名空间", "name": "string；只查这个 VirtualService"}, "查询 Istio VirtualService 路由摘要：gateways、hosts、每条 HTTP/TCP/TLS 规则的 match 和 destination；服务端按 host 过滤并只返回摘要，比 kubectl get virtualservice -o yaml 小得多"),
+    "net_resolve": (["names"], {"names": "string[]；要解析的域名，最多 10 个", "family": "4/6/any；默认 any"}, "从 kubedoor-agent 所在 Pod 解析域名（走系统解析器，和业务 Pod 一样），返回 IP、耗时和失败原因；排查 DNS / 域名解析用它，不要用 diagnostic dig"),
+    "net_tcp": (["host", "port"], {"host": "string；域名或 IP", "port": "integer 1..65535"}, "从 kubedoor-agent 所在 Pod 测试 TCP 端口连通性，返回每个地址的连接结果、耗时和源地址；相当于 nc -zv，但连接失败是正常结果，不会当成工具错误"),
     "resource_content": (["namespace", "resource_type", "resource_name"], _RESOURCE, "读取现有资源 YAML，含 Job/CronJob；PVC 可用 pvc 或 persistentvolumeclaim；CRD 使用通用 Kubernetes API"),
     "resource_apply": (["yaml_content"], {"yaml_content": "string；完整 K8S YAML/JSON，可多文档，metadata.name 必填，命名空间写在 metadata.namespace；标准资源含 CronJob，不支持 CRD", "method": "apply/replace/create；默认 apply"}, "现有资源编辑页面接口；申请、替换或创建标准 K8S 资源。Deployment 的立即、定时、周期重启优先使用对应 restart 工具，勿构造重启 CronJob。此接口不修改 Istio 共享数据库模板"),
     "resource_delete": (["namespace", "resource_type", "resource_name"], _RESOURCE, "删除现有标准 K8S 资源，包括 Job/CronJob；CRD 用通用 Kubernetes API"),
@@ -268,12 +274,12 @@ _APPLY_KINDS = {
     "rbac.authorization.k8s.io/v1": {"Role", "RoleBinding", "ClusterRole", "ClusterRoleBinding"},
     "storage.k8s.io/v1": {"StorageClass", "VolumeAttachment"},
 }
-_LIST_FIELDS = {"namespaces", "node_names", "exclude_namespaces", "alertName", "status", "severity"}
+_LIST_FIELDS = {"namespaces", "node_names", "exclude_namespaces", "alertName", "status", "severity", "names"}
 _STRUCTURED_FIELDS = {"pods", "migrations"}
-_INTEGER_FIELDS = {"replicas", "page", "pageSize", "limit", "count", "limit_mem_mb", "limit_cpu_m", "pod_count_manual", "request_cpu_m", "request_mem_mb", "context", "max_results", "start_line", "lines"}
+_INTEGER_FIELDS = {"replicas", "page", "pageSize", "limit", "count", "limit_mem_mb", "limit_cpu_m", "pod_count_manual", "request_cpu_m", "request_mem_mb", "context", "max_results", "start_line", "lines", "port"}
 # 整数字段的下限默认 0，这些是 1；上限没列的不限
-_MIN_ONE = {"page", "pageSize", "limit", "max_results", "start_line", "lines"}
-_MAXIMUM = {"pageSize": 500, "limit": 5000, "context": 5, "max_results": 200, "lines": 500}
+_MIN_ONE = {"page", "pageSize", "limit", "max_results", "start_line", "lines", "port"}
+_MAXIMUM = {"pageSize": 500, "limit": 5000, "context": 5, "max_results": 200, "lines": 500, "port": 65535}
 _BOOLEAN_FIELDS = {"simple", "apply_now", "fixed_strings", "ignore_case", "detail", "refresh"}
 _JVM_FIELDS = {"jvm_xms_bytes", "jvm_xmx_bytes", "jvm_xss_bytes", "jvm_max_metaspace_bytes"}
 _RESOURCE_FIELDS = {"request_cpu_m", "request_mem_mb", "limit_cpu_m", "limit_mem_mb"}
@@ -869,6 +875,14 @@ def build_request(operation: str, args: dict, env: str) -> tuple[dict, dict | No
     elif operation == "load_balance_isolated":
         if "exclude_namespaces" in values:
             query["exclude_namespaces"] = ",".join(values["exclude_namespaces"])
+    elif operation == "net_resolve":
+        query["names"] = ",".join(values["names"])
+        if values.get("family"):
+            if values["family"] not in ("4", "6", "any"):
+                raise AIError("family 必须为 4、6 或 any")
+            query["family"] = values["family"]
+    elif operation == "net_tcp":
+        query.update(values)
     elif operation in ("alert_total", "alert_detail", "alert_detail_total"):
         body = {**values, "env": env if operation == "alert_total" else [env]}
         if operation == "alert_detail":

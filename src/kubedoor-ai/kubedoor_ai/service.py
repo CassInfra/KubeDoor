@@ -15,11 +15,14 @@ import openai
 from langchain_core.messages import HumanMessage, SystemMessage
 from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 
-from .domain import AIError, CredentialCipher, Identity, Provider, normalize_scope, redact
+from .domain import AIError, CredentialCipher, Provider, normalize_scope, redact
 from .gateway import Gateway, PendingAction, RunContext
 from .memories import MemoryLibrary
 from .models import without_thinking
 from .permissions import DATA_OPERATIONS
+from .public_share import (
+    CONFIG_AAD, CloudflareShare, PublicShareConfig, build_public_snapshot, public_share_url, render_public_share,
+)
 from .runtime import Runtime, SKILLS, make_model
 from .storage import Store, pg_dsn
 
@@ -364,6 +367,7 @@ class Service:
         pattern = "%" + text.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
         rows = await self.store.fetch(
             "SELECT s.id,s.title,s.created_at,s.updated_at,s.share_code IS NOT NULL AS shared,"
+            "s.public_share_code IS NOT NULL AS public_shared,"
             "(SELECT m.content FROM kubedoor_ai_messages m WHERE m.session_id=s.id AND m.replaced_at IS NULL AND m.content ILIKE $2 "
             "ORDER BY m.created_at DESC LIMIT 1) AS matched "
             "FROM kubedoor_ai_sessions s WHERE s.username=$1 AND s.channel='web' AND (s.title ILIKE $2 OR EXISTS "
@@ -496,6 +500,158 @@ class Service:
             messages.append(row)
         return {"title": session["title"], "shared_at": session["shared_at"], "updated_at": session["updated_at"],
                 "active_run": {"status": active["status"]} if active else None, "messages": messages}
+
+    # ---- 公网分享（Cloudflare Workers）：发布时的脱敏静态快照，和上面的站内实时分享是两套独立的链接 ----
+
+    async def _public_share_config(self):
+        row = await self.store.one("SELECT encrypted_config FROM kubedoor_ai_public_share_config WHERE singleton=true")
+        if not row:
+            return None
+        raw = self.gateway.cipher.decrypt(CONFIG_AAD, bytes(row["encrypted_config"]))
+        return PublicShareConfig.parse(raw)
+
+    def _share_publisher(self, config):
+        return CloudflareShare(config)
+
+    async def _delete_public_value(self, config, code):
+        publisher = self._share_publisher(config)
+        try:
+            await publisher.delete_value(code)
+        finally:
+            await publisher.close()
+
+    async def public_share_config(self):
+        """管理页的 Cloudflare 配置：不返回 API Token，只返回是否已设置。"""
+        row = await self.store.one(
+            "SELECT encrypted_config,updated_by,updated_at FROM kubedoor_ai_public_share_config WHERE singleton=true")
+        if not row:
+            return {"configured": False, **PublicShareConfig().public(), "updated_by": None, "updated_at": None}
+        config = PublicShareConfig.parse(self.gateway.cipher.decrypt(CONFIG_AAD, bytes(row["encrypted_config"])))
+        return {"configured": True, **config.public(), "updated_by": row["updated_by"], "updated_at": row["updated_at"]}
+
+    async def save_public_share_config(self, identity, raw):
+        """保存 Cloudflare 配置并部署 Worker；KV Namespace 留空时自动创建。"""
+        identity.require_admin()
+        current = await self._public_share_config()
+        config = PublicShareConfig.parse(raw, current)
+        publisher = self._share_publisher(config)
+        warning = None
+        try:
+            config.kv_namespace_id = await publisher.ensure_namespace()
+            await publisher.deploy()
+            warning = await publisher.check_public_url()
+        finally:
+            await publisher.close()
+        encrypted = self.gateway.cipher.encrypt(CONFIG_AAD, config.encrypted())
+        await self.store.execute(
+            "INSERT INTO kubedoor_ai_public_share_config(singleton,encrypted_config,updated_by) VALUES(true,$1,$2) "
+            "ON CONFLICT(singleton) DO UPDATE SET encrypted_config=EXCLUDED.encrypted_config,"
+            "updated_by=EXCLUDED.updated_by,updated_at=now()", encrypted, identity.username)
+        await self.audit(identity, "ai.public_share_config.update", "AI 公网分享",
+                         {"worker_name": config.worker_name, "public_base_url": config.public_base_url})
+        result = await self.public_share_config()
+        result["warning"] = warning
+        return result
+
+    async def test_public_share_config(self, identity, raw):
+        identity.require_admin()
+        config = PublicShareConfig.parse(raw, await self._public_share_config())
+        publisher = self._share_publisher(config)
+        try:
+            return await publisher.verify()
+        finally:
+            await publisher.close()
+
+    async def publish_public_share(self, identity, sid):
+        """把当前会话发布成公网快照：本人操作；再次发布换新码，旧码从 Cloudflare 删除。"""
+        session = await self.store.session(sid, identity)
+        config = await self._public_share_config()
+        if not config:
+            raise AIError("管理员还没有配置 Cloudflare 公网分享（系统管理 → AI 公网分享）", 409, "public_share_unconfigured")
+        rows = await self.store.fetch(
+            "SELECT m.id,m.role,m.content,m.tools,m.created_at,r.origin FROM kubedoor_ai_messages m "
+            "LEFT JOIN kubedoor_ai_runs r ON r.id=m.run_id WHERE m.session_id=$1::uuid AND m.replaced_at IS NULL "
+            "ORDER BY m.created_at,m.id", sid)
+        active = await self.store.one(
+            "SELECT status FROM kubedoor_ai_runs WHERE session_id=$1::uuid AND status IN ('running','waiting_approval') "
+            "ORDER BY created_at DESC LIMIT 1", sid)
+        snapshot = build_public_snapshot(session, rows, active["status"] if active else None)
+        page = render_public_share(snapshot)
+        code = token_urlsafe(16)
+        publisher = self._share_publisher(config)
+        try:
+            # 先删旧快照再写新快照：删不掉就报错并保留原链接，避免留下无法管理的旧链接
+            previous = session.get("public_share_code")
+            if previous:
+                await publisher.delete_value(previous)
+            await publisher.put_value(code, page)
+        finally:
+            await publisher.close()
+        url = public_share_url(config.public_base_url, code)
+        try:
+            row = await self.store.one(
+                "UPDATE kubedoor_ai_sessions SET public_share_code=$2,public_shared_at=now(),public_share_url=$3 "
+                "WHERE id=$1::uuid AND username=$4 AND channel='web' RETURNING id,public_shared_at",
+                sid, code, url, identity.username)
+        except Exception:
+            # 数据库没记上就收回刚写出去的快照，避免留下无法取消的公网链接
+            try:
+                await self._delete_public_value(config, code)
+            except Exception:
+                LOGGER.warning("收回公网分享快照失败 %s", code[:4], exc_info=True)
+            raise
+        if not row:
+            try:
+                await self._delete_public_value(config, code)
+            except Exception:
+                LOGGER.warning("收回公网分享快照失败 %s", code[:4], exc_info=True)
+            raise AIError("会话不存在", 404, "not_found")
+        await self.audit(identity, "ai.public_share.publish", session["title"],
+                         {"session_id": sid, "message_count": snapshot["message_count"]})
+        return {"id": sid, "public_shared": True, "public_share_code": code,
+                "public_shared_at": row["public_shared_at"], "public_url": url,
+                "message_count": snapshot["message_count"]}
+
+    async def unpublish_public_share(self, identity, sid):
+        """取消公网分享：先删 Cloudflare 上的快照，再清本地状态；删不掉就保留本地状态并报错。"""
+        session = await self.store.session(sid, identity)
+        code = session.get("public_share_code")
+        if not code:
+            return {"id": sid, "public_shared": False, "public_share_code": None,
+                    "public_shared_at": None, "public_url": None}
+        config = await self._public_share_config()
+        if config:
+            try:
+                await self._delete_public_value(config, code)
+            except AIError as exc:
+                raise AIError(f"取消公网分享失败：{exc}", 502, "public_share_unpublish_failed") from None
+        else:
+            LOGGER.warning("公网分享配置已不存在，无法删除 Cloudflare 上的快照 %s", code[:4])
+        if await self.store.one(
+                "UPDATE kubedoor_ai_sessions SET public_share_code=NULL,public_shared_at=NULL,public_share_url=NULL "
+                "WHERE id=$1::uuid AND username=$2 AND channel='web' RETURNING id", sid, identity.username):
+            await self.audit(identity, "ai.public_share.unpublish", session["title"], {"session_id": sid})
+        return {"id": sid, "public_shared": False, "public_share_code": None,
+                "public_shared_at": None, "public_url": None}
+
+    async def discard_public_share(self, identity, sid, session=None):
+        """删除会话前清掉它在 Cloudflare 上的公网快照；清理失败就阻止删除，避免留下无法管理的公网链接。
+
+        http 删除会话时已经读过会话详情，把那一行传进来，避免再查一次归属（test_session_performance 守着只查一次）。
+        """
+        session = session or await self.store.session(sid, identity)
+        code = session.get("public_share_code")
+        if not code:
+            return
+        config = await self._public_share_config()
+        if not config:
+            LOGGER.warning("公网分享配置已不存在，删除会话时无法清理快照 %s", code[:4])
+            return
+        try:
+            await self._delete_public_value(config, code)
+        except AIError:
+            raise AIError("删除会话前清理公网分享失败，请先取消公网分享或稍后重试",
+                          502, "public_share_cleanup_failed") from None
 
     async def decision(self, identity, rid, body):
         run = await self.store.run(rid, identity)

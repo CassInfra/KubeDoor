@@ -135,7 +135,10 @@ const ACTION_LABELS: Record<string, string> = {
   "api.denied": "越权被拒",
   "ai.agent_execute": "AI 执行修改",
   "ai.share": "开启 AI 会话分享",
-  "ai.unshare": "关闭 AI 会话分享"
+  "ai.unshare": "关闭 AI 会话分享",
+  "ai.public_share.publish": "发布 AI 公网分享",
+  "ai.public_share.unpublish": "取消 AI 公网分享",
+  "ai.public_share_config.update": "修改 AI 公网分享配置"
 };
 
 const loading = ref(false);

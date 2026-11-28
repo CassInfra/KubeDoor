@@ -114,6 +114,12 @@ export const useAIStore = defineStore("kubedoor-ai", () => {
   const shareCode = ref<string | null | undefined>(undefined);
   /** 正在开启 / 关闭分享 */
   const sharing = ref(false);
+  /** 当前会话的公网分享地址（Cloudflare Workers）：undefined 表示还没读到会话详情，null 表示没有发布 */
+  const publicShareUrl = ref<string | null | undefined>(undefined);
+  const publicSharedAt = ref<string | null | undefined>(undefined);
+  /** 正在发布 / 取消公网分享 */
+  const publishingPublic = ref(false);
+  let publicShareGeneration = 0;
   const submitting = ref(false);
   const deciding = ref("");
   const cancelling = ref(false);
@@ -366,6 +372,10 @@ export const useAIStore = defineStore("kubedoor-ai", () => {
     shareRevision++;
     sharing.value = false;
     shareCode.value = undefined;
+    publicShareUrl.value = undefined;
+    publicSharedAt.value = undefined;
+    publicShareGeneration++;
+    publishingPublic.value = false;
     lastSeq.value = 0;
     assistantId = "";
     initialized.value = false;
@@ -610,6 +620,8 @@ export const useAIStore = defineStore("kubedoor-ai", () => {
     activeRun.value = null;
     contextUsage.value = null;
     shareCode.value = undefined;
+    publicShareUrl.value = undefined;
+    publicSharedAt.value = undefined;
     assistantId = "";
     lastSeq.value = 0;
     streamState.value = "idle";
@@ -624,6 +636,8 @@ export const useAIStore = defineStore("kubedoor-ai", () => {
     if (draft) {
       messages.value = [];
       shareCode.value = null;
+      publicShareUrl.value = null;
+      publicSharedAt.value = null;
       if (draftScopes.has(id))
         scope.value = JSON.parse(JSON.stringify(draftScopes.get(id)));
       sessionReady.value = true;
@@ -636,6 +650,8 @@ export const useAIStore = defineStore("kubedoor-ai", () => {
       sessionCache.set(id, cached);
       showHistory(cached.data);
       shareCode.value = cached.data.share_code;
+      publicShareUrl.value = cached.data.public_share_url ?? null;
+      publicSharedAt.value = cached.data.public_shared_at ?? null;
     } else messages.value = [];
     sessionReady.value = false;
     sessionLoading.value = true;
@@ -661,6 +677,8 @@ export const useAIStore = defineStore("kubedoor-ai", () => {
       cacheSession(data);
       showHistory(data);
       applyShare(id, data.share_code);
+      publicShareUrl.value = data.public_share_url ?? null;
+      publicSharedAt.value = data.public_shared_at ?? null;
       sessionReady.value = true;
       activeRun.value =
         typeof data.active_run === "string"
@@ -707,6 +725,8 @@ export const useAIStore = defineStore("kubedoor-ai", () => {
     draftScopes.set(created.id, JSON.parse(JSON.stringify(scope.value)));
     messages.value = [];
     shareCode.value = null;
+    publicShareUrl.value = null;
+    publicSharedAt.value = null;
     sessionLoading.value = false;
     sessionReady.value = true;
     return created;
@@ -728,6 +748,82 @@ export const useAIStore = defineStore("kubedoor-ai", () => {
       if (sharedAt !== undefined) cached.data.shared_at = sharedAt;
     }
     if (id === sessionId.value) shareCode.value = code;
+  }
+
+  /** 记下会话的公网分享状态（会话详情或发布 / 取消带回的） */
+  function applyPublicShare(
+    id: string,
+    url: string | null | undefined,
+    sharedAt?: string | null
+  ) {
+    if (url === undefined) return;
+    const item = sessions.value.find(session => session.id === id);
+    if (item) item.public_shared = !!url;
+    const cached = sessionCache.get(id);
+    if (cached) {
+      cached.data.public_share_url = url;
+      if (sharedAt !== undefined) cached.data.public_shared_at = sharedAt;
+    }
+    if (id === sessionId.value) {
+      publicShareUrl.value = url;
+      publicSharedAt.value = sharedAt ?? null;
+    }
+  }
+
+  /** 发布当前会话的公网快照（只有会话本人），返回公网地址 */
+  async function publishPublicShare() {
+    const id = sessionId.value;
+    if (!id || sessions.value.some(item => item.id === id && item.draft))
+      throw new Error("会话还没有发送过消息，不能分享。");
+    if (!sessionReady.value) throw new Error("正在核验会话状态，请稍后再试。");
+    if (publishingPublic.value)
+      throw new Error("上一次公网分享还在处理，请稍候。");
+    const username = owner;
+    const current = id;
+    const generation = ++publicShareGeneration;
+    publishingPublic.value = true;
+    try {
+      const result = await aiApi.publishPublicShare(current);
+      if (
+        username !== owner ||
+        current !== sessionId.value ||
+        generation !== publicShareGeneration
+      )
+        return result;
+      applyPublicShare(
+        current,
+        result.public_shared ? result.public_url : null,
+        result.public_shared_at
+      );
+      return result;
+    } finally {
+      if (generation === publicShareGeneration) publishingPublic.value = false;
+    }
+  }
+
+  /** 取消当前会话的公网分享，删除 Cloudflare 上的快照 */
+  async function unpublishPublicShare() {
+    const id = sessionId.value;
+    if (!id) throw new Error("会话不存在。");
+    if (publishingPublic.value)
+      throw new Error("上一次公网分享还在处理，请稍候。");
+    const username = owner;
+    const current = id;
+    const generation = ++publicShareGeneration;
+    publishingPublic.value = true;
+    try {
+      const result = await aiApi.unpublishPublicShare(current);
+      if (
+        username !== owner ||
+        current !== sessionId.value ||
+        generation !== publicShareGeneration
+      )
+        return result;
+      applyPublicShare(current, null, null);
+      return result;
+    } finally {
+      if (generation === publicShareGeneration) publishingPublic.value = false;
+    }
   }
 
   /** 开启 / 关闭当前会话的分享，返回分享码（关闭时为 null） */
@@ -1433,6 +1529,11 @@ export const useAIStore = defineStore("kubedoor-ai", () => {
     shareCode,
     sharing,
     setShare,
+    publicShareUrl,
+    publicSharedAt,
+    publishingPublic,
+    publishPublicShare,
+    unpublishPublicShare,
     changeScope,
     setSelectedMemories,
     removeSelectedMemory,

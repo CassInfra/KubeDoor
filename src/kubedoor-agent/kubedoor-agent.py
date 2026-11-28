@@ -613,6 +613,10 @@ async def setup_routes(app):
     app.router.add_get(
         '/api/agent/istio/vs/detail', lambda request: istio_manager.get_virtualservice_detail(custom_api, request)
     )
+    # 路由摘要:AI 排障用,按 host / namespace / name 过滤,只返回 gateways、hosts、match 和 destination
+    app.router.add_get(
+        '/api/agent/istio-routes', lambda request: istio_manager.get_virtualservice_routes(custom_api, request)
+    )
     app.router.add_post(
         '/api/agent/istio/vs/apply', lambda request: istio_manager.apply_virtualservice(custom_api, request)
     )

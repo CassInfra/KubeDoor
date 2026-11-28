@@ -33,8 +33,11 @@ DATA_OPERATIONS = ("mysql", "redis", "elasticsearch")
 DATA_OP = "data.query"
 GENERIC_OPERATIONS = ("api", "kubectl", "istioctl", "diagnostic", "pod_exec", *DATA_OPERATIONS)
 DATA_TOOLS_UNSUPPORTED = "此 Agent 版本不支持数据库 / Redis / ES 查询，请升级 Agent"
-# AI 服务经 /api/ai/internal/audit 写的操作审计:开启 / 关闭网页 AI 会话分享
-AI_AUDIT_ACTIONS = ("ai.share", "ai.unshare")
+# AI 服务经 /api/ai/internal/audit 写的操作审计:开启 / 关闭网页 AI 会话分享,以及发布 / 取消公网分享、修改 Cloudflare 配置
+AI_AUDIT_ACTIONS = (
+    "ai.share", "ai.unshare",
+    "ai.public_share.publish", "ai.public_share.unpublish", "ai.public_share_config.update",
+)
 
 
 def authorize(request):

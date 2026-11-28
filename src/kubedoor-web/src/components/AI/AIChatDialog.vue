@@ -376,6 +376,14 @@ const canShare = computed(
     !ai.sharing &&
     !operating.value
 );
+const canPublicShare = computed(
+  () =>
+    !!selectedSession.value &&
+    !selectedSession.value.draft &&
+    ai.sessionReady &&
+    !ai.publishingPublic &&
+    !operating.value
+);
 async function copyShareLink(code = ai.shareCode) {
   if (!code) return;
   const link = shareLink(
@@ -420,6 +428,48 @@ async function toggleShare(value: string | number | boolean) {
     if (found) found.shared = !!code;
     if (code) await copyShareLink(code);
     else if (!value) ElMessage.success("已关闭分享，原链接已失效。");
+  });
+}
+async function copyPublicShareLink(url = ai.publicShareUrl) {
+  if (!url) return;
+  if (await copyText(url)) {
+    ElMessage.success(
+      "公网链接已复制；首次打开可能需要几十秒同步，任何拿到链接的人都能查看。"
+    );
+    return;
+  }
+  await ElMessageBox.alert(url, "公网分享链接（请手动复制）", {
+    confirmButtonText: "知道了"
+  }).catch(() => undefined);
+}
+async function publishPublicShare() {
+  await action(async () => {
+    await ElMessageBox.confirm(
+      "将当前会话发布成公网快照：任何拿到链接的人都能打开，不需要登录 KubeDoor；只包含发布时的内容，之后的新消息不会同步；工具调用只显示名称，不能展开参数和结果；正文会自动脱敏密码、令牌、API Key、IP、邮箱、手机号等，集群名、命名空间等业务标识请自行确认可以公开。再次发布会生成新链接，旧链接失效。",
+      "发布公网分享",
+      {
+        type: "warning",
+        confirmButtonText: "发布并复制链接",
+        cancelButtonText: "取消"
+      }
+    );
+    const result = await ai.publishPublicShare();
+    await copyPublicShareLink(result.public_url);
+  });
+}
+async function unpublishPublicShare() {
+  await action(async () => {
+    await ElMessageBox.confirm(
+      "取消后公网链接立即失效（Cloudflare 边缘节点可能需要最多一分钟同步），已经发布的内容不能再打开。",
+      "取消公网分享",
+      {
+        type: "warning",
+        confirmButtonText: "取消公网分享",
+        cancelButtonText: "保留"
+      }
+    );
+    await ai.unpublishPublicShare();
+    ElMessage.success("已取消公网分享，公网链接已失效。");
   });
 }
 const timestamp = (value?: string) => {
@@ -547,12 +597,18 @@ const timestamp = (value?: string) => {
               :class="['session-item', { active: session.id === ai.sessionId }]"
               :disabled="ai.busy || operating"
               :title="
-                session.shared ? `${session.title}（分享中）` : session.title
+                session.public_shared
+                  ? `${session.title}（公网分享中）`
+                  : session.shared
+                    ? `${session.title}（分享中）`
+                    : session.title
               "
               @click="selectSession(session)"
             >
               <span
-                ><span v-if="session.shared" aria-label="分享中">🔗 </span
+                ><span v-if="session.public_shared" aria-label="公网分享中"
+                  >🌐 </span
+                ><span v-else-if="session.shared" aria-label="分享中">🔗 </span
                 >{{ session.title || "新会话" }}</span
               >
               <small v-if="session.snippet" class="session-snippet">{{
@@ -824,6 +880,42 @@ const timestamp = (value?: string) => {
                   title="复制这个会话的分享链接"
                   @click="copyShareLink()"
                   >复制链接</el-button
+                >
+                <el-button
+                  v-if="ai.publicShareUrl"
+                  link
+                  type="success"
+                  title="复制公网分享链接"
+                  @click="copyPublicShareLink()"
+                  >公网链接</el-button
+                >
+                <el-button
+                  v-if="ai.publicShareUrl"
+                  link
+                  type="primary"
+                  :loading="ai.publishingPublic"
+                  :disabled="!canPublicShare"
+                  title="用当前内容重新发布快照，生成新链接"
+                  @click="publishPublicShare"
+                  >更新快照</el-button
+                >
+                <el-button
+                  v-if="ai.publicShareUrl"
+                  link
+                  type="danger"
+                  title="取消公网分享，删除 Cloudflare 上的快照"
+                  @click="unpublishPublicShare"
+                  >取消公网</el-button
+                >
+                <el-button
+                  v-else
+                  link
+                  type="primary"
+                  :loading="ai.publishingPublic"
+                  :disabled="!canPublicShare"
+                  title="发布成不需要登录的公网快照"
+                  @click="publishPublicShare"
+                  >公网分享</el-button
                 >
                 <el-button
                   :loading="ai.summarizingMemory"

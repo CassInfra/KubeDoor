@@ -16,8 +16,8 @@ description: 用链路追踪（Jaeger，可选 ClickHouse 加速）排查接口�
 
 ## 2. 找服务和接口
 
-- `trace_services` 用 `pattern` 按关键字找服务（用户说「订单服务」就试 `order`）。
-- 用户只给了域名：先找网关服务（`pattern="gateway"`）。网关服务端 Span 的 `host`（server.address）一般就是域名，再加 `path` 定位接口。
+- `trace_services` 用 `pattern` 按关键字找服务（用户说「订单服务」就试 `order`）。**服务名以这里返回的为准**（Deployment 通常带 `deploy-` 前缀），不要按域名自己拼；拼错只会得到 0 条。
+- 用户只给了域名：可以直接用 `host` 过滤 `trace_search`（不填 `service`，避免服务名拼错），或先找网关服务（`pattern="gateway"`）。网关服务端 Span 的 `host`（server.address）是请求实际带的 Host，可能和 VirtualService 的 hosts 不同（中间有 ELB 转发或 Host 改写），再加 `path` 定位接口。
 - `trace_operations` 列出服务的接口。服务端 Span 名一般是「方法 + 路由」，路由里的参数是占位符（Spring 是 `GET /order/{id}`，Node 是 `POST /cs/:ticketId/open`）：用户给的实际路径要对应到路由才能按 `operation` 查，对不上就按 `path`（实际路径）查。
 - Spring Cloud Gateway 这类网关的服务端 Span 名是路由 ID（例如 `POST CompositeDiscoveryClient_order-service`），看不出接口：用 `path` 查（路径带服务前缀，例如 `/order-service/order/create`），或者 `contains={"path": "/order/create"}`。
 - 调用别人的客户端 Span 名常常只有方法（`GET`、`POST`），数据库是「语句 + 表名」（`SELECT orders`），Redis 是命令名。
@@ -32,6 +32,7 @@ description: 用链路追踪（Jaeger，可选 ClickHouse 加速）排查接口�
 
 ## 4. 找链路：`trace_search`
 
+- 按域名排查时 `service` 可以不填，用 `host` + `path` + `status_codes` + 时间窗口即可；服务名不确定先 `trace_services`。
 - 状态码：`status_codes=[504]`、`["5xx"]`、`[502, 503, 504]`，或者 `status_min` / `status_max`。只能精确匹配，没有「包含」。
 - 报错：`error=true` 是 Span 状态为 error。服务端返回 4xx 一般不标 error，要按状态码查。
 - 超时、慢：`min_duration` 取接近超时阈值的值（网关超时 10 秒就用 `9s`），加 `span_kind="server"`。
@@ -43,7 +44,7 @@ description: 用链路追踪（Jaeger，可选 ClickHouse 加速）排查接口�
 ## 5. 没查到不要直接下结论
 
 1. 先看查完了没有：`coverage`、`scan`。没查完就缩小时间窗口、加条件再查。
-2. 放宽条件：去掉 `operation`（Span 名可能和想的不一样）、改用 `path` 或 `contains`、扩大时间窗口、换个字段（例如 `host` 换成 `path`）。
+2. 放宽条件：去掉 `operation`（Span 名可能和想的不一样）、改用 `path` 或 `contains`、扩大时间窗口、换个字段（例如 `host` 换成 `path`）；服务名用 `trace_services` 核对，不要自己拼。
 3. 什么条件都查不到链路时，可能是集群对不上：`trace_fields` 的 `cluster` 是按哪个字段（`key`）、哪些值（`values`，集群名和别名）过滤当前集群；有 traceId 时，`trace_get` 结果里的 `trace.clusters` 是链路里实际上报的集群值。对不上时请管理员在 Agent 管理页给集群加别名，或检查「系统管理 → 链路追踪」的集群字段。
 4. 还是没有：可能没被采样、这个服务没接入链路，或者请求根本没到这个服务（看上游网关）。如实告诉用户查了什么、可能的原因。
 

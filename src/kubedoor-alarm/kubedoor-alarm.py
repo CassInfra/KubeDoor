@@ -388,29 +388,21 @@ def build_silence_url(labels):
     return f"{kubedoor_exturl.rstrip('/')}/#/alarm/silence?prefill={quoted}"
 
 
-def build_content(kind, entries):
-    """把本批要通知的告警拼成消息。entries 是 [(状态, 摘要, 描述, 屏蔽链接), ...]。
-
-    Slack 每条告警单独发一条(列表,恢复不带屏蔽链接);其余 IM 拼成一条 markdown。
-    """
-    if kind == 'slack':
-        allmd = []
-        for status, summary, message, url in entries:
-            if status == '恢复':
-                allmd.append([f'🎉{status}: {summary}', message])
-            else:
-                allmd.append([f'💥{status}: {summary}', message, url])
-        return allmd
-    allmd = ''
-    for status, summary, message, url in entries:
-        if status == '恢复':
-            allmd += f"### {status}<font color=\"#6aa84f\">{summary}</font>\n- {message}\n\n"
-        else:
-            allmd += f"### {status}<font color=\"#ff0000\">{summary}</font>\n- {message}[【屏蔽】]({url})\n\n"
-    return allmd
+def _batch_severity(items):
+    firing = [item for item in items if item.get('status') != 'resolved']
+    if not firing:
+        return 'resolved'
+    severities = {str(item.get('severity') or '').strip().lower() for item in firing if item.get('severity')}
+    if severities & {'critical', 'error', 'high'}:
+        return 'critical'
+    if severities & {'warning', 'warn'}:
+        return 'warning'
+    if 'info' in severities:
+        return 'info'
+    return 'critical'
 
 
-# Alertmanager 的通知 webhook:屏蔽判断后,按这批告警的集群向 master 取通知配置(系统管理 → 消息通知)发 IM
+# Alertmanager 的通知 webhook:屏蔽判断后,将干净的结构化告警转发给 master 统一路由并投递
 @app.route("/msg/<path:token>", methods=['POST'])
 def alertnode(token):
     if token != 'kubedoor':
@@ -427,36 +419,34 @@ def alertnode(token):
     now_utc = datetime.now(UTC).replace(tzinfo=None)
     now_cn = datetime.now()
 
-    # time1830 = datetime.strptime(str(now_cn.date()) + '18:30', '%Y-%m-%d%H:%M')
-    # time0830 = datetime.strptime(str(now_cn.date()) + '08:30', '%Y-%m-%d%H:%M')
-
-    # if (now_cn > time1830 or now_cn < time0830):
-    #    return Response(status=204)
     env = notify_client.cluster_of(req, settings_client.value('prom_k8s_tag_key'))
-    entries = []
+    items = []
+    links = []
     # 告警规则 annotations 里的 at 优先于通知配置里的默认 @ 人(和以前一样取本批最后一条告警的)
     alert_at = None
     silenced_count = 0
     for i in req["alerts"]:
+        labels = i.get('labels') or {}
+        annotations = i.get('annotations') or {}
         # 屏蔽判断:命中规则的告警直接跳过通知(故障与恢复一并屏蔽,避免只收到恢复消息)
-        silence_id = silence.match_alert(i.get('labels', {}), i.get('annotations', {}), count_hit=True)
+        silence_id = silence.match_alert(labels, annotations, count_hit=True)
         if silence_id:
             silenced_count += 1
             logging.info(
                 f"【silence】已屏蔽通知 规则#{silence_id}: "
-                f"{i.get('labels', {}).get('alertname', '')} status={i.get('status', '')}"
+                f"{labels.get('alertname', '')} status={i.get('status', '')}"
             )
             continue
 
-        status = "故障" if i['status'] == "firing" else "恢复"
+        raw_status = 'firing' if i.get('status') == 'firing' else 'resolved'
         try:
             firstime = datetime.strptime(i['startsAt'], '%Y-%m-%dT%H:%M:%SZ')
             durn_s = (now_utc - firstime).total_seconds()
-        except:
+        except Exception:
             try:
                 firstime = datetime.strptime(i['startsAt'], '%Y-%m-%dT%H:%M:%S.%fZ')
                 durn_s = (now_utc - firstime).total_seconds()
-            except:
+            except Exception:
                 firstime = datetime.strptime(i['startsAt'].split(".")[0], '%Y-%m-%dT%H:%M:%S+08:00')
                 durn_s = (now_cn - firstime).total_seconds()
         if durn_s < 60:
@@ -468,31 +458,49 @@ def alertnode(token):
             durn = round(durn_s / 3600, 1)
             durninfo = f"已持续{durn}小时"
 
-        summary = f"{i['labels']['alertname']},{durninfo}"
-        message = i['annotations']['description']
-        alert_at = i['annotations'].get('at')
+        alertname = str(labels.get('alertname') or '')
+        summary = f"{alertname},{durninfo}"
+        description = str(annotations.get('description') or '')
+        alert_at = annotations.get('at')
 
-        url = build_silence_url(i['labels'])
-        entries.append((status, summary, message, url))
+        silence_url = '' if raw_status == 'resolved' else build_silence_url(labels)
+        raw_severity = str(labels.get('severity') or ('critical' if raw_status == 'firing' else 'resolved')).strip().lower()
+        items.append({
+            'status': raw_status,
+            'summary': summary,
+            'description': description,
+            'silence_url': silence_url,
+            'severity': raw_severity,
+            'labels': {str(k): str(v) for k, v in labels.items()},
+            'alertname': alertname,
+            'duration_text': durninfo,
+            'starts_at': str(i.get('startsAt') or ''),
+        })
+        if silence_url:
+            links.append({'label': f'屏蔽: {summary}', 'url': silence_url})
 
-    if not entries:
+    if not items:
         logging.info(f"本批 {silenced_count} 条告警全部被屏蔽，不发送通知")
         return Response(status=204)
     if silenced_count:
         logging.info(f"本批告警中 {silenced_count} 条被屏蔽，其余正常通知")
 
-    # 先看该集群单独配置的群,再看全局配置;master 暂时不可用时沿用上次取到的配置
-    channel = notify_client.resolve(env)
-    if channel is None:
-        logging.info(f"没有可用的消息通知配置({notify_client.scope_label(env)}),本批 {len(entries)} 条告警不发送")
-        return Response(status=204)
-    at = channel['at'] if alert_at is None else alert_at
     try:
-        notify_client.send(channel, build_content(channel['type'], entries), at)
+        result = notify_client.send_alert(
+            env,
+            items,
+            at='' if alert_at is None else str(alert_at),
+            severity=_batch_severity(items),
+            links=links,
+        )
     except notify_client.SendError as exc:
-        # 返回 5xx 让 Alertmanager 重试(和以前发送异常时一样)
-        logging.error(f"{exc}({notify_client.scope_label(env)}),本批 {len(entries)} 条告警没有发出")
+        # 返回 5xx 让 Alertmanager 重试
+        logging.error(f"{exc}({notify_client.scope_label(env)}),本批 {len(items)} 条告警没有发出")
         return Response(status=502)
+
+    if int(result.get('matched') or 0) == 0:
+        logging.info(f"没有可用的消息通知配置({notify_client.scope_label(env)}),本批 {len(items)} 条告警不发送")
+        return Response(status=204)
     return Response(status=200)
 
 
