@@ -1,4 +1,4 @@
-// 系统管理:用户与权限、权限与审批、LDAP、通用配置、镜像管理、企微 AI 机器人、获取代码接口、获取运行配置接口、链路追踪、历史日志、消息通知、事件告警规则、AI 用量看板、操作审计,只对管理员开放(后端 /api/admin/* 同样只认管理员)
+// 系统管理:用户与权限、权限与审批、LDAP、通用配置、镜像管理、企微 AI 机器人、AI 公网分享、获取代码接口、获取运行配置接口、链路追踪、历史日志、消息通知、事件告警规则、AI 用量看板、操作审计,只对管理员开放(后端 /api/admin/* 同样只认管理员)
 export default {
   path: "/system",
   redirect: "/system/users",
@@ -61,6 +61,16 @@ export default {
       component: () => import("@/views/system/wecom-ai/index.vue"),
       meta: {
         title: "企微 AI 机器人",
+        roles: ["admin"]
+      }
+    },
+    {
+      // AI 会话公网分享的 Cloudflare Workers 配置（Account ID、API Token、Worker、KV、公网地址）
+      path: "/system/ai-public-share",
+      name: "SystemAIPublicShare",
+      component: () => import("@/views/system/ai-public-share/index.vue"),
+      meta: {
+        title: "AI 公网分享",
         roles: ["admin"]
       }
     },

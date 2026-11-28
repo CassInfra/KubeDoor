@@ -124,7 +124,13 @@ async def test_internal_audit_records_ai_share_for_the_acting_user(monkeypatch):
         response = await client.post("/api/ai/internal/audit", headers=headers, json={
             "action": "ai.share", "target": "排查超时" + "长" * 300, "detail": {"session_id": "s-1"}})
         assert response.status == 200 and await response.json() == {"success": True}
-        assert recorded == [("limited", "ai.share", {"target": "排查超时" + "长" * 196, "detail": {"session_id": "s-1"}})]
+        public = await client.post("/api/ai/internal/audit", headers=headers, json={
+            "action": "ai.public_share.publish", "target": "排查超时", "detail": {"session_id": "s-1", "code": "c" * 22}})
+        assert public.status == 200 and await public.json() == {"success": True}
+        assert recorded == [
+            ("limited", "ai.share", {"target": "排查超时" + "长" * 196, "detail": {"session_id": "s-1"}}),
+            ("limited", "ai.public_share.publish", {"target": "排查超时", "detail": {"session_id": "s-1", "code": "c" * 22}}),
+        ]
         # 白名单以外的动作、字段类型不对、detail 过大都拒绝,不写审计
         for body in ({"action": "ai.agent_execute"}, {"action": "ai.unshare", "target": 1},
                      {"action": "ai.unshare", "detail": "x"}, {"action": "ai.unshare", "detail": {"x": "y" * 3000}},
@@ -135,7 +141,7 @@ async def test_internal_audit_records_ai_share_for_the_acting_user(monkeypatch):
         assert (await client.post("/api/ai/internal/audit", headers={"X-Kubedoor-Token": "secret-test-token"},
                                   json={"action": "ai.share"})).status == 403
         assert (await client.post("/api/ai/internal/audit", json={"action": "ai.share"})).status == 401
-    assert len(recorded) == 1
+    assert len(recorded) == 2
 
 
 @pytest.mark.asyncio

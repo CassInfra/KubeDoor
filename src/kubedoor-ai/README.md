@@ -406,6 +406,8 @@ kubedoor-ai 照常先测试连通再保存；`kubedoor_ai_connections.origin` �
 | `GET /api/ai/bootstrap` | 当前用户、集群连接能力、Skills，以及只读显示用的企微专用模型（`shared_model`，不含 Key） |
 | `/api/ai/sessions`、`/api/ai/sessions/{id}/runs` | 会话管理与创建运行 |
 | `PUT /api/ai/sessions/{id}/share`、`GET /api/ai/shares/{code}` | 会话分享：本人开关（`{enabled}`）；任何登录用户凭分享码只读查看，规则见下文「会话分享」 |
+| `POST/DELETE /api/ai/sessions/{id}/public-share` | 公网分享：本人把当前会话发布成脱敏静态快照到 Cloudflare Workers / 取消；再次发布换新码 |
+| `GET/PUT /api/ai/public-share-config`、`POST /api/ai/public-share-config/test` | 管理员配置 Cloudflare（Account ID、API Token、Worker、KV、公网地址）；保存时自动创建 / 绑定 KV 并部署 Worker |
 | `GET/POST /api/ai/memories`、`GET/PATCH/DELETE /api/ai/memories/{id}` | 全局记忆分页查询、按需读取正文及版本检查后的管理 |
 | `POST /api/ai/sessions/{id}/memory-summary` | 生成本人会话的可编辑记忆草稿，保存前不写入全局库 |
 | `GET /api/ai/runs/{id}/events` | 标准 SSE，支持 `after`、`Last-Event-ID` 持久化重放 |
@@ -433,6 +435,26 @@ DeepAgents 加载仓库内 `skills/kubedoor-k8s`，Skills 文件只读；会话�
   （不显示 `replaced_at` 的轮次），进行中的轮次只返回 `active_run.status`。
 - 工具结果按查看人的集群权限：消息 `scope.env` 没有只读权限（或消息没有集群）时 `tools` 清空并标 `tools_hidden`；
   MCP 调用建的会话（`kubedoor_ai_runs.origin='mcp'`）正文本身就是工具参数和结果，一起清空。问答正文所有登录用户都能看。
+
+### 公网分享（Cloudflare Workers）
+
+「分享」是站内的实时链接（要登录）；输入框下方另有「公网分享」按钮，把当前会话发布成**脱敏的静态快照**到
+Cloudflare Workers（`kubedoor_ai/public_share.py`，`Service.publish_public_share`）：
+
+- 公网链接不需要登录 KubeDoor，地址是 `<公网访问地址>/s/<分享码>`；快照存在 Workers KV，由 AI 服务部署到
+  Cloudflare 的 Worker 读取（`WORKER_SCRIPT`），只返回静态 HTML，不连 KubeDoor、不加载外部图片。
+- 只包含发布时的内容，之后的新消息不同步；再次发布会生成新分享码、删掉旧快照（旧链接失效），取消公网分享
+  会删除 KV 里的快照。删除会话前也会先清理公网快照，清理失败则阻止删除会话。
+- 工具调用只保留名称和状态，**不包含参数、结果、集群、命名空间和记忆附件**；页面上点击工具只会提示
+  「公网分享不支持查看工具调用明细」。MCP 调用建的会话正文是工具参数 / 结果，公网快照里不展示。
+- 正文和标题会脱敏：密码 / token / API Key / Bearer、常见云密钥格式、URL 里的账号密码、IPv4、邮箱、手机号、
+  身份证号（`redact_public_text`）；集群名、命名空间等业务标识不自动打码，发布前需人工确认。Markdown 用
+  `markdown-it-py` 渲染，原始 HTML 禁用、图片只显示替代文字。
+- 配置在「系统管理 → AI 公网分享」（`/system/ai-public-share`）：Account ID、API Token、Worker 名称、
+  KV Namespace ID（留空自动创建）、公网访问地址。整份配置用 `AI_ENCRYPTION_KEY` 加密存
+  `kubedoor_ai_public_share_config`，接口只返回 `api_token_set`；保存时自动创建 / 绑定 KV 并部署 Worker。
+- 审计：发布 / 取消记 `ai.public_share.publish` / `ai.public_share.unpublish`，改配置记
+  `ai.public_share_config.update`；Cloudflare 删除失败时取消公网分享会报错并保留本地状态，避免留下无法管理的链接。
 
 外部 MCP 使用 `/mcp`（Streamable HTTP），并保留 `/sse`、`/messages` 兼容入口。
 原有 **16 个工具的名称和参数保留**，另提供统一 `kubedoor_tool` 和

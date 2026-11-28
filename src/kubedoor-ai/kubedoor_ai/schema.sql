@@ -23,6 +23,20 @@ ALTER TABLE kubedoor_ai_sessions ADD COLUMN IF NOT EXISTS checkpoint_purged_at t
 ALTER TABLE kubedoor_ai_sessions ADD COLUMN IF NOT EXISTS share_code text;
 ALTER TABLE kubedoor_ai_sessions ADD COLUMN IF NOT EXISTS shared_at timestamptz;
 CREATE UNIQUE INDEX IF NOT EXISTS kubedoor_ai_sessions_share_code ON kubedoor_ai_sessions(share_code) WHERE share_code IS NOT NULL;
+-- 公网分享（Cloudflare Workers）：public_share_code 是 Worker 路径 /s/<code> 里的随机码，public_share_url 是发布时
+-- 拼好的公网地址，public_shared_at 是这次发布的时间。内容是发布时的静态快照，不随会话更新；再次发布会换新码。
+ALTER TABLE kubedoor_ai_sessions ADD COLUMN IF NOT EXISTS public_share_code text;
+ALTER TABLE kubedoor_ai_sessions ADD COLUMN IF NOT EXISTS public_shared_at timestamptz;
+ALTER TABLE kubedoor_ai_sessions ADD COLUMN IF NOT EXISTS public_share_url text;
+CREATE UNIQUE INDEX IF NOT EXISTS kubedoor_ai_sessions_public_share_code ON kubedoor_ai_sessions(public_share_code) WHERE public_share_code IS NOT NULL;
+-- 公网分享的 Cloudflare 配置（Account ID、API Token、Worker 名称、KV Namespace、公网地址）：整份用 AI_ENCRYPTION_KEY
+-- 加密，接口只返回是否设置了 Token。保存时自动创建 / 绑定 KV Namespace 并部署 Worker。
+CREATE TABLE IF NOT EXISTS kubedoor_ai_public_share_config (
+    singleton boolean PRIMARY KEY DEFAULT true CHECK (singleton),
+    encrypted_config bytea NOT NULL,
+    updated_by text NOT NULL,
+    updated_at timestamptz NOT NULL DEFAULT now()
+);
 CREATE TABLE IF NOT EXISTS kubedoor_ai_runs (
     id uuid PRIMARY KEY, session_id uuid NOT NULL REFERENCES kubedoor_ai_sessions(id) ON DELETE CASCADE,
     username text NOT NULL, permission text NOT NULL, status text NOT NULL,

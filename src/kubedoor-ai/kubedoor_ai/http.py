@@ -134,7 +134,7 @@ def create_app(service=None, token=None):
                     if text:
                         result = {"sessions": await svc.search_sessions(identity, text)}
                     else:
-                        result = {"sessions": await svc.store.fetch("SELECT id,title,created_at,updated_at,share_code IS NOT NULL AS shared FROM kubedoor_ai_sessions WHERE username=$1 AND channel='web' ORDER BY updated_at DESC", identity.username)}
+                        result = {"sessions": await svc.store.fetch("SELECT id,title,created_at,updated_at,share_code IS NOT NULL AS shared,public_share_code IS NOT NULL AS public_shared FROM kubedoor_ai_sessions WHERE username=$1 AND channel='web' ORDER BY updated_at DESC", identity.username)}
                 else:
                     data = await body(request)
                     result = await svc.new_session(identity, data.get("title", "新会话"), request.headers.get("idempotency-key"))
@@ -162,6 +162,21 @@ def create_app(service=None, token=None):
                 result = await svc.set_share(identity, sid, (await body(request)).get("enabled"))
             elif endpoint == "share":
                 result = await svc.shared_session(identity, request.path_params["code"])
+            # 公网分享（Cloudflare Workers）：本人发布 / 取消；管理员配置 Cloudflare
+            elif endpoint == "session-public-share":
+                if request.method == "POST":
+                    result = await svc.publish_public_share(identity, sid)
+                else:
+                    result = await svc.unpublish_public_share(identity, sid)
+            elif endpoint == "public-share-config":
+                identity.require_admin()
+                if request.method == "GET":
+                    result = await svc.public_share_config()
+                else:
+                    result = await svc.save_public_share_config(identity, await body(request))
+            elif endpoint == "public-share-config-test":
+                identity.require_admin()
+                result = await svc.test_public_share_config(identity, await body(request))
             elif endpoint == "session":
                 if request.method == "GET":
                     result = await svc.session_detail(identity, sid)
@@ -172,9 +187,12 @@ def create_app(service=None, token=None):
                         raise AIError("会话标题不能为空")
                     result = await svc.store.one("UPDATE kubedoor_ai_sessions SET title=$2,updated_at=now() WHERE id=$1::uuid RETURNING id,title,updated_at", sid, title.strip()[:200])
                 else:
-                    active = (await svc.session_detail(identity, sid))["active_run"]
+                    detail = await svc.session_detail(identity, sid)
+                    active = detail["active_run"]
                     if active:
                         await svc.runtime.cancel(await svc.store.run(active["id"], identity), identity)
+                    # 先删掉它在 Cloudflare 上的公网快照，删不掉就不删会话；复用详情里的会话行，不重复查归属
+                    await svc.discard_public_share(identity, sid, detail)
                     await svc.store.execute("DELETE FROM kubedoor_ai_sessions WHERE id=$1::uuid", sid)
                     if hasattr(svc.runtime.checkpointer, "adelete_thread"):
                         await svc.runtime.checkpointer.adelete_thread(sid)
@@ -350,7 +368,10 @@ def create_app(service=None, token=None):
     route("/sessions/{sid}/memory-summary", "memory-summary", ["POST"])
     route("/sessions/{sid}/title", "title", ["POST"])
     route("/sessions/{sid}/share", "session-share", ["PUT"])
+    route("/sessions/{sid}/public-share", "session-public-share", ["POST", "DELETE"])
     route("/shares/{code}", "share", ["GET"])
+    route("/public-share-config", "public-share-config", ["GET", "PUT"])
+    route("/public-share-config/test", "public-share-config-test", ["POST"])
     route("/sessions/{sid}", "session", ["GET", "PATCH", "DELETE"])
     route("/sessions/{sid}/runs", "runs", ["POST"])
     route("/runs/{rid}/events", "events", ["GET"])

@@ -178,6 +178,11 @@ export interface AISession {
   /** 会话详情：分享码（分享链接里的随机码），null 表示没有分享 */
   share_code?: string | null;
   shared_at?: string | null;
+  /** 会话列表：是否有公网分享快照 */
+  public_shared?: boolean;
+  /** 会话详情：公网分享地址（Cloudflare Workers），null 表示没有发布 */
+  public_share_url?: string | null;
+  public_shared_at?: string | null;
 }
 
 /** 开关分享的结果 */
@@ -196,6 +201,39 @@ export interface AIShareView {
   /** 进行中的一轮；回答要等这一轮结束才写进消息 */
   active_run: { status: string } | null;
   messages: AIMessage[];
+}
+
+/** 公网分享（Cloudflare Workers）的管理配置；API Token 只返回是否已设置 */
+export interface AIPublicShareConfig {
+  configured: boolean;
+  account_id: string;
+  worker_name: string;
+  kv_namespace_id: string;
+  public_base_url: string;
+  api_token_set: boolean;
+  updated_by: string | null;
+  updated_at: string | null;
+  /** 保存并部署后检查公网地址的结果；能打开为 null，否则是提醒文字 */
+  warning?: string | null;
+}
+
+/** 管理页保存 / 测试时提交的 Cloudflare 配置；API Token 留空表示沿用已保存的 */
+export interface AIPublicShareConfigInput {
+  account_id: string;
+  api_token?: string;
+  worker_name: string;
+  kv_namespace_id: string;
+  public_base_url: string;
+}
+
+/** 发布 / 取消公网分享的结果；public_url 是 Cloudflare Worker 上的快照地址 */
+export interface AIPublicShareState {
+  id: string;
+  public_shared: boolean;
+  public_share_code: string | null;
+  public_shared_at: string | null;
+  public_url: string | null;
+  message_count?: number;
 }
 
 export interface AIRun {
@@ -544,6 +582,28 @@ export const aiApi = {
       undefined,
       signal
     ),
+  /** 发布 / 取消公网分享（Cloudflare Workers 上的脱敏静态快照，只有会话本人） */
+  publishPublicShare: (id: string) =>
+    request<AIPublicShareState>(
+      `/sessions/${itemPath(id)}/public-share`,
+      "POST"
+    ),
+  unpublishPublicShare: (id: string) =>
+    request<AIPublicShareState>(
+      `/sessions/${itemPath(id)}/public-share`,
+      "DELETE"
+    ),
+  /** 管理员：Cloudflare 公网分享配置（保存时会自动创建 / 绑定 KV 并部署 Worker） */
+  publicShareConfig: () => request<AIPublicShareConfig>("/public-share-config"),
+  savePublicShareConfig: (config: AIPublicShareConfigInput) =>
+    request<AIPublicShareConfig>("/public-share-config", "PUT", config),
+  testPublicShareConfig: (config: AIPublicShareConfigInput) =>
+    request<{
+      success: boolean;
+      account_id: string;
+      worker_name: string;
+      kv_namespace_id: string;
+    }>("/public-share-config/test", "POST", config),
   run: (
     id: string,
     body: {
