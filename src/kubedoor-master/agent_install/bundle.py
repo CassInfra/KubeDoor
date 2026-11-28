@@ -9,6 +9,7 @@ import argparse
 import base64
 import copy
 import hashlib
+import hmac
 import json
 import os
 from pathlib import Path
@@ -221,6 +222,116 @@ def pin_ksm_job(scrape: dict, options: dict) -> None:
         relabels.append({"source_labels": ["__meta_kubernetes_service_name"], "regex": name, "action": "keep"})
 
 
+def ensure_webhook_tls_secret_manifest(namespace: str = "kubedoor") -> dict:
+    """为 kubedoor-agent Webhook 生成集群持久化的 TLS Secret 清单（包含 ca.crt、tls.crt、tls.key）。"""
+    if not isinstance(namespace, str) or not re.fullmatch(r"[a-z0-9](?:[-a-z0-9]{0,61}[a-z0-9])?", namespace):
+        raise ValueError("命名空间必须是有效的 Kubernetes 名称")
+
+    from datetime import datetime, timedelta, timezone
+    import ipaddress
+    from cryptography import x509
+    from cryptography.hazmat.primitives import hashes, serialization
+    from cryptography.hazmat.primitives.asymmetric import rsa
+    from cryptography.x509.oid import ExtendedKeyUsageOID, NameOID
+
+    now = datetime.now(timezone.utc)
+    not_before = now - timedelta(minutes=5)
+    not_after = now + timedelta(days=3650)
+
+    ca_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    ca_name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "kubedoor-agent-ca")])
+    ca_cert = (
+        x509.CertificateBuilder()
+        .subject_name(ca_name)
+        .issuer_name(ca_name)
+        .public_key(ca_key.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(not_before)
+        .not_valid_after(not_after)
+        .add_extension(x509.BasicConstraints(ca=True, path_length=None), critical=True)
+        .add_extension(
+            x509.KeyUsage(
+                digital_signature=True,
+                content_commitment=False,
+                key_encipherment=False,
+                data_encipherment=False,
+                key_agreement=False,
+                key_cert_sign=True,
+                crl_sign=True,
+                encipher_only=False,
+                decipher_only=False,
+            ),
+            critical=True,
+        )
+        .add_extension(x509.SubjectKeyIdentifier.from_public_key(ca_key.public_key()), critical=False)
+        .add_extension(x509.AuthorityKeyIdentifier.from_issuer_public_key(ca_key.public_key()), critical=False)
+        .sign(ca_key, hashes.SHA256())
+    )
+
+    leaf_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    leaf_name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, f"kubedoor-agent.{namespace}.svc")])
+    san = x509.SubjectAlternativeName([
+        x509.DNSName("kubedoor-agent"),
+        x509.DNSName(f"kubedoor-agent.{namespace}"),
+        x509.DNSName(f"kubedoor-agent.{namespace}.svc"),
+        x509.DNSName(f"kubedoor-agent.{namespace}.svc.cluster.local"),
+        x509.DNSName("localhost"),
+        x509.IPAddress(ipaddress.IPv4Address("127.0.0.1")),
+    ])
+    leaf_cert = (
+        x509.CertificateBuilder()
+        .subject_name(leaf_name)
+        .issuer_name(ca_cert.subject)
+        .public_key(leaf_key.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(not_before)
+        .not_valid_after(not_after)
+        .add_extension(x509.BasicConstraints(ca=False, path_length=None), critical=True)
+        .add_extension(
+            x509.KeyUsage(
+                digital_signature=True,
+                content_commitment=False,
+                key_encipherment=True,
+                data_encipherment=False,
+                key_agreement=False,
+                key_cert_sign=False,
+                crl_sign=False,
+                encipher_only=False,
+                decipher_only=False,
+            ),
+            critical=True,
+        )
+        .add_extension(x509.ExtendedKeyUsage([ExtendedKeyUsageOID.SERVER_AUTH]), critical=False)
+        .add_extension(x509.SubjectKeyIdentifier.from_public_key(leaf_key.public_key()), critical=False)
+        .add_extension(x509.AuthorityKeyIdentifier.from_issuer_public_key(ca_key.public_key()), critical=False)
+        .add_extension(san, critical=False)
+        .sign(ca_key, hashes.SHA256())
+    )
+
+    ca_pem = ca_cert.public_bytes(serialization.Encoding.PEM)
+    tls_crt_pem = leaf_cert.public_bytes(serialization.Encoding.PEM)
+    tls_key_pem = leaf_key.private_bytes(
+        encoding=serialization.Encoding.PEM,
+        format=serialization.PrivateFormat.PKCS8,
+        encryption_algorithm=serialization.NoEncryption(),
+    )
+    return {
+        "apiVersion": "v1",
+        "kind": "Secret",
+        "metadata": {
+            "name": "kubedoor-agent-webhook-tls",
+            "namespace": namespace,
+            "labels": {"app.kubernetes.io/managed-by": "kubedoor-installer"},
+        },
+        "type": "kubernetes.io/tls",
+        "data": {
+            "ca.crt": base64.b64encode(ca_pem).decode("ascii"),
+            "tls.crt": base64.b64encode(tls_crt_pem).decode("ascii"),
+            "tls.key": base64.b64encode(tls_key_pem).decode("ascii"),
+        },
+    }
+
+
 def render_agent(options: dict, *, username: str, password: str) -> list[dict]:
     options = normalize_options(options, default=options)
     if not options["env"] or not options["master_url"]:
@@ -266,7 +377,16 @@ def render_agent(options: dict, *, username: str, password: str) -> list[dict]:
     resources = [obj for filename in selected for obj in _load_file(filename, variables, options["ksm"] != "reuse")]
     # 通知不再由 agent 直接发送（经 master 统一发送），agent 里不保存机器人 token。
     # 对象存储地址：网页安装为空串（master 每次转发 /api/pod/* 时带上通用配置里的地址），旧脚本照旧写入 OSS_URL
-    secret_data = {"KUBEDOOR_MASTER": ws, "OSS_URL": options.get("oss_url", "")}
+    internal_token = hmac.new(
+        f"{username}:{password}".encode("utf-8"),
+        f"kubedoor-internal-token:{options['namespace']}:{options['env']}".encode("utf-8"),
+        "sha256",
+    ).hexdigest()
+    secret_data = {
+        "KUBEDOOR_MASTER": ws,
+        "OSS_URL": options.get("oss_url", ""),
+        "KUBEDOOR_INTERNAL_TOKEN": internal_token,
+    }
     secret = {"apiVersion": "v1", "kind": "Secret", "metadata": {"name": "kubedoor-agent-credentials", "namespace": options["namespace"]}, "type": "Opaque", "data": {k: base64.b64encode(v.encode()).decode() for k, v in secret_data.items()}}
     resources.insert(1, secret)
     if vmagent and (rw_user or rw_pass or rp.query):

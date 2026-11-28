@@ -1,4 +1,4 @@
-import asyncio, utils, json, sys, base64, re
+import asyncio, utils, json, sys, base64, os, re
 from functools import partial
 from urllib.parse import urlencode
 import aiohttp
@@ -32,8 +32,10 @@ from func_manager.ai_tools import AiToolHandler
 from func_manager.pod_exec import PodExecManager
 from func_manager.pod_log_stream import PodLogStreamer, MAX_STREAMS as MAX_LOG_STREAMS
 from func_manager.ws_lifecycle import run_connection_tasks, MasterConnection
+from func_manager import internal_auth
 from func_manager import notifier
 from func_manager import oss_url
+from func_manager import tls_certs
 from k8s_client_manager import OffloadApiClient, load_incluster_config
 from scaler.scale_service import ScaleService
 from scaler.cci_scaler import get_schedule_profile_info
@@ -154,9 +156,11 @@ async def handle_http_request(
             response_data = {"success": False, "error": f"agent收到master发来的不支持的请求方法: {method}"}
             logger.error(response_data["error"])
         else:
+            merged_headers = dict(headers or {})
+            merged_headers.update(internal_auth.auth_headers())
             options = {"params": query, "ssl": False}
-            if headers:
-                options["headers"] = headers
+            if merged_headers:
+                options["headers"] = merged_headers
             if method == "GET":
                 options["timeout"] = aiohttp.ClientTimeout(total=300)
             else:
@@ -380,9 +384,10 @@ async def get_cci_schedule_profile(custom_api, apps_v1_api, request):
 async def delete_cronjob_or_not(cronjob_name, job_type):
     """判断是否是一次性 job，是的话删除"""
     if job_type == "once":
+        namespace = os.environ.get("POD_NAMESPACE") or "kubedoor"
         try:
             await batch_v1.delete_namespaced_cron_job(
-                name=cronjob_name, namespace="kubedoor", body=client.V1DeleteOptions()
+                name=cronjob_name, namespace=namespace, body=client.V1DeleteOptions()
             )
             logger.info(f"CronJob '{cronjob_name}' deleted successfully.")
         except ApiException as e:
@@ -490,8 +495,54 @@ async def handle_load_balance_check_pods(request):
         return web.json_response({"success": False, "error": str(e)}, status=500)
 
 
+async def ensure_internal_token_secret():
+    """把当前内部令牌写入 kubedoor-agent-credentials Secret，供 CronJob 回调使用。"""
+    token = internal_auth.load_internal_token()
+    if not token or core_v1 is None:
+        return False
+    namespace = os.environ.get("POD_NAMESPACE") or "kubedoor"
+    name = "kubedoor-agent-credentials"
+    data = {"KUBEDOOR_INTERNAL_TOKEN": base64.b64encode(token.encode("utf-8")).decode("ascii")}
+    try:
+        try:
+            await core_v1.read_namespaced_secret(name=name, namespace=namespace)
+        except ApiException as exc:
+            if exc.status != 404:
+                raise
+            await core_v1.create_namespaced_secret(
+                namespace=namespace,
+                body=client.V1Secret(
+                    metadata=client.V1ObjectMeta(name=name, namespace=namespace),
+                    data=data,
+                ),
+            )
+            return True
+        await core_v1.patch_namespaced_secret(name=name, namespace=namespace, body={"data": data})
+        return True
+    except Exception as exc:
+        logger.warning(f"同步内部令牌到 Secret {name} 失败: {type(exc).__name__}: {exc}")
+        return False
+
+
 async def cron(request):
     """创建定时任务，执行扩缩容或重启"""
+    if not internal_auth.load_internal_token():
+        return web.json_response(
+            {
+                "success": False,
+                "message": "缺少内部令牌，无法创建定时任务；请修复 Agent 或重新应用安装清单",
+            },
+            status=500,
+        )
+    if not await ensure_internal_token_secret():
+        return web.json_response(
+            {
+                "success": False,
+                "message": "内部令牌写入 Secret 失败，无法创建定时任务；请检查 Agent RBAC",
+            },
+            status=500,
+        )
+
     request_info = await request.json()
     cron_expr = request_info.get("cron")
     time_expr = request_info.get("time")
@@ -503,7 +554,8 @@ async def cron(request):
     cron_new = f"{time_expr[4]} {time_expr[3]} {time_expr[2]} {time_expr[1]} *" if time_expr else cron_expr
     service['deployment_list'][0]["job_name"] = name_pre
     service['deployment_list'][0]["job_type"] = job_type
-    url = utils.cron_callback_url(type_expr, request.query)
+    namespace = os.environ.get("POD_NAMESPACE") or "kubedoor"
+    url = utils.cron_callback_url(type_expr, request.query, namespace=namespace)
     cronjob = client.V1CronJob(
         metadata=client.V1ObjectMeta(name=name_pre),
         spec=client.V1CronJobSpec(
@@ -520,18 +572,24 @@ async def cron(request):
                                     name=name_pre,
                                     image="registry.cn-shenzhen.aliyuncs.com/starsl/busybox-curl",
                                     command=[
-                                        "curl",
-                                        "-s",
-                                        "-k",
-                                        "-X",
-                                        "POST",
-                                        "-H",
-                                        "Content-Type: application/json",
-                                        "-d",
-                                        f'{json.dumps(service)}',
-                                        url,
+                                        "sh",
+                                        "-c",
+                                        'exec curl -sS -k -X POST -H "Content-Type: application/json" -H "X-Kubedoor-Internal-Token: ${KUBEDOOR_INTERNAL_TOKEN}" -d "${CRON_PAYLOAD}" "${CRON_URL}"',
                                     ],
-                                    env=[client.V1EnvVar(name="CRONJOB_TYPE", value=job_type)],
+                                    env=[
+                                        client.V1EnvVar(name="CRONJOB_TYPE", value=job_type),
+                                        client.V1EnvVar(name="CRON_PAYLOAD", value=json.dumps(service)),
+                                        client.V1EnvVar(name="CRON_URL", value=url),
+                                        client.V1EnvVar(
+                                            name="KUBEDOOR_INTERNAL_TOKEN",
+                                            value_from=client.V1EnvVarSource(
+                                                secret_key_ref=client.V1SecretKeySelector(
+                                                    name="kubedoor-agent-credentials",
+                                                    key="KUBEDOOR_INTERNAL_TOKEN",
+                                                )
+                                            ),
+                                        ),
+                                    ],
                                 )
                             ],
                         ),
@@ -541,7 +599,6 @@ async def cron(request):
         ),
     )
 
-    namespace = "kubedoor"
     try:
         await batch_v1.create_namespaced_cron_job(namespace=namespace, body=cronjob)
         content = f"CronJob '{name_pre}' created successfully."
@@ -665,20 +722,45 @@ async def setup_routes(app):
     app.router.add_post('/api/load-balance/check-pods', handle_load_balance_check_pods)
 
 
+_INTERNAL_AUTH_EXEMPT = frozenset({("GET", "/api/health"), ("POST", "/api/admis")})
+
+
+@web.middleware
+async def internal_auth_middleware(request, handler):
+    if (request.method, request.path) in _INTERNAL_AUTH_EXEMPT:
+        return await handler(request)
+    if not internal_auth.verify_internal_token(request.headers.get(internal_auth.HEADER, "")):
+        return web.json_response({"success": False, "error": "forbidden"}, status=403)
+    return await handler(request)
+
+
+async def create_https_app():
+    app = web.Application(middlewares=[internal_auth_middleware])
+    await setup_routes(app)
+    return app
+
+
 async def start_https_server():
     """启动 HTTPS 服务器"""
-    app = web.Application()
-    await setup_routes(app)
+    app = await create_https_app()
     import ssl
 
+    cert_file, key_file, _ca_file = tls_certs.ensure_webhook_certs()
     ssl_context = ssl.create_default_context(ssl.Purpose.CLIENT_AUTH)
-    ssl_context.load_cert_chain('/app/serving-certs/tls.crt', '/app/serving-certs/tls.key')
+    ssl_context.load_cert_chain(cert_file, key_file)
 
     runner = web.AppRunner(app)
     await runner.setup()
     site = web.TCPSite(runner, '0.0.0.0', 443, ssl_context=ssl_context)
     await site.start()
     logger.info("HTTPS 服务器已启动，监听端口 443")
+    if not await ensure_internal_token_secret():
+        logger.warning("内部令牌未能写入 Secret，新建定时任务可能失败")
+    if admis_service:
+        try:
+            await admis_service.ensure_webhook_ca_bundle()
+        except Exception as exc:
+            logger.warning(f"启动同步 MutatingWebhookConfiguration caBundle 失败: {exc}")
     while True:
         await asyncio.sleep(3600)
 
