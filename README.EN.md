@@ -56,7 +56,7 @@
 
 ## 🌈Overview
 
-🌼**花折 - KubeDoor** is an **AI-driven intelligent management platform for multi-cluster Kubernetes**, built with Python + Vue. The control plane is installed through a Web wizard, and each workload cluster joins by uploading its kubeconfig in the Web UI; a single Web UI covers multi-cluster monitoring, resource management, alerts and events, Istio routing, CoreDNS records, peak-hour resource governance and JVM control. A built-in **AI ops assistant with approvals and an audit trail** is available in the Web UI, in WeCom (WeChat Work) and to MCP clients.
+🌼**花折 - KubeDoor** is an **AI-driven intelligent management platform for multi-cluster Kubernetes**, built with Python + Vue. The control plane is installed through a Web wizard, and each workload cluster joins by uploading its kubeconfig in the Web UI; a single Web UI covers multi-cluster monitoring, resource management, alerts and events, Istio routing, CoreDNS records, peak-hour resource governance and JVM control. A built-in **AI ops assistant with approvals and an audit trail** is available in the Web UI, in WeCom (WeChat Work), Feishu and MCP clients.
 
 KubeDoor focuses on microservice resources as seen during the daily peak hours: it collects the real resource usage of every microservice during the peak, and uses K8S admission control to keep resource requests in line with that real usage.
 
@@ -80,6 +80,7 @@ K8S Resource Overview: multi-cluster resources, at-risk nodes, and today's abnor
 
 **Compared with 1.x, 2.x is an architecture-level upgrade: the AI assistant becomes a core capability, PostgreSQL becomes the only database, and deployment moves to a Web wizard.** See [Releases](https://github.com/CassInfra/KubeDoor/releases) for the full notes of each version.
 
+- **2.7**: unified notifications and an AI bot gateway across WeCom, DingTalk, Feishu and Slack, with a shared default model and Feishu long connection; public sharing of AI conversations; a Deployment environment-variable viewer; hardened pod-mgr, webhook certificates and node-exporter; `upgrade` handles backups, settings migration and Grafana dashboard sync.
 - **2.6**: Web-wizard installation of the control plane and Web installation of Agents; code and runtime config lookup, with an AI that reads source code, checks configuration and runs read-only MySQL / Redis / ES queries; permissions & approvals; notifications, general settings and event alert rules configured in the UI; backup / rollback and domain conflict checks for Istio VirtualServices.
 - **2.3**: WeCom smart bot; Istio VirtualService management rebuilt around Istio groups; CoreDNS management; prefix caching for long AI conversations, context compression and a usage dashboard.
 - **2.2**: LDAP sign-in and per-cluster permissions, the audit log, Web Pod and node terminals.
@@ -94,7 +95,7 @@ K8S Resource Overview: multi-cluster resources, at-risk nodes, and today's abnor
 <img src="screenshot/kubedoor-arch.png" alt="KubeDoor 2.x architecture overview" />
 </div>
 
-- **Control plane** (deployed by the Web wizard): kubedoor-web (single entry point and console), kubedoor-master (API gateway and agent connection hub), kubedoor-ai (AI assistant, WeCom bot and MCP), the Grafana dashboards and the daily peak-hour collection job, plus the optional alerting components (vmalert, Alertmanager, kubedoor-alarm).
+- **Control plane** (deployed by the Web wizard): kubedoor-web (single entry point and console), kubedoor-master (API gateway and agent connection hub), kubedoor-ai (AI assistant, WeCom/Feishu bots and MCP), the Grafana dashboards and the daily peak-hour collection job, plus the optional alerting components (vmalert, Alertmanager, kubedoor-alarm).
 - **Cluster side** (installed from the Web UI): kubedoor-agent initiates a WebSocket connection to the control plane, so workload clusters need no inbound ports; vmagent, kube-state-metrics and node-exporter are optional, and metrics are written straight to the time-series database.
 - **External dependencies**: PostgreSQL 18 (the only database) and VictoriaMetrics (each cluster's metrics are told apart by one label); use existing ones, or deploy them separately with the Docker Compose files under `deploy/`.
 
@@ -112,6 +113,7 @@ K8S Resource Overview: multi-cluster resources, at-risk nodes, and today's abnor
 - 🧰**Governed tools**: 73 KubeDoor business operations plus the K8S API, kubectl, istioctl, diagnostic commands and Pod exec; generic operations run through the online Agent first, and fall back to a direct connection with the cluster's kubeconfig while the Agent is offline.
 - 🔍**Reads code, checks configuration [2.6]**: downloads the source code behind the current image to pinpoint errors; fetches the runtime configuration (passwords are replaced with placeholders, so the model never sees them) and runs read-only queries against MySQL, Redis and Elasticsearch.
 - 💬**WeCom bot [2.3]**: connects over a long-lived connection, so no public callback URL is needed; members chat with it one-on-one, approve changes from a card or by replying 「批准」 (approve), and permissions are checked live against the bound KubeDoor account.
+- 💬**Feishu bot [2.7]**: long-lived connection with CardKit streaming cards; shares the tools, permissions, approvals and audit trail of the Web AI assistant. Manage bots and models in one page, and let members bind their own IM accounts.
 - 🔌**MCP**: the Web entry point serves `/mcp` (Streamable HTTP) and `/sse`, reusing the Web accounts and permissions (Basic auth); you can also connect your own MCP servers under 「MCP 管理」 (MCP management) [2.6].
 - 🛡**Guardrails**: permission first, then approval; approved operations run with frozen parameters, K8S writes are dry-run first, and timed-out writes are never replayed; secrets are redacted, and every tool call is stored for auditing.
 
@@ -265,7 +267,7 @@ Peak resource dashboard (Grafana): global peak-hour resource statistics with a T
 
 - 🚪**Single entry point**: the Web UI, Grafana, the AI assistant and MCP share one NodePort, and logins and permissions are managed by the master.
 - 👥**Accounts and permissions [2.2]**: local accounts plus LDAP, with per-cluster grants (Admin / Read-write / Read-only / None); 「权限与审批」 (Permissions & approvals) [2.6] sets, for 27 operation types, what each level may do and which AI operations need human approval; every write operation is audited.
-- 🖥**Console settings [2.6]**: general settings, notifications, event alert rules, image registries, LDAP, the WeCom bot and more live under 「系统管理」 (System), take effect on save, and store sensitive values encrypted.
+- 🖥**Console settings [2.6]**: general settings, notifications, event alert rules, image registries, LDAP, the IM bots and more live under 「系统管理」 (System), take effect on save, and store sensitive values encrypted.
 - 🛰**Agent management**: install Agents from the Web UI, update and restart them in bulk, and configure collection and admission control.
 
 <details close>
@@ -320,7 +322,7 @@ Sign in as `kubedoor` with the password set in the wizard, open 「Agent管理�
 
 1. In 「Agent管理」, check that the cluster is online, turn on 「自动采集」 (auto collection), set the peak hours and click 「采集」 (Collect) to backfill historical data; once the data in 「高峰资源管控」 (Peak Resource Control) looks right, turn on 「准入控制」 (admission control) as needed (off by default).
 2. Click 「AI 助手」 → 「模型设置」 (Model Settings) in the top bar, enter the model's Base URL, API Key and name, and start chatting.
-3. Under 「系统管理」 (System), add users, grant cluster permissions or connect LDAP, and set up notifications, the WeCom bot and so on as needed.
+3. Under 「系统管理」 (System), add users, grant cluster permissions or connect LDAP, and set up notifications, the IM bots and so on as needed.
 
 #### Production Tips
 

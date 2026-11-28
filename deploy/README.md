@@ -66,7 +66,7 @@ sh install.sh
 
 ```bash
 sh install.sh --context production --namespace kubedoor --nodeport 30080
-sh install.sh --image-repo registry.example.com/kubedoor --tag 2.6.0 \
+sh install.sh --image-repo registry.example.com/kubedoor --tag 2.7.0 \
   --image-pull-secret registry-pull
 sh install.sh --render     # 只预览引导资源，不连接集群、不生成凭据
 ```
@@ -77,7 +77,7 @@ sh install.sh --render     # 只预览引导资源，不连接集群、不生成
 
 ## 更新已有控制端（包括 2.3.0）
 
-每次升级先取得目标发布版本对应的新版 `deploy/install.sh`，单独复制到能访问控制端集群的机器。脚本内的固定版本就是默认升级目标；当前为 **2.6.0**，不会在运行时查询远程版本或使用浮动 `latest` 镜像。
+每次升级先取得目标发布版本对应的新版 `deploy/install.sh`，单独复制到能访问控制端集群的机器。脚本内的固定版本就是默认升级目标；当前为 **2.7.0**，不会在运行时查询远程版本或使用浮动 `latest` 镜像。
 
 先查看升级计划、实际使用的 Deployment 补丁、旧配置的迁移和清理步骤，以及 Grafana 看板的同步：
 
@@ -89,7 +89,7 @@ sh install.sh upgrade --context production --namespace kubedoor --dry-run
 
 ```sh
 sh install.sh upgrade --context production --namespace kubedoor \
-  --backup kubedoor-before-2.6.0.yaml
+  --backup kubedoor-before-2.7.0.yaml
 # 自动化执行时添加 --yes，表示已完成数据库备份并确认升级。
 ```
 
@@ -155,7 +155,7 @@ containers:
 默认保留各组件当前的镜像仓库。使用镜像同步仓库或自定义构建 tag 时，可以显式指定：
 
 ```sh
-sh install.sh upgrade --image-repo registry.example.com/kubedoor --tag 2.6.0 \
+sh install.sh upgrade --image-repo registry.example.com/kubedoor --tag 2.7.0 \
   --backup kubedoor-before-upgrade.yaml
 ```
 
@@ -179,7 +179,7 @@ kubectl apply -f kubedoor-install.yaml
 命名空间、镜像版本和端口选项同样适用于导出，例如：
 
 ```sh
-sh install.sh --namespace kubedoor --tag 2.6.0 --nodeport 30080 \
+sh install.sh --namespace kubedoor --tag 2.7.0 --nodeport 30080 \
   --export kubedoor-install.yaml
 ```
 

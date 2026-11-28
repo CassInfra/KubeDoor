@@ -557,7 +557,7 @@
           <el-form-item label="镜像标签">
             <el-input
               v-model="batchUpdateForm.image_tag"
-              placeholder="请输入镜像标签（版本号），如 2.3.0"
+              placeholder="请输入镜像标签（版本号），如 2.7.0"
               clearable
               @keyup.enter="submitBatchUpdate"
             />

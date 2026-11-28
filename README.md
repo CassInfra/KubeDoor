@@ -52,7 +52,7 @@
 
 ## 🌈概述
 
-🌼**花折 - KubeDoor** 是一个使用Python + Vue开发的**AI驱动的多K8S集群智能管控平台**：控制端用网页向导安装，业务集群在网页上传kubeconfig即可接入；在一个Web里完成多集群的监控、资源管理、告警与事件、Istio路由、CoreDNS解析、高峰期资源治理和JVM管控；内置**可审批、可审计的AI运维助手**，网页、企业微信和MCP客户端里都能用。
+🌼**花折 - KubeDoor** 是一个使用Python + Vue开发的**AI驱动的多K8S集群智能管控平台**：控制端用网页向导安装，业务集群在网页上传kubeconfig即可接入；在一个Web里完成多集群的监控、资源管理、告警与事件、Istio路由、CoreDNS解析、高峰期资源治理和JVM管控；内置**可审批、可审计的AI运维助手**，网页、企业微信/飞书和MCP客户端里都能用。
 
 KubeDoor专注微服务每日高峰时段的资源视角：采集各微服务高峰期的真实资源用量，基于K8S准入控制让资源需求值与真实用量保持一致。
 
@@ -76,6 +76,7 @@ K8S资源总览：多集群资源、风险节点、今日异常告警与事件�
 
 **相对1.x，2.x是一次架构级升级：AI助手成为核心能力，PostgreSQL成为唯一数据库，部署改为网页向导。** 各版本的完整说明见[Releases](https://github.com/CassInfra/KubeDoor/releases)。
 
+- **2.7**：统一企业微信、钉钉、飞书、Slack 的消息通知与 AI 机器人网关，公共默认模型、飞书长连接；AI 会话公网分享；Deployment 环境变量查看；加固 pod-mgr、Webhook 证书与 node-exporter；`upgrade` 支持备份、配置迁移和 Grafana 看板同步。
 - **2.6**：网页向导安装控制端、网页安装Agent；获取代码与运行配置，AI读源码、查配置、只读查询MySQL / Redis / ES；权限与审批；消息通知、通用配置和事件告警规则改为在页面配置；Istio VirtualService备份回退与域名冲突检查。
 - **2.3**：企业微信智能机器人；Istio VirtualService管理（按Istio组重构）；CoreDNS管理；AI长对话缓存、上下文压缩与用量看板。
 - **2.2**：LDAP登录与按集群授权、操作审计、网页Pod终端与节点终端。
@@ -90,7 +91,7 @@ K8S资源总览：多集群资源、风险节点、今日异常告警与事件�
 <img src="screenshot/kubedoor-arch.png" alt="KubeDoor 2.x 架构总览" />
 </div>
 
-- **控制端**（网页向导部署）：kubedoor-web（统一入口与控制台）、kubedoor-master（API网关、agent连接中心）、kubedoor-ai（AI助手、企微机器人与MCP）、Grafana看板、每日高峰期采集任务，以及可选的告警组件（vmalert、Alertmanager、kubedoor-alarm）。
+- **控制端**（网页向导部署）：kubedoor-web（统一入口与控制台）、kubedoor-master（API网关、agent连接中心）、kubedoor-ai（AI助手、IM机器人与MCP）、Grafana看板、每日高峰期采集任务，以及可选的告警组件（vmalert、Alertmanager、kubedoor-alarm）。
 - **集群端**（网页安装）：kubedoor-agent主动通过WebSocket连接控制端，业务集群不用开放入站端口；可选装vmagent、kube-state-metrics、node-exporter，指标直接写入时序库。
 - **外部依赖**：PostgreSQL 18（唯一数据库）和VictoriaMetrics（各集群的指标用一个标签区分）；可用现成的，也可用`deploy/`下的Docker Compose单独部署。
 
@@ -108,6 +109,7 @@ K8S资源总览：多集群资源、风险节点、今日异常告警与事件�
 - 🧰**受控工具**：73个KubeDoor业务操作，加上K8S API、kubectl、istioctl、诊断命令和Pod exec；通用操作优先经在线Agent执行，Agent离线时用该集群的kubeconfig直连。
 - 🔍**读源码、查配置【2.6】**：下载当前镜像对应的源码定位报错；获取运行配置（密码换成占位符，模型看不到明文），并只读查询MySQL、Redis、Elasticsearch。
 - 💬**企业微信机器人【2.3】**：长连接接入，不需要公网回调地址；成员单聊即可对话，变更点卡片或回复「批准」审批，按绑定的花折账号实时校验权限。
+- 💬**飞书机器人【2.7】**：长连接接入，CardKit 流式卡片，与网页 AI 助手共用工具、权限、审批与审计；在「AI 机器人与模型」统一管理，成员可自助绑定 IM 账号。
 - 🔌**MCP**：Web入口提供`/mcp`（Streamable HTTP）和`/sse`，复用Web账号和权限（Basic认证）；也可以在「MCP 管理」接入自己的MCP服务【2.6】。
 - 🛡**安全护栏**：先权限后审批；批准后按冻结的参数执行，K8S写操作先dry-run，超时不重放；密钥脱敏，每次工具调用都入库审计。
 
@@ -261,7 +263,7 @@ K8S资源总览：多集群资源、风险节点、今日异常告警与事件�
 
 - 🚪**统一入口**：Web、Grafana、AI助手和MCP共用一个NodePort，登录与权限都由master管理。
 - 👥**账号与权限【2.2】**：本地账号 + LDAP，按集群授权「管理员 / 读写 / 只读 / 无」；「权限与审批」【2.6】按27类操作配置每级权限能做什么、AI做哪些操作要人工批准；写操作全部留痕审计。
-- 🖥**界面配置【2.6】**：通用配置、消息通知、事件告警规则、镜像仓库、LDAP、企微机器人等都在「系统管理」里，保存即生效，敏感值加密保存。
+- 🖥**界面配置【2.6】**：通用配置、消息通知、事件告警规则、镜像仓库、LDAP、IM机器人等都在「系统管理」里，保存即生效，敏感值加密保存。
 - 🛰**Agent管理**：网页安装Agent，批量更新与重启，配置采集与准入控制。
 
 <details close>
@@ -316,7 +318,7 @@ sh install.sh
 
 1. 在「Agent管理」确认集群在线，打开「自动采集」并设置高峰时段，点「采集」补齐历史数据；在「高峰资源管控」确认数据无误后，再按需开启「准入控制」（默认关闭）。
 2. 点顶栏「AI 助手」→「模型设置」，填写模型的Base URL、API Key和模型名，即可开始对话。
-3. 在「系统管理」添加用户、按集群授权或接入LDAP，按需配置消息通知、企微机器人等。
+3. 在「系统管理」添加用户、按集群授权或接入LDAP，按需配置消息通知、IM机器人等。
 
 #### 生产环境提示
 

@@ -31,7 +31,7 @@ AGENT_NAMESPACE = "kubedoor"
 BASE = {
     "namespace": AGENT_NAMESPACE, "master_url": "", "env": "", "aliases": [],
     "mode": "full", "image_repo": "swr.cn-south-1.myhuaweicloud.com/starsl.cn",
-    "agent_tag": "2.6.0", "oss_url": "", "remote_write_url": "",
+    "agent_tag": "2.7.0", "oss_url": "", "remote_write_url": "",
     "vmagent": "install", "ksm": "auto", "node_exporter": "auto", "image_pull_secret": "",
     "prom_k8s_tag_key": "origin_prometheus",
     # 与 deploy/install.sh 的 IMAGE_VMAGENT 一致（网页安装用的就是它；不一致时安装向导会把它当成改过的值存进通用配置）

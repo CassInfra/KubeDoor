@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>花折 · KubeDoor — AI 驱动的多 K8S 集群智能管控平台</title>
-<meta name="description" content="花折 · KubeDoor：开源的多 K8S 集群智能管控平台。一条命令启动网页安装向导，统一纳管多套 Kubernetes：监控、资源管理、告警事件、Istio VirtualService、CoreDNS、高峰期资源治理与准入管控一站搞定；内置可审批、可审计的 AI 运维助手，能读服务源码、查运行配置，网页和企业微信里都能对话，并以标准 MCP 对外开放；按集群、按操作配置权限与审批。">
+<meta name="description" content="花折 · KubeDoor：开源的多 K8S 集群智能管控平台。一条命令启动网页安装向导，统一纳管多套 Kubernetes：监控、资源管理、告警事件、Istio VirtualService、CoreDNS、高峰期资源治理与准入管控一站搞定；内置可审批、可审计的 AI 运维助手，能读服务源码、查运行配置，网页、企业微信和飞书里都能对话，并以标准 MCP 对外开放；按集群、按操作配置权限与审批。">
 <meta name="keywords" content="KubeDoor,花折,Kubernetes,K8S,多集群管理,AI 运维,网页安装向导,一键安装,获取代码,运行配置,企业微信机器人,MCP,Istio,VirtualService,CoreDNS,准入控制,告警,消息通知,LDAP,权限与审批,操作审计,VictoriaMetrics,PostgreSQL">
 <meta name="author" content="StarsL.cn">
 <meta name="theme-color" content="#05070f">
@@ -17,7 +17,7 @@
 <meta property="og:site_name" content="花折 · KubeDoor">
 <meta property="og:locale" content="zh_CN">
 <meta property="og:title" content="花折 · KubeDoor — AI 驱动的多 K8S 集群智能管控平台">
-<meta property="og:description" content="一条命令启动网页安装向导；一个平台统一纳管多套 Kubernetes：监控、资源管理、告警事件、高峰期资源治理与准入管控一站搞定；内置 AI 助手/企微机器人，一句话排障运维，还能找源码、查配置、分析数据库定位问题；账号、角色与权限细到每个集群、每类操作。">
+<meta property="og:description" content="一条命令启动网页安装向导；一个平台统一纳管多套 Kubernetes：监控、资源管理、告警事件、高峰期资源治理与准入管控一站搞定；内置 AI 助手/多 IM 机器人，一句话排障运维，还能找源码、查配置、分析数据库定位问题；账号、角色与权限细到每个集群、每类操作。">
 <meta property="og:url" content="https://cassinfra.github.io/KubeDoor/">
 <meta property="og:image" content="https://cassinfra.github.io/KubeDoor/assets/img/og-cover.jpg">
 <meta property="og:image:width" content="1200">
@@ -25,7 +25,7 @@
 <meta property="og:image:alt" content="花折 · KubeDoor：AI 驱动的多 K8S 集群智能管控平台">
 <meta name="twitter:card" content="summary_large_image">
 <meta name="twitter:title" content="花折 · KubeDoor — AI 驱动的多 K8S 集群智能管控平台">
-<meta name="twitter:description" content="一条命令启动网页安装向导；一个平台统一纳管多套 Kubernetes：监控、资源管理、告警事件、高峰期资源治理与准入管控一站搞定；内置 AI 助手/企微机器人，一句话排障运维，还能找源码、查配置、分析数据库定位问题；账号、角色与权限细到每个集群、每类操作。">
+<meta name="twitter:description" content="一条命令启动网页安装向导；一个平台统一纳管多套 Kubernetes：监控、资源管理、告警事件、高峰期资源治理与准入管控一站搞定；内置 AI 助手/多 IM 机器人，一句话排障运维，还能找源码、查配置、分析数据库定位问题；账号、角色与权限细到每个集群、每类操作。">
 <meta name="twitter:image" content="https://cassinfra.github.io/KubeDoor/assets/img/og-cover.jpg">
 
 <script type="application/ld+json">{"@context":"https://schema.org","@type":"SoftwareSourceCode","name":"花折 · KubeDoor","description":"AI 驱动的多 K8S 集群智能管控平台","url":"https://cassinfra.github.io/KubeDoor/","codeRepository":"https://github.com/CassInfra/KubeDoor","license":"https://opensource.org/licenses/MIT","programmingLanguage":["Python","TypeScript"]}</script>
@@ -133,13 +133,13 @@
   <div class="hero-grid" aria-hidden="true"></div>
   <div class="container hero-inner">
     <div class="hero-copy">
-      <a class="hero-pill" href="#deploy"><span class="pill-tag">v2.6</span><span><span class="nw">一键安装 ·</span> <span class="nw">AI 找代码</span><span class="nw">查配置</span><span class="nw">分析数据库 ·</span> <span class="nw">企微机器人</span></span><svg class="icon" aria-hidden="true"><use href="#i-arrow"/></svg></a>
+      <a class="hero-pill" href="#deploy"><span class="pill-tag">v2.7</span><span><span class="nw">一键安装 ·</span> <span class="nw">AI 找代码</span><span class="nw">查配置</span><span class="nw">分析数据库 ·</span> <span class="nw">多 IM 机器人</span></span><svg class="icon" aria-hidden="true"><use href="#i-arrow"/></svg></a>
       <h1 id="hero-title">
         <span class="hero-brand">花折 · KubeDoor</span>
         <span class="hero-tagline"><span class="grad-text">AI 驱动</span>的<br>多 K8S 集群<br>智能管控平台</span>
       </h1>
       <p class="hero-poem">花开堪折直须折，莫待无花空折枝</p>
-      <p class="hero-lead"><strong>一条命令</strong>启动<span class="nw">网页安装向导；</span>一个平台统一纳管多套 Kubernetes：<span class="nw">监控、</span><span class="nw">资源管理</span>、<span class="nw">告警事件</span>、<span class="nw">高峰期资源治理</span>与<span class="nw">准入管控</span><span class="nw">一站搞定</span>；<span class="nw">内置 <strong>AI 助手/企微机器人</strong>，</span><span class="nw">一句话排障运维，</span><span class="nw">还能找源码、查配置、</span><span class="nw">分析数据库定位问题；</span><span class="nw"><strong>账号、角色与权限</strong>细到每个集群、每类操作。</span></p>
+      <p class="hero-lead"><strong>一条命令</strong>启动<span class="nw">网页安装向导；</span>一个平台统一纳管多套 Kubernetes：<span class="nw">监控、</span><span class="nw">资源管理</span>、<span class="nw">告警事件</span>、<span class="nw">高峰期资源治理</span>与<span class="nw">准入管控</span><span class="nw">一站搞定</span>；<span class="nw">内置 <strong>AI 助手/多 IM 机器人</strong>，</span><span class="nw">一句话排障运维，</span><span class="nw">还能找源码、查配置、</span><span class="nw">分析数据库定位问题；</span><span class="nw"><strong>账号、角色与权限</strong>细到每个集群、每类操作。</span></p>
       <div class="hero-ctas">
         <a class="btn btn-primary" href="https://github.com/CassInfra/KubeDoor" target="_blank" rel="noopener">
           <svg class="icon" aria-hidden="true"><use href="#i-github"/></svg>GitHub<svg class="icon icon-star" aria-hidden="true"><use href="#i-star"/></svg>Star
@@ -260,7 +260,7 @@ content_type: application/json-patch+json</pre>
       <li class="reveal">
         <div class="card-icon card-icon-sm"><svg class="icon" aria-hidden="true"><use href="#i-robot"/></svg></div>
         <h3>内置 AI 运维助手</h3>
-        <p>选定集群用一句话排障与运维，自动联合日志、事件、监控与历史数据定位原因，还能读服务源码、查运行配置；变更先冻结参数、展示差异，按「权限与审批」人工批准后才执行，会话与每次操作全程入库审计，模型自由选。同一能力也开放给企业微信机器人和标准 MCP。</p>
+        <p>选定集群用一句话排障与运维，自动联合日志、事件、监控与历史数据定位原因，还能读服务源码、查运行配置；变更先冻结参数、展示差异，按「权限与审批」人工批准后才执行，会话与每次操作全程入库审计，模型自由选。同一能力也开放给企业微信、飞书机器人和标准 MCP。</p>
       </li>
       <li class="reveal" style="--d:1">
         <div class="card-icon card-icon-sm"><svg class="icon" aria-hidden="true"><use href="#i-route"/></svg></div>
@@ -634,7 +634,7 @@ sql: SELECT status FROM orders WHERE id = 123</pre>
       <article class="card glow-card fcard reveal" style="--d:2">
         <div class="card-icon"><svg class="icon" aria-hidden="true"><use href="#i-lock"/></svg></div>
         <h3>账号 · 权限与审批<em class="new-tag">2.6</em></h3>
-        <p>本地账号与 LDAP 统一登录，按用户 × 集群授权「管理员 / 读写 / 只读 / 无」；「权限与审批」按 27 类操作配置每级权限能做什么、AI 变更要不要审批，Web、Grafana、AI 助手、企微与 MCP 共用一套；登录、权限变更与所有写操作（含越权被拒）进入操作审计。</p>
+        <p>本地账号与 LDAP 统一登录，按用户 × 集群授权「管理员 / 读写 / 只读 / 无」；「权限与审批」按 27 类操作配置每级权限能做什么、AI 变更要不要审批，Web、Grafana、AI 助手、IM 机器人与 MCP 共用一套；登录、权限变更与所有写操作（含越权被拒）进入操作审计。</p>
       </article>
       <article class="card glow-card fcard fcard-wide fcard-flow reveal">
         <div class="fcard-text">
@@ -700,7 +700,7 @@ sql: SELECT status FROM orders WHERE id = 123</pre>
           <li><b>LDAP 设置</b><span>一键测试、首次登录开通</span></li>
           <li><b>获取代码接口</b><span>按镜像返回代码链接</span></li>
           <li><b>获取运行配置接口</b><span>返回服务的生效配置</span></li>
-          <li><b>企微 AI 机器人</b><span>长连接、成员绑定</span></li>
+          <li><b>多 IM AI 机器人</b><span>长连接、成员绑定</span></li>
           <li><b>镜像管理</b><span>仓库凭据、更新规则</span></li>
           <li><b>AI 用量看板</b><span>用量、缓存命中、费用</span></li>
           <li><b>操作审计</b><span>登录与所有写操作</span></li>
@@ -720,7 +720,7 @@ sql: SELECT status FROM orders WHERE id = 123</pre>
               <tr><td>网页 Pod 终端</td><td><i class="ok-no">–</i></td><td><i class="ok-yes">✓</i></td><td><i class="ok-yes">✓</i></td><td><b class="ap">不涉及</b></td></tr>
             </tbody>
           </table>
-          <p class="perm-note">共 27 类操作，勾选即生效；网页、AI 助手、企微机器人与外部 MCP 共用这一张表 · 示意</p>
+          <p class="perm-note">共 27 类操作，勾选即生效；网页、AI 助手、IM 机器人与外部 MCP 共用这一张表 · 示意</p>
         </div>
       </figure>
     </div>
@@ -907,7 +907,11 @@ Web 入口：http://192.168.1.10:31080
     </header>
     <ol class="timeline">
       <li class="tl-item tl-current reveal">
-        <div class="tl-date"><time datetime="2026-11-08">2026-11-08</time><span class="tl-ver">2.6.0 · 当前</span></div>
+        <div class="tl-date"><time datetime="2026-11-28">2026-11-28</time><span class="tl-ver">2.7.0 · 当前</span></div>
+        <div class="tl-body"><h3>多 IM 通知与 AI 机器人、公网分享、安全加固</h3><p>统一企业微信、钉钉、飞书、Slack 的消息通知与 AI 机器人网关，公共默认模型、飞书长连接；AI 会话支持公网分享，Deployment 详情可查看并复制环境变量；加固 pod-mgr、Webhook 证书与 node-exporter；upgrade 支持备份、配置迁移和 Grafana 看板同步。</p></div>
+      </li>
+      <li class="tl-item reveal">
+        <div class="tl-date"><time datetime="2026-11-08">2026-11-08</time><span class="tl-ver">2.6.0</span></div>
         <div class="tl-body"><h3>一键安装、AI 读代码查配置、权限与审批</h3><p>一条命令启动网页安装向导，控制端各服务一起部署、逐项验证，本集群 Agent 一并装好，其他集群网页上传 kubeconfig 接入；对接自定义接口获取代码与运行配置，AI 能读源码定位问题、只读查询 MySQL / Redis / ES、接入自己的 MCP；「权限与审批」按 27 类操作配置；消息通知在控制台按集群配置；Istio VirtualService 支持回退与域名冲突检查。</p></div>
       </li>
       <li class="tl-item reveal">

@@ -5,12 +5,12 @@ set -eu
 # 以下为本发布的镜像版本，用于首次安装及升级；--tag 可覆盖 KubeDoor 组件版本。
 # BEGIN KUBEDOOR IMAGE DEFAULTS
 IMAGE_REPO="swr.cn-south-1.myhuaweicloud.com/starsl.cn"
-TAG_MASTER="2.6.0"
-TAG_AGENT="2.6.0"
-TAG_WEB="2.6.0"
-TAG_AI="2.6.0"
-TAG_SETUP="2.6.0"
-TAG_ALARM="2.6.0"
+TAG_MASTER="2.7.0"
+TAG_AGENT="2.7.0"
+TAG_WEB="2.7.0"
+TAG_AI="2.7.0"
+TAG_SETUP="2.7.0"
+TAG_ALARM="2.7.0"
 IMAGE_GRAFANA="registry.cn-shenzhen.aliyuncs.com/starsl/grafana-oss:11.4.0"
 IMAGE_VMAGENT="registry.cn-shenzhen.aliyuncs.com/starsl/vmagent"
 IMAGE_VMALERT="registry.cn-shenzhen.aliyuncs.com/starsl/vmalert"
@@ -58,7 +58,7 @@ usage() {
         '  --export FILE          导出可直接 kubectl apply 的 YAML；- 表示标准输出' \
         '  -h, --help             显示帮助' \
         '首次安装在网页填写数据库及管理员信息；重复运行保留原安装。' \
-        '升级示例：sh install.sh upgrade --dry-run；sh install.sh upgrade --tag 2.6.0' \
+        '升级示例：sh install.sh upgrade --dry-run；sh install.sh upgrade --tag 2.7.0' \
         'upgrade 保留现有镜像仓库；--image-repo 可覆盖。请先备份 PostgreSQL。' \
         'upgrade 会把 ConfigMap 里的旧配置和事件告警规则迁入数据库（需要 pods/exec 权限），成功后清理旧配置。' \
         'upgrade 还会用新版看板覆盖 Grafana 看板（kubedoor-dash-* ConfigMap；自己改过的也会被覆盖，旧内容在备份里）。'
