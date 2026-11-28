@@ -76,7 +76,7 @@ K8S资源总览：多集群资源、风险节点、今日异常告警与事件�
 
 **相对1.x，2.x是一次架构级升级：AI助手成为核心能力，PostgreSQL成为唯一数据库，部署改为网页向导。** 各版本的完整说明见[Releases](https://github.com/CassInfra/KubeDoor/releases)。
 
-- **2.7**：统一企业微信、钉钉、飞书、Slack 的消息通知与 AI 机器人网关，公共默认模型、飞书长连接；AI 会话公网分享；Deployment 环境变量查看；加固 pod-mgr、Webhook 证书与 node-exporter；`upgrade` 支持备份、配置迁移和 Grafana 看板同步。
+- **2.7**：统一企业微信、钉钉、飞书、Slack、Webhook、SMTP 的消息通知与 AI 机器人网关，公共默认模型、飞书长连接；AI 助手新增历史日志查询 Skill、会话分享与公网分享；控制端新增 `upgrade`（dry-run、备份、配置迁移、Grafana 看板同步）、通用配置和事件告警规则页面；Agent 安装支持采集组件单独选装、修复与版本检查；新增 Deployment 环境变量查看；加固 pod-mgr、Webhook 证书与 node-exporter；修复高峰期看板/采集、链路追踪、安装向导等问题。
 - **2.6**：网页向导安装控制端、网页安装Agent；获取代码与运行配置，AI读源码、查配置、只读查询MySQL / Redis / ES；权限与审批；消息通知、通用配置和事件告警规则改为在页面配置；Istio VirtualService备份回退与域名冲突检查。
 - **2.3**：企业微信智能机器人；Istio VirtualService管理（按Istio组重构）；CoreDNS管理；AI长对话缓存、上下文压缩与用量看板。
 - **2.2**：LDAP登录与按集群授权、操作审计、网页Pod终端与节点终端。
