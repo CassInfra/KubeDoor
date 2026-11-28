@@ -96,9 +96,17 @@ spec:
           env:
             - name: TZ
               value: Asia/Shanghai
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
           ports:
             - name: https
               containerPort: 443
+          volumeMounts:
+            - name: webhook-tls
+              mountPath: /etc/kubedoor/certs
+              readOnly: true
           resources:
             limits:
               cpu: "2"
@@ -124,6 +132,11 @@ spec:
             timeoutSeconds: 3
             periodSeconds: 10
             failureThreshold: 3
+      volumes:
+        - name: webhook-tls
+          secret:
+            secretName: kubedoor-agent-webhook-tls
+            optional: true
       restartPolicy: Always
 
 ---

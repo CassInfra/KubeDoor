@@ -145,6 +145,8 @@ class FakeCluster:
             if secret and self.agent_token:
                 secret['data'] = {'token': base64.b64encode(self.agent_token.encode()).decode(), 'ca.crt': 'Q0E='}
             return secret
+        if path.endswith('/secrets/kubedoor-agent-webhook-tls'):
+            return copy.deepcopy(self.resources.get(('Secret', 'kubedoor-agent-webhook-tls')))
         raise AssertionError((method, path))
 
     async def list(self, path, params=None):
@@ -816,7 +818,9 @@ async def test_oss_url_is_not_written_into_the_agent_secret(environment, setting
     done = await repo.get(task['id'])
     assert done['status'] == 'succeeded', done['payload']
     secret = cluster.resources['Secret', 'kubedoor-agent-credentials']['data']
-    assert set(secret) == {'KUBEDOOR_MASTER', 'OSS_URL'} and base64.b64decode(secret['OSS_URL']).decode() == ''
+    assert set(secret) == {'KUBEDOOR_MASTER', 'OSS_URL', 'KUBEDOOR_INTERNAL_TOKEN'}
+    assert base64.b64decode(secret['OSS_URL']).decode() == ''
+    assert base64.b64decode(secret['KUBEDOOR_INTERNAL_TOKEN']).decode()
     applied = json.dumps(cluster.applied)
     assert 'objects.example.test' not in applied and 'page.example.test' not in applied
 
@@ -1336,3 +1340,65 @@ def test_plans_without_a_chosen_kube_state_metrics_render_as_before():
     bad = {**base, 'ksm_target': {'namespace': 'monitoring', 'name': 'x|.*', 'count': 2, 'pin_name': True}}
     with pytest.raises(ValueError, match='kube-state-metrics 的命名空间或 Service 名称无效'):
         module.render_agent(bad, username='agent-1', password='secret-1')
+
+@pytest.mark.asyncio
+async def test_webhook_tls_secret_and_hardened_manifests(environment):
+    service, cluster, repo = environment
+    task = await plan(service, mode='agent')
+    await service.start(task['id'], task['revision'])
+    await service.tasks[task['id']]
+    done = await repo.get(task['id'])
+    assert done['status'] == 'succeeded', done['payload']
+
+    tls = cluster.resources['Secret', 'kubedoor-agent-webhook-tls']
+    assert tls['type'] == 'kubernetes.io/tls'
+    assert set(tls['data']) == {'ca.crt', 'tls.crt', 'tls.key'}
+    assert all(base64.b64decode(tls['data'][key]) for key in tls['data'])
+
+    pod = cluster.resources['Deployment', 'kubedoor-agent']['spec']['template']['spec']
+    env = {item['name']: item for item in pod['containers'][0]['env']}
+    assert env['POD_NAMESPACE']['valueFrom']['fieldRef']['fieldPath'] == 'metadata.namespace'
+    mounts = {item['name']: item for item in pod['containers'][0]['volumeMounts']}
+    assert mounts['webhook-tls']['mountPath'] == '/etc/kubedoor/certs'
+    assert mounts['webhook-tls']['readOnly'] is True
+    volumes = {item['name']: item for item in pod['volumes']}
+    assert volumes['webhook-tls']['secret']['secretName'] == 'kubedoor-agent-webhook-tls'
+    assert volumes['webhook-tls']['secret']['optional'] is True
+
+    # Agent 仍然保留最高 K8S 权限，不能因为加固而被降权
+    rules = cluster.resources['ClusterRole', 'kubedoor-agent-cr']['rules']
+    assert rules == [
+        {'apiGroups': ['*'], 'resources': ['*'], 'verbs': ['*']},
+        {'nonResourceURLs': ['*'], 'verbs': ['*']},
+    ]
+
+    render_options = {
+        **module.defaults({module.WRITE_KEY: WRITE_URL}),
+        'env': 'production',
+        'master_url': 'https://kubedoor.example.test',
+        'installation_id': 'task-1',
+        'mode': 'full',
+        'vmagent': 'reuse',
+        'ksm': 'reuse',
+        'node_exporter': 'install',
+    }
+    resources = module.render_agent(render_options, username='agent-1', password='secret-1')
+    node = next(
+        item for item in resources
+        if item['kind'] == 'DaemonSet' and item['metadata']['name'] == 'node-exporter'
+    )['spec']['template']['spec']
+    assert node['hostPID'] is True and node['hostNetwork'] is True
+    assert 'hostIPC' not in node
+    assert node['automountServiceAccountToken'] is False
+    security = node['containers'][0]['securityContext']
+    assert 'privileged' not in security
+    assert security['allowPrivilegeEscalation'] is False
+    assert security['readOnlyRootFilesystem'] is True
+    assert security['capabilities']['drop'] == ['ALL']
+    assert all(item['readOnly'] for item in node['containers'][0]['volumeMounts'] if item['name'] in ('proc', 'sys'))
+    assert node['securityContext']['runAsUser'] == 0
+    assert node['securityContext']['runAsGroup'] == 0
+    assert node['securityContext']['seccompProfile']['type'] == 'RuntimeDefault'
+
+    credentials = cluster.resources['Secret', 'kubedoor-agent-credentials']['data']
+    assert base64.b64decode(credentials['KUBEDOOR_INTERNAL_TOKEN']).decode()

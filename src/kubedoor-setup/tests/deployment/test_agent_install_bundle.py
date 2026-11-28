@@ -48,7 +48,8 @@ def test_credentials_are_secret_and_urls_are_encoded(monkeypatch):
     cfg = docs["ConfigMap", "kubedoor-agent-config"]["data"]
     assert cfg == {"PROM_K8S_TAG_VALUE": "demo"}
     data = docs["Secret", "kubedoor-agent-credentials"]["data"]
-    assert set(data) == {"KUBEDOOR_MASTER", "OSS_URL"}
+    assert set(data) == {"KUBEDOOR_MASTER", "OSS_URL", "KUBEDOOR_INTERNAL_TOKEN"}
+    assert base64.b64decode(data["KUBEDOOR_INTERNAL_TOKEN"]).decode()
     assert base64.b64decode(data["KUBEDOOR_MASTER"]).decode() == "wss://agent-demo:p%40ss%3A%27%22%24%26%2Fword@kubedoor.example.com:8443"
     assert "notify-secret" not in json.dumps(list(docs.values()))
     assert "MSG_TYPE" not in json.dumps(list(docs.values())) and "MSG_TOKEN" not in json.dumps(list(docs.values()))
