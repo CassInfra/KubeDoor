@@ -249,17 +249,18 @@ class RunContext:
     switch_env: str | None = None   # 企微提问里 AI 请求切换到的集群；本轮随后只让模型说一句正在切换
 
 
-# 企业微信没有集群选择框：AI 判断用户问的是另一个集群时调用它，由企微在那个集群上重新处理
+# IM 机器人对话没有固定集群选择框：AI 判断用户问的是另一个集群时调用它，由 IM 引擎在那个集群上重新处理
 # 这个问题。每一轮仍只在一个集群上执行，这个操作只校验和记录目标，不访问任何集群。
 # 请求之后本轮不再调用工具，模型用一句话收尾，本轮正常结束（检查点完整，下一轮只追加）。
 SWITCH_CLUSTER = "switch_cluster"
+IM_ORIGINS = frozenset({"wecom", "im", "feishu", "dingtalk", "slack"})
 
 
 def request_cluster_switch(ctx: RunContext, arguments: dict) -> dict:
     run = ctx.run
     clusters = run.get("_clusters") or []
-    if run.get("origin") != "wecom" or not clusters:
-        raise AIError("只有企业微信对话里的提问可以切换集群，请让用户自己切换", 400, "switch_unsupported")
+    if run.get("origin") not in IM_ORIGINS or not clusters:
+        raise AIError("只有企微或 IM 对话里的提问可以切换集群，请让用户自己切换", 400, "switch_unsupported")
     if run.get("_switched") or ctx.switch_env:
         raise AIError("本轮已经切换过一次集群，不能再切换，请在当前集群上回答", 409, "switch_repeated")
     env = arguments.get("env")

@@ -3,10 +3,10 @@ import { computed, onMounted, ref } from "vue";
 import { emitter } from "@/utils/mitt";
 import { useNav } from "@/layout/hooks/useNav";
 import { useUserStoreHook } from "@/store/modules/user";
-import { aiApi } from "@/api/ai";
+import { AIRequestError, aiApi } from "@/api/ai";
 import LogoutCircleRLine from "@iconify-icons/ri/logout-circle-r-line";
 import LockPasswordLine from "@iconify-icons/ri/lock-password-line";
-import Wechat2Line from "@iconify-icons/ri/wechat-2-line";
+import Chat3Line from "@iconify-icons/ri/chat-3-line";
 
 defineOptions({
   name: "LayUserMenu"
@@ -25,15 +25,39 @@ const ROLE_TAG = {
 const tagType = computed(() => ROLE_TAG[user.role] ?? "info");
 const displayName = computed(() => user.nickname || user.username);
 
-/** 启用了企微机器人(或已经绑过,方便解除)才显示「绑定企业微信」;AI 服务没部署时请求失败,不显示 */
-const wecomBindable = ref(false);
+/** 启用了 IM 机器人（或已经绑过，方便解除）才显示「绑定 IM 账号」；AI 服务没部署时请求失败，不显示 */
+const imBindable = ref(false);
+const imBoundCount = ref(0);
+const imMenuLabel = computed(() =>
+  imBoundCount.value > 0
+    ? `绑定 IM 账号（${imBoundCount.value}）`
+    : "绑定 IM 账号"
+);
+
+const isNotFound = (err: unknown) =>
+  (err instanceof AIRequestError && err.status === 404) ||
+  (typeof err === "object" &&
+    err !== null &&
+    "status" in err &&
+    (err as { status?: number }).status === 404);
+
 onMounted(() => {
   aiApi
-    .wecomBinding()
-    .then(
-      value => (wecomBindable.value = value.enabled || !!value.members.length)
-    )
-    .catch(() => undefined);
+    .imBinding()
+    .then(value => {
+      imBoundCount.value = value.members.length;
+      imBindable.value = value.enabled || !!value.members.length;
+    })
+    .catch(err => {
+      if (!isNotFound(err)) return;
+      return aiApi
+        .wecomBinding()
+        .then(value => {
+          imBoundCount.value = value.members.length;
+          imBindable.value = value.enabled || !!value.members.length;
+        })
+        .catch(() => undefined);
+    });
 });
 </script>
 
@@ -68,15 +92,15 @@ onMounted(() => {
           修改口令
         </el-dropdown-item>
         <el-dropdown-item
-          v-if="wecomBindable"
+          v-if="imBindable"
           :divided="!user.canChangePassword"
           @click="emitter.emit('openWecomBind')"
         >
-          <IconifyIconOffline :icon="Wechat2Line" style="margin: 5px" />
-          绑定企业微信
+          <IconifyIconOffline :icon="Chat3Line" style="margin: 5px" />
+          {{ imMenuLabel }}
         </el-dropdown-item>
         <el-dropdown-item
-          :divided="!user.canChangePassword && !wecomBindable"
+          :divided="!user.canChangePassword && !imBindable"
           @click="logout"
         >
           <IconifyIconOffline :icon="LogoutCircleRLine" style="margin: 5px" />

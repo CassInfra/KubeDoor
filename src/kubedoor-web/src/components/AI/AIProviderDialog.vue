@@ -207,8 +207,8 @@ function openWecomSettings() {
         class="shared-alert"
       >
         <p class="alert-text">
-          企微专用模型在「系统管理 → 企微 AI
-          机器人」配置，配置好后所有账号都能直接使用；现在可以先滑到「自定义模型」自己填写。
+          企微专用模型在「系统管理 → AI
+          机器人与模型」配置，配置好后所有账号都能直接使用；现在可以先滑到「自定义模型」自己填写。
         </p>
         <el-button
           v-if="ai.bootstrap?.is_admin"
@@ -244,8 +244,8 @@ function openWecomSettings() {
         />
       </el-form>
       <p v-if="shared?.available" class="settings-hint">
-        由系统管理员在「系统管理 → 企微 AI
-        机器人」配置，所有账号共用，这里只读；API Key
+        由系统管理员在「系统管理 → AI
+        机器人与模型」配置，所有账号共用，这里只读；API Key
         只在服务端使用，不会发到浏览器。
       </p>
     </template>
