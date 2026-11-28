@@ -71,6 +71,95 @@ async def get_virtualservice_detail(custom_objects_api, request):
         return web.json_response({"error": f"服务器内部错误: {str(e)}"}, status=500)
 
 
+def _host_matches(patterns, host: str) -> bool:
+    """VirtualService 的 hosts 是否匹配这个域名（* 匹配全部，*.example.com 匹配子域）"""
+    host = (host or "").strip().lower()
+    if not host:
+        return True
+    for pattern in patterns or []:
+        pattern = str(pattern).strip().lower()
+        if pattern == "*" or pattern == host:
+            return True
+        if pattern.startswith("*.") and host.endswith(pattern[1:]):
+            return True
+    return False
+
+
+def _route_destinations(route: list) -> list:
+    """route 里的 destination 压平成 {host, port, weight, subset}"""
+    result = []
+    for item in route or []:
+        if not isinstance(item, dict):
+            continue
+        destination = item.get("destination") or {}
+        entry = {"host": destination.get("host")}
+        port = destination.get("port") or {}
+        if port.get("number") is not None:
+            entry["port"] = port["number"]
+        for key in ("weight", "subset"):
+            if item.get(key) is not None:
+                entry[key] = item[key]
+        result.append(entry)
+    return result
+
+
+def _route_summary(spec: dict) -> dict:
+    """只留排障要用的字段，丢掉 istio 注入的大对象"""
+    summary = {"gateways": spec.get("gateways") or [], "hosts": spec.get("hosts") or [],
+               "export_to": spec.get("exportTo") or []}
+    for kind in ("http", "tcp", "tls"):
+        routes = []
+        for rule in spec.get(kind) or []:
+            if not isinstance(rule, dict):
+                continue
+            entry = {}
+            if rule.get("match"):
+                entry["match"] = rule["match"]
+            destinations = _route_destinations(rule.get("route"))
+            if destinations:
+                entry["destination"] = destinations
+            for key in ("timeout", "retries", "rewrite", "fault", "mirror"):
+                if rule.get(key) is not None:
+                    entry[key] = rule[key]
+            routes.append(entry)
+        if routes:
+            summary[kind] = routes
+    return summary
+
+
+async def get_virtualservice_routes(custom_objects_api, request):
+    """GET ?host=&namespace=&name=：VirtualService 路由摘要（不含完整 spec）"""
+    host = (request.query.get("host") or "").strip()
+    namespace = (request.query.get("namespace") or "").strip()
+    name = (request.query.get("name") or "").strip()
+    group, version, plural = "networking.istio.io", "v1beta1", "virtualservices"
+    try:
+        if namespace:
+            vs_list = await custom_objects_api.list_namespaced_custom_object(
+                group=group, version=version, namespace=namespace, plural=plural)
+        else:
+            vs_list = await custom_objects_api.list_cluster_custom_object(group=group, version=version, plural=plural)
+        result = []
+        for vs in vs_list.get("items", []):
+            metadata = vs.get("metadata") or {}
+            spec = vs.get("spec") or {}
+            if name and metadata.get("name") != name:
+                continue
+            if not _host_matches(spec.get("hosts"), host):
+                continue
+            result.append({"namespace": metadata.get("namespace") or namespace or "",
+                           "name": metadata.get("name") or "",
+                           "resourceVersion": metadata.get("resourceVersion") or "",
+                           **_route_summary(spec)})
+        return web.json_response({"success": True, "data": result, "total": len(result)})
+    except ApiException as e:
+        logger.error(f"查询VirtualService路由摘要失败: {e}")
+        return web.json_response({"error": f"Kubernetes API错误: {e.reason}"}, status=e.status)
+    except Exception as e:
+        logger.error(f"查询VirtualService路由摘要异常: {e}")
+        return web.json_response({"error": f"服务器内部错误: {str(e)}"}, status=500)
+
+
 async def apply_virtualservice(custom_objects_api, request):
     """
     POST接口：创建或更新VirtualService

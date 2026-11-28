@@ -9,7 +9,7 @@
 - `agent`：通过在线且支持通用工具的 Agent 执行 K8S API/CLI/Pod 命令，无需上传 kubeconfig。
 - `auto`：目录 operation 优先使用 KubeDoor；通用 operation 在有 kubeconfig 时选择 direct，否则选择 agent。该选项不会把通用 `api`/`kubectl` 自动改写为业务 operation，因此仍须先选对 operation。
 
-不存在适合的可用接口、资源类型不适用或需要接口未提供的实时细节时，才用通用工具。失败的写操作不能直接换通道再写一次；先读取实际状态，避免重复任务或重复变更。用户指定目标优先于页面默认值，当前集群不可覆盖。
+目录没有合适接口、资源类型不适用，或需要接口未提供的实时细节时，才用通用工具。失败的写操作不换通道重试，先读实际状态；用户指定的目标优先于页面默认值，当前集群不可覆盖。
 
 ## Deployment 重启、扩缩容与调度
 
@@ -26,7 +26,11 @@
 
 `replicas` 为非负整数。`run_at` 是不带时区的 `YYYY-MM-DDTHH:mm`（也可用空格分隔日期和时间），表示北京时间（Asia/Shanghai）；不接受 `Z` 或 `+08:00` 等偏移。`cron` 使用五段表达式，顺序为分、时、日、月、星期，同样按北京时间解释，也支持目录允许的 K8S 标准宏。
 
-定时和周期操作复用页面已有的 `POST /api/cron`，由服务构造与现有 Agent 匹配的请求，再由 Agent 创建任务。不要另行手写 CronJob、ServiceAccount/RBAC 或应用 YAML 来替代这些接口。Agent 创建的 CronJob 固定设置 `spec.timeZone: Asia/Shanghai`，按北京时间执行，与 Web 页面的定时执行一致；用户给出其它时区的时间时，先换算成北京时间再填写。该字段需要 K8S 1.25 及以上，旧版 agent 或更老的集群会忽略它，此时按 CronJob 控制器的时区执行，所以注册后要回读核对。单次任务的年份不由原接口强制执行，网关会拒绝已过去或不是该月日时分下一次到达的年份；沿用月、日、时、分调度，不宣称新增跨年绝对时间保证。
+定时和周期操作复用页面已有的 `POST /api/cron`，由服务构造与现有 Agent 匹配的请求，再由 Agent 创建任务。不要另行手写 CronJob、ServiceAccount/RBAC 或应用 YAML 来替代。
+
+- Agent 创建的 CronJob 固定 `spec.timeZone: Asia/Shanghai`，按北京时间执行，与 Web 页面一致；用户给其它时区的时间先换算成北京时间。
+- 该字段需要 K8S 1.25 及以上，旧版 Agent 或更老的集群会忽略它，此时按 CronJob 控制器的时区执行，所以注册后要回读核对。
+- 单次任务的年份不由原接口强制执行，网关会拒绝已过去或不是该月日时分下一次到达的年份；沿用月日时分调度，不宣称跨年绝对时间保证。
 
 例：“帮我每天凌晨2点重启 demo 的 deploy-demo-order”属于周期重启：
 
@@ -36,13 +40,13 @@
 
 这里的 2 点是北京时间。“某日 2 点只重启一次”则使用 `schedule_deployment_restart` 和明确日期的 `run_at`，不要把它转成每日 Cron。
 
-执行前确认目标 Deployment 和是否存在同名任务。任务名为 `restart-cron-<deployment>`、`restart-once-<deployment>`，扩缩容对应 `scale-cron-<deployment>`、`scale-once-<deployment>`，位于 `kubedoor` 命名空间。同名任务先读现状，不能默认删除或覆盖。注册成功后优先用 `resource_content`（`namespace="kubedoor"`、`resource_type="cronjob"`、`resource_name` 为实际任务名）回读核验；没有可用的此读取能力时，使用通用 API 只读查询：
+执行前确认目标 Deployment 和同名任务：`restart-cron-<deployment>`、`restart-once-<deployment>`、`scale-cron-<deployment>`、`scale-once-<deployment>`，都在 `kubedoor` 命名空间；同名任务先读现状，不能默认删除或覆盖。注册后用 `resource_content`（`namespace="kubedoor"`、`resource_type="cronjob"`、`resource_name` 为实际任务名）回读；没有此读取能力时用通用 API：
 
 ```json
 {"operation":"api","arguments":{"method":"GET","path":"/apis/batch/v1/namespaces/kubedoor/cronjobs/restart-cron-deploy-demo-order"}}
 ```
 
-核对 `spec.schedule`、`spec.suspend`、`spec.timeZone`（应为 `Asia/Shanghai`；缺少该字段时提醒用户任务将按 CronJob 控制器时区执行）、目标请求和运行记录。任务注册成功不等于已经重启；到点后仍需通过 Deployment 状态、Pod 或任务记录确认执行结果。无法回读时说明核验缺失，不声称已经完成重启。
+核对 `spec.schedule`、`spec.suspend`、`spec.timeZone`（应为 `Asia/Shanghai`；缺少时提醒用户任务按 CronJob 控制器时区执行）和运行记录。注册成功不等于已重启，到点后仍需通过 Deployment 状态、Pod 或任务记录确认；无法回读时说明核验缺失。
 
 ## 花折资源管控（准入控制）
 
@@ -74,10 +78,11 @@
 | 入库资源与历史 | `resource_inventory`：已采集 CPU/内存 requests、limits 与 JVM；`resource_history`：指定 `date` 的每日高峰快照；`resource_max_day`：采集记录最多的日期；`stored_namespaces`、`stored_deployments`：已入库名称列表，Agent 离线仍可查询 |
 | 资源管控 | `deployment_control`：是否受管控、原因和管控值；`update_deployment_resources`、`update_deployment_jvm`：按管控状态调整资源和 JVM；`resource_config_update`、`resource_pod_count`、`resource_control_add`：只改管控表（修改已登记服务的配置、只改管控副本数、登记新服务）。生效规则见「花折资源管控」 |
 | 监控 | `deployment_metrics`：工作负载资源指标；`metrics`：自由 MetricsQL/PromQL；`node_resource_rank`：节点 CPU、内存、Pod 与峰值排名 |
-| 集群资源列表 | `namespaces`、`services`、`configmaps`、`ingresses`、`statefulsets`、`daemonsets`、`jvm_configs`：对应页面的资源或 JVM 配置查询 |
+| 集群资源列表 | `namespaces`、`services`、`configmaps`、`ingresses`（仅 K8S Ingress 摘要，不含 Istio）、`statefulsets`、`daemonsets`、`jvm_configs`：对应页面的资源或 JVM 配置查询 |
 | 节点管理 | `nodes`：现有节点查询；`node_list`：详细节点列表（`simple=true` 仅名称）；`cordon_nodes`、`uncordon_nodes`：传 `node_names` 批量禁止或恢复新调度，不会驱逐已有 Pod |
 | Pod 列表 | `pods`：指定 Deployment 的 Pod 明细；`pod_list`：集群 Pod、容器状态与资源，支持 `namespaces` 多选和 `node_name`；`statefulset_pods`、`daemonset_pods`：各自工作负载的 Pod 明细 |
-| 服务与入口排障 | `service_endpoints`、`service_first_port`：指定 Service 的后端或第一个端口；`ingress_rules`：指定 Ingress 的域名、路径及后端规则 |
+| 服务与入口排障 | `service_endpoints`、`service_first_port`：指定 Service 的后端或第一个端口；`ingress_rules`：指定 Ingress 的域名、路径及后端规则；`istio_routes`：按 host 查 Istio VirtualService 路由摘要。Istio 详见下一节 |
+| 网络连通性 | `net_resolve`：从 agent Pod 解析域名（IP、耗时、失败原因）；`net_tcp`：从 agent Pod 测 TCP 端口（每个地址的结果、耗时、源地址）。排查 DNS / 连通性优先用这两个，不要用 `diagnostic` 的 dig / nc |
 | 资源 YAML 编辑 | `resource_content`：按 `namespace`、`resource_type`、`resource_name` 读取接口支持的资源，含 Job/CronJob；`resource_apply`：传 `yaml_content` 和可选 `method=apply/replace/create`；`resource_delete`：删除接口支持的资源。CRD 不由这些接口支持，使用通用 K8S API；Deployment 重启调度仍使用前节专用工具 |
 | 其他工作负载变更 | `restart_statefulset`、`scale_statefulset`：立即重启或扩缩容 StatefulSet（参数 `statefulset`，扩缩容另传 `replicas`）；`restart_daemonset`：立即重启 DaemonSet（参数 `daemonset`）。这些工具不提供 Deployment 的定时、周期模式 |
 | Deployment 镜像 | `image_tags`：按现有仓库配置查询可用及当前镜像标签；`update_deployment_image`：传 `image_tag`，按「权限与审批」执行（不使用网页只读用户的额外白名单），只换第一个容器镜像的 tag（仓库地址不变）；改 sidecar 镜像或换仓库用通用工具 |
@@ -98,6 +103,51 @@
 `resource_pod_count` 复用 `/api/db/res/pod_count`，仅更新数据库里的 `pod_count_manual`，不会立即改变 Deployment 副本数。要立即扩缩容用 `scale_deployment`：`mode=persistent` 会同时写管控副本数，不要自己分两步拼。
 
 资源修改、工作负载变更、节点调度和负载均衡写操作都经网关按账号权限执行，是否需要批准由管理员配置。不要把 `load_balance_analyze` 当成完全无写入的查询，它会改变 master 的待执行计划。迁移清理参数从实际隔离查询结果取得，先检查替代 Pod Ready；不修改全局负载均衡配置或共享 Istio 模板。
+
+## 入口与路由（Ingress / Istio）
+
+先判断集群用的是哪种入口，判断一次就够，不要 Ingress 和 Istio 各查一遍。
+
+| 线索 | 判断 | 下一步 |
+| --- | --- | --- |
+| `namespaces` 有 `istio-system`，或 `kubectl get crd virtualservices.networking.istio.io` 有结果 | Istio | 读 VirtualService 规则定义，用 `istioctl` 看网关实际路由 |
+| 没有 Istio，`ingresses {}` 有数据 | K8S Ingress | `ingresses {}` 看列表，`ingress_rules` 看单个规则 |
+| `ingresses {}` 为空，也没有 Istio | 集群内没有入口 | 查 Service / Endpoints、外部负载均衡，或链路里的 `host`、`peer` |
+
+先查路由摘要（服务端按 host / namespace / name 过滤，只返回 gateways、hosts、match 和 destination）：
+
+```json
+{"operation":"istio_routes","arguments":{"host":"beta-wms.casstime.com"}}
+{"operation":"istio_routes","arguments":{"namespace":"istio-system","name":"wms-int"}}
+```
+
+需要完整对象、或 agent 版本旧没有这个接口时，才退回 kubectl：
+
+```json
+{"operation":"kubectl","arguments":{"argv":["get","virtualservice","-A","-o","wide"]}}
+{"operation":"kubectl","arguments":{"argv":["get","virtualservice","wms-int","-n","istio-system","-o","yaml"]}}
+{"operation":"istioctl","arguments":{"argv":["proxy-config","routes","istio-ingressgateway-5d9b7c8f4-abcde","-n","istio-system","-o","json"]}}
+```
+
+- `istio_routes` 优先：服务端按 host / namespace / name 过滤，只返回摘要，不用把整个集群的 VS 拉回来；返回 404 或提示接口不存在时说明 agent 版本旧，再退回 kubectl。
+- 退回 kubectl 时列表只用 `-o wide`（命名空间、名称、hosts），几十 KB；**不要**对全集群用 `-o yaml` / `-o json`，一次就是上百 KB，几乎全是无关规则。先 `-o wide` 定位，再按名称取单个。
+- `istioctl` 没有 `get virtualservice`：规则定义只能读 CRD（kubectl / K8S API）。`istioctl proxy-config routes` 读的是某个网关 Pod 里 Envoy **实际生效**的路由，用来确认「这个域名到底进哪个 Service」，和 CRD 互补；先用 `kubectl get pods -n istio-system` 找名字含 `ingressgateway` 的网关 Pod。
+- VirtualService 的 hosts 不等于用户访问的域名时（ELB 或另一层网关转发、Host 改写），以链路 Span 里的 `host`、`peer` 和网关实际路由为准。
+- `ingresses {}` 已覆盖全集群，空就是没有，不要再按 namespace 重复查；`ingress_class` 取的是旧注解，用 `spec.ingressClassName` 的会显示为空，不要据此判断没有配置。
+
+## DNS 与端口连通性
+
+- 用 `net_resolve` 解析域名、`net_tcp` 测端口：都从 kubedoor-agent 所在 Pod 发起，和业务 Pod 同一套解析器（`/etc/resolv.conf`），5 秒超时，返回结构化结果（IP、耗时、每个地址的连接结果和源地址）。
+- 不要用 `diagnostic` 的 `dig` / `nc` 代替：`nc -z` 连接失败时退出码是 1，网关会按 `outcome_unknown` 报成工具错误，模型容易误判成执行失败并重试；`net_tcp` 把「连不上」当作正常结果（`ok=false` 加原因），语义清楚。
+- `diagnostic` 的退出码本身是结果：`nc -z` 连不上退出 1、`rg` 没匹配退出 1、`jq` 解析失败退出 2。程序跑完就是一次完成的探测，看 `exit_code` 和 `stderr` 解读，不要当成工具执行失败。
+- `net_tcp` 需要账号在目标集群有「端口测试」权限；没有时如实告诉用户，不要换 `nc` 绕过。
+
+## 查询代价（先窄后宽）
+
+- 全集群列表先看概要再取详情：`-o wide`、`simple=true`、`namespaces` 先定位，命中后再 `-o yaml`、`resource_content`。
+- `pod_list {}`、`kubectl get pods -A`、`kubectl get svc -A` 是全集群扫描，结果动辄几百 KB；先用命名空间、`node_name` 或已知服务名缩小范围。
+- 事件、日志先取小窗口和少量行定位，确认时间点后再放大 `lines` / 时间范围。
+- 同一轮不要重复相同的查询（例如 `ingresses {}` 之后又 `ingresses {namespace}`）；结果为空时先换判断依据，不要原样重试。
 
 ## 通用操作（direct / agent）
 

@@ -170,9 +170,19 @@ async def test_nc_port_probe_runs_against_local_listener():
         server.close()
         await server.wait_closed()
         refused = await executor.execute("diagnostic", {"program": "nc", "argv": ["-z", "-w", "3", "127.0.0.1", port]}, timeout=30)
-        assert not refused["success"] and refused["exit_code"] != 0
+        assert refused["success"] and refused["exit_code"] == 1 and "退出码" in refused["note"]
     finally:
         server.close()
+        await executor.close()
+
+
+@pytest.mark.skipif(shutil.which("rg") is None, reason="needs ripgrep")
+async def test_diagnostic_exit_code_is_a_result_not_a_tool_failure():
+    executor = KubernetesExecutor()
+    try:
+        result = await executor.execute("diagnostic", {"program": "rg", "argv": ["--fixed-strings", "no-such-string"], "stdin": "hello\n"}, timeout=30)
+        assert result["success"] and result["exit_code"] == 1 and "退出码" in result["note"]
+    finally:
         await executor.close()
 
 

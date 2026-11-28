@@ -743,10 +743,16 @@ class KubernetesExecutor:
 
             def export():
                 data = {"stdout": self._cli_export(stdout[0]), "stderr": self._cli_export(stderr[0])}
-                return self._result(exit_code == 0, data, source=program, exit_code=exit_code,
+                # 诊断程序的退出码是结果的一部分:nc -z 连不上是 1、rg 没匹配是 1、jq 解析失败是 2。
+                # 程序跑完就算这次探测完成,不按工具失败处理;真正的错误(找不到程序、参数不合法、超时)在别处抛出。
+                completed = exit_code == 0 or operation == "diagnostic"
+                extra = {}
+                if operation == "diagnostic" and exit_code:
+                    extra["note"] = f"{program} 退出码 {exit_code}:这是程序的结果,不是工具执行失败;结合 stdout / stderr 解读"
+                return self._result(completed, data, source=program, exit_code=exit_code,
                                     truncated=stdout[1] or stderr[1],
                                     error={"code": "COMMAND_FAILED", "message": _failure_message(operation, program, exit_code, stderr[0])}
-                                    if exit_code else None)
+                                    if exit_code and not completed else None, **extra)
 
             # Parsing and redacting megabytes of output must not block the event loop.
             return await asyncio.to_thread(export)

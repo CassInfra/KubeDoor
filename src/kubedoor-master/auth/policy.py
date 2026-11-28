@@ -333,7 +333,7 @@ _AGENT_READ_PATHS = '|'.join([
     'agent/daemonset/pods', 'load-balance/isolated', 'load-balance/nodes-cpu', 'load-balance/namespaces',
     'pod/get_logs', 'pod/download_logs', 'pod/get_previous_logs', r'pod/task_status/[^/]+',
     # CoreDNS:查看 coredns ConfigMap;从 agent 所在 Pod 解析域名
-    'agent/coredns', 'agent/net/resolve',
+    'agent/coredns', 'agent/net/resolve', 'agent/istio-routes',
 ])
 
 RULES = (

@@ -109,6 +109,7 @@ def test_env_condition_sql():
     ('GET', '/api/agent/coredns', 'env_read'),
     ('GET', '/api/agent/net/resolve', 'env_read'),  # 从 agent 所在 Pod 解析域名
     ('GET', '/api/agent/net/tcp', 'op'),  # 端口测试会从集群内向任意地址发起连接
+    ('GET', '/api/agent/istio-routes', 'env_read'),  # VirtualService 路由摘要,按集群读权限
     ('POST', '/api/agent/coredns/save', 'op'),
     ('GET', '/api/agent/coredns/save', 'op'),  # 只登记了 GET 的只读路径,别的子路径不放宽
     ('POST', '/api/db/silence/add', 'custom'),
